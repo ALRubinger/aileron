@@ -25,6 +25,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 | `aileron sandbox plan` | Inspect the normalized composition tier and image Aileron infers from the current project. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox build` | Build the Tier 0 sandbox-base image or Tier 1 devcontainer image with Docker. Tier 2 BYO images are reported without build or injection. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox check [--runtime=auto\|docker] [--build=auto\|always\|never] --agent=<command>` | Validate that the selected sandbox image can launch an agent command before starting a session. | [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron sandbox clear --agent=<command> [--runtime=auto\|docker]` | Remove the Aileron-managed persistent cache volumes (`customizations.aileron.caches`) for an agent in the current project. Eviction is manual; clearing an absent cache is a no-op. | [ADR-0017](/adr/0017-sandbox-composition) |
 
 Docker is the only supported sandbox runtime in v4. Podman is planned but not yet supported ([ADR-0014](/adr/0014-spawn-sandbox-technology/)); passing `--sandbox=podman` or `--runtime=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014`.
 

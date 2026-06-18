@@ -431,6 +431,154 @@ func TestDiscoverRejectsNonObjectFeatures(t *testing.T) {
 	}
 }
 
+func TestDiscoverParsesCachesIntoPlan(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "customizations": {
+    "aileron": {
+      "caches": [
+        {"name": "printingpress", "path": "/home/agent/.local/share/printingpress"},
+        {"name": "gh", "path": "/home/agent/.config/gh"}
+      ]
+    }
+  }
+}`)
+	plan, err := Discover(dir, "0.4.0", "")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(plan.Aileron.Caches) != 2 {
+		t.Fatalf("Caches = %+v, want 2", plan.Aileron.Caches)
+	}
+	if plan.Aileron.Caches[0].Name != "printingpress" || plan.Aileron.Caches[0].Path != "/home/agent/.local/share/printingpress" {
+		t.Fatalf("Caches[0] = %+v", plan.Aileron.Caches[0])
+	}
+	if plan.Aileron.Caches[1].Name != "gh" || plan.Aileron.Caches[1].Path != "/home/agent/.config/gh" {
+		t.Fatalf("Caches[1] = %+v", plan.Aileron.Caches[1])
+	}
+}
+
+func TestParseDevcontainerRejectsInvalidCaches(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{
+			name: "missing name",
+			json: `{"customizations":{"aileron":{"caches":[{"path":"/data"}]}}}`,
+			want: "name is required",
+		},
+		{
+			name: "missing path",
+			json: `{"customizations":{"aileron":{"caches":[{"name":"x"}]}}}`,
+			want: "path is required",
+		},
+		{
+			name: "relative path",
+			json: `{"customizations":{"aileron":{"caches":[{"name":"x","path":"data"}]}}}`,
+			want: "must be absolute",
+		},
+		{
+			name: "duplicate name",
+			json: `{"customizations":{"aileron":{"caches":[{"name":"x","path":"/a"},{"name":"x","path":"/b"}]}}}`,
+			want: "duplicate cache name",
+		},
+		{
+			name: "duplicate path",
+			json: `{"customizations":{"aileron":{"caches":[{"name":"x","path":"/a"},{"name":"y","path":"/a"}]}}}`,
+			want: "duplicate cache path",
+		},
+		{
+			name: "invalid name char",
+			json: `{"customizations":{"aileron":{"caches":[{"name":"bad/name","path":"/a"}]}}}`,
+			want: "must contain only",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseDevcontainer([]byte(tc.json))
+			if err == nil {
+				t.Fatalf("parseDevcontainer: expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateCachesAcceptsUnixContainerPath(t *testing.T) {
+	// Cache paths are in-container Unix paths. They must validate as absolute
+	// on every host OS, so validation uses the path package, not filepath
+	// (filepath.IsAbs("/x") is false on Windows). Regression for the
+	// cross-platform finding.
+	_, err := parseDevcontainer([]byte(`{"customizations":{"aileron":{"caches":[{"name":"pp","path":"/home/agent/.local/share/pp"}]}}}`))
+	if err != nil {
+		t.Fatalf("parseDevcontainer rejected a valid Unix container path: %v", err)
+	}
+}
+
+func TestCacheVolumeNameIsDeterministicAndWorkspaceKeyed(t *testing.T) {
+	a := CacheVolumeName("claude", "/home/u/projA", "printingpress")
+	again := CacheVolumeName("claude", "/home/u/projA", "printingpress")
+	if a != again {
+		t.Fatalf("CacheVolumeName not deterministic: %q vs %q", a, again)
+	}
+	if !strings.HasPrefix(a, CacheVolumeNamePrefix+"-claude-printingpress-") {
+		t.Fatalf("CacheVolumeName = %q, want prefix %s-claude-printingpress-", a, CacheVolumeNamePrefix)
+	}
+	// Different workspace -> different volume (re-auth to a different
+	// workspace gets a fresh store).
+	if b := CacheVolumeName("claude", "/home/u/projB", "printingpress"); a == b {
+		t.Fatalf("expected distinct volumes for distinct workspaces, both = %q", a)
+	}
+	// Different agent -> different volume.
+	if b := CacheVolumeName("codex", "/home/u/projA", "printingpress"); a == b {
+		t.Fatalf("expected distinct volumes for distinct agents, both = %q", a)
+	}
+	// Different cache name -> different volume.
+	if b := CacheVolumeName("claude", "/home/u/projA", "gh"); a == b {
+		t.Fatalf("expected distinct volumes for distinct cache names, both = %q", a)
+	}
+}
+
+func TestResolveCaches(t *testing.T) {
+	plan := Plan{Aileron: AileronCustomization{Caches: []Cache{
+		{Name: "printingpress", Path: "/data/pp"},
+		{Name: "gh", Path: "/data/gh"},
+	}}}
+	resolved, err := plan.ResolveCaches("claude", "/ws")
+	if err != nil {
+		t.Fatalf("ResolveCaches: %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved = %+v, want 2", resolved)
+	}
+	if resolved[0].Cache.Path != "/data/pp" || resolved[0].VolumeName != CacheVolumeName("claude", "/ws", "printingpress") {
+		t.Fatalf("resolved[0] = %+v", resolved[0])
+	}
+}
+
+func TestResolveCachesEmptyReturnsNil(t *testing.T) {
+	resolved, err := Plan{}.ResolveCaches("claude", "/ws")
+	if err != nil {
+		t.Fatalf("ResolveCaches: %v", err)
+	}
+	if resolved != nil {
+		t.Fatalf("resolved = %+v, want nil", resolved)
+	}
+}
+
+func TestResolveCachesRequiresAgent(t *testing.T) {
+	plan := Plan{Aileron: AileronCustomization{Caches: []Cache{{Name: "x", Path: "/a"}}}}
+	_, err := plan.ResolveCaches("", "/ws")
+	if err == nil || !strings.Contains(err.Error(), "agent is required") {
+		t.Fatalf("err = %v, want agent-required error", err)
+	}
+}
+
 func writeDevcontainer(t *testing.T, dir, body string) {
 	t.Helper()
 	path := filepath.Join(dir, DefaultDevcontainerPath)

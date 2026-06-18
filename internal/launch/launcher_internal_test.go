@@ -766,3 +766,68 @@ func TestEnclosingDirMount_IdentityTargetNotEnclosing(t *testing.T) {
 		t.Fatal("enclosingDirMount returned nil for nested target, want the dir mount")
 	}
 }
+
+func TestSandboxCacheMountsResolvesNamedVolumes(t *testing.T) {
+	caches := []sandboxcomposition.Cache{
+		{Name: "printingpress", Path: "/home/agent/.local/share/printingpress"},
+		{Name: "gh", Path: "/home/agent/.config/gh"},
+	}
+	mounts, err := sandboxCacheMounts(caches, "claude", "/home/u/proj")
+	if err != nil {
+		t.Fatalf("sandboxCacheMounts: %v", err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("mounts = %+v, want 2", mounts)
+	}
+	for i, c := range caches {
+		if !mounts[i].Named {
+			t.Fatalf("mounts[%d].Named = false, want true (cache must be a named volume)", i)
+		}
+		if mounts[i].Target != c.Path {
+			t.Fatalf("mounts[%d].Target = %q, want %q", i, mounts[i].Target, c.Path)
+		}
+		want := sandboxcomposition.CacheVolumeName("claude", "/home/u/proj", c.Name)
+		if mounts[i].Source != want {
+			t.Fatalf("mounts[%d].Source = %q, want %q", i, mounts[i].Source, want)
+		}
+		// Cache mounts are writable: the CLI must update its store.
+		if mounts[i].ReadOnly {
+			t.Fatalf("mounts[%d].ReadOnly = true, want false (cache must be writable)", i)
+		}
+	}
+}
+
+func TestSandboxCacheMountsEmptyReturnsNil(t *testing.T) {
+	mounts, err := sandboxCacheMounts(nil, "claude", "/ws")
+	if err != nil {
+		t.Fatalf("sandboxCacheMounts: %v", err)
+	}
+	if mounts != nil {
+		t.Fatalf("mounts = %+v, want nil for no caches", mounts)
+	}
+}
+
+func TestSandboxCacheMountsRequiresAgent(t *testing.T) {
+	caches := []sandboxcomposition.Cache{{Name: "x", Path: "/a"}}
+	_, err := sandboxCacheMounts(caches, "", "/ws")
+	if err == nil {
+		t.Fatal("sandboxCacheMounts with empty agent: want error")
+	}
+}
+
+func TestEnclosingDirMountSkipsNamedVolumes(t *testing.T) {
+	// A named cache volume must never be treated as the enclosing directory
+	// for a nested MCP file: its Source is a Docker volume name, not a host
+	// path, so collapsing a file into it would write to a bogus host dir.
+	mounts := []sandboxcontainer.Volume{
+		{Source: "aileron-cache-claude-x-abc", Target: "/home/agent/.codex", Named: true},
+	}
+	if got := enclosingDirMount(mounts, "/home/agent/.codex/config.toml"); got != nil {
+		t.Fatalf("enclosingDirMount returned %+v for a named-volume parent, want nil", got)
+	}
+	// A non-named directory mount still matches.
+	mounts = append(mounts, sandboxcontainer.Volume{Source: "/host/dir", Target: "/home/agent/.config"})
+	if got := enclosingDirMount(mounts, "/home/agent/.config/app.toml"); got == nil {
+		t.Fatal("enclosingDirMount returned nil for a host-path dir parent, want the dir mount")
+	}
+}

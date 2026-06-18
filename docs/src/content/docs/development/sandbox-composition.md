@@ -121,6 +121,51 @@ aileron sandbox check --runtime=docker --build=never --agent=codex
 
 `sandbox check` uses the same composition plan, build policy, and minimal image validation as sandbox launch. It reports the selected tier, runtime, image, command, and `support: ok` when the command is available. Agent-specific image recipes and support status live in the [sandbox agent image matrix](/development/sandbox-agent-images/).
 
+## Persist a CLI's Local Store with Caches
+
+A stateful, DB-backed CLI run in the sandbox keeps a local store on disk: a SQLite/FTS5 index, an `gh` config tree, a search cache. The sandbox container is one-shot, so without a persistent mount that store is rebuilt from scratch on every cold start. Declare a cache under `customizations.aileron.caches` to give the store an Aileron-managed Docker volume that survives container teardown ([#1190](https://github.com/ALRubinger/aileron/issues/1190)):
+
+```jsonc
+{
+  "image": "ghcr.io/alrubinger/aileron-sandbox-base:<version>",
+  "customizations": {
+    "aileron": {
+      "caches": [
+        // name: a stable identifier for the cache.
+        // path: the absolute in-container directory the CLI keeps its store in.
+        { "name": "printingpress", "path": "/home/agent/.local/share/printingpress" },
+        { "name": "gh", "path": "/home/agent/.config/gh" }
+      ]
+    }
+  }
+}
+```
+
+Each declared cache mounts a named Docker volume at its `path`. The volume is keyed by `(agent, workspace identity, cache name)`, so the same agent in the same project reuses its store across launches, while a different workspace gets a fresh one. Docker auto-provisions the volume on the first launch that mounts it. `name` must contain only letters, digits, `-`, `_`, or `.`; `path` must be absolute; names and paths must be unique within the block.
+
+The cache holds whatever the CLI writes there, in plaintext on the host. This matches the v4 single-user posture where the operator is the user ([ADR-0011](/adr/0011-local-encrypted-vault/)); the cache is not the credential vault and must not be used for secrets.
+
+`sandbox plan` lists declared caches:
+
+```text
+tier: devcontainer
+image: ghcr.io/alrubinger/aileron-sandbox-base:edge
+devcontainer: .devcontainer/devcontainer.json
+cache: printingpress -> /home/agent/.local/share/printingpress
+cache: gh -> /home/agent/.config/gh
+```
+
+### Clear a Cache
+
+Eviction is manual: there is no max-age and nothing is auto-evicted. Use `sandbox clear` to discard the cache volumes for an agent in the current project (for example after re-authenticating a CLI to a different account):
+
+```bash
+aileron sandbox clear --agent=claude
+aileron sandbox clear --agent=codex --runtime=docker
+```
+
+`--agent` is required because the cache volume is keyed by agent. `clear` removes only the volumes that match the declared caches for that `(agent, workspace)`, so it never touches another agent's or another project's store. Clearing a cache that was never created, or clearing twice, is a no-op.
+
 ## Run During Launch
 
 Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image and start the agent inside it:

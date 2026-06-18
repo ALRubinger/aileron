@@ -18,7 +18,7 @@ import (
 
 func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|clear>")
 		return 1
 	}
 	switch args[0] {
@@ -30,9 +30,11 @@ func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writ
 		return runSandboxBuild(args[1:], stdout, stderr)
 	case "check":
 		return runSandboxCheck(args[1:], stdout, stderr)
+	case "clear":
+		return runSandboxClear(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown sandbox command: %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|clear>")
 		return 1
 	}
 }
@@ -108,6 +110,9 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintf(stdout, "features: %s\n", strings.Join(refs, ", "))
 		}
+	}
+	for _, c := range plan.Aileron.Caches {
+		fmt.Fprintf(stdout, "cache: %s -> %s\n", c.Name, c.Path)
 	}
 	return 0
 }
@@ -252,6 +257,75 @@ func reportBakedMCPVersion(stdout, stderr io.Writer, baked, host string) {
 
 func sandboxCheckError(err error) string {
 	return strings.ReplaceAll(err.Error(), "--sandbox-build", "--build")
+}
+
+// runSandboxClear evicts the Aileron-managed persistent cache volumes declared
+// in customizations.aileron.caches. Eviction is manual (issue #1190): there is
+// no max-age or auto-eviction, so this command is the only way a stateful CLI's
+// cached store is discarded. The volumes are keyed by (agent, workspace
+// identity), matching launchSandbox's naming, so --agent must name the same
+// agent the cache was created under. A volume that does not exist is a no-op
+// (idempotent), so clearing a never-launched or already-cleared cache succeeds.
+func runSandboxClear(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("sandbox clear", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
+	agent := flags.String("agent", "", "Agent the cache volumes are keyed under (required)")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: aileron sandbox clear --agent=<agent> [--runtime=auto|docker]")
+		return 1
+	}
+	if strings.TrimSpace(*agent) == "" {
+		fmt.Fprintln(stderr, "error: --agent is required (cache volumes are keyed by agent)")
+		fmt.Fprintln(stderr, "usage: aileron sandbox clear --agent=<agent> [--runtime=auto|docker]")
+		return 1
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	plan, err := sandboxcomposition.Discover(cwd, version.Version, *agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	resolved, err := plan.ResolveCaches(*agent, cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if len(resolved) == 0 {
+		fmt.Fprintln(stdout, "no caches declared in customizations.aileron.caches; nothing to clear")
+		return 0
+	}
+	failed := false
+	for _, rc := range resolved {
+		if err := sandboxRemoveVolumeFn(context.Background(), *runtimeName, rc.VolumeName, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "error: remove cache %s (volume %s): %v\n", rc.Cache.Name, rc.VolumeName, err)
+			failed = true
+			continue
+		}
+		fmt.Fprintf(stdout, "cleared cache %s (volume %s)\n", rc.Cache.Name, rc.VolumeName)
+	}
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+// sandboxRemoveVolumeFn resolves the runtime and removes one managed cache
+// volume. Swappable in tests so the clear command's argv/identity wiring is
+// exercised without a container runtime on PATH.
+var sandboxRemoveVolumeFn = func(ctx context.Context, runtimeName, name string, stdout, stderr io.Writer) error {
+	resolved, err := sandboxcontainer.ResolveRuntime(runtimeName)
+	if err != nil {
+		return err
+	}
+	return sandboxcontainer.RemoveVolume(ctx, sandboxcontainer.DefaultRunner(), resolved, name, stdout, stderr)
 }
 
 var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stderr io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {

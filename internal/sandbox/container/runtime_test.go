@@ -1013,6 +1013,70 @@ func TestRunMountsAdditionalReadWriteVolumes(t *testing.T) {
 	}
 }
 
+func TestRunMountsNamedVolumeWithoutPathResolution(t *testing.T) {
+	pinHostOSDarwin(t)
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron-sandbox-base:test",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source: "aileron-cache-claude-printingpress-abc123",
+			Target: "/home/agent/.local/share/printingpress",
+			Named:  true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A named volume's source must be emitted verbatim (NOT filepath.Abs'd):
+	// a path-resolved volume name would become an absolute host path and
+	// turn the named volume into a bind mount.
+	want := "aileron-cache-claude-printingpress-abc123:/home/agent/.local/share/printingpress"
+	found := false
+	for i := 0; i < len(runner.args)-1; i++ {
+		if runner.args[i] == "--volume" && runner.args[i+1] == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("named volume spec %q missing from args: %#v", want, runner.args)
+	}
+}
+
+func TestRunMountsReadOnlyNamedVolume(t *testing.T) {
+	pinHostOSDarwin(t)
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron-sandbox-base:test",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source:   "aileron-cache-x",
+			Target:   "/data",
+			Named:    true,
+			ReadOnly: true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "aileron-cache-x:/data:ro"
+	found := false
+	for i := 0; i < len(runner.args)-1; i++ {
+		if runner.args[i] == "--volume" && runner.args[i+1] == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("read-only named volume spec %q missing from args: %#v", want, runner.args)
+	}
+}
+
 func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
 		Image:   "aileron-sandbox-base:test",
@@ -1389,6 +1453,53 @@ func TestStopContainerEmptyNameIsNoOp(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("expected no runner calls for empty name; got %v", runner.calls)
+	}
+}
+
+func TestRemoveVolumeIssuesVolumeRm(t *testing.T) {
+	runner := &recordingRunner{}
+	if err := RemoveVolume(context.Background(), runner, "docker", "aileron-cache-x", io.Discard, io.Discard); err != nil {
+		t.Fatalf("RemoveVolume: %v", err)
+	}
+	want := []string{"volume", "rm", "aileron-cache-x"}
+	if runner.name != "docker" || !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("runner = %s %#v, want docker %#v", runner.name, runner.args, want)
+	}
+}
+
+func TestRemoveVolumeEmptyNameIsNoOp(t *testing.T) {
+	runner := &callRecordingRunner{errs: []error{errors.New("must not run")}}
+	if err := RemoveVolume(context.Background(), runner, "docker", "", io.Discard, io.Discard); err != nil {
+		t.Fatalf("RemoveVolume empty name = %v, want nil", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("expected no runner calls for empty name; got %v", runner.calls)
+	}
+}
+
+func TestRemoveVolumeSuppressesAlreadyGone(t *testing.T) {
+	cases := []string{
+		"Error: No such volume: aileron-cache-x\n",
+		"Error response from daemon: get aileron-cache-x: not found\n",
+	}
+	for _, stderr := range cases {
+		var userStderr bytes.Buffer
+		runner := &stderrWritingRunner{stderrText: stderr, errReturn: errors.New("exit status 1")}
+		if err := RemoveVolume(context.Background(), runner, "docker", "aileron-cache-x", io.Discard, &userStderr); err != nil {
+			t.Fatalf("RemoveVolume = %v, want nil (already-gone suppressed) for %q", err, stderr)
+		}
+	}
+}
+
+func TestRemoveVolumeGenuineErrorReturned(t *testing.T) {
+	wantErr := errors.New("exit status 1")
+	runner := &stderrWritingRunner{
+		stderrText: "Error response from daemon: volume is in use\n",
+		errReturn:  wantErr,
+	}
+	err := RemoveVolume(context.Background(), runner, "docker", "aileron-cache-x", io.Discard, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RemoveVolume error = %v, want %v (genuine error not suppressed)", err, wantErr)
 	}
 }
 

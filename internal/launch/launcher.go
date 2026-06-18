@@ -86,6 +86,12 @@ type SandboxLaunchPlan struct {
 	Image   string
 	Tier    sandboxcomposition.Tier
 	Built   bool
+	// Caches carries the persistent cache volumes declared in
+	// customizations.aileron.caches. launchSandbox resolves each to a named
+	// Docker volume keyed by (agent, workspace identity) and mounts it at the
+	// cache's container path so the CLI's local store survives container
+	// teardown (issue #1190). Nil when the plan declares no caches.
+	Caches []sandboxcomposition.Cache
 }
 
 // ResolveBinary searches PATH for the first matching binary name from
@@ -224,6 +230,7 @@ func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolic
 			Runtime: runtime,
 			Image:   result.Image,
 			Tier:    result.Tier,
+			Caches:  plan.Aileron.Caches,
 		}, nil
 	}
 	if err != nil {
@@ -234,6 +241,7 @@ func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolic
 		Image:   result.Image,
 		Tier:    result.Tier,
 		Built:   result.Built,
+		Caches:  plan.Aileron.Caches,
 	}, nil
 }
 
@@ -794,9 +802,18 @@ func collapseNestedMCPMounts(existing []sandboxcontainer.Volume, mcpMounts []MCP
 // inside any of them. A directory mount is identified by target shape: an
 // MCP single-file mount and a directory mount are distinguished only by
 // whether target is a strict path prefix of another mount's target.
+//
+// Named volumes (persistent caches, #1190) are never returned as the
+// enclosing mount: their Source is a Docker volume name, not a host path, so
+// collapseNestedMCPMounts cannot relocate a file into them. An MCP file
+// nested under a cache directory is left as its own bind mount instead of
+// being silently written into a host directory named after the volume.
 func enclosingDirMount(mounts []sandboxcontainer.Volume, target string) *sandboxcontainer.Volume {
 	clean := path.Clean(target)
 	for i := range mounts {
+		if mounts[i].Named {
+			continue
+		}
 		dir := path.Clean(mounts[i].Target)
 		if dir == clean {
 			continue
@@ -818,6 +835,17 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return LaunchResult{}, err
 	}
 	mounts = append(mounts, extraMounts...)
+
+	// Persistent cache volumes (issue #1190): resolve each declared cache to a
+	// named Docker volume keyed by (agent, workspace identity) and mount it at
+	// the cache's container path, so a stateful CLI's local store (e.g.
+	// PrintingPress' SQLite/FTS5 store) survives container teardown. Docker
+	// auto-provisions the named volume on first mount.
+	cacheMounts, err := sandboxCacheMounts(plan.Caches, config.Agent.Name(), config.Dir)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	mounts = append(mounts, cacheMounts...)
 
 	// Unbaked image: resolve aileron-mcp on the host and bind-mount it
 	// read-only at the container's well-known MCP binary path. Matches the
@@ -1063,6 +1091,33 @@ func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, error) {
 			continue
 		}
 		mounts = append(mounts, candidate)
+	}
+	return mounts, nil
+}
+
+// sandboxCacheMounts resolves declared persistent caches to named-volume
+// mounts keyed by (agent, workspace identity). Each cache's container path
+// becomes the mount target and the derived volume name (see
+// CacheVolumeName) the source; Named=true tells runArgs to emit
+// `--volume <name>:<target>` so Docker auto-provisions and persists the volume
+// across container teardown (issue #1190). The caches are writable: the CLI
+// must update its store. Returns nil when no caches are declared.
+func sandboxCacheMounts(caches []sandboxcomposition.Cache, agent, workDir string) ([]sandboxcontainer.Volume, error) {
+	if len(caches) == 0 {
+		return nil, nil
+	}
+	plan := sandboxcomposition.Plan{Aileron: sandboxcomposition.AileronCustomization{Caches: caches}}
+	resolved, err := plan.ResolveCaches(agent, workDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sandbox caches: %w", err)
+	}
+	mounts := make([]sandboxcontainer.Volume, 0, len(resolved))
+	for _, rc := range resolved {
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source: rc.VolumeName,
+			Target: rc.Cache.Path,
+			Named:  true,
+		})
 	}
 	return mounts, nil
 }

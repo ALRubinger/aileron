@@ -3,10 +3,13 @@ package composition
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -89,6 +92,25 @@ type AileronCustomization struct {
 	Image           string `json:"image,omitempty"`
 	Mediation       string `json:"mediation,omitempty"`
 	ApprovalSurface string `json:"approval_surface,omitempty"`
+	// Caches declares persistent, Aileron-managed cache volumes for
+	// stateful, DB-backed CLIs run in the sandbox. Each entry maps a
+	// container data path (e.g. a CLI's SQLite/FTS5 store) to a named
+	// Docker volume Aileron auto-provisions, so the store survives container
+	// teardown instead of being rebuilt on every cold start. The volume is
+	// keyed by (agent, workspace identity, cache name) at launch time, so
+	// re-auth to a different workspace gets a fresh store; eviction is
+	// manual via `aileron sandbox clear`. See issue #1190.
+	Caches []Cache `json:"caches,omitempty"`
+}
+
+// Cache is one declared persistent cache mount. Name is a stable,
+// human-meaningful identifier for the cache (e.g. "printingpress"); it is
+// combined with the agent and workspace identity to derive the managed Docker
+// volume name. Path is the absolute in-container directory where the CLI keeps
+// its local store; it becomes the volume's mount target.
+type Cache struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 type devcontainerConfig struct {
@@ -216,7 +238,68 @@ func parseDevcontainer(b []byte) (devcontainerConfig, error) {
 			return cfg, fmt.Errorf("customizations.aileron.approval_surface must be webapp, tui, or both")
 		}
 	}
+	if err := validateCaches(cfg.Customizations.Aileron.Caches); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// validateCaches enforces the contract for customizations.aileron.caches: each
+// entry needs a non-empty name and an absolute container path, names must be
+// unique (the name keys the managed volume), and paths must be unique (two
+// caches cannot target the same directory). A malformed declaration is a hard
+// parse error so the operator sees it at `sandbox plan` rather than as a silent
+// mount surprise at launch.
+func validateCaches(caches []Cache) error {
+	seenNames := make(map[string]struct{}, len(caches))
+	seenPaths := make(map[string]struct{}, len(caches))
+	for i, c := range caches {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			return fmt.Errorf("customizations.aileron.caches[%d]: name is required", i)
+		}
+		if !isValidCacheName(name) {
+			return fmt.Errorf("customizations.aileron.caches[%d]: name %q must contain only letters, digits, '-', '_', or '.'", i, name)
+		}
+		// Cache paths are in-container paths, always Unix-style with a
+		// leading "/", regardless of the host OS. Use the path package
+		// (forward-slash semantics) rather than filepath, whose IsAbs/Clean
+		// would wrongly reject or mangle a "/..." container path on a Windows
+		// host.
+		cpath := strings.TrimSpace(c.Path)
+		if cpath == "" {
+			return fmt.Errorf("customizations.aileron.caches[%d] (%s): path is required", i, name)
+		}
+		if !path.IsAbs(cpath) {
+			return fmt.Errorf("customizations.aileron.caches[%d] (%s): path %q must be absolute", i, name, cpath)
+		}
+		if _, dup := seenNames[name]; dup {
+			return fmt.Errorf("customizations.aileron.caches: duplicate cache name %q", name)
+		}
+		seenNames[name] = struct{}{}
+		cleanPath := path.Clean(cpath)
+		if _, dup := seenPaths[cleanPath]; dup {
+			return fmt.Errorf("customizations.aileron.caches: duplicate cache path %q", cleanPath)
+		}
+		seenPaths[cleanPath] = struct{}{}
+	}
+	return nil
+}
+
+// isValidCacheName reports whether name is safe to embed in a Docker volume
+// name. Docker volume names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*; restricting
+// the cache name to this alphabet keeps the derived volume name valid without
+// further escaping.
+func isValidCacheName(name string) bool {
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // BaseImage returns the Aileron-owned sandbox-base image for version.
@@ -265,6 +348,63 @@ func parseMount(raw json.RawMessage) (Mount, error) {
 		return Mount{}, fmt.Errorf("parse devcontainer mount: %w", err)
 	}
 	return Mount{Source: obj.Source, Target: obj.Target, ReadOnly: obj.ReadOnly}, nil
+}
+
+// CacheVolumeNamePrefix is the prefix every Aileron-managed cache volume name
+// carries. It namespaces these volumes apart from any other Docker volumes on
+// the host and lets `aileron sandbox clear` and operators recognize them.
+const CacheVolumeNamePrefix = "aileron-cache"
+
+// ResolvedCache pairs a declared cache with the managed Docker volume name it
+// resolves to for a given (agent, workspace identity). The launcher mounts
+// VolumeName at Cache.Path; `aileron sandbox clear` removes VolumeName.
+type ResolvedCache struct {
+	Cache      Cache
+	VolumeName string
+}
+
+// CacheVolumeName derives the managed Docker volume name for a cache, keyed by
+// (agent, workspace identity, cache name). The workspace path is hashed so
+// re-auth/use against a different workspace gets a fresh store (issue #1190),
+// while the agent and cache name stay human-readable in the volume name for
+// operator legibility. The result matches Docker's volume-name grammar
+// because agent and cacheName are constrained alphabets (agent ids and
+// isValidCacheName) and the workspace component is hex.
+func CacheVolumeName(agent, workspaceDir, cacheName string) string {
+	abs, err := filepath.Abs(workspaceDir)
+	if err != nil {
+		abs = workspaceDir
+	}
+	sum := sha256.Sum256([]byte(abs))
+	workspaceID := hex.EncodeToString(sum[:])[:12]
+	return strings.Join([]string{
+		CacheVolumeNamePrefix,
+		strings.TrimSpace(agent),
+		strings.TrimSpace(cacheName),
+		workspaceID,
+	}, "-")
+}
+
+// ResolveCaches resolves every declared cache in the plan to its managed
+// Docker volume name for the given agent and workspace directory. It returns
+// nil when the plan declares no caches, so launch paths with no caches add no
+// mounts. agent must be non-empty: the cache volume is keyed by agent, so an
+// empty agent would collide caches across agents sharing a workspace.
+func (p Plan) ResolveCaches(agent, workspaceDir string) ([]ResolvedCache, error) {
+	if len(p.Aileron.Caches) == 0 {
+		return nil, nil
+	}
+	if strings.TrimSpace(agent) == "" {
+		return nil, fmt.Errorf("resolve caches: agent is required to key the cache volume")
+	}
+	out := make([]ResolvedCache, 0, len(p.Aileron.Caches))
+	for _, c := range p.Aileron.Caches {
+		out = append(out, ResolvedCache{
+			Cache:      c,
+			VolumeName: CacheVolumeName(agent, workspaceDir, c.Name),
+		})
+	}
+	return out, nil
 }
 
 func stripJSONComments(in []byte) ([]byte, error) {

@@ -177,11 +177,20 @@ type RunOptions struct {
 	Name string
 }
 
-// Volume describes an additional host bind mount for a sandbox container.
+// Volume describes an additional mount for a sandbox container.
+//
+// By default Source is a host path: it is resolved with filepath.Abs and
+// emitted as a bind mount (`--volume <abs-host-path>:<target>`). When Named is
+// true, Source is instead a Docker named-volume identifier: it is NOT
+// path-resolved and is emitted as `--volume <name>:<target>`, so Docker
+// auto-provisions and persists the volume across container teardown. Named
+// volumes back the Aileron-managed persistent caches (issue #1190); the
+// existing credential and MCP bind-mounts keep Named=false.
 type Volume struct {
 	Source   string
 	Target   string
 	ReadOnly bool
+	Named    bool
 }
 
 // RunResult reports the selected runtime after a sandbox container exits.
@@ -530,6 +539,49 @@ func StopContainer(ctx context.Context, runner Runner, runtimeName, name string,
 	return err
 }
 
+// RemoveVolume issues `<runtimeName> volume rm <name>` through runner so
+// `aileron sandbox clear` can evict a managed persistent cache volume (issue
+// #1190). An empty name is a no-op. A volume that does not exist is treated as
+// success (returns nil): clearing a cache that was never created, or clearing
+// twice, is idempotent rather than an error. A nil runner falls back to the
+// real runtime so the CLI path works without wiring.
+func RemoveVolume(ctx context.Context, runner Runner, runtimeName, name string, stdout, stderr io.Writer) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if runner == nil {
+		runner = execRunner{}
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	var stderrBuf bytes.Buffer
+	teedStderr := io.MultiWriter(stderr, &stderrBuf)
+	err := runner.Run(ctx, runtimeName, []string{"volume", "rm", name}, stdout, teedStderr)
+	if err != nil && isVolumeAlreadyGone(stderrBuf.String()) {
+		return nil
+	}
+	return err
+}
+
+// isVolumeAlreadyGone reports whether a `volume rm` error's stderr indicates
+// the target volume did not exist, so clearing an absent cache is idempotent.
+func isVolumeAlreadyGone(stderr string) bool {
+	lowered := strings.ToLower(stderr)
+	for _, signature := range []string{
+		"no such volume",
+		"not found",
+	} {
+		if strings.Contains(lowered, signature) {
+			return true
+		}
+	}
+	return false
+}
+
 // isContainerAlreadyGone reports whether a container-runtime stop error's
 // stderr indicates the target container was already removed or stopped.
 // Matched case-insensitively against the signatures Docker
@@ -720,9 +772,16 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 		if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
 			return nil, fmt.Errorf("sandbox volume source and target are required")
 		}
-		source, err := filepath.Abs(volume.Source)
-		if err != nil {
-			return nil, fmt.Errorf("resolve sandbox volume source: %w", err)
+		source := volume.Source
+		if !volume.Named {
+			// Host bind mount: resolve to an absolute host path. A named
+			// volume's Source is a Docker volume identifier, not a path, so
+			// it must NOT be path-resolved (issue #1190).
+			abs, err := filepath.Abs(volume.Source)
+			if err != nil {
+				return nil, fmt.Errorf("resolve sandbox volume source: %w", err)
+			}
+			source = abs
 		}
 		spec := source + ":" + volume.Target
 		if volume.ReadOnly {

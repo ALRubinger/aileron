@@ -320,3 +320,138 @@ func TestSandboxCheckValidateOptionsWiring(t *testing.T) {
 		t.Fatal("ValidateOptions.RequireProxyTrust must round-trip")
 	}
 }
+
+func writeCacheDevcontainer(t *testing.T, dir string) {
+	t.Helper()
+	devDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := `{
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "customizations": {"aileron": {"caches": [
+    {"name": "printingpress", "path": "/home/agent/.local/share/printingpress"},
+    {"name": "gh", "path": "/home/agent/.config/gh"}
+  ]}}
+}`
+	if err := os.WriteFile(filepath.Join(devDir, "devcontainer.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write devcontainer.json: %v", err)
+	}
+}
+
+func TestRunSandboxPlanPrintsCaches(t *testing.T) {
+	dir := t.TempDir()
+	writeCacheDevcontainer(t, dir)
+	t.Chdir(dir)
+	var out, errb bytes.Buffer
+	if code := runSandboxPlan(nil, &out, &errb); code != 0 {
+		t.Fatalf("runSandboxPlan = %d, stderr: %s", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "cache: printingpress -> /home/agent/.local/share/printingpress\n") {
+		t.Fatalf("plan output missing printingpress cache line:\n%s", got)
+	}
+	if !strings.Contains(got, "cache: gh -> /home/agent/.config/gh\n") {
+		t.Fatalf("plan output missing gh cache line:\n%s", got)
+	}
+}
+
+func stubSandboxRemoveVolume(t *testing.T) *[]string {
+	t.Helper()
+	orig := sandboxRemoveVolumeFn
+	t.Cleanup(func() { sandboxRemoveVolumeFn = orig })
+	var removed []string
+	sandboxRemoveVolumeFn = func(_ context.Context, _ string, name string, _, _ io.Writer) error {
+		removed = append(removed, name)
+		return nil
+	}
+	return &removed
+}
+
+func TestRunSandboxClearRemovesDeclaredCacheVolumes(t *testing.T) {
+	dir := t.TempDir()
+	writeCacheDevcontainer(t, dir)
+	t.Chdir(dir)
+	removed := stubSandboxRemoveVolume(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxClear([]string{"--agent=claude", "--runtime=docker"}, &out, &errb); code != 0 {
+		t.Fatalf("runSandboxClear = %d, stderr: %s", code, errb.String())
+	}
+	// The volumes removed must match the (agent, workspace, name) keying the
+	// launcher mounts, so clear evicts exactly what launch created.
+	want := []string{
+		sandboxcomposition.CacheVolumeName("claude", dir, "printingpress"),
+		sandboxcomposition.CacheVolumeName("claude", dir, "gh"),
+	}
+	if len(*removed) != 2 || (*removed)[0] != want[0] || (*removed)[1] != want[1] {
+		t.Fatalf("removed = %v, want %v", *removed, want)
+	}
+	if !strings.Contains(out.String(), "cleared cache printingpress") {
+		t.Fatalf("stdout = %q, want cleared lines", out.String())
+	}
+}
+
+func TestRunSandboxClearRequiresAgent(t *testing.T) {
+	dir := t.TempDir()
+	writeCacheDevcontainer(t, dir)
+	t.Chdir(dir)
+	var out, errb bytes.Buffer
+	if code := runSandboxClear(nil, &out, &errb); code != 1 {
+		t.Fatalf("runSandboxClear = %d, want 1 (missing --agent)", code)
+	}
+	if !strings.Contains(errb.String(), "--agent is required") {
+		t.Fatalf("stderr = %q, want --agent required error", errb.String())
+	}
+}
+
+func TestRunSandboxClearNoCachesIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	// devcontainer with no caches declared.
+	devDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(devDir, "devcontainer.json"), []byte(`{"image":"x"}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Chdir(dir)
+	removed := stubSandboxRemoveVolume(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxClear([]string{"--agent=claude"}, &out, &errb); code != 0 {
+		t.Fatalf("runSandboxClear = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if len(*removed) != 0 {
+		t.Fatalf("removed = %v, want none (no caches declared)", *removed)
+	}
+	if !strings.Contains(out.String(), "nothing to clear") {
+		t.Fatalf("stdout = %q, want nothing-to-clear message", out.String())
+	}
+}
+
+func TestRunSandboxClearReportsRemoveFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeCacheDevcontainer(t, dir)
+	t.Chdir(dir)
+	orig := sandboxRemoveVolumeFn
+	t.Cleanup(func() { sandboxRemoveVolumeFn = orig })
+	sandboxRemoveVolumeFn = func(_ context.Context, _ string, _ string, _, _ io.Writer) error {
+		return context.DeadlineExceeded
+	}
+	var out, errb bytes.Buffer
+	if code := runSandboxClear([]string{"--agent=claude", "--runtime=docker"}, &out, &errb); code != 1 {
+		t.Fatalf("runSandboxClear = %d, want 1 on remove failure", code)
+	}
+	if !strings.Contains(errb.String(), "remove cache") {
+		t.Fatalf("stderr = %q, want remove-cache error", errb.String())
+	}
+}
+
+func TestRunSandboxUnknownSubcommand(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runSandbox([]string{"bogus"}, nil, &out, &errb); code != 1 {
+		t.Fatalf("runSandbox bogus = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "clear") {
+		t.Fatalf("usage must mention clear subcommand; stderr=%q", errb.String())
+	}
+}
