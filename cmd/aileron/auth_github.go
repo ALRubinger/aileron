@@ -13,7 +13,22 @@ import (
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
+
+	"golang.org/x/term"
 )
+
+// stdinIsTerminal reports whether the operator's stdin is a real
+// terminal. It is a package var so tests can drive both branches.
+// gh's interactive device-flow login renders a prompt through a
+// prompt library that requires a pseudo-TTY; the login exec therefore
+// needs `docker exec -t`. We gate on a real stdin so a non-TTY / CI
+// caller does not hit docker's "cannot enable tty mode on non tty
+// input" — they get a plain `exec -i` instead (which will not complete
+// an interactive login, but fails cleanly rather than mis-allocating a
+// PTY).
+var stdinIsTerminal = func() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // deviceFlowRunner performs gh's OAuth device-authorization flow and
 // returns the captured user-to-server bearer token bytes. It is a seam
@@ -163,13 +178,26 @@ func (c *containerDeviceFlow) Capture(ctx context.Context) ([]byte, error) {
 	// wired to the host terminal by the Runner so the operator can read
 	// the prompt. HTTPS only — never configure SSH (-p https). Output is
 	// surfaced so the operator sees gh's instructions.
-	loginArgs := []string{
-		"exec", "-i", c.containerName,
+	//
+	// gh's prompt needs a pseudo-TTY, so the exec gets `-t` when stdin
+	// is a real terminal. Without it `gh auth login --web` hangs with no
+	// visible prompt (the prompt library never renders). `-i` and `-t`
+	// are passed as separate args so the Runner's interactiveTTYRun gate
+	// matches `-t` and hands the child the controlling terminal's
+	// foreground process group — required because the Runner isolates
+	// the docker child into its own process group, where docker's
+	// raw-mode tcsetattr would otherwise fail with SIGTTOU/EINTR.
+	loginArgs := []string{"exec", "-i"}
+	if stdinIsTerminal() {
+		loginArgs = append(loginArgs, "-t")
+	}
+	loginArgs = append(loginArgs,
+		c.containerName,
 		"gh", "auth", "login",
 		"--hostname", "github.com",
 		"--git-protocol", "https",
 		"--web",
-	}
+	)
 	if err := c.runner.Run(ctx, c.runtimeExe, loginArgs, os.Stdout, os.Stderr); err != nil {
 		return nil, fmt.Errorf("gh auth login: %w", err)
 	}

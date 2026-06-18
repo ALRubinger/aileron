@@ -115,12 +115,16 @@ var stdinIsTerminal = func() bool {
 }
 
 // interactiveTTYRun reports whether args describe an interactive
-// container `run` that allocates a pseudo-TTY (`-t`). Only such a run
-// needs the runtime child to own the terminal's foreground process
-// group. Image builds (`build -t <tag>`) and non-TTY runs do not — the
-// `run` verb gate keeps the `-t` build-tag flag from matching.
+// container `run` or `exec` that allocates a pseudo-TTY (`-t`). Only
+// such a command needs the runtime child to own the terminal's
+// foreground process group — without it docker's raw-mode tcsetattr
+// runs from a background group and fails with SIGTTOU/EINTR. Both the
+// interactive `run -t` (an agent shell) and `exec -t` (the gh
+// device-flow login in `aileron auth github`) need this. Image builds
+// (`build -t <tag>`) do not — the verb gate keeps the `-t` build-tag
+// flag from matching.
 func interactiveTTYRun(args []string) bool {
-	if len(args) == 0 || args[0] != "run" {
+	if len(args) == 0 || (args[0] != "run" && args[0] != "exec") {
 		return false
 	}
 	for _, a := range args {

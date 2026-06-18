@@ -392,6 +392,82 @@ func TestContainerDeviceFlow_UsesOneSharedContainerForBothGHCalls(t *testing.T) 
 	}
 }
 
+// TestContainerDeviceFlow_LoginExecAllocatesTTYWithStdin is the
+// regression guard for #1165: `gh auth login --web` renders an
+// interactive prompt that needs a pseudo-TTY, so the login exec must
+// carry `-t` when the operator's stdin is a real terminal (without it
+// the command hangs with no visible prompt). A non-terminal / CI stdin
+// must NOT get `-t` (docker rejects a PTY on non-tty input), and the
+// non-interactive token read must never allocate a PTY. `-i` and `-t`
+// must be separate args so the Runner's interactiveTTYRun gate matches.
+func TestContainerDeviceFlow_LoginExecAllocatesTTYWithStdin(t *testing.T) {
+	loginAndTokenArgs := func(t *testing.T, isTTY bool) (login, token []string) {
+		t.Helper()
+		orig := stdinIsTerminal
+		stdinIsTerminal = func() bool { return isTTY }
+		t.Cleanup(func() { stdinIsTerminal = orig })
+
+		rr := &recordingRunner{token: "gho_tok"}
+		flow := &containerDeviceFlow{
+			runner:        rr,
+			runtimeExe:    "docker",
+			image:         "img",
+			containerName: "aileron-auth-github",
+		}
+		if _, err := flow.Capture(context.Background()); err != nil {
+			t.Fatalf("Capture: %v", err)
+		}
+		for _, c := range rr.calls {
+			if len(c) == 0 || c[0] != "exec" {
+				continue
+			}
+			_, gh := parseExecArgs(c)
+			switch gh.sub {
+			case "login":
+				login = c
+			case "token":
+				token = c
+			}
+		}
+		return login, token
+	}
+
+	hasFlag := func(args []string, f string) bool {
+		for _, a := range args {
+			if a == f {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("terminal stdin allocates a PTY for the login exec", func(t *testing.T) {
+		login, token := loginAndTokenArgs(t, true)
+		if !hasFlag(login, "-t") {
+			t.Errorf("login exec = %v; want a standalone -t (PTY) flag when stdin is a terminal", login)
+		}
+		if !hasFlag(login, "-i") {
+			t.Errorf("login exec = %v; want -i", login)
+		}
+		if hasFlag(login, "-it") {
+			t.Errorf("login exec = %v; -i and -t must be separate args (not -it) so interactiveTTYRun matches -t", login)
+		}
+		if hasFlag(token, "-t") {
+			t.Errorf("token exec = %v; the non-interactive token read must not allocate a PTY", token)
+		}
+	})
+
+	t.Run("non-terminal stdin omits the PTY flag", func(t *testing.T) {
+		login, _ := loginAndTokenArgs(t, false)
+		if hasFlag(login, "-t") {
+			t.Errorf("login exec = %v; want NO -t when stdin is not a terminal (docker rejects a PTY on non-tty input)", login)
+		}
+		if !hasFlag(login, "-i") {
+			t.Errorf("login exec = %v; want -i even without a terminal", login)
+		}
+	})
+}
+
 func TestContainerDeviceFlow_TearsDownOnLoginFailure(t *testing.T) {
 	// A runner that fails the login exec but records all calls, so we can
 	// assert the deferred teardown still ran.

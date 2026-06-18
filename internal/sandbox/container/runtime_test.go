@@ -55,6 +55,8 @@ func TestInteractiveTTYRun(t *testing.T) {
 	}{
 		{"run with tty", []string{"run", "--rm", "-i", "-t", "img", "claude"}, true},
 		{"run without tty", []string{"run", "--rm", "-i", "img", "claude"}, false},
+		{"exec with tty", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, true},
+		{"exec without tty", []string{"exec", "-i", "c", "gh", "auth", "token"}, false},
 		{"build with tag flag is not a tty run", []string{"build", "-t", "img", "-f", "Dockerfile", "."}, false},
 		{"image inspect", []string{"image", "inspect", "img"}, false},
 		{"empty args", nil, false},

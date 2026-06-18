@@ -106,6 +106,9 @@ func TestConfigureRuntimeChildGating(t *testing.T) {
 		{"interactive run on terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, true, true},
 		{"interactive run without terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, false, false},
 		{"non-tty run on terminal", []string{"run", "--rm", "-i", "img", "claude"}, true, false},
+		{"interactive exec on terminal", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, true, true},
+		{"interactive exec without terminal", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, false, false},
+		{"non-tty exec on terminal", []string{"exec", "-i", "c", "gh", "auth", "token"}, true, false},
 		{"build on terminal", []string{"build", "-t", "img", "."}, true, false},
 	}
 	for _, tc := range cases {
