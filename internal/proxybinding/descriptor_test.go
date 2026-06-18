@@ -120,6 +120,13 @@ func TestParse_Errors(t *testing.T) {
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: C\n",
 		},
 		{
+			// Mechanism B (sentinel-swap) is rejected at load time until
+			// #1196 wires the egress path: a descriptor must not validate
+			// against a mechanism no proxy code can honor (fail-closed).
+			name: "unsupported emit_mechanism B (sentinel-swap, #1196 not yet wired)",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: B\n",
+		},
+		{
 			name: "header-template missing header",
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: header-template\n    template: \"{token}\"\n",
 		},
@@ -170,6 +177,38 @@ func TestParse_Errors(t *testing.T) {
 				t.Fatalf("Parse(%s) = nil error, want error", tc.name)
 			}
 		})
+	}
+}
+
+// TestParse_EmitMechanismBRejectedUntil1196 pins the operator decision that
+// emit_mechanism "B" (sentinel-swap) is rejected at load time until the
+// sentinel-swap egress path (#1196) is wired: a descriptor must never
+// validate against a mechanism no proxy code can honor. Mechanism "A" (the
+// implemented path) and the empty default (which means "A") must still
+// parse. This is the fail-closed contract; it is intentionally decoupled
+// from the table above so the policy is explicit and survives refactors.
+func TestParse_EmitMechanismBRejectedUntil1196(t *testing.T) {
+	const base = "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n"
+
+	// "A" and the empty default are accepted.
+	if _, err := Parse([]byte(base + "    emit_mechanism: A\n")); err != nil {
+		t.Errorf("emit_mechanism A: Parse = %v, want nil", err)
+	}
+	if _, err := Parse([]byte(base)); err != nil {
+		t.Errorf("emit_mechanism omitted (defaults to A): Parse = %v, want nil", err)
+	}
+
+	// "B" is rejected at load time, and the canonical constant for it is
+	// the value the rejected descriptor declares.
+	bYAML := base + "    emit_mechanism: " + string(binding.EmitMechanismB) + "\n"
+	if _, err := Parse([]byte(bYAML)); err == nil {
+		t.Fatalf("emit_mechanism B: Parse = nil error, want load-time rejection")
+	}
+
+	// The canonical constant is unchanged for future #1196 code even
+	// though the loader does not accept it yet.
+	if string(binding.EmitMechanismB) != "B" {
+		t.Errorf("binding.EmitMechanismB = %q, want %q", string(binding.EmitMechanismB), "B")
 	}
 }
 
