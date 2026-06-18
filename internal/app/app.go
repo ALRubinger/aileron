@@ -30,6 +30,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/proxybinding"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
@@ -371,41 +372,41 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	sourceReg := source.NewRegistry()
 
 	server := &apiServer{
-		log:                     log,
-		registry:                registry,
-		policyEngine:            policyEngine,
-		orchestrator:            orchestrator,
-		vault:                   v,
-		lockableVault:           lockableVault,
-		localVaultPath:          cfg.LocalVaultPath,
-		vaultLocked:             startVaultLocked,
-		vaultUnlockedCh:         newVaultUnlockedCh(startVaultLocked),
-		notifier:                notifier,
-		intents:                 intentStore,
-		approvals:               approvalStore,
-		policies:                policyStore,
-		grants:                  grantStore,
-		executions:              executionStore,
-		connectors:              connectorStore,
-		connectedAccounts:       connectedAccountStore,
-		drafts:                  draftStore,
-		instructions:            instructionStore,
-		feedback:                feedbackStore,
-		credentials:             credentialStore,
-		fundingSources:          fundingSourceStore,
-		llmConfigs:              llmConfigStore,
-		traces:                  traceStore,
-		sourceRegistry:          sourceReg,
-		openAIProxy:             openAIProxy,
-		anthropicProxy:          anthropicProxy,
-		localDaemonToken:        cfg.LocalDaemonToken,
-		sandboxProxyStateDir:    cfg.SandboxProxyStateDir,
-		newID:                   idGen,
-		actions:                 action.NewStore(action.DefaultDir()),
-		actionState:             newActionStateStore(log),
-		installer:               newConnectorInstaller(log),
-		versionLister:           cstore.DefaultVersionLister(),
-		hub:                     newHubClient(),
+		log:                  log,
+		registry:             registry,
+		policyEngine:         policyEngine,
+		orchestrator:         orchestrator,
+		vault:                v,
+		lockableVault:        lockableVault,
+		localVaultPath:       cfg.LocalVaultPath,
+		vaultLocked:          startVaultLocked,
+		vaultUnlockedCh:      newVaultUnlockedCh(startVaultLocked),
+		notifier:             notifier,
+		intents:              intentStore,
+		approvals:            approvalStore,
+		policies:             policyStore,
+		grants:               grantStore,
+		executions:           executionStore,
+		connectors:           connectorStore,
+		connectedAccounts:    connectedAccountStore,
+		drafts:               draftStore,
+		instructions:         instructionStore,
+		feedback:             feedbackStore,
+		credentials:          credentialStore,
+		fundingSources:       fundingSourceStore,
+		llmConfigs:           llmConfigStore,
+		traces:               traceStore,
+		sourceRegistry:       sourceReg,
+		openAIProxy:          openAIProxy,
+		anthropicProxy:       anthropicProxy,
+		localDaemonToken:     cfg.LocalDaemonToken,
+		sandboxProxyStateDir: cfg.SandboxProxyStateDir,
+		newID:                idGen,
+		actions:              action.NewStore(action.DefaultDir()),
+		actionState:          newActionStateStore(log),
+		installer:            newConnectorInstaller(log),
+		versionLister:        cstore.DefaultVersionLister(),
+		hub:                  newHubClient(),
 	}
 	if res, err := server.actions.Load(); err != nil {
 		log.Warn("failed to load actions directory", "dir", server.actions.Dir(), "error", err)
@@ -440,23 +441,38 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// --- Host->credential binding table (#1193) ---
 	// The user-level host-binding table is consulted at the TLS
 	// forward-proxy boundary when no connector spec matches a decrypted
-	// request (ADR-0019 launch passthrough). v1 has no config wire
-	// format yet (the launch/policy schema and authoring CLI are a
-	// follow-on), so the only bindings seeded here are the built-in
-	// GitHub pair (#1195): github.com -> basic and api.github.com ->
-	// bearer, both resolving user/github daemon-side. The agent never
-	// holds the GitHub secret; the daemon injects it at egress. With no
-	// user/github entry the bindings still match but resolution fails
-	// closed (no secret, no Authorization header), so an unauthenticated
-	// GitHub request behaves exactly as before today's passthrough.
-	if ghBindings, err := gitHubHostBindings(); err != nil {
+	// request (ADR-0019 launch passthrough). It is seeded from two
+	// sources, in order:
+	//
+	//   1. The built-in GitHub pair (#1195): github.com -> basic and
+	//      api.github.com -> bearer, both resolving user/github
+	//      daemon-side, kept as Go code because their schemes differ per
+	//      host and one needs sentinel-swap (#1196).
+	//   2. The declarative binding descriptors (#1197), loaded through the
+	//      generic three-layer loader (built-in profiles -> project ->
+	//      user). This is the "config, not code" path: a third-party CLI
+	//      (e.g. Linear, api.linear.app via header-template) is sealed by
+	//      shipping a descriptor, with zero per-CLI proxy code.
+	//
+	// The agent never holds these secrets; the daemon injects them at
+	// egress. With no matching vault entry a binding still matches but
+	// resolution fails closed (no secret, no header), so an
+	// unauthenticated request behaves exactly as today's passthrough.
+	ghBindings, err := gitHubHostBindings()
+	if err != nil {
 		// A construction error here is a programming bug (the host
 		// patterns and schemes are constants), not operator input;
 		// surface it rather than silently dropping the seal.
 		return nil, fmt.Errorf("seed github host bindings: %w", err)
-	} else {
-		server.hostBindings = ghBindings
 	}
+	descriptorBindings, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions(""))
+	if err != nil {
+		// A malformed descriptor must fail loudly, not degrade to an empty
+		// (passthrough) table: a typo that silently disables sealing is a
+		// fail-open we explicitly reject.
+		return nil, fmt.Errorf("load binding descriptors: %w", err)
+	}
+	server.hostBindings = append(ghBindings, descriptorBindings...)
 
 	// --- Scope-drift detection (#726) ---
 	// Hook fires after every successful connector install. If the

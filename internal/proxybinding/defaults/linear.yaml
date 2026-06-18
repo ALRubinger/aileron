@@ -1,0 +1,22 @@
+# Built-in binding descriptor for the Linear CLI (api.linear.app).
+#
+# This is the proving community profile for the credential-sealing
+# substrate: Linear is a third-party CLI nobody special-cased in the
+# proxy. It is sealed purely by this descriptor flowing through the
+# generic loader into the binding table, with zero per-CLI proxy code.
+#
+# Linear's API authenticates with a personal API key sent verbatim in the
+# Authorization header with NO "Bearer" prefix. The header-template scheme
+# expresses that: the template is "{token}", so the egress injector sets
+# "Authorization: <key>" exactly. The agent in the sandbox never holds the
+# key; the daemon resolves user/linear from the vault and injects it at the
+# TLS forward-proxy boundary. With no user/linear entry the binding still
+# matches but resolution fails closed (no header, no secret).
+version: v1
+bindings:
+  - host: api.linear.app
+    credential_ref: user/linear
+    scheme: header-template
+    emit_mechanism: A
+    header: Authorization
+    template: "{token}"
