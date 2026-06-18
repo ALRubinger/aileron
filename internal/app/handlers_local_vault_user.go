@@ -53,9 +53,20 @@ func userCredentialVaultPath(service string) string {
 func (s *apiServer) emitVaultUserCredentialEvent(ctx context.Context, eventType model.EventType, service string, actor model.ActorRef, sessionID, errClass string) {
 	logArgs := []any{
 		"event", string(eventType),
-		"service", service,
-		"actor", actor.ID,
 	}
+	// service is the attacker-controlled `{service}` path parameter. The
+	// validation-failure handlers pass "" so the raw, unvalidated value is
+	// never stamped into the slog line or the audit payload: a rejected
+	// `{service}` may carry CR/LF or other control bytes that forge extra
+	// log fields, or be unbounded enough to bloat the audit record. On every
+	// other path service has already passed validateUserService (an anchored
+	// `^[a-z0-9][a-z0-9_-]*$` allow-list), so it is safe to record. Only the
+	// `failure.class` is kept for a rejected request, mirroring how the
+	// untrusted session header is dropped when it sanitizes to empty.
+	if service != "" {
+		logArgs = append(logArgs, "service", service)
+	}
+	logArgs = append(logArgs, "actor", actor.ID)
 	if sessionID != "" {
 		logArgs = append(logArgs, "session", sessionID)
 	}
@@ -73,8 +84,9 @@ func (s *apiServer) emitVaultUserCredentialEvent(ctx context.Context, eventType 
 	if s.auditRecorder == nil {
 		return
 	}
-	payload := map[string]any{
-		"aileron.vault.user.service": service,
+	payload := map[string]any{}
+	if service != "" {
+		payload["aileron.vault.user.service"] = service
 	}
 	if sessionID != "" {
 		payload["aileron.session.id"] = sessionID
@@ -99,7 +111,7 @@ func (s *apiServer) GetUserCredentials(w http.ResponseWriter, r *http.Request, s
 	if !validateUserService(service) {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"service must match ^[a-z0-9][a-z0-9_-]*$")
-		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialRead, service, actor, sessionID, "invalid_request")
+		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialRead, "", actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
@@ -142,7 +154,7 @@ func (s *apiServer) PutUserCredentials(w http.ResponseWriter, r *http.Request, s
 	if !validateUserService(service) {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"service must match ^[a-z0-9][a-z0-9_-]*$")
-		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialWrite, service, actor, sessionID, "invalid_request")
+		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialWrite, "", actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
@@ -198,7 +210,7 @@ func (s *apiServer) DeleteUserCredentials(w http.ResponseWriter, r *http.Request
 	if !validateUserService(service) {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"service must match ^[a-z0-9][a-z0-9_-]*$")
-		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialDelete, service, actor, sessionID, "invalid_request")
+		s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialDelete, "", actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {

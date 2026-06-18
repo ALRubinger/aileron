@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
@@ -31,6 +32,9 @@ import (
 //   - Success Get/Put/Delete emit EventTypeVaultUserCredential* carrying
 //     `aileron.vault.user.service` and never `aileron.vault.agent` nor the
 //     credential bytes.
+//   - An invalid `{service}` failure event records only `failure.class` and
+//     omits the raw, attacker-controlled value from both
+//     `aileron.vault.user.service` and the slog line (#1156).
 
 func newUserCredentialsServer(t *testing.T, v vault.Vault) *apiServer {
 	t.Helper()
@@ -224,13 +228,13 @@ func TestValidateUserService(t *testing.T) {
 		{"github2", true},
 		{"2github", true},
 		{"", false},
-		{"GitHub", false},        // uppercase
-		{"-github", false},       // leading dash
-		{"_github", false},       // leading underscore
-		{"git hub", false},       // space
-		{"git/hub", false},       // slash
-		{"..", false},            // dot-dot
-		{"../agents", false},     // traversal
+		{"GitHub", false},    // uppercase
+		{"-github", false},   // leading dash
+		{"_github", false},   // leading underscore
+		{"git hub", false},   // space
+		{"git/hub", false},   // slash
+		{"..", false},        // dot-dot
+		{"../agents", false}, // traversal
 		{"agents/claude/oauth", false},
 		{"git.hub", false}, // dot not allowed
 	}
@@ -464,6 +468,97 @@ func TestUserCredentials_InvalidServiceEmitsFailureEvent(t *testing.T) {
 	events := listVaultCredentialEvents(t, store)
 	ev := requireSingleEvent(t, events, model.EventTypeVaultUserCredentialRead)
 	assertFailureClass(t, ev, "invalid_request")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+// TestUserCredentials_InvalidServiceOmitsRawServiceFromAudit is the #1156
+// regression: the rejected `{service}` is fully attacker-controlled, so its
+// validation-failure event must record only `failure.class` and never stamp
+// the raw value into `aileron.vault.user.service` or the slog line. The probe
+// carries CR/LF, a NUL, a forged-field marker, and an over-long tail — bytes
+// that, if recorded, would inject extra log fields or bloat the audit record.
+// Before the fix every verb stamped the raw value; this fails then, passes now.
+func TestUserCredentials_InvalidServiceOmitsRawServiceFromAudit(t *testing.T) {
+	const marker = "forged.field=evil"
+	malicious := "BAD\r\n" + marker + "\x00" + strings.Repeat("z", 4096)
+
+	putBody, err := json.Marshal(api.AgentCredentials{Value: []byte("x")})
+	if err != nil {
+		t.Fatalf("marshal put body: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		ev   model.EventType
+		do   func(s *apiServer)
+	}{
+		{"GET", model.EventTypeVaultUserCredentialRead, func(s *apiServer) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/vault/user/x/credentials", nil)
+			s.GetUserCredentials(httptest.NewRecorder(), req, malicious)
+		}},
+		{"PUT", model.EventTypeVaultUserCredentialWrite, func(s *apiServer) {
+			req := httptest.NewRequest(http.MethodPut, "/v1/vault/user/x/credentials",
+				bytes.NewReader(putBody))
+			req.Header.Set("Content-Type", "application/json")
+			s.PutUserCredentials(httptest.NewRecorder(), req, malicious)
+		}},
+		{"DELETE", model.EventTypeVaultUserCredentialDelete, func(s *apiServer) {
+			req := httptest.NewRequest(http.MethodDelete, "/v1/vault/user/x/credentials", nil)
+			s.DeleteUserCredentials(httptest.NewRecorder(), req, malicious)
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, store, logBuf := newAuditingUserCredentialsServer(t, vault.NewMemVault())
+			c.do(s)
+
+			events := listVaultCredentialEvents(t, store)
+			ev := requireSingleEvent(t, events, c.ev)
+			assertFailureClass(t, ev, "invalid_request")
+
+			if got, ok := ev.Payload["aileron.vault.user.service"]; ok {
+				t.Errorf("rejected service stamped into audit payload: %v", got)
+			}
+			if strings.Contains(logBuf.String(), marker) {
+				t.Errorf("raw rejected service leaked into slog line: %q", logBuf.String())
+			}
+		})
+	}
+}
+
+// TestUserCredentials_SessionHeaderAttributesActor proves the optional
+// X-Aileron-Session-Id header attributes a user-credential operation to that
+// session: the actor ID and the `aileron.session.id` payload key both carry the
+// sanitized value, and the slog line records `session`. Mirrors the per-agent
+// session-attribution contract for the user namespace.
+func TestUserCredentials_SessionHeaderAttributesActor(t *testing.T) {
+	s, store, logBuf := newAuditingUserCredentialsServer(t, vault.NewMemVault())
+
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/user/github/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Aileron-Session-Id", "sess-123")
+	rec := httptest.NewRecorder()
+	s.PutUserCredentials(rec, req, "github")
+	assertStatus(t, rec, http.StatusNoContent)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultUserCredentialWrite)
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != "sess-123" {
+		t.Errorf("actor = %+v, want service/sess-123", ev.Actor)
+	}
+	if ev.Payload["aileron.session.id"] != "sess-123" {
+		t.Errorf("session id = %v, want sess-123", ev.Payload["aileron.session.id"])
+	}
+	if !strings.Contains(logBuf.String(), "session=sess-123") {
+		t.Errorf("slog line missing session attribution: %q", logBuf.String())
+	}
 	assertNoCredentialLeak(t, events, logBuf)
 }
 
