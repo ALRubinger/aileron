@@ -326,6 +326,17 @@ const (
 	// credential is injected. See ADR-0019.
 	EventTypeSandboxProxyUpgrade EventType = "sandbox.proxy.upgrade"
 
+	// Sandbox proxy event for a cooperative HTTPS request that matched
+	// a user-level host->credential binding (the host-binding table at
+	// the TLS boundary, #1193) when no connector spec matched. The
+	// daemon resolved the bound credential from the vault, injected it
+	// per the binding's scheme, re-issued the request upstream, and
+	// streamed the response back. The credential bytes and the
+	// credential-ref are never present in the payload; only the matched
+	// host pattern, scheme, and upstream destination/status. See
+	// ADR-0019.
+	EventTypeSandboxProxyBindingInjected EventType = "sandbox.proxy.binding_injected"
+
 	// Sandbox proxy event for launches that proceed (or refuse to
 	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
 	// launcher when proxy bootstrap is opted out, preflight fails, or

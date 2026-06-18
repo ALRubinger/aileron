@@ -92,6 +92,7 @@ type apiServer struct {
 	localDaemonToken     string                        // local-daemon bearer token; empty disables local bearer auth
 	actionApprovalTTL    time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings             binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
+	hostBindings         binding.HostBindings          // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough
 	specLoader           connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
 	oauth2Sessions       *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient     *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient

@@ -192,6 +192,29 @@ var (
 		},
 	}
 
+	sandboxProxyBindingInjectedShape = sandboxProxyEventShape{
+		eventType: "sandbox.proxy.binding_injected",
+		requiredFields: []string{
+			"aileron.proxy.boundary",
+			"aileron.proxy.mediation",
+			"aileron.proxy.source",
+			"aileron.proxy.decision",
+			"aileron.proxy.method",
+			"aileron.proxy.binding.host",
+			"aileron.proxy.binding.scheme",
+			"aileron.proxy.upstream.scheme",
+			"aileron.proxy.upstream.host",
+			"aileron.proxy.upstream.path",
+			"aileron.proxy.upstream.status",
+		},
+		allowedFields: []string{
+			"aileron.session.id",
+		},
+		forbiddenSubstrs: []string{
+			"lin_secret", "Bearer ", "Authorization",
+		},
+	}
+
 	sandboxProxyDisabledShape = sandboxProxyEventShape{
 		eventType: "sandbox.proxy.disabled",
 		requiredFields: []string{
@@ -291,6 +314,43 @@ func TestSandboxProxyAuditShape_SandboxProxyPassthroughConforms(t *testing.T) {
 		t.Fatalf("event type = %q", events[0].EventType)
 	}
 	sandboxProxyPassthroughShape.validate(t, events[0].Payload)
+}
+
+func TestSandboxProxyAuditShape_SandboxProxyBindingInjectedConforms(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-shape-binding" }),
+	}
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
+	req.Method = http.MethodGet
+	upstream, _ := url.Parse("https://api.example.test/v1/resource")
+	srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200)
+	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyBindingInjected {
+		t.Fatalf("event type = %q", events[0].EventType)
+	}
+	sandboxProxyBindingInjectedShape.validate(t, events[0].Payload)
+}
+
+func TestSandboxProxyAuditShape_BindingInjectedNilRecorderIsIDSafe(t *testing.T) {
+	upstream, _ := url.Parse("https://api.example.test/v1/resource")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	// With newID wired, the recorder mints from it.
+	srv := &apiServer{newID: func() string { return "minted-id" }}
+	if got := srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200); got != "minted-id" {
+		t.Errorf("audit id = %q, want minted-id", got)
+	}
+
+	// With no newID and no recorder, it falls back to the default ID fn.
+	srvNoID := &apiServer{}
+	if got := srvNoID.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200); strings.TrimSpace(got) == "" {
+		t.Error("audit id must be non-empty even with no recorder and no newID")
+	}
 }
 
 func TestSandboxProxyAuditShape_SandboxProxyUpgradeConforms(t *testing.T) {
