@@ -135,6 +135,13 @@ command = "/usr/local/bin/other-mcp"
 // the contract: under ModeSandbox the host ~/.codex/config.toml is
 // never created; instead a temp config.toml is written and a Volume
 // mount is returned targeting /home/agent/.codex/config.toml.
+//
+// The returned mount target is intentionally nested under the AuthSpec's
+// /home/agent/.codex/ directory mount: the launcher
+// (collapseNestedMCPMounts) relocates the file into that directory's
+// host-side source instead of emitting a separate nested bind mount, so
+// no file-inside-dir bind reaches runc. See issue #1143 and the launcher
+// regression test TestCollapseNestedMCPMounts_CollapsesFileIntoParentDir.
 func TestCodex_ConfigureMCP_SandboxMode_WritesTempAndReturnsMount(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

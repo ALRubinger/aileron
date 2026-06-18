@@ -85,11 +85,16 @@ func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, m
 // host-side inode to bind, so the login would write into the
 // container overlay FS and Capture would see nothing.
 //
-// ConfigureMCP under ModeSandbox still installs a read-only file
-// mount at /home/agent/.codex/config.toml. Container runtimes apply
-// mounts in declaration order; the file mount lands after the
-// auth-spec dir mount and overlays config.toml at its specific path
-// without masking auth.json.
+// ConfigureMCP under ModeSandbox renders config.toml to a temp file
+// and returns it as an MCPMount targeting
+// /home/agent/.codex/config.toml. The launcher detects that this
+// target is nested inside the AuthSpec's /home/agent/.codex/ directory
+// mount and relocates the file into that mount's host-side source dir
+// (collapseNestedMCPMounts in launcher.go), so a single directory mount
+// carries both auth.json and config.toml. Emitting config.toml as a
+// separate nested file-inside-dir bind mount is what broke under macOS
+// Docker Desktop's virtiofs (runc: "mountpoint outside of rootfs",
+// issue #1143).
 //
 // The PreLaunchRefresh hook exchanges the refresh token for a new
 // access token against auth.openai.com before the container starts,
