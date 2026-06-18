@@ -34,6 +34,18 @@ const SchemeBearer = "bearer"
 // credential bytes.
 const SchemeBasic = "basic"
 
+// SchemeHeaderTemplate emits an arbitrary header set to a verbatim
+// template value, with a token placeholder the egress injector (#1194)
+// substitutes with the credential bytes. It expresses a vendor header
+// that carries the token with no fixed prefix, e.g. Linear's verbatim
+// `Authorization: <key>` (no `Bearer`). Carries [HostBinding.HeaderName]
+// and [HostBinding.HeaderTemplate], both non-secret.
+const SchemeHeaderTemplate = "header-template"
+
+// SchemeQueryParam emits the credential as a URL query parameter named by
+// [HostBinding.QueryParamName].
+const SchemeQueryParam = "query-param"
+
 // EmitMechanism names how the in-container client is made to emit a
 // request the proxy can seal at egress (ADR-0019, #1196). It is
 // orthogonal to [HostBinding.Scheme], which is how the proxy injects the
@@ -93,6 +105,27 @@ type HostBinding struct {
 	// ignored for every other scheme.
 	BasicUsername string
 
+	// HeaderName is the header to set, used only when Scheme is
+	// [SchemeHeaderTemplate] (e.g. `Authorization` or a vendor header).
+	// It is a non-secret param. Required for the header-template scheme,
+	// ignored otherwise.
+	HeaderName string
+
+	// HeaderTemplate is the verbatim header value for
+	// [SchemeHeaderTemplate], with a token placeholder substituted with
+	// the credential bytes at egress (the injector owns the placeholder
+	// convention). It lets a vendor express a header that carries the
+	// token without a fixed prefix (e.g. Linear's verbatim
+	// `Authorization: <key>` with no `Bearer`). Non-secret: it is a
+	// template, never the credential bytes. Required for the
+	// header-template scheme, ignored otherwise.
+	HeaderTemplate string
+
+	// QueryParamName is the query-parameter name to set, used only when
+	// Scheme is [SchemeQueryParam]. Non-secret. Required for the
+	// query-param scheme, ignored otherwise.
+	QueryParamName string
+
 	// EmitMechanism declares how the in-container client is made to emit
 	// a sealable request (see [EmitMechanism]). The zero value is
 	// [EmitMechanismA] (plant nothing, inject unconditionally), which
@@ -118,6 +151,24 @@ type HostBindingOption func(*HostBinding)
 // username used by [SchemeBasic]. It is required for that scheme.
 func WithBasicUsername(username string) HostBindingOption {
 	return func(hb *HostBinding) { hb.BasicUsername = username }
+}
+
+// WithHeaderTemplate sets the non-secret [HostBinding.HeaderName] and
+// [HostBinding.HeaderTemplate] used by [SchemeHeaderTemplate]. Both are
+// required for that scheme: a header-template binding with no header name
+// or no template could never produce a well-formed header, so an empty
+// value is a construction error.
+func WithHeaderTemplate(header, template string) HostBindingOption {
+	return func(hb *HostBinding) {
+		hb.HeaderName = header
+		hb.HeaderTemplate = template
+	}
+}
+
+// WithQueryParam sets the non-secret [HostBinding.QueryParamName] used by
+// [SchemeQueryParam]. It is required for that scheme.
+func WithQueryParam(name string) HostBindingOption {
+	return func(hb *HostBinding) { hb.QueryParamName = name }
 }
 
 // WithEmitMechanismB marks the binding as [EmitMechanismB] (sentinel-
@@ -162,6 +213,12 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	}
 	if scheme == SchemeBasic && hb.BasicUsername == "" {
 		return HostBinding{}, fmt.Errorf("host binding: basic scheme requires a username (WithBasicUsername)")
+	}
+	if scheme == SchemeHeaderTemplate && (hb.HeaderName == "" || hb.HeaderTemplate == "") {
+		return HostBinding{}, fmt.Errorf("host binding: header-template scheme requires a header name and template (WithHeaderTemplate)")
+	}
+	if scheme == SchemeQueryParam && hb.QueryParamName == "" {
+		return HostBinding{}, fmt.Errorf("host binding: query-param scheme requires a param name (WithQueryParam)")
 	}
 	return hb, nil
 }

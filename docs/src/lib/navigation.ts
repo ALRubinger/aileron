@@ -76,7 +76,8 @@ export const navigation: NavItem[] = [
       { label: 'Authoring an Action Suite', href: '/guides/authoring-an-action-suite/' },
       { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' },
       { label: 'Publishing to the Hub', href: '/guides/publishing-to-the-hub/' },
-      { label: 'Observability', href: '/guides/observability/' }
+      { label: 'Observability', href: '/guides/observability/' },
+      { label: 'Binding Descriptors', href: '/guides/binding-descriptors/' }
     ]
   },
   {

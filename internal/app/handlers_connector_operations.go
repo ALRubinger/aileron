@@ -570,15 +570,16 @@ func (s *apiServer) injectSandboxProxyHostBindingCredential(ctx context.Context,
 // over the #1194 scheme-keyed injector (internal/credential/inject):
 // the binding-match wiring is untouched and the injector owns the wire
 // shape of every scheme, so a header convention lives in exactly one
-// place. `bearer` and `basic` are implemented (basic carries the
-// non-secret username from the binding); the remaining members of
-// binding.HostBindingSchemes are accepted at config time but rejected
-// here, which fails closed rather than silently passing an un-injected
-// request upstream.
+// place. `bearer`, `basic`, `header-template`, and `query-param` are
+// implemented (each carries its non-secret params from the binding); the
+// remaining member of binding.HostBindingSchemes (sigv4-resign) is
+// accepted at config time but rejected here, which fails closed rather
+// than silently passing an un-injected request upstream.
 //
 // The resolved credential bytes flow only into [inject.Inject], which
-// writes them solely onto the request's Authorization header. They are
-// never copied into the returned reject reason or any audit payload.
+// writes them solely onto the request header or query parameter the
+// scheme defines. They are never copied into the returned reject reason
+// or any audit payload.
 func applyHostBindingScheme(req *http.Request, hb binding.HostBinding, cred credential.Credential) (bool, string) {
 	scheme, params, ok := hostBindingInjectScheme(hb)
 	if !ok {
@@ -604,6 +605,10 @@ func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Para
 		return inject.SchemeBearer, inject.Params{}, true
 	case binding.SchemeBasic:
 		return inject.SchemeBasic, inject.Params{Username: hb.BasicUsername}, true
+	case binding.SchemeHeaderTemplate:
+		return inject.SchemeHeaderTemplate, inject.Params{HeaderName: hb.HeaderName, Template: hb.HeaderTemplate}, true
+	case binding.SchemeQueryParam:
+		return inject.SchemeQueryParam, inject.Params{ParamName: hb.QueryParamName}, true
 	default:
 		return "", inject.Params{}, false
 	}

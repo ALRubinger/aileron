@@ -107,6 +107,40 @@ func TestNewHostBinding_BasicSchemeRequiresUsername(t *testing.T) {
 	}
 }
 
+func TestNewHostBinding_HeaderTemplateRequiresHeaderAndTemplate(t *testing.T) {
+	// A header-template binding with no header or no template can never
+	// produce a well-formed header, so it is rejected at construction.
+	if _, err := binding.NewHostBinding("api.linear.app", "user/linear", "header-template"); err == nil {
+		t.Fatal("expected error for header-template without header/template, got nil")
+	}
+	if _, err := binding.NewHostBinding("api.linear.app", "user/linear", "header-template",
+		binding.WithHeaderTemplate("Authorization", "")); err == nil {
+		t.Fatal("expected error for header-template with empty template, got nil")
+	}
+	hb, err := binding.NewHostBinding("api.linear.app", "user/linear", "header-template",
+		binding.WithHeaderTemplate("Authorization", "{token}"))
+	if err != nil {
+		t.Fatalf("unexpected error for valid header-template: %v", err)
+	}
+	if hb.HeaderName != "Authorization" || hb.HeaderTemplate != "{token}" {
+		t.Errorf("header params = (%q,%q), want (Authorization,{token})", hb.HeaderName, hb.HeaderTemplate)
+	}
+}
+
+func TestNewHostBinding_QueryParamRequiresName(t *testing.T) {
+	if _, err := binding.NewHostBinding("api.example.com", "user/example", "query-param"); err == nil {
+		t.Fatal("expected error for query-param without a param name, got nil")
+	}
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "query-param",
+		binding.WithQueryParam("api_key"))
+	if err != nil {
+		t.Fatalf("unexpected error for valid query-param: %v", err)
+	}
+	if hb.QueryParamName != "api_key" {
+		t.Errorf("QueryParamName = %q, want api_key", hb.QueryParamName)
+	}
+}
+
 func TestNewHostBinding_RejectsInvalidCredentialRef(t *testing.T) {
 	for _, ref := range []string{"", "not-a-binding-name", "oauth2/github", "../escape/x"} {
 		if _, err := binding.NewHostBinding("api.example.com", ref, "bearer"); err == nil {
