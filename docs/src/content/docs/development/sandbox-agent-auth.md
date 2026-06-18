@@ -43,9 +43,13 @@ The launcher's sandbox path performs four steps around `sandboxcontainer.Builder
 
 Codex's binding also declares a `PreLaunchRefresh` hook that runs between the GET and Render. The hook exchanges the refresh token for a new access token against `auth.openai.com`, persists the rotated bundle through the daemon, and hands Render the new Secret. A failed persist aborts the launch; the rotated bundle must be in vault before container start.
 
-### Verification status of the in-container read
+### Verification of the in-container read
 
-Step 3 (the in-container agent reading the rendered credential) is **not** covered by an automated end-to-end test today. CI verifies the host side only: per-agent unit tests assert each binding's `ContainerPath` and the Render/Capture byte round-trip, and the `prepareAuthSpec` tests cover the host-side reclaim, read, and freshness-gated PUT. No automated test starts a real container, has the agent read the rendered file, and asserts it authenticates. That gap is tracked in [issue #1025](https://github.com/ALRubinger/aileron/issues/1025). Until it closes, verify the path manually after changing any binding's container path, mount strategy, or Render/Capture:
+Step 3 (the in-container agent reading the rendered credential) is covered by an automated container-integration test, [`TestAuthSpecInContainerCredentialReadCapture`](https://github.com/ALRubinger/aileron/blob/main/internal/launch/authspec_container_read_integration_test.go) (build tag `integration_sandbox`, issue [#1025](https://github.com/ALRubinger/aileron/issues/1025)). The test renders a Claude-shaped AuthSpec through the real `prepareAuthSpec`, launches a real container, and asserts the agent reads the credential at its `ContainerPath`. It then has the container rotate the credential the way Claude does (tmpfile plus rename) and asserts the rotation round-trips back to the vault on clean exit. A second case exits cleanly without rotating and asserts the freshness gate holds so no PUT clobbers the vault.
+
+The test is fail-fast and requires Docker. It runs in CI on the `ubuntu-latest` integration job (rootful Docker, which exercises the Linux chown-to-agent-UID path) and locally via `task test:integration:authspec-container-read`. The host side stays covered separately by the per-agent unit tests (each binding's `ContainerPath` and Render/Capture byte round-trip) and the `prepareAuthSpec` tests (host-side reclaim, read, and freshness-gated PUT).
+
+For a quick manual check after changing a binding's container path, mount strategy, or Render/Capture, the smoke procedure is still useful as a fallback:
 
 1. Seed a vault entry: `aileron auth <agent> --import-from-host` (or `aileron vault put agents/<agent>/oauth --from-file ...`).
 2. Launch sandboxed: `aileron launch <agent> --sandbox=docker`.
