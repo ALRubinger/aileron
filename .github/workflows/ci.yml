@@ -597,6 +597,21 @@ jobs:
         env:
           AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
 
+      - name: Run in-container credential read + capture round-trip test (#1025)
+        # Closes the ADR-0025 verification gap that was previously covered only
+        # by a manual smoke-check: renders a Claude-shaped AuthSpec, launches a
+        # real container, asserts the agent READS the credential at its
+        # ContainerPath, and asserts an in-container rotation round-trips to the
+        # vault on clean exit (with a clean-exit-without-rotation negative case
+        # proving the freshness gate holds). The ubuntu runner has rootful
+        # Docker, so this exercises the Linux chown-to-agent-UID path the
+        # launcher uses in production. FAIL-FAST: requires Docker, no self-skip.
+        # Additive step so a failure is attributable to this specific contract.
+        run: go test -tags=integration_sandbox -run TestAuthSpecInContainerCredentialReadCapture ./launch/...
+        working-directory: internal
+        env:
+          AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
+
       - name: Run sandbox MCP integration tests (#962 — Linux automated column)
         # Exercises the aileron-mcp <-> daemon round-trip behind the sandbox
         # MCP parity work (#953, ADR-0024) over BOTH transports: the host
