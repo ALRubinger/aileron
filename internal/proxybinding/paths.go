@@ -23,6 +23,12 @@ func DefaultUserPath() string {
 // `.aileron/binding-descriptors.yaml` relative to the given working
 // directory (the middle layer). An empty workdir roots it at the current
 // directory. The file need not exist.
+//
+// For the running daemon this resolves against the daemon's working
+// directory, not the directory a `launch` invocation was issued from: the
+// binding table is loaded once at daemon construction and is daemon-global.
+// Per-launch resolution against the launch repo root is deferred future
+// work.
 func DefaultProjectPath(workdir string) string {
 	return filepath.Join(workdir, ".aileron", "binding-descriptors.yaml")
 }

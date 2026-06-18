@@ -27,7 +27,10 @@
 // This package defines the descriptor format and the three-layer loader.
 // It does not implement the binding-table consult (#1193), the injectors
 // (#1194), or the sentinel-swap mechanism (#1196, mechanism B); it only
-// validates the emit_mechanism field against the known set. Persisting a
+// validates the emit_mechanism field against the implemented set. Because
+// the sentinel-swap egress path is not yet wired (#1196), this loader
+// accepts only mechanism "A" and rejects emit_mechanism "B" at load time;
+// "B" becomes a valid descriptor value once #1196 lands. Persisting a
 // stateful CLI's local cache across ephemeral sandboxes is out of scope
 // and tracked separately (#1190).
 //
@@ -52,15 +55,19 @@ import (
 const SchemaVersion = "v1"
 
 // EmitMechanisms is the closed set of emit-mechanism values a descriptor
-// may declare. It mirrors internal/binding.EmitMechanism: mechanism "A"
-// injects unconditionally at the proxy (the client emits a no-credential
-// request), and mechanism "B" is sentinel-swap (the launcher plants a
-// non-secret sentinel the proxy swaps for the real credential at egress,
-// defined by #1196). This package validates the field against this set
-// and rejects unknown values; it does not implement either mechanism.
+// may declare at load time. Mechanism "A" injects unconditionally at the
+// proxy (the client emits a no-credential request). Mechanism "B" is
+// sentinel-swap (the launcher plants a non-secret sentinel the proxy swaps
+// for the real credential at egress), and is intentionally absent from
+// this set: until the sentinel-swap egress path is wired (#1196), a
+// descriptor that declares emit_mechanism "B" is rejected at load time
+// rather than accepted into a table no code can honor. This keeps the
+// fail-closed posture: a descriptor never validates against a mechanism
+// the proxy cannot enforce. The canonical internal/binding.EmitMechanismB
+// constant is kept for the future #1196 code; this loader simply does not
+// accept it yet.
 var EmitMechanisms = map[string]struct{}{
 	string(binding.EmitMechanismA): {},
-	string(binding.EmitMechanismB): {},
 }
 
 // Descriptor is a parsed, versioned binding-descriptor document. One
@@ -107,7 +114,10 @@ type Entry struct {
 
 	// EmitMechanism declares how the credential reaches egress: "A"
 	// (inject at the proxy) or "B" (sentinel-swap, #1196). Optional;
-	// empty defaults to "A". An unknown value is a load-time error.
+	// empty defaults to "A". Until the sentinel-swap egress path is wired
+	// (#1196), only "A" is accepted: "B" is rejected at load time rather
+	// than admitted into a table no code can honor. Any other value is
+	// also a load-time error.
 	EmitMechanism string `yaml:"emit_mechanism"`
 
 	// Username is the non-secret HTTP basic-auth username, required only
@@ -200,7 +210,9 @@ func (e *Entry) Validate() error {
 		mech = string(binding.EmitMechanismA)
 	}
 	if _, ok := EmitMechanisms[mech]; !ok {
-		return fmt.Errorf("unknown emit_mechanism %q (want A or B)", e.EmitMechanism)
+		// "B" (sentinel-swap) is rejected at load time until #1196 wires
+		// the egress path; only "A" is accepted today.
+		return fmt.Errorf("unsupported emit_mechanism %q (only %q is accepted until sentinel-swap (#1196) lands)", e.EmitMechanism, string(binding.EmitMechanismA))
 	}
 
 	switch e.Scheme {

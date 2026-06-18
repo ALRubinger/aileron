@@ -27,7 +27,7 @@ Each binding is a quad plus scheme-specific fields.
 - `host` is the upstream host matched at the proxy boundary. It is an exact host (`api.linear.app`) or a single leading-wildcard form (`*.example.com`). Ports are not part of the pattern.
 - `credential_ref` is a vault credential reference the daemon resolves at injection time. It is a connector-style binding name (`<kind>/<service>/<identity>`) or a user-level reference (`user/<service>`), the namespace `aileron auth <service>` writes. It is never the credential bytes. The descriptor names where the credential lives, never its value.
 - `scheme` is one of the closed injection-scheme set: `bearer`, `basic`, `header-template`, `query-param`, `sigv4-resign`. An unknown scheme is a load-time error. `sigv4-resign` is enumerated but not yet implemented.
-- `emit_mechanism` declares how the credential reaches egress. `A` injects the credential unconditionally at the proxy. `B` is sentinel-swap, where the launcher plants a non-secret sentinel the proxy swaps for the real credential. The field is optional and defaults to `A`. An unknown value is a load-time error.
+- `emit_mechanism` declares how the credential reaches egress. `A` injects the credential unconditionally at the proxy. `B` is sentinel-swap, where the launcher plants a non-secret sentinel the proxy swaps for the real credential. The field is optional and defaults to `A`. Mechanism `B` is rejected at load time until the sentinel-swap egress path ([#1196](https://github.com/ALRubinger/aileron/issues/1196)) is wired, because a descriptor must never validate against a mechanism no proxy code can honor. Today only `A` is accepted; an unknown value is also a load-time error.
 
 Scheme-specific fields:
 
@@ -42,7 +42,7 @@ Decoding is strict. An unknown YAML key is an error, not a silently ignored fiel
 Descriptors load from three layers, in increasing precedence.
 
 1. **Built-in defaults.** Community profiles Aileron ships, embedded at build time. The Linear descriptor above is one.
-2. **Project layer.** `.aileron/binding-descriptors.yaml` relative to your working project.
+2. **Project layer.** `.aileron/binding-descriptors.yaml` relative to the working directory. For the running daemon this resolves against the daemon's working directory, not the directory a `launch` invocation was issued from: the binding table is loaded once at daemon construction and is daemon-global. Per-launch resolution against the launch repo root is deliberately deferred future work.
 3. **User layer.** `~/.aileron/binding-descriptors.yaml`.
 
 A later layer overrides an earlier one per `host` key. A user descriptor can replace a shipped community profile for the same host without editing the shipped file. A new host in any layer is added on top of the others rather than replacing them. An absent project or user file is not an error. It simply contributes nothing.
