@@ -63,7 +63,11 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	}
 }
 
-func TestLauncherMergesGitHubInject_NoEntryIsCleanSkip(t *testing.T) {
+func TestLauncherMergesGitHubInject_NoEntryStillMountsNoopGitconfig(t *testing.T) {
+	// Key Decision 4 (#1195): even with no user/github entry the launcher
+	// appends the secret-free no-op gitconfig mount (so git-over-HTTPS
+	// does not block in the sandbox), but no GH_TOKEN is merged (the
+	// sentinel-swap needs a real daemon-side credential).
 	daemon := &fakeUserCredsDaemon{err: ErrUserCredentialsNotFound}
 
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
@@ -80,13 +84,22 @@ func TestLauncherMergesGitHubInject_NoEntryIsCleanSkip(t *testing.T) {
 	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
 
 	if _, ok := agentEnv["GH_TOKEN"]; ok {
-		t.Errorf("GH_TOKEN injected on clean skip; want absent")
+		t.Errorf("GH_TOKEN injected on no-entry path; want absent")
 	}
-	if len(proxyMounts) != 0 {
-		t.Errorf("mounts appended on clean skip; want none, got %+v", proxyMounts)
+	var found bool
+	for _, m := range proxyMounts {
+		if m.Target == "/home/agent/.gitconfig" {
+			found = true
+			if !m.ReadOnly {
+				t.Errorf("no-op gitconfig mount ReadOnly = false, want true")
+			}
+		}
 	}
-	// The unrelated AuthSpec env survives the no-op merge.
+	if !found {
+		t.Errorf("no-op gitconfig mount missing on no-entry path; got %+v", proxyMounts)
+	}
+	// The unrelated AuthSpec env survives the merge.
 	if agentEnv["CLAUDE_CODE_OAUTH_TOKEN"] != "agent-oauth" {
-		t.Errorf("clean skip disturbed existing env: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])
+		t.Errorf("no-entry path disturbed existing env: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])
 	}
 }

@@ -24,9 +24,14 @@ import (
 //     helper, and a no-op empty-credential helper scoped to
 //     https://github.com. The real token is sealed daemon-side at egress,
 //     never env-injected and never in the mount.
-//   - ErrUserCredentialsNotFound and a locked vault both yield an empty
-//     prep with no error and a nil-safe Cleanup (skip-clean).
-//   - An empty-after-trim token is treated as no token.
+//   - Key Decision 4 (#1195): the static secret-free no-op gitconfig is
+//     mounted on EVERY path — ErrUserCredentialsNotFound, a locked vault,
+//     and an empty-after-trim token all yield exactly one read-only mount
+//     at /home/agent/.gitconfig with no error and a real Cleanup that
+//     removes the transient dir. The GH_TOKEN sentinel is gated to the
+//     token-present path only (the sentinel-swap needs a real daemon-side
+//     credential), so it is absent on those skip paths.
+//   - An empty-after-trim token is treated as no token (mount, no token).
 //   - The chown hook is invoked exactly once with the transient root
 //     dir (P1 wiring), and the transient dir is 0700 (traverse bit),
 //     never 0600.
@@ -147,6 +152,10 @@ func TestPrepareGitHubInject_GitconfigIsSecretFreeRegardlessOfToken(t *testing.T
 }
 
 func TestPrepareGitHubInject_NotFoundIsCleanSkip(t *testing.T) {
+	// Key Decision 4 (#1195): a missing entry still mounts the static
+	// secret-free no-op gitconfig (so git-over-HTTPS does not block), but
+	// sets no GH_TOKEN (the sentinel-swap needs a real daemon-side
+	// credential).
 	daemon := &fakeUserCredsDaemon{err: ErrUserCredentialsNotFound}
 	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
 	if err != nil {
@@ -155,47 +164,77 @@ func TestPrepareGitHubInject_NotFoundIsCleanSkip(t *testing.T) {
 	if _, ok := prep.EnvAdditions["GH_TOKEN"]; ok {
 		t.Errorf("GH_TOKEN set on not-found, want absent")
 	}
-	if len(prep.Mounts) != 0 {
-		t.Errorf("Mounts = %d, want 0 on not-found", len(prep.Mounts))
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 (no-op gitconfig) on not-found", len(prep.Mounts))
+	}
+	if prep.Mounts[0].Target != "/home/agent/.gitconfig" {
+		t.Errorf("mount Target = %q, want /home/agent/.gitconfig", prep.Mounts[0].Target)
+	}
+	if !prep.Mounts[0].ReadOnly {
+		t.Errorf("mount ReadOnly = false, want true")
 	}
 	if prep.Cleanup == nil {
 		t.Fatal("Cleanup nil on not-found; want nil-safe no-op")
 	}
+	src := prep.Mounts[0].Source
+	if _, statErr := os.Stat(src); statErr != nil {
+		t.Fatalf("mounted gitconfig %q not present before cleanup: %v", src, statErr)
+	}
 	prep.Cleanup() // must not panic
+	if _, statErr := os.Stat(src); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("Cleanup did not remove transient dir: stat err = %v, want ErrNotExist", statErr)
+	}
 }
 
 func TestPrepareGitHubInject_LockedVaultIsCleanSkip(t *testing.T) {
+	// Key Decision 4 (#1195): a locked vault still mounts the static
+	// secret-free no-op gitconfig and still emits the locked-vault
+	// warning, but sets no GH_TOKEN.
 	var stderr bytes.Buffer
 	daemon := &fakeUserCredsDaemon{err: vault.ErrCredentialUnavailable}
 	prep, err := prepareGitHubInject(context.Background(), daemon, nil, &stderr, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v, want clean skip on locked vault", err)
 	}
+	defer prep.Cleanup()
 	if _, ok := prep.EnvAdditions["GH_TOKEN"]; ok {
 		t.Errorf("GH_TOKEN set on locked vault, want absent")
 	}
-	if len(prep.Mounts) != 0 {
-		t.Errorf("Mounts = %d, want 0 on locked vault", len(prep.Mounts))
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 (no-op gitconfig) on locked vault", len(prep.Mounts))
+	}
+	if prep.Mounts[0].Target != "/home/agent/.gitconfig" {
+		t.Errorf("mount Target = %q, want /home/agent/.gitconfig", prep.Mounts[0].Target)
+	}
+	if !prep.Mounts[0].ReadOnly {
+		t.Errorf("mount ReadOnly = false, want true")
 	}
 	if stderr.Len() == 0 {
 		t.Errorf("expected a non-fatal locked-vault warning on stderr")
 	}
-	prep.Cleanup()
 }
 
 func TestPrepareGitHubInject_EmptyTokenIsCleanSkip(t *testing.T) {
+	// Key Decision 4 (#1195): an empty-after-trim token still mounts the
+	// static secret-free no-op gitconfig, but sets no GH_TOKEN.
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("   \n")}}
 	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
+	defer prep.Cleanup()
 	if _, ok := prep.EnvAdditions["GH_TOKEN"]; ok {
 		t.Errorf("GH_TOKEN set on empty-after-trim token, want absent")
 	}
-	if len(prep.Mounts) != 0 {
-		t.Errorf("Mounts = %d, want 0 on empty token", len(prep.Mounts))
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 (no-op gitconfig) on empty token", len(prep.Mounts))
 	}
-	prep.Cleanup()
+	if prep.Mounts[0].Target != "/home/agent/.gitconfig" {
+		t.Errorf("mount Target = %q, want /home/agent/.gitconfig", prep.Mounts[0].Target)
+	}
+	if !prep.Mounts[0].ReadOnly {
+		t.Errorf("mount ReadOnly = false, want true")
+	}
 }
 
 func TestPrepareGitHubInject_UnexpectedDaemonErrorAborts(t *testing.T) {

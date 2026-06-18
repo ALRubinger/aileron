@@ -69,9 +69,12 @@ type githubInjectPrep struct {
 	// #1196). The sentinel is non-secret and safe to place in the env.
 	EnvAdditions map[string]string
 
-	// Mounts append to the sandbox volume list. Carries the individual
-	// secret-free gitconfig file mount when a usable user/github entry
-	// was found; empty otherwise. The mount holds no secret regardless.
+	// Mounts append to the sandbox volume list. Always carries the
+	// individual secret-free no-op gitconfig file mount, regardless of
+	// vault state (entry present, missing, locked, or empty token). The
+	// gitconfig content is invariant and holds no secret, so it is mounted
+	// on every launch so git-over-HTTPS emits a completable unauthenticated
+	// request instead of blocking on a prompt or shelling out to `gh`.
 	Mounts []sandboxcontainer.Volume
 
 	// Cleanup removes the transient host directory holding the rendered
@@ -80,74 +83,28 @@ type githubInjectPrep struct {
 	Cleanup func()
 }
 
-// emptyGitHubInjectPrep returns a clean, no-op prep: no env, no mount,
-// and a nil-safe Cleanup. Used on every skip path (no entry, locked
-// vault, empty token) so the caller can unconditionally defer Cleanup
-// and range over EnvAdditions/Mounts.
-func emptyGitHubInjectPrep() githubInjectPrep {
-	return githubInjectPrep{
-		EnvAdditions: map[string]string{},
-		Cleanup:      func() {},
-	}
-}
-
-// prepareGitHubInject probes the user-level GitHub entry in the vault
-// and, when a usable token is present, mounts a read-only, secret-free
-// no-op gitconfig at /home/agent/.gitconfig.
-//
-// Under the ADR-0019 sealing model (#1195) the token never enters the
-// container: no GH_TOKEN env is set and the gitconfig carries no secret
-// bytes. The mounted helper makes git emit a fully-formed but
-// unauthenticated HTTPS request that the daemon proxy seals at egress
-// via the user/github host bindings. The vault probe is retained only
-// to drive the locked-vault warning UX and to gate the (secret-free)
-// mount the same way the pre-sealing code did, keeping the prep shape
-// stable; the daemon binding independently handles the locked/empty
-// case fail-closed, so a missed mount never leaks or breaks auth.
-//
-// Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or
-// a locked vault (vault.ErrCredentialUnavailable) returns an empty prep
-// with no error — the launch proceeds with GitHub operations simply
-// unauthenticated. A token that is empty after trimming is treated the
-// same way. Only an unexpected daemon error aborts.
+// renderNoopGitconfigMount creates the transient host directory, writes
+// the static secret-free no-op gitconfig, applies the chown hook, and
+// returns a prep carrying the read-only file mount and a real Cleanup.
+// EnvAdditions is initialized empty; the caller adds GH_TOKEN only on the
+// token-present path. This is invoked on EVERY launch path (entry
+// present, missing, locked, empty token) because the gitconfig content
+// is invariant and secret-free regardless of vault state (Key Decision 4,
+// #1195): always mounting it lets git-over-HTTPS emit a completable
+// unauthenticated request the daemon seals at egress, instead of blocking
+// on a prompt or shelling out to `gh`.
 //
 // chownHook, when non-nil, is applied to the transient directory before
-// the mount is added. On rootful Docker Linux the host operator owns
+// the mount is assembled. On rootful Docker Linux the host operator owns
 // the 0700 transient dir, which the in-container agent UID cannot
 // traverse; the hook chowns the tree to the agent UID so git-over-HTTPS
 // can read the helper line. A hook failure is non-fatal: the injector
 // warns and proceeds, since a same-UID environment needs no chown.
-func prepareGitHubInject(
-	ctx context.Context,
-	daemon userCredsDaemon,
+func renderNoopGitconfigMount(
 	sessionLog *slog.Logger,
 	stderr io.Writer,
 	chownHook func(dir string) error,
 ) (githubInjectPrep, error) {
-	secret, err := daemon.GetUserCredentials(ctx, githubUserService)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrUserCredentialsNotFound):
-			// No user/github entry — proceed unauthenticated.
-			return emptyGitHubInjectPrep(), nil
-		case errors.Is(err, vault.ErrCredentialUnavailable):
-			// Vault locked — no token available this launch. Warn so the
-			// user knows GitHub ops will be unauthenticated, but never
-			// abort the launch.
-			githubInjectWarn(sessionLog, stderr,
-				fmt.Errorf("vault locked; GitHub operations in the sandbox will be unauthenticated until you unlock the vault"))
-			return emptyGitHubInjectPrep(), nil
-		default:
-			return githubInjectPrep{}, fmt.Errorf("read user github credentials: %w", err)
-		}
-	}
-
-	token := strings.TrimSpace(string(secret.Value))
-	if token == "" {
-		// An entry with no usable token is equivalent to no entry.
-		return emptyGitHubInjectPrep(), nil
-	}
-
 	dir, err := os.MkdirTemp("", "aileron-github-inject-")
 	if err != nil {
 		return githubInjectPrep{}, fmt.Errorf("create github inject dir: %w", err)
@@ -179,23 +136,91 @@ func prepareGitHubInject(
 		}
 	}
 
-	prep := emptyGitHubInjectPrep()
+	return githubInjectPrep{
+		EnvAdditions: map[string]string{},
+		Mounts: []sandboxcontainer.Volume{{
+			Source:   hostPath,
+			Target:   githubConfigTarget,
+			ReadOnly: true,
+		}},
+		Cleanup: cleanup,
+	}, nil
+}
+
+// prepareGitHubInject probes the user-level GitHub entry in the vault and
+// always mounts a read-only, secret-free no-op gitconfig at
+// /home/agent/.gitconfig — on every path, whether the entry is present,
+// missing, the vault is locked, or the token is empty (Key Decision 4,
+// #1195). The gitconfig content is invariant and carries no secret bytes,
+// so mounting it unconditionally leaks nothing while ensuring
+// git-over-HTTPS always emits a completable unauthenticated request the
+// daemon proxy seals at egress via the user/github host bindings, instead
+// of blocking on a prompt or shelling out to `gh`.
+//
+// Under the ADR-0019 sealing model (#1195) the token never enters the
+// container: the gitconfig carries no secret bytes and GH_TOKEN, when
+// set, holds only the non-secret sentinel. The vault probe drives the
+// locked-vault warning UX and gates the GH_TOKEN sentinel (which requires
+// a real daemon-side credential to swap), but no longer gates the mount.
+//
+// Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or
+// a locked vault (vault.ErrCredentialUnavailable) still mounts the no-op
+// gitconfig with no error and no GH_TOKEN — the launch proceeds with
+// GitHub operations simply unauthenticated. A token that is empty after
+// trimming is treated the same way. Only an unexpected daemon error
+// aborts. The locked-vault warning is still emitted.
+//
+// chownHook is threaded into renderNoopGitconfigMount; see its doc for
+// the rootful-Docker-Linux rationale and the non-fatal-on-failure
+// contract.
+func prepareGitHubInject(
+	ctx context.Context,
+	daemon userCredsDaemon,
+	sessionLog *slog.Logger,
+	stderr io.Writer,
+	chownHook func(dir string) error,
+) (githubInjectPrep, error) {
+	secret, err := daemon.GetUserCredentials(ctx, githubUserService)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrUserCredentialsNotFound):
+			// No user/github entry — proceed unauthenticated, but still
+			// mount the secret-free no-op gitconfig.
+			return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
+		case errors.Is(err, vault.ErrCredentialUnavailable):
+			// Vault locked — no token available this launch. Warn so the
+			// user knows GitHub ops will be unauthenticated, but never
+			// abort the launch; still mount the secret-free no-op gitconfig.
+			githubInjectWarn(sessionLog, stderr,
+				fmt.Errorf("vault locked; GitHub operations in the sandbox will be unauthenticated until you unlock the vault"))
+			return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
+		default:
+			return githubInjectPrep{}, fmt.Errorf("read user github credentials: %w", err)
+		}
+	}
+
+	token := strings.TrimSpace(string(secret.Value))
+	if token == "" {
+		// An entry with no usable token is equivalent to no entry: mount
+		// the no-op gitconfig, set no GH_TOKEN.
+		return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
+	}
+
+	prep, err := renderNoopGitconfigMount(sessionLog, stderr, chownHook)
+	if err != nil {
+		return githubInjectPrep{}, err
+	}
 	// GH_TOKEN carries the non-secret sentinel, never the real token.
 	// `gh` short-circuits locally without a token, so we plant the
 	// sentinel to make it issue its request; the daemon recognizes the
 	// sentinel at the TLS boundary and swaps in the real user/github
 	// credential (emit-mechanism B, #1196). The real secret never enters
-	// the container in env, mount, or args. The mount below carries only
-	// the secret-free no-op git credential helper (emit-mechanism A for
+	// the container in env, mount, or args. The mount carries only the
+	// secret-free no-op git credential helper (emit-mechanism A for
 	// git-over-HTTPS, which the daemon seals from the unauthenticated
-	// request git emits).
+	// request git emits). The sentinel is gated to the token-present path
+	// because the sentinel-swap requires a real daemon-side credential.
 	prep.EnvAdditions["GH_TOKEN"] = sentinel.GitHubTokenSentinel
-	prep.Mounts = []sandboxcontainer.Volume{{
-		Source:   hostPath,
-		Target:   githubConfigTarget,
-		ReadOnly: true,
-	}}
-	prep.Cleanup = cleanup
 	return prep, nil
 }
 
