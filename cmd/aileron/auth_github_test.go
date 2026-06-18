@@ -165,6 +165,33 @@ func TestRunAuthGitHub_RunnerConstructionErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestRunAuthGitHub_RejectsUnknownFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runAuthGitHub([]string{"--nope"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+}
+
+func TestRunAuthGitHub_TransportErrorSurfaces(t *testing.T) {
+	// Capture succeeds, but the daemon is unreachable: vaultDoRequest's
+	// transport error must surface cleanly with exit 1 and no panic.
+	withStubDeviceFlow(t, stubDeviceFlow{token: []byte("gho_tok")}, nil)
+	// Point at a closed port so the HTTP client errors at the transport
+	// layer rather than returning a status.
+	t.Setenv("AILERON_API_URL", "http://127.0.0.1:0/v1")
+	t.Setenv("AILERON_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	code := runAuthGitHub(nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("stderr = %q, want a transport error", stderr.String())
+	}
+}
+
 func TestRunAuthGitHub_RejectsExtraPositionalArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runAuthGitHub([]string{"unexpected"}, &stdout, &stderr)
@@ -181,6 +208,18 @@ func TestNewDeviceFlowRunner_RejectsUnsupportedRuntime(t *testing.T) {
 	// container work, exercising the production constructor's error path.
 	if _, err := newDeviceFlowRunner("podman", ""); err == nil {
 		t.Fatal("expected an error for an unsupported runtime")
+	}
+}
+
+func TestStderrSuffix(t *testing.T) {
+	if got := stderrSuffix(bytes.NewBufferString("")); got != "" {
+		t.Errorf("empty stderr suffix = %q, want empty", got)
+	}
+	if got := stderrSuffix(bytes.NewBufferString("   \n")); got != "" {
+		t.Errorf("whitespace stderr suffix = %q, want empty", got)
+	}
+	if got := stderrSuffix(bytes.NewBufferString("boom\n")); got != ": boom" {
+		t.Errorf("stderr suffix = %q, want %q", got, ": boom")
 	}
 }
 
