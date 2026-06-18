@@ -24,7 +24,7 @@
 //
 // # Scope
 //
-// This package defines the descriptor format and the three-layer loader.
+// This package defines the descriptor format and the two-layer loader.
 // It does not implement the binding-table consult (#1193), the injectors
 // (#1194), or the sentinel-swap mechanism (#1196, mechanism B); it only
 // validates the emit_mechanism field against the implemented set. Because
@@ -73,7 +73,7 @@ var EmitMechanisms = map[string]struct{}{
 // Descriptor is a parsed, versioned binding-descriptor document. One
 // document carries a version and an ordered list of per-host entries.
 // A CLI vendor or community profile ships a Descriptor; the loader merges
-// the built-in, project, and user layers into a single validated set.
+// the built-in and user layers into a single validated set.
 type Descriptor struct {
 	// Version is the schema version. It must equal [SchemaVersion]; any
 	// other value is rejected at parse time so the format can evolve under

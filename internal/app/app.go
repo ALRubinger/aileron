@@ -449,8 +449,8 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	//      daemon-side, kept as Go code because their schemes differ per
 	//      host and one needs sentinel-swap (#1196).
 	//   2. The declarative binding descriptors (#1197), loaded through the
-	//      generic three-layer loader (built-in profiles -> project ->
-	//      user). This is the "config, not code" path: a third-party CLI
+	//      generic two-layer loader (built-in profiles -> user). This is
+	//      the "config, not code" path: a third-party CLI
 	//      (e.g. Linear, api.linear.app via header-template) is sealed by
 	//      shipping a descriptor, with zero per-CLI proxy code.
 	//
@@ -465,7 +465,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		// surface it rather than silently dropping the seal.
 		return nil, fmt.Errorf("seed github host bindings: %w", err)
 	}
-	descriptorBindings, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions(""))
+	descriptorBindings, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
 	if err != nil {
 		// A malformed descriptor must fail loudly, not degrade to an empty
 		// (passthrough) table: a typo that silently disables sealing is a

@@ -1,6 +1,6 @@
 ---
 title: "Binding Descriptors"
-description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the three-layer loading order, and a worked Linear example."
+description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the two-layer loading order, and a worked Linear example."
 ---
 
 A command-line tool that talks to a third-party API needs a credential. The usual answer is to hand that credential to the tool, which means the credential lives wherever the tool runs. Aileron's credential-sealing substrate takes a different path. The credential stays in your vault, the agent in the sandbox never holds it, and the daemon injects it at the TLS forward-proxy boundary on the way out. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the data-plane design this builds on.
@@ -37,15 +37,14 @@ Scheme-specific fields:
 
 Decoding is strict. An unknown YAML key is an error, not a silently ignored field, so a typo fails fast instead of shipping a binding that does nothing. A wrong or missing `version` is an error so the format can evolve without a silent misparse.
 
-## Three-layer loading
+## Two-layer loading
 
-Descriptors load from three layers, in increasing precedence.
+Descriptors load from two layers, in increasing precedence.
 
 1. **Built-in defaults.** Community profiles Aileron ships, embedded at build time. The Linear descriptor above is one.
-2. **Project layer.** `.aileron/binding-descriptors.yaml` relative to the working directory. For the running daemon this resolves against the daemon's working directory, not the directory a `launch` invocation was issued from: the binding table is loaded once at daemon construction and is daemon-global. Per-launch resolution against the launch repo root is deliberately deferred future work.
-3. **User layer.** `~/.aileron/binding-descriptors.yaml`.
+2. **User layer.** `~/.aileron/binding-descriptors.yaml`.
 
-A later layer overrides an earlier one per `host` key. A user descriptor can replace a shipped community profile for the same host without editing the shipped file. A new host in any layer is added on top of the others rather than replacing them. An absent project or user file is not an error. It simply contributes nothing.
+A later layer overrides an earlier one per `host` key. A user descriptor can replace a shipped community profile for the same host without editing the shipped file. A new host in any layer is added on top of the others rather than replacing them. An absent user file is not an error. It simply contributes nothing.
 
 One invalid layer fails the whole load with a clear error. A malformed descriptor never degrades to a partial or empty binding table, because a typo that silently disables sealing would be a fail-open we reject.
 

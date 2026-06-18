@@ -3,8 +3,8 @@ package proxybinding
 import "embed"
 
 // builtinDefaults holds the descriptors Aileron ships as the built-in
-// layer of the three-layer config convention (built-in -> project ->
-// user). Each file under defaults/ is a community profile that seals a
+// layer of the two-layer config convention (built-in -> user). Each file
+// under defaults/ is a community profile that seals a
 // third-party CLI by descriptor alone. linear.yaml is the proving
 // example; adding another vendor is a new file here, never new proxy code.
 //

@@ -8,41 +8,34 @@ import (
 	"sort"
 )
 
-// LoadOptions selects the project and user descriptor layers that override
-// the built-in defaults. Both paths are optional: an empty path or an
-// absent file contributes no entries, so an operator who ships nothing
-// gets exactly the built-in profiles.
+// LoadOptions selects the user descriptor layer that overrides the
+// built-in defaults. UserPath is optional: an empty path or an absent file
+// contributes no entries, so an operator who ships nothing gets exactly the
+// built-in profiles.
 type LoadOptions struct {
-	// ProjectPath is a descriptor file relative to (or rooted at) the
-	// working project, the middle layer. It overrides built-in entries for
-	// the same host and is itself overridden by the user layer. Empty or
-	// absent contributes nothing.
-	ProjectPath string
-
 	// UserPath is the per-user descriptor file (e.g. under ~/.aileron),
-	// the highest-precedence layer. It overrides both built-in and project
-	// entries for the same host. Empty or absent contributes nothing.
+	// the highest-precedence layer. It overrides built-in entries for the
+	// same host. Empty or absent contributes nothing.
 	UserPath string
 }
 
-// Load merges the three configuration layers (built-in defaults, then
-// project, then user) into a single validated, ordered set of entries
-// keyed on host. This mirrors the three-layer policy/config convention
-// used elsewhere in the codebase: later layers override earlier ones per
-// host key, so a user descriptor can replace a shipped community profile
-// for the same host without editing it.
+// Load merges the two configuration layers (built-in defaults, then user)
+// into a single validated, ordered set of entries keyed on host. This
+// mirrors the layered policy/config convention used elsewhere in the
+// codebase: the later layer overrides the earlier one per host key, so a
+// user descriptor can replace a shipped community profile for the same host
+// without editing it.
 //
-// Precedence is strictly built-in < project < user. Within the merged
-// result, entries are ordered deterministically by host so the binding
-// table is reproducible across loads.
+// Precedence is strictly built-in < user. Within the merged result, entries
+// are ordered deterministically by host so the binding table is
+// reproducible across loads.
 //
 // Every layer is parsed strictly (unknown keys, wrong version, malformed
 // YAML, and invalid entries are errors). An invalid layer fails the whole
 // load with a clear error and never silently drops entries: a typo in a
 // descriptor must not degrade to a partial, surprising binding set. A
-// missing project or user file is not an error (an absent layer is an
-// empty layer); only a present-but-unreadable or present-but-invalid file
-// fails.
+// missing user file is not an error (an absent layer is an empty layer);
+// only a present-but-unreadable or present-but-invalid file fails.
 func Load(opts LoadOptions) ([]Entry, error) {
 	merged := make(map[string]Entry)
 
@@ -51,14 +44,6 @@ func Load(opts LoadOptions) ([]Entry, error) {
 		return nil, fmt.Errorf("proxybinding: load built-in defaults: %w", err)
 	}
 	applyLayer(merged, builtin)
-
-	if opts.ProjectPath != "" {
-		project, err := parseLayerFile(opts.ProjectPath)
-		if err != nil {
-			return nil, fmt.Errorf("proxybinding: load project layer %q: %w", opts.ProjectPath, err)
-		}
-		applyLayer(merged, project)
-	}
 
 	if opts.UserPath != "" {
 		user, err := parseLayerFile(opts.UserPath)
