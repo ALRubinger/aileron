@@ -553,7 +553,7 @@ const (
 // readVaultPassphrase resolves a passphrase from (in order):
 //  1. The supplied file path, if non-empty.
 //  2. The AILERON_VAULT_PASSPHRASE env var.
-//  3. An interactive prompt on /dev/tty.
+//  3. An interactive prompt on the controlling terminal.
 //
 // Returns the passphrase and the source it came from. Trailing CR/LF is
 // stripped from file/env values so common shell idioms (heredocs,
@@ -577,7 +577,7 @@ func readVaultPassphrase(passphraseFile, prompt string, w io.Writer) (string, pa
 }
 
 // willPromptInteractively reports whether the next readVaultPassphrase
-// call would fall through to /dev/tty. Mirrors readVaultPassphrase's
+// call would fall through to the controlling terminal. Mirrors readVaultPassphrase's
 // dispatch order — file > env > interactive — so callers can decide
 // whether to print user-facing context (e.g. the new-vault banner)
 // BEFORE the prompt fires, instead of inferring interactivity from

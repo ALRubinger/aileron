@@ -1181,7 +1181,7 @@ func defaultPromptPassphrase(prompt string, w io.Writer) (string, error) {
 	if w != nil && prompt != "" {
 		fmt.Fprint(w, prompt)
 	}
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := openControllingTerminal()
 	if err != nil {
 		return "", fmt.Errorf("cannot open terminal: %w", err)
 	}

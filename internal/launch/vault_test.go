@@ -178,11 +178,11 @@ func tamperVault(t *testing.T, path, passphrase string) {
 }
 
 func TestEnsureVault_DefaultPrompterFailsGracefullyOffTTY(t *testing.T) {
-	// In test contexts there's no /dev/tty open, so calling the
-	// default prompter should fail with a clear error rather than
-	// hanging or panicking. We exercise this by calling EnsureVault
-	// with prompter=nil and checking that we get the expected
-	// "cannot open /dev/tty" error.
+	// In test contexts there's no controlling terminal open, so
+	// calling the default prompter should fail with a clear error
+	// rather than hanging or panicking. We exercise this by calling
+	// EnsureVault with prompter=nil and checking that we get the
+	// expected "cannot open terminal" error.
 	if _, err := EnsureVault(filepath.Join(t.TempDir(), "secrets.json"), nil, &bytes.Buffer{}, 1); err == nil {
 		t.Error("expected error from default prompter without a tty")
 	}

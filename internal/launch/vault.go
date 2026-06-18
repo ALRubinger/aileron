@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -115,12 +114,12 @@ func unlockExistingVault(path string, prompter PassphrasePrompter, w io.Writer, 
 	return nil, fmt.Errorf("vault unlock loop exited without resolution")
 }
 
-// defaultPassphrasePrompter reads from /dev/tty without echoing.
-// Used as the fallback when the caller doesn't inject a prompter.
+// defaultPassphrasePrompter reads from the controlling terminal without
+// echoing. Used as the fallback when the caller doesn't inject a prompter.
 func defaultPassphrasePrompter(prompt string, w io.Writer) (string, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := openControllingTerminal()
 	if err != nil {
-		return "", fmt.Errorf("cannot open /dev/tty: %w", err)
+		return "", fmt.Errorf("cannot open terminal: %w", err)
 	}
 	defer tty.Close()
 	fmt.Fprint(w, "aileron: ", prompt)
