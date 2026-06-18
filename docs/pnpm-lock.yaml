@@ -10,16 +10,16 @@ importers:
     dependencies:
       '@astrojs/mdx':
         specifier: ^6.0.0
-        version: 6.0.3(astro@6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))
+        version: 6.0.3(astro@6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))
       '@astrojs/svelte':
         specifier: ^8.0.5
-        version: 8.1.2(astro@6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))(jiti@2.7.0)(lightningcss@1.32.0)(svelte@5.56.3)(typescript@6.0.3)(yaml@2.8.4)
+        version: 8.1.2(astro@6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))(jiti@2.7.0)(lightningcss@1.32.0)(svelte@5.56.3)(typescript@6.0.3)(yaml@2.8.4)
       '@lucide/svelte':
         specifier: ^1.16.0
         version: 1.18.0(svelte@5.56.3)
       astro:
         specifier: ^6.1.6
-        version: 6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
+        version: 6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
       bits-ui:
         specifier: ^2.18.0
         version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.56.3)
@@ -184,8 +184,8 @@ packages:
   '@emmetio/stream-reader@2.2.0':
     resolution: {integrity: sha512-fXVXEyFA5Yv3M3n8sUGT7+fvecGrZP4k6FnWWMSZVQf69kAq0LLpaBQLGcPR30m3zMmKYhECP4k/ZkzvhEW5kw==}
 
-  '@emnapi/runtime@1.11.0':
-    resolution: {integrity: sha512-55coeOFKHv1ywEcUXJtWU5f+Jr/W5tZDvZig8DLKSwUN1JpROQ4rk/SNOQiFWmaR/VKF4zuFyW1B8JduOSv6Pg==}
+  '@emnapi/runtime@1.11.1':
+    resolution: {integrity: sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==}
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -1192,8 +1192,8 @@ packages:
     resolution: {integrity: sha512-LElXdjswlqjWrPpJFg1Fx4wpkOCxj1TDHlSV4PlaRxHGWko024xICaa97ZkMfs6DRKlCguiAI+rbXv5GWwXIkg==}
     hasBin: true
 
-  astro@6.4.6:
-    resolution: {integrity: sha512-48OBTBKR9ctbf+DQxpOuxGl8ebfn59zTuNQMBzptmG/Mi/H8IdfMSbJgGuX1I/4U6g9yazG1p4BHlf4+2hWU4Q==}
+  astro@6.4.7:
+    resolution: {integrity: sha512-5vsXx0H52u23Jpshs9tM81D03Tb3Oh2Vt2Zo0bpqjXN+njkAWjFyGjTfmWJLAcrCQd9Q+iWB1eqfhR1sZJEaUA==}
     engines: {node: '>=22.12.0', npm: '>=9.6.5', pnpm: '>=7.1.0'}
     hasBin: true
 
@@ -2359,11 +2359,6 @@ packages:
   scule@1.3.0:
     resolution: {integrity: sha512-6FtHJEvt+pVMIB9IBY+IcCJ6Z5f1iQnytgyfKMhDKgmzYG+TeH/wx1y3l27rshSbLiSanrR9ffZDrEsmjlQF2g==}
 
-  semver@7.8.1:
-    resolution: {integrity: sha512-rkVq3IXh+4FDGch+KwzX3aV9W3kO54GyEgpvBzSyctDA6Xtd7RJQV1xmXbeQp5v7+VzLOfVqiutSE6GICgPFvg==}
-    engines: {node: '>=10'}
-    hasBin: true
-
   semver@7.8.4:
     resolution: {integrity: sha512-rUCObTnP32Q08R2uuIrt7r9PlEonuTmtuXYcW6s5kjdlj3xbnwe+21yXptAUYcMAABLkYYTtnmzb3w3EDZfueA==}
     engines: {node: '>=10'}
@@ -2939,13 +2934,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@astrojs/mdx@6.0.3(astro@6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))':
+  '@astrojs/mdx@6.0.3(astro@6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))':
     dependencies:
       '@astrojs/internal-helpers': 0.10.0
       '@astrojs/markdown-remark': 7.2.0
       '@mdx-js/mdx': 3.1.1
       acorn: 8.17.0
-      astro: 6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
+      astro: 6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
       es-module-lexer: 2.1.0
       estree-util-visit: 2.0.0
       hast-util-to-html: 9.0.5
@@ -2963,10 +2958,10 @@ snapshots:
     dependencies:
       prismjs: 1.30.0
 
-  '@astrojs/svelte@8.1.2(astro@6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))(jiti@2.7.0)(lightningcss@1.32.0)(svelte@5.56.3)(typescript@6.0.3)(yaml@2.8.4)':
+  '@astrojs/svelte@8.1.2(astro@6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4))(jiti@2.7.0)(lightningcss@1.32.0)(svelte@5.56.3)(typescript@6.0.3)(yaml@2.8.4)':
     dependencies:
       '@sveltejs/vite-plugin-svelte': 6.2.4(svelte@5.56.3)(vite@7.3.5(jiti@2.7.0)(lightningcss@1.32.0)(yaml@2.8.4))
-      astro: 6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
+      astro: 6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4)
       svelte: 5.56.3
       svelte2tsx: 0.7.55(svelte@5.56.3)(typescript@6.0.3)
       typescript: 6.0.3
@@ -3053,7 +3048,7 @@ snapshots:
 
   '@emmetio/stream-reader@2.2.0': {}
 
-  '@emnapi/runtime@1.11.0':
+  '@emnapi/runtime@1.11.1':
     dependencies:
       tslib: 2.8.1
     optional: true
@@ -3240,7 +3235,7 @@ snapshots:
 
   '@img/sharp-wasm32@0.34.5':
     dependencies:
-      '@emnapi/runtime': 1.11.0
+      '@emnapi/runtime': 1.11.1
     optional: true
 
   '@img/sharp-win32-arm64@0.34.5':
@@ -3854,7 +3849,7 @@ snapshots:
 
   astring@1.9.0: {}
 
-  astro@6.4.6(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4):
+  astro@6.4.7(jiti@2.7.0)(lightningcss@1.32.0)(rollup@4.62.0)(yaml@2.8.4):
     dependencies:
       '@astrojs/compiler': 4.0.0
       '@astrojs/internal-helpers': 0.10.0
@@ -5569,8 +5564,6 @@ snapshots:
 
   scule@1.3.0: {}
 
-  semver@7.8.1: {}
-
   semver@7.8.4: {}
 
   sharp@0.34.5:
@@ -5740,7 +5733,7 @@ snapshots:
 
   typescript-auto-import-cache@0.3.6:
     dependencies:
-      semver: 7.8.1
+      semver: 7.8.4
 
   typescript@6.0.3: {}
 
@@ -5917,7 +5910,7 @@ snapshots:
   volar-service-typescript@0.0.70(@volar/language-service@2.4.28):
     dependencies:
       path-browserify: 1.0.1
-      semver: 7.8.1
+      semver: 7.8.4
       typescript-auto-import-cache: 0.3.6
       vscode-languageserver-textdocument: 1.0.12
       vscode-nls: 5.2.0
