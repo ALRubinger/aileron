@@ -70,6 +70,17 @@ func resolveDeviceFlowImage(override string) string {
 	return sandboxcomposition.BaseImage(version.Version)
 }
 
+// userGitHubCredentialsPath is the daemon-relative request path the
+// `auth github` verb PUTs the captured token to. It is appended to the
+// daemon's API base (which already carries the `/v1` prefix) by
+// [vaultDoRequest], so the full URL is `<base>/v1/vault/user/github/
+// credentials`. This is a CLI-side literal, deliberately NOT shared with
+// the daemon's generated route (#1147): the two ends are kept
+// independent so a build-tagged integration test can boot the real
+// daemon and fail loudly if this hardcoded path ever stops resolving to
+// the registered handler (#1157).
+const userGitHubCredentialsPath = "/vault/user/github/credentials"
+
 // runAuthGitHub implements `aileron auth github`. It drives gh's OAuth
 // device flow inside a container that ships gh, captures the resulting
 // non-expiring bearer token, and PUTs it to the user/github vault path
@@ -110,7 +121,7 @@ func runAuthGitHub(args []string, stdout, stderr io.Writer) int {
 	// error is discarded here matching runAuthImport's precedent.
 	body, _ := json.Marshal(agentCredentialsBody{Value: token})
 	status, respBody, err := vaultDoRequest(http.MethodPut,
-		"/vault/user/github/credentials", body)
+		userGitHubCredentialsPath, body)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

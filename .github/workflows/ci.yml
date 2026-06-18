@@ -574,6 +574,7 @@ jobs:
             internal/go.mod
             sdk/go/go.mod
             test/integration/go.mod
+            cmd/aileron/go.mod
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
@@ -611,6 +612,20 @@ jobs:
         # suite. Additive step so a failure is attributable to this contract.
         run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
         working-directory: internal
+
+      - name: Run CLI vault-route drift guard (#1157)
+        # Boots the real local daemon in-process (httptest + in-memory
+        # vault) and drives the `auth github` CLI's actual request helper
+        # against its hardcoded user/github credentials path, asserting it
+        # resolves to the registered route rather than 404ing. The CLI
+        # literal and the daemon's generated route are deliberately not a
+        # shared constant; this guard is what fails loudly if they drift.
+        # Hermetic — does not use the docker-compose services stack — but
+        # tagged `integration` per the residual decision, so it lives in
+        # this job rather than the unit suite. Additive step so a failure
+        # is attributable to this contract.
+        run: go test -tags=integration -race -run 'TestUserGitHubCredentialsVaultPathResolves|TestDriftedVaultPathIsRejected' ./...
+        working-directory: cmd/aileron
 
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}

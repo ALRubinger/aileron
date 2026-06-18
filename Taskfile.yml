@@ -342,6 +342,12 @@ tasks:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_BASE_URL: http://localhost:3000
 
+  test:integration:cli-vault-route:
+    desc: "Boot the real local daemon and assert the `auth github` CLI's hardcoded vault path resolves to the registered route, not a 404 (drift guard for #1157). Hermetic: in-process httptest daemon + in-memory vault, no running services."
+    dir: cmd/aileron
+    cmds:
+      - go test -tags=integration -race -run 'TestUserGitHubCredentialsVaultPathResolves|TestDriftedVaultPathIsRejected' ./...
+
   test:integration:sandbox:
     desc: Run the sandbox MCP parity integration test (in-process daemon + aileron-mcp host subprocess; see internal/app/sandbox_mcp_test.go for the contract)
     cmds:
