@@ -230,7 +230,9 @@ func BaseImage(version string) string {
 // A real release version pulls `latest`, which those workflows move only on a
 // v* tag build. So `latest` always names the most recent release and a dev run
 // can never clobber it. Reproducible per-release digest pinning (so a given
-// release pulls a fixed image rather than floating `latest`) is owned by #1088.
+// release pulls a fixed image rather than floating `latest`) layers on top of
+// this in PublishedAgentImage (#1233); imageTag still selects the floating tag
+// the pin resolves from and the fallback when no digest is recorded.
 func imageTag(version string) string {
 	v := strings.TrimSpace(version)
 	if v == "" || v == "dev" {

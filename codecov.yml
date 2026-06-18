@@ -45,6 +45,7 @@ flags:
 ignore:
   - "internal/api/gen/**"             # generated code (oapi-codegen) — DO NOT EDIT
   - "internal/sessions/sessionstest/**" # test-helper package; err-check branches only fire when SUT misbehaves
+  - "internal/tools/**"               # release-prep dev tooling (shells out to docker); pure logic lives in & is tested by the packages it serves
   - "ui/**"                           # tracked separately via ui flag
   - "webapp/**"                       # webapp tests run via vitest; coverage not uploaded to codecov
   - "docs/**"                         # documentation and ADRs

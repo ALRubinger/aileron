@@ -38,7 +38,7 @@ With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>
 
 `sandbox check --agent=<agent>` resolves the same image, so a passing check matches what launch will run.
 
-The launcher resolves a floating tag for this build-free default: a release build pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (published on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the correct in-process pin. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088). Digest pinning is owned by [#1233](https://github.com/ALRubinger/aileron/issues/1233); the resolver is the seam where that pinned reference plugs in.
+The launcher resolves the image for this build-free default in two ways. A release build with a recorded digest pin pulls a fixed image by `@sha256` (see [Reproducible releases](#reproducible-releases-digest-pinning) below). Otherwise it resolves a floating tag: a release build with no recorded pin pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (published on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the fallback when no digest is pinned. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
 
 When the requested agent has no published image, launch falls back to the customization tier. The image validation then emits the actionable message to install the agent CLI in the sandbox image or launch with `--sandbox=off`.
 
@@ -76,7 +76,21 @@ A daily watcher workflow (`sandbox-agents-watch.yml`) keeps the `edge` images fr
 
 `latest` and the release-pinned `<aileron-version>-<agent-cli-version>` tags move on `v*` releases only, by design. A released user on `latest` stays pinned to that release's CLI version until the next release. This is intentional. A release is an immutable point and `latest` names the most-recent release, so a background job must never clobber it. Keeping `latest` fresh between releases is an accepted gap, not a bug.
 
-The watcher supports a `dry_run` `workflow_dispatch` input for demonstration, which detects and reports drift without dispatching a rebuild. It uses only `GITHUB_TOKEN` and bakes no credentials anywhere. Digest pinning of the resolved image is tracked separately by [#1233](https://github.com/ALRubinger/aileron/issues/1233).
+The watcher supports a `dry_run` `workflow_dispatch` input for demonstration, which detects and reports drift without dispatching a rebuild. It uses only `GITHUB_TOKEN` and bakes no credentials anywhere.
+
+## Reproducible Releases: Digest Pinning
+
+The floating `latest` tag is mutable. The freshness watcher republishes images between releases, so a `latest`-resolving launcher could pull a different image than the one a release was cut against. Digest pinning ([#1233](https://github.com/ALRubinger/aileron/issues/1233)) removes that drift: a release pins each per-agent image to its immutable `@sha256` digest, so the same release binary always pulls the same image.
+
+The pins live in a committed lockfile, `internal/sandbox/composition/agent-images.lock.json`, embedded into the binary via `go:embed`. It maps each published agent to a `sha256:...` digest. `PublishedAgentImage` consumes it: a release build (a real version, which resolves to `latest`) returns `ghcr.io/alrubinger/aileron-sandbox-<agent>@sha256:...` when the lockfile records the agent, and falls back to the floating tag otherwise. A dev build keeps `edge` and is never pinned, so tip-of-`main` development always tracks the freshest image. An empty lockfile means no agent is pinned yet and releases keep pulling `latest`, the pre-#1233 behavior.
+
+Regenerate the lockfile at release prep, after the release's images are published and before tagging the binary:
+
+```bash
+task generate:agent-digests
+```
+
+The generator (`internal/tools/agentdigests`) resolves each published agent's manifest digest from the registry via `docker buildx imagetools inspect` and writes the lockfile in canonical form. Commit the result, then tag the release. Override the resolved tag with `TAG=<tag>` (default `latest`). The generated file is deterministic, so a regenerate with no registry change is a no-op diff. A test asserts the committed lockfile is canonical, so a hand-edit or a stale regenerate fails CI.
 
 ## Claude Code Feature
 

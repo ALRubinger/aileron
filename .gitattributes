@@ -1,0 +1,5 @@
+# The sandbox image digest lockfile is embedded (go:embed) and byte-compared
+# against its canonical LF rendering by TestCommittedLockfileIsCanonical. Force
+# LF so a Windows checkout does not rewrite it with CRLF and fail that test (and
+# so the embedded bytes are identical across platforms).
+internal/sandbox/composition/agent-images.lock.json text eol=lf
