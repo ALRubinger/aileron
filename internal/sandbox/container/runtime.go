@@ -177,11 +177,19 @@ type RunOptions struct {
 	Name string
 }
 
-// Volume describes an additional host bind mount for a sandbox container.
+// Volume describes an additional mount for a sandbox container. By default
+// Source is a host path bind-mounted at Target. When Named is set, Source is a
+// Docker named volume instead: it is emitted verbatim as <name>:<target>
+// (no host-path resolution), and Docker auto-creates the volume on first mount.
 type Volume struct {
 	Source   string
 	Target   string
 	ReadOnly bool
+	// Named marks Source as a Docker named volume rather than a host path. The
+	// runtime emits the mount without resolving Source to an absolute path
+	// (filepath.Abs would mangle a volume name), letting Docker create and reuse
+	// a persistent managed volume. Used for Aileron-managed sandbox caches.
+	Named bool
 }
 
 // RunResult reports the selected runtime after a sandbox container exits.
@@ -720,9 +728,16 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 		if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
 			return nil, fmt.Errorf("sandbox volume source and target are required")
 		}
-		source, err := filepath.Abs(volume.Source)
-		if err != nil {
-			return nil, fmt.Errorf("resolve sandbox volume source: %w", err)
+		source := volume.Source
+		if !volume.Named {
+			// Host bind mount: resolve to an absolute path. A named volume must
+			// be emitted verbatim — filepath.Abs would mangle the volume name
+			// into a host path under the working directory.
+			abs, err := filepath.Abs(volume.Source)
+			if err != nil {
+				return nil, fmt.Errorf("resolve sandbox volume source: %w", err)
+			}
+			source = abs
 		}
 		spec := source + ":" + volume.Target
 		if volume.ReadOnly {

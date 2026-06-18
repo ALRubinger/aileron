@@ -89,6 +89,28 @@ type AileronCustomization struct {
 	Image           string `json:"image,omitempty"`
 	Mediation       string `json:"mediation,omitempty"`
 	ApprovalSurface string `json:"approval_surface,omitempty"`
+	// CachePaths declares Aileron-managed named-volume caches mounted into the
+	// sandbox. Each entry is keyed by (CLI, identity) so a tool's cache survives
+	// across launches but re-auth to a different workspace/identity yields a
+	// fresh store. The volume holds plaintext on the host (acceptable for v4
+	// single-user/local mode) and is created on first mount; manual eviction is
+	// via `aileron sandbox cache clear`. See docs/development/sandbox-composition.md.
+	CachePaths []CachePath `json:"cache_paths,omitempty"`
+}
+
+// CachePath declares one Aileron-managed cache volume mounted into the sandbox.
+type CachePath struct {
+	// CLI names the tool the cache belongs to (e.g. "npm", "pip"). It is part
+	// of the volume key and is sanitized into the deterministic volume name.
+	CLI string `json:"cli,omitempty"`
+	// Identity scopes the cache to a credential/workspace identity. Re-auth to a
+	// different identity yields a different volume, so caches never leak across
+	// identities. It is hashed into the volume name and never appears in plaintext
+	// on the host.
+	Identity string `json:"identity,omitempty"`
+	// ContainerPath is the absolute in-container mount point for the cache (e.g.
+	// "/home/agent/.npm").
+	ContainerPath string `json:"container_path,omitempty"`
 }
 
 type devcontainerConfig struct {

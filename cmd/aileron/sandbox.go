@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -18,7 +19,7 @@ import (
 
 func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|cache>")
 		return 1
 	}
 	switch args[0] {
@@ -30,11 +31,105 @@ func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writ
 		return runSandboxBuild(args[1:], stdout, stderr)
 	case "check":
 		return runSandboxCheck(args[1:], stdout, stderr)
+	case "cache":
+		return runSandboxCache(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown sandbox command: %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|cache>")
 		return 1
 	}
+}
+
+// runSandboxCache dispatches the manual cache-volume management subcommands.
+// Operators evict Aileron-managed sandbox caches by hand (no max-age policy),
+// so the only verb today is `clear`.
+func runSandboxCache(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aileron sandbox cache <clear>")
+		return 1
+	}
+	switch args[0] {
+	case "clear":
+		return runSandboxCacheClear(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown sandbox cache command: %q\n", args[0])
+		fmt.Fprintln(stderr, "usage: aileron sandbox cache <clear>")
+		return 1
+	}
+}
+
+// runSandboxCacheClear removes every Aileron-managed sandbox cache volume
+// (those whose name carries the CacheVolumePrefix). This is the manual
+// garbage-collection path the operator chose over an automatic max-age policy.
+// It is safe to run between launches; Docker recreates a volume on the next
+// mount that needs it.
+func runSandboxCacheClear(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("sandbox cache clear", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: aileron sandbox cache clear [--runtime=auto|docker]")
+		return 1
+	}
+	runtime, err := sandboxcontainer.ResolveRuntime(*runtimeName)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	names, err := sandboxCacheListFn(context.Background(), runtime)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(stdout, "no Aileron-managed sandbox cache volumes to remove")
+		return 0
+	}
+	if err := sandboxCacheRemoveFn(context.Background(), runtime, names); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	for _, name := range names {
+		fmt.Fprintf(stdout, "removed %s\n", name)
+	}
+	fmt.Fprintf(stdout, "removed %d cache volume(s)\n", len(names))
+	return 0
+}
+
+// sandboxCacheListFn lists the Aileron-managed sandbox cache volumes for the
+// given runtime, filtered by CacheVolumePrefix. Swappable in tests.
+var sandboxCacheListFn = func(ctx context.Context, runtime string) ([]string, error) {
+	var out bytes.Buffer
+	err := sandboxcontainer.DefaultRunner().Run(ctx, runtime,
+		[]string{"volume", "ls", "--quiet", "--filter", "name=" + sandboxcomposition.CacheVolumePrefix},
+		&out, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("list sandbox cache volumes: %w", err)
+	}
+	var names []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		name := strings.TrimSpace(line)
+		// Docker's name filter is a substring match; require the prefix so an
+		// unrelated volume that merely contains the prefix mid-name is not
+		// swept. Aileron names always start with the prefix.
+		if strings.HasPrefix(name, sandboxcomposition.CacheVolumePrefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// sandboxCacheRemoveFn removes the named sandbox cache volumes. Swappable in
+// tests.
+var sandboxCacheRemoveFn = func(ctx context.Context, runtime string, names []string) error {
+	args := append([]string{"volume", "rm"}, names...)
+	if err := sandboxcontainer.DefaultRunner().Run(ctx, runtime, args, io.Discard, io.Discard); err != nil {
+		return fmt.Errorf("remove sandbox cache volumes: %w", err)
+	}
+	return nil
 }
 
 func runSandboxInit(args []string, stdout, stderr io.Writer) int {
