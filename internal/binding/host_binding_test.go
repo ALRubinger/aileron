@@ -33,6 +33,30 @@ func TestNewHostBinding_AcceptsValidInput(t *testing.T) {
 	}
 }
 
+func TestNewHostBinding_DefaultsToEmitMechanismA(t *testing.T) {
+	// A binding constructed without an emit-mechanism option defaults to
+	// mechanism A (plant nothing, inject unconditionally), preserving the
+	// pre-#1196 behavior.
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.EmitMechanism != binding.EmitMechanismA {
+		t.Errorf("EmitMechanism = %q, want A by default", hb.EmitMechanism)
+	}
+}
+
+func TestNewHostBinding_WithEmitMechanismB(t *testing.T) {
+	hb, err := binding.NewHostBinding("api.github.com", "user/github", "bearer",
+		binding.WithEmitMechanismB())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.EmitMechanism != binding.EmitMechanismB {
+		t.Errorf("EmitMechanism = %q, want B after WithEmitMechanismB", hb.EmitMechanism)
+	}
+}
+
 func TestNewHostBinding_RejectsInvalidScheme(t *testing.T) {
 	if _, err := binding.NewHostBinding("api.example.com", "oauth2/github/octocat", "magic"); err == nil {
 		t.Fatal("expected error for unknown scheme, got nil")

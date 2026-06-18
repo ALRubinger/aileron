@@ -65,6 +65,31 @@ func TestGitHubHostBindings_APIIsBearer(t *testing.T) {
 	}
 }
 
+func TestGitHubHostBindings_EmitMechanisms(t *testing.T) {
+	// The emit mechanism differs per host (#1196): git-over-HTTPS on
+	// github.com issues an unauthenticated request the proxy seals
+	// (mechanism A), while `gh` short-circuits without a token so
+	// api.github.com uses the sentinel-swap gate (mechanism B).
+	bindings, err := gitHubHostBindings()
+	if err != nil {
+		t.Fatalf("gitHubHostBindings: %v", err)
+	}
+	apex, ok := bindings.Match("github.com")
+	if !ok {
+		t.Fatal("no binding matched github.com")
+	}
+	if apex.EmitMechanism != binding.EmitMechanismA {
+		t.Errorf("github.com EmitMechanism = %q, want A (git emits an unauthenticated request)", apex.EmitMechanism)
+	}
+	api, ok := bindings.Match("api.github.com")
+	if !ok {
+		t.Fatal("no binding matched api.github.com")
+	}
+	if api.EmitMechanism != binding.EmitMechanismB {
+		t.Errorf("api.github.com EmitMechanism = %q, want B (gh short-circuits without a token)", api.EmitMechanism)
+	}
+}
+
 func TestGitHubHostBindings_ExactHostsOnly(t *testing.T) {
 	// Only the two exact apexes are sealed. A different github.com
 	// subdomain (e.g. raw content host) must not match either binding,

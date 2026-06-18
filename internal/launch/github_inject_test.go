@@ -8,17 +8,22 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// prepareGitHubInject contract (#1149, sealed by #1195):
+// prepareGitHubInject contract (#1149, sealed by #1195, sentinel-swap
+// added by #1196):
 //
 //   - The agent never holds the GitHub secret. A usable user/github
-//     entry yields NO GH_TOKEN env and a read-only file mount at
-//     /home/agent/.gitconfig whose host source contains NO secret
-//     bytes, NO `!gh auth git-credential` helper, and a no-op
-//     empty-credential helper scoped to https://github.com. The token
-//     is sealed daemon-side at the TLS boundary, not env-injected.
+//     entry yields a GH_TOKEN env set to the non-secret
+//     sentinel.GitHubTokenSentinel (so `gh` does not short-circuit and
+//     issues its request, which the daemon seals at the TLS boundary)
+//     and a read-only file mount at /home/agent/.gitconfig whose host
+//     source contains NO secret bytes, NO `!gh auth git-credential`
+//     helper, and a no-op empty-credential helper scoped to
+//     https://github.com. The real token is sealed daemon-side at egress,
+//     never env-injected and never in the mount.
 //   - ErrUserCredentialsNotFound and a locked vault both yield an empty
 //     prep with no error and a nil-safe Cleanup (skip-clean).
 //   - An empty-after-trim token is treated as no token.
@@ -43,9 +48,11 @@ func (f *fakeUserCredsDaemon) GetUserCredentials(_ context.Context, service stri
 }
 
 func TestPrepareGitHubInject_TokenPresent(t *testing.T) {
-	// Sealed model (#1195): a usable token mounts a secret-free gitconfig
-	// and sets NO GH_TOKEN. The token bytes must never appear in the env
-	// or the mounted file; the daemon seals the request at egress.
+	// Sealed model (#1195/#1196): a usable token mounts a secret-free
+	// gitconfig and sets GH_TOKEN to the NON-SECRET sentinel (so `gh`
+	// does not short-circuit). The real token bytes must never appear in
+	// the env or the mounted file; the daemon swaps the sentinel for the
+	// real credential at egress.
 	const tokenValue = "ghp_realtoken"
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte(tokenValue)}}
 	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
@@ -54,8 +61,25 @@ func TestPrepareGitHubInject_TokenPresent(t *testing.T) {
 	}
 	defer prep.Cleanup()
 
-	if _, ok := prep.EnvAdditions["GH_TOKEN"]; ok {
-		t.Errorf("GH_TOKEN present in EnvAdditions; sealed model must not env-inject the secret")
+	// GH_TOKEN must be present and equal to the sentinel, and recognized
+	// by the proxy-side recognizer. This is the emit-mechanism B plant.
+	ghToken, ok := prep.EnvAdditions["GH_TOKEN"]
+	if !ok {
+		t.Fatalf("GH_TOKEN absent from EnvAdditions; emit-mechanism B must plant the sentinel so gh does not short-circuit")
+	}
+	if ghToken != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN = %q, want the sentinel %q", ghToken, sentinel.GitHubTokenSentinel)
+	}
+	if !sentinel.IsGitHubTokenSentinel(ghToken) {
+		t.Errorf("GH_TOKEN %q is not recognized by IsGitHubTokenSentinel; launch and proxy would drift", ghToken)
+	}
+	// The real token bytes must never appear anywhere in the env. This is
+	// the ADR-0019 regression guard: before this fix the real token was
+	// injected here verbatim.
+	for k, v := range prep.EnvAdditions {
+		if v == tokenValue {
+			t.Errorf("EnvAdditions[%q] holds the real token; the agent must never see the secret", k)
+		}
 	}
 	if len(prep.Mounts) != 1 {
 		t.Fatalf("Mounts = %d, want 1", len(prep.Mounts))
@@ -234,8 +258,14 @@ func TestPrepareGitHubInject_ChownHookFailureIsNonFatal(t *testing.T) {
 		t.Fatalf("chown failure must be non-fatal, got: %v", err)
 	}
 	defer prep.Cleanup()
-	if _, ok := prep.EnvAdditions["GH_TOKEN"]; ok {
-		t.Errorf("GH_TOKEN present after chown failure; sealed model must not env-inject the secret")
+	// A non-fatal chown failure still produces the full prep: the
+	// non-secret sentinel GH_TOKEN and the secret-free mount. The real
+	// token never appears regardless.
+	if prep.EnvAdditions["GH_TOKEN"] != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN after chown failure = %q, want the sentinel", prep.EnvAdditions["GH_TOKEN"])
+	}
+	if prep.EnvAdditions["GH_TOKEN"] == "ghp_x" {
+		t.Errorf("GH_TOKEN holds the real token after chown failure; the agent must never see the secret")
 	}
 	if len(prep.Mounts) != 1 {
 		t.Errorf("Mounts = %d, want 1 after non-fatal chown failure", len(prep.Mounts))

@@ -25,18 +25,26 @@ const githubBasicUsername = "x-access-token"
 // GitHub secret; the daemon resolves user/github from the vault and
 // injects the credential per the matched binding's scheme:
 //
-//   - github.com -> basic, emitting
+//   - github.com -> basic, emit-mechanism A, emitting
 //     "Authorization: Basic base64(x-access-token:<token>)", the
 //     git-over-HTTPS convention used by `git clone`/`git push`.
-//   - api.github.com -> bearer, emitting
-//     "Authorization: Bearer <token>", the `gh`/REST convention.
+//     git-over-HTTPS issues an unauthenticated request (its no-op
+//     credential helper supplies empty credentials), so the proxy
+//     injects unconditionally with no sentinel needed.
+//   - api.github.com -> bearer, emit-mechanism B, emitting
+//     "Authorization: Bearer <token>", the `gh`/REST convention. `gh`
+//     short-circuits locally without a token, so the launcher plants a
+//     non-secret sentinel as GH_TOKEN; the proxy swaps the sentinel for
+//     the real credential at egress and leaves a foreign token untouched
+//     (#1196).
 //
-// Both name the same credential-ref (user/github); the scheme is what
-// differs. No secret bytes appear in the returned descriptors: a
-// binding names where the credential lives, never its value. Resolution
-// fails closed daemon-side when the vault is locked or the entry is
-// absent (the binding-injection path writes no Authorization header and
-// no secret in that case; see injectSandboxProxyHostBindingCredential).
+// Both name the same credential-ref (user/github); the scheme and emit
+// mechanism are what differ. No secret bytes appear in the returned
+// descriptors: a binding names where the credential lives, never its
+// value. Resolution fails closed daemon-side when the vault is locked or
+// the entry is absent (the binding-injection path writes no Authorization
+// header and no secret in that case; see
+// injectSandboxProxyHostBindingCredential).
 //
 // The two host patterns are exact (no wildcard): only github.com and
 // api.github.com are sealed, so a request to any other *.github.com
@@ -53,6 +61,7 @@ func gitHubHostBindings() (binding.HostBindings, error) {
 	}
 	api, err := binding.NewHostBinding(
 		"api.github.com", githubCredentialRef, binding.SchemeBearer,
+		binding.WithEmitMechanismB(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("github host binding (api.github.com): %w", err)

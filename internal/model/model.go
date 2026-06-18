@@ -337,6 +337,17 @@ const (
 	// ADR-0019.
 	EventTypeSandboxProxyBindingInjected EventType = "sandbox.proxy.binding_injected"
 
+	// Sandbox proxy event for a request on an emit-mechanism B host
+	// binding (sentinel-swap, #1196) whose inbound credential carrier
+	// bore a FOREIGN (non-sentinel) token. The proxy seals only tokens it
+	// itself planted, so it did NOT swap: it forwarded the request
+	// upstream with the agent-supplied token intact and injected no real
+	// credential. The payload carries the matched host pattern, scheme,
+	// and upstream destination/status; it never carries the foreign token,
+	// the sentinel, the real credential, or the credential-ref. See
+	// ADR-0019.
+	EventTypeSandboxProxyForeignTokenNotSwapped EventType = "sandbox.proxy.foreign_token_not_swapped"
+
 	// Sandbox proxy event for launches that proceed (or refuse to
 	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
 	// launcher when proxy bootstrap is opted out, preflight fails, or

@@ -646,6 +646,46 @@ func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source, h
 	)
 }
 
+// recordSandboxProxyForeignTokenNotSwapped emits
+// sandbox.proxy.foreign_token_not_swapped for a request on an
+// emit-mechanism B host binding (#1196) that carried a foreign
+// (non-sentinel) token. The proxy did not swap it: it forwarded the
+// request unchanged with no real credential injected. The payload
+// carries the matched host pattern, scheme, and upstream
+// destination/status; it never carries the foreign token, the sentinel,
+// the real credential, or the credential-ref. nil-recorder safe like its
+// siblings.
+func (s *apiServer) recordSandboxProxyForeignTokenNotSwapped(r *http.Request, source, hostPattern, scheme string, upstream *url.URL, upstreamStatus int) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
+		"aileron.proxy.source":          source,
+		"aileron.proxy.decision":        "foreign_token_not_swapped",
+		"aileron.proxy.method":          r.Method,
+		"aileron.proxy.binding.host":    hostPattern,
+		"aileron.proxy.binding.scheme":  scheme,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+		"aileron.proxy.upstream.status": upstreamStatus,
+	}
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyForeignTokenNotSwapped,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
+}
+
 func ptrNonEmpty(value string) *string {
 	if strings.TrimSpace(value) == "" {
 		return nil
