@@ -60,6 +60,8 @@ aileron sandbox check --runtime=docker --agent="$AGENT"
 
 Expect `support: ok`, along with the selected tier, runtime, image, and command. A development build resolves the floating `edge` base image tag, and launch pulls it automatically. No separate image build is needed for the smoke.
 
+The working directory determines the resolved tier. A `.devcontainer/` in the directory you run from selects the devcontainer tier, which builds the project image from that authored config and can ignore `--agent`. If the project image was built without the requested agent's CLI, validate fails and now names the tier, the discovered `.devcontainer/devcontainer.json`, and the published per-agent image you could use instead. To pick the build-free published image, run from a directory without a `.devcontainer/`, or add the agent's Feature to the devcontainer.
+
 ## Step 4: Launch the agent inside the container
 
 ```bash
