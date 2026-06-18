@@ -15,7 +15,7 @@ func TestDiscoverMissingDevcontainerUsesBaseImage(t *testing.T) {
 	if plan.Tier != TierBase {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBase)
 	}
-	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:0.4.0" {
+	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:latest" {
 		t.Fatalf("Image = %q", plan.Image)
 	}
 }
@@ -25,8 +25,8 @@ func TestDiscoverMissingDevcontainerPublishedAgentResolvesPerAgentImage(t *testi
 		agent     string
 		wantImage string
 	}{
-		{"claude", "ghcr.io/alrubinger/aileron-sandbox-claude:0.4.0"},
-		{"codex", "ghcr.io/alrubinger/aileron-sandbox-codex:0.4.0"},
+		{"claude", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
+		{"codex", "ghcr.io/alrubinger/aileron-sandbox-codex:latest"},
 	} {
 		t.Run(tc.agent, func(t *testing.T) {
 			plan, err := Discover(t.TempDir(), "0.4.0", tc.agent)
@@ -98,9 +98,9 @@ func TestPublishedAgentImage(t *testing.T) {
 		version string
 		want    string
 	}{
-		{"", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
-		{"dev", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
-		{"0.4.0", "ghcr.io/alrubinger/aileron-sandbox-claude:0.4.0"},
+		{"", "ghcr.io/alrubinger/aileron-sandbox-claude:edge"},
+		{"dev", "ghcr.io/alrubinger/aileron-sandbox-claude:edge"},
+		{"0.4.0", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
 	} {
 		if got := PublishedAgentImage("claude", tc.version); got != tc.want {
 			t.Fatalf("PublishedAgentImage(claude, %q) = %q, want %q", tc.version, got, tc.want)
@@ -148,7 +148,7 @@ func TestDiscoverDevcontainerBuildPlan(t *testing.T) {
 	if plan.Tier != TierDevcontainer {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
 	}
-	if plan.BaseImage != "ghcr.io/alrubinger/aileron-sandbox-base:latest" {
+	if plan.BaseImage != "ghcr.io/alrubinger/aileron-sandbox-base:edge" {
 		t.Fatalf("BaseImage = %q", plan.BaseImage)
 	}
 	if plan.DockerfilePath != "Dockerfile" {
@@ -288,7 +288,7 @@ func TestInitWritesFeatureComposingDevcontainer(t *testing.T) {
 	if plan.Tier != TierDevcontainer {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
 	}
-	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:0.4.0" {
+	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:latest" {
 		t.Fatalf("Image = %q, want the base image", plan.Image)
 	}
 	// Exactly one active Feature: the default agent Feature. The customer

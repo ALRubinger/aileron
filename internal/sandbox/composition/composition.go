@@ -221,11 +221,22 @@ func parseDevcontainer(b []byte) (devcontainerConfig, error) {
 
 // BaseImage returns the Aileron-owned sandbox-base image for version.
 func BaseImage(version string) string {
-	tag := strings.TrimSpace(version)
-	if tag == "" || tag == "dev" {
-		tag = "latest"
+	return DefaultBaseImageRepository + ":" + imageTag(version)
+}
+
+// imageTag maps an Aileron CLI version to the floating sandbox-image tag it
+// consumes. A dev or empty version (a build off main, not a release) pulls
+// `edge`, the tip published by the sandbox image workflows on workflow_dispatch.
+// A real release version pulls `latest`, which those workflows move only on a
+// v* tag build. So `latest` always names the most recent release and a dev run
+// can never clobber it. Reproducible per-release digest pinning (so a given
+// release pulls a fixed image rather than floating `latest`) is owned by #1088.
+func imageTag(version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" || v == "dev" {
+		return "edge"
 	}
-	return DefaultBaseImageRepository + ":" + tag
+	return "latest"
 }
 
 func resolveDockerfilePath(cfg devcontainerConfig) string {

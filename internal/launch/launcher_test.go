@@ -979,15 +979,15 @@ func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	}
 	args := string(data)
 	for _, want := range []string{
-		"build\n-t\nghcr.io/alrubinger/aileron-sandbox-base:latest\n",
+		"build\n-t\nghcr.io/alrubinger/aileron-sandbox-base:edge\n",
 		"run\n--rm\n-i\n",
-		"--env\nAILERON_SANDBOX_IMAGE=ghcr.io/alrubinger/aileron-sandbox-base:latest\n",
+		"--env\nAILERON_SANDBOX_IMAGE=ghcr.io/alrubinger/aileron-sandbox-base:edge\n",
 		"--env\nAILERON_SANDBOX_TIER=base\n",
 		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
 		// Default-on proxy bootstrap routes the agent through
 		// aileron-run-with-proxy-ca; the image name still precedes the
 		// agent argv but the bootstrap wrapper sits between them.
-		"ghcr.io/alrubinger/aileron-sandbox-base:latest\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
+		"ghcr.io/alrubinger/aileron-sandbox-base:edge\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("expected %q in docker args:\n%s", want, args)
@@ -1034,7 +1034,7 @@ func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing
 		t.Fatalf("read docker args: %v", err)
 	}
 	args := string(data)
-	const image = "ghcr.io/alrubinger/aileron-sandbox-claude:latest"
+	const image = "ghcr.io/alrubinger/aileron-sandbox-claude:edge"
 	for _, want := range []string{
 		"pull\n" + image + "\n",
 		"run\n--rm\n-i\n",
