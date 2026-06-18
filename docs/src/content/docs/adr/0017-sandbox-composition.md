@@ -32,8 +32,8 @@ Aileron supports three tiers:
 
 | Tier | Contract |
 |---|---|
-| Tier 0: prebuilt per-agent image | No `.devcontainer/devcontainer.json`; launch auto-resolves the prebuilt per-agent image `ghcr.io/alrubinger/aileron-sandbox-<agent>` baked from the agent Feature. Publishing and launch-time auto-resolution are owned by [#965](https://github.com/ALRubinger/aileron/issues/965). The bare `aileron/sandbox-base:<version>` stays the harness-free root that each agent Feature layers onto. |
-| Tier 1: devcontainer | `.devcontainer/devcontainer.json` exists; Aileron composes the sandbox from the Features it lists. The starter path lists `aileron/sandbox-base:<version>` as the base plus an agent Feature plus an optional customer-tooling Feature under `features`. |
+| Tier 0: prebuilt per-agent image | No `.devcontainer/devcontainer.json`; launch auto-resolves the prebuilt per-agent image `ghcr.io/alrubinger/aileron-sandbox-<agent>` baked from the agent Feature. Publishing and launch-time auto-resolution are owned by [#965](https://github.com/ALRubinger/aileron/issues/965). The bare `ghcr.io/alrubinger/aileron-sandbox-base:<version>` stays the harness-free root that each agent Feature layers onto. |
+| Tier 1: devcontainer | `.devcontainer/devcontainer.json` exists; Aileron composes the sandbox from the Features it lists. The starter path lists `ghcr.io/alrubinger/aileron-sandbox-base:<version>` as the base plus an agent Feature plus an optional customer-tooling Feature under `features`. |
 | Tier 2: BYO image | `customizations.aileron.image` names a fully custom image. Aileron uses it as supplied and injects the runtime contract at launch. |
 
 The Aileron extension block starts narrow:
@@ -60,7 +60,7 @@ Each agent install is authored once as a devcontainer Feature. A Feature is a se
 
 ```jsonc
 {
-  "image": "aileron/sandbox-base:<version>",
+  "image": "ghcr.io/alrubinger/aileron-sandbox-base:<version>",
   "features": {
     "ghcr.io/alrubinger/aileron-features/<agent>:0": {},
     "ghcr.io/acme/internal-tools:1": {}
@@ -91,7 +91,7 @@ This ADR follows the updated sandbox runtime direction:
 
 ## CLI surface
 
-`aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` for the customization tier. The scaffold lists `aileron/sandbox-base:<version>` as the base image and an agent Feature plus an optional customer-tooling Feature under `features`, so users compose their own tooling alongside the agent through standard devcontainer workflows. Under the Feature model `init` no longer scaffolds a per-agent `.devcontainer/Dockerfile`, and the `--agent` flag is removed because the agent is selected by the listed Feature rather than a baked recipe.
+`aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` for the customization tier. The scaffold lists `ghcr.io/alrubinger/aileron-sandbox-base:<version>` as the base image and an agent Feature plus an optional customer-tooling Feature under `features`, so users compose their own tooling alongside the agent through standard devcontainer workflows. Under the Feature model `init` no longer scaffolds a per-agent `.devcontainer/Dockerfile`, and the `--agent` flag is removed because the agent is selected by the listed Feature rather than a baked recipe.
 
 `aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan, including a `features:` summary line listing the parsed Feature references when the devcontainer declares any.
 
