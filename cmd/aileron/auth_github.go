@@ -191,6 +191,15 @@ func (c *containerDeviceFlow) Capture(ctx context.Context) ([]byte, error) {
 	if stdinIsTerminal() {
 		loginArgs = append(loginArgs, "-t")
 	}
+	// Point gh's browser-open at a no-op. The container ships no browser,
+	// so gh's default open (xdg-open / x-www-browser / wslview) fails with
+	// a noisy "executable file not found in $PATH" that reads like an
+	// error even though the device flow is fine — the operator just opens
+	// the printed URL on the host. BROWSER=echo turns the open step into a
+	// clean success that reprints the verification URL at the exact moment
+	// the operator needs it. Passed as a single `--env=K=V` token so it
+	// stays a `-`-prefixed exec flag (the arg parsing skips those).
+	loginArgs = append(loginArgs, "--env=BROWSER=echo")
 	loginArgs = append(loginArgs,
 		c.containerName,
 		"gh", "auth", "login",

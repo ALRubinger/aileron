@@ -468,6 +468,53 @@ func TestContainerDeviceFlow_LoginExecAllocatesTTYWithStdin(t *testing.T) {
 	})
 }
 
+// TestContainerDeviceFlow_LoginSilencesBrowserOpen guards the browser
+// no-op: the capture container ships no browser, so gh's default
+// open-in-browser step fails with a noisy "executable file not found"
+// that reads like an error. The login exec sets BROWSER=echo (as a
+// single `--env=K=V` token so it stays a `-`-prefixed flag) to make the
+// open a clean no-op. The non-interactive token read must not carry it.
+func TestContainerDeviceFlow_LoginSilencesBrowserOpen(t *testing.T) {
+	rr := &recordingRunner{token: "gho_tok"}
+	flow := &containerDeviceFlow{
+		runner:        rr,
+		runtimeExe:    "docker",
+		image:         "img",
+		containerName: "aileron-auth-github",
+	}
+	if _, err := flow.Capture(context.Background()); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+
+	has := func(args []string, want string) bool {
+		for _, a := range args {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	var login, token []string
+	for _, c := range rr.calls {
+		if len(c) == 0 || c[0] != "exec" {
+			continue
+		}
+		_, gh := parseExecArgs(c)
+		switch gh.sub {
+		case "login":
+			login = c
+		case "token":
+			token = c
+		}
+	}
+	if !has(login, "--env=BROWSER=echo") {
+		t.Errorf("login exec = %v; want --env=BROWSER=echo to silence gh's failed browser-open", login)
+	}
+	if has(token, "--env=BROWSER=echo") {
+		t.Errorf("token exec = %v; the non-interactive token read must not set BROWSER", token)
+	}
+}
+
 func TestContainerDeviceFlow_TearsDownOnLoginFailure(t *testing.T) {
 	// A runner that fails the login exec but records all calls, so we can
 	// assert the deferred teardown still ran.
