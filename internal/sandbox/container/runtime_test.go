@@ -441,15 +441,49 @@ func TestBuildBYOImageDoesNotBuild(t *testing.T) {
 
 const publishedImage = "ghcr.io/alrubinger/aileron-sandbox-claude:latest"
 
+// publishedPinnedImage is a version-pinned published-image reference. Its tag is
+// stable (the upstream digest never moves under a pinned tag), so a local copy
+// may be cached under `auto` (issue #1174).
+const publishedPinnedImage = "ghcr.io/alrubinger/aileron-sandbox-claude:v0.0.42"
+
+// publishedEdgeImage carries the floating `edge` tag, whose upstream digest
+// moves while the tag name stays fixed (issue #1174).
+const publishedEdgeImage = "ghcr.io/alrubinger/aileron-sandbox-claude:edge"
+
+func TestIsFloatingTag(t *testing.T) {
+	cases := []struct {
+		image string
+		want  bool
+	}{
+		{"ghcr.io/alrubinger/aileron-sandbox-claude:latest", true},
+		{"ghcr.io/alrubinger/aileron-sandbox-claude:edge", true},
+		{"ghcr.io/alrubinger/aileron-sandbox-claude:v0.0.42", false},
+		{"ghcr.io/alrubinger/aileron-sandbox-claude:0.0.42", false},
+		// No tag segment defaults to latest → floating.
+		{"ghcr.io/alrubinger/aileron-sandbox-claude", true},
+		// A registry host:port prefix with no tag is not mistaken for a tag.
+		{"localhost:5000/aileron-sandbox-claude", true},
+		// A registry host:port prefix plus a pinned tag.
+		{"localhost:5000/aileron-sandbox-claude:v1.2.3", false},
+		// A registry host:port prefix plus a floating tag.
+		{"localhost:5000/aileron-sandbox-claude:edge", true},
+	}
+	for _, c := range cases {
+		if got := isFloatingTag(c.image); got != c.want {
+			t.Errorf("isFloatingTag(%q) = %v, want %v", c.image, got, c.want)
+		}
+	}
+}
+
 func TestBuildPublishedAutoPullsMissingImage(t *testing.T) {
-	// image inspect fails (absent) → pull.
+	// A pinned image absent locally → inspect (fails) → pull.
 	runner := &callRecordingRunner{errs: []error{errors.New("missing"), nil}}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
 		WorkDir: t.TempDir(),
 		Policy:  BuildPolicyAuto,
 		Plan: composition.Plan{
 			Tier:  composition.TierPublished,
-			Image: publishedImage,
+			Image: publishedPinnedImage,
 		},
 	})
 	if err != nil {
@@ -458,41 +492,76 @@ func TestBuildPublishedAutoPullsMissingImage(t *testing.T) {
 	if result.Built {
 		t.Fatalf("result.Built = true, want false (a pull is not a local build)")
 	}
-	if result.Image != publishedImage {
-		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	if result.Image != publishedPinnedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedPinnedImage)
 	}
 	if result.Tier != composition.TierPublished {
 		t.Fatalf("result.Tier = %q, want %q", result.Tier, composition.TierPublished)
 	}
 	want := []runnerCall{
-		{name: "docker", args: []string{"image", "inspect", publishedImage}},
-		{name: "docker", args: []string{"pull", publishedImage}},
+		{name: "docker", args: []string{"image", "inspect", publishedPinnedImage}},
+		{name: "docker", args: []string{"pull", publishedPinnedImage}},
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
 	}
 }
 
-func TestBuildPublishedAutoSkipsExistingImage(t *testing.T) {
-	// image inspect succeeds (present) → no pull.
+func TestBuildPublishedAutoSkipsExistingPinnedImage(t *testing.T) {
+	// A version-pinned tag is present locally → no pull (its digest never moves).
 	runner := &callRecordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
 		WorkDir: t.TempDir(),
 		Policy:  BuildPolicyAuto,
 		Plan: composition.Plan{
 			Tier:  composition.TierPublished,
-			Image: publishedImage,
+			Image: publishedPinnedImage,
 		},
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if result.Image != publishedImage {
-		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	if result.Image != publishedPinnedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedPinnedImage)
 	}
-	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", publishedImage}}}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", publishedPinnedImage}}}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+// TestBuildPublishedAutoRepullsExistingFloatingImage is the issue #1174
+// regression: a floating tag (edge/latest) that is already present locally must
+// still pull under `auto`, because its upstream digest can have moved. The fix
+// skips the existence short-circuit for floating tags, so no `image inspect`
+// probe happens and the build goes straight to `pull`.
+func TestBuildPublishedAutoRepullsExistingFloatingImage(t *testing.T) {
+	for _, image := range []string{publishedImage, publishedEdgeImage} {
+		t.Run(image, func(t *testing.T) {
+			runner := &callRecordingRunner{}
+			result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+				WorkDir: t.TempDir(),
+				Policy:  BuildPolicyAuto,
+				Plan: composition.Plan{
+					Tier:  composition.TierPublished,
+					Image: image,
+				},
+			})
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			if result.Built {
+				t.Fatalf("result.Built = true, want false (a pull is not a local build)")
+			}
+			if result.Image != image {
+				t.Fatalf("result.Image = %q, want %q", result.Image, image)
+			}
+			// Floating tags skip the inspect probe and pull unconditionally.
+			want := []runnerCall{{name: "docker", args: []string{"pull", image}}}
+			if !reflect.DeepEqual(runner.calls, want) {
+				t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+			}
+		})
 	}
 }
 

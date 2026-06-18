@@ -326,7 +326,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			}
 			return result, nil
 		case BuildPolicyAuto:
-			if b.imageExists(ctx, runner, runtimeName, result.Image) {
+			// A floating tag (edge/latest) keeps its name while its upstream
+			// digest moves, so a stale local copy would permanently satisfy the
+			// existence check and `auto` would never re-pull. Only honor the
+			// existence short-circuit for version-pinned tags; floating tags fall
+			// through to the pull below so they re-resolve to the current digest
+			// each launch (issue #1174).
+			if !isFloatingTag(result.Image) && b.imageExists(ctx, runner, runtimeName, result.Image) {
 				return result, nil
 			}
 		}
@@ -372,6 +378,40 @@ func (b Builder) shouldBuild(ctx context.Context, runner Runner, runtimeName, im
 	default:
 		return false, fmt.Errorf("unsupported sandbox build policy %q (want auto, always, or never)", policy)
 	}
+}
+
+// isFloatingTag reports whether an image reference carries a floating tag
+// (`edge` or `latest`) whose upstream digest can move while the tag name stays
+// fixed. The composition layer assigns these tags (composition.imageTag), so a
+// local copy of a floating tag can go stale silently. Version-pinned tags (and
+// digest references) are stable, so callers may safely cache them; floating tags
+// must re-pull under `auto` to track the current digest (issue #1174).
+//
+// The tag is the segment after the last `:` that follows the final `/` (so a
+// registry host:port prefix like `ghcr.io:443/x` is not mistaken for a tag).
+// A reference with no tag segment defaults to `latest`, matching Docker's own
+// implicit-tag behavior, and is therefore treated as floating.
+func isFloatingTag(image string) bool {
+	switch parseImageTag(image) {
+	case "edge", "latest":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseImageTag extracts the tag segment from an image reference. It returns the
+// substring after the last `:` that appears after the final `/`, or `latest`
+// when the reference carries no tag (Docker's implicit default).
+func parseImageTag(image string) string {
+	ref := image
+	if slash := strings.LastIndex(ref, "/"); slash != -1 {
+		ref = ref[slash+1:]
+	}
+	if colon := strings.LastIndex(ref, ":"); colon != -1 {
+		return ref[colon+1:]
+	}
+	return "latest"
 }
 
 func (b Builder) imageExists(ctx context.Context, runner Runner, runtimeName, image string) bool {

@@ -137,7 +137,7 @@ Launch uses `--sandbox-build=auto` by default. Build policy options are:
 
 | Policy | Behavior |
 |---|---|
-| `auto` | Use the selected image if it already exists locally; build Tier 0/Tier 1 images only when missing. |
+| `auto` | Use the selected image if it already exists locally; build Tier 0/Tier 1 images only when missing. A published image carrying a floating tag (`edge`/`latest`) is always re-pulled so it re-resolves to the current upstream digest each launch; version-pinned published tags are cached locally. |
 | `always` | Rebuild Tier 0/Tier 1 images before validation and launch. |
 | `never` | Do not build; fail with an actionable error if the selected image is missing locally. |
 
