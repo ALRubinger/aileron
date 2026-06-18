@@ -437,6 +437,16 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	server.bindings = bindingStore
 	server.oauth2Sessions = newOAuth2Sessions()
 
+	// --- Host->credential binding table (#1193) ---
+	// The user-level host-binding table is consulted at the TLS
+	// forward-proxy boundary when no connector spec matches a decrypted
+	// request (ADR-0019 launch passthrough). v1 has no config wire
+	// format yet (the launch/policy schema and authoring CLI are a
+	// follow-on); the daemon leaves server.hostBindings at its nil
+	// zero value, which preserves today's passthrough behavior exactly.
+	// A nil/empty binding.HostBindings never matches, so the regression
+	// path is the default until a config source populates the table.
+
 	// --- Scope-drift detection (#726) ---
 	// Hook fires after every successful connector install. If the
 	// installed manifest demands an OAuth scope the binding's recorded

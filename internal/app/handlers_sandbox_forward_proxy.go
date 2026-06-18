@@ -173,6 +173,13 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn net.Conn, decrypted 
 	match, ok, err := s.matchSandboxForwardProxyOperation(decrypted.Method, upstream)
 	if err != nil {
 		if errors.Is(err, errSandboxForwardProxyAmbiguousOperation) {
+			// Precedence: connector-spec -> host-binding -> passthrough.
+			// An ambiguous connector-spec match yields no unique spec, so
+			// the host-binding table is consulted before passthrough,
+			// exactly as on the no-match branch below.
+			if s.routeSandboxForwardProxyHostBinding(conn, decrypted, auth, targetHost, upstream) {
+				return
+			}
 			s.passthroughSandboxForwardProxy(conn, decrypted, auth, targetHost, upstream)
 			return
 		}
@@ -181,6 +188,12 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn net.Conn, decrypted 
 		return
 	}
 	if !ok {
+		// Precedence: a unique connector-spec match wins (handled below);
+		// otherwise the host-binding table is consulted before falling to
+		// passthrough.
+		if s.routeSandboxForwardProxyHostBinding(conn, decrypted, auth, targetHost, upstream) {
+			return
+		}
 		s.passthroughSandboxForwardProxy(conn, decrypted, auth, targetHost, upstream)
 		return
 	}
@@ -198,6 +211,100 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn net.Conn, decrypted 
 		return
 	}
 	writeSandboxForwardProxyResponse(conn, auth.SessionID, targetHost, result.UpstreamStatus, derefString(result.ContentType), result.BodyBase64)
+}
+
+// routeSandboxForwardProxyHostBinding consults the user-level
+// host->credential binding table (#1193) for the decrypted request's
+// target host. It is called only when no unique connector spec matched,
+// so the precedence is connector-spec -> host-binding -> passthrough.
+//
+// On a binding match it resolves the bound credential daemon-side
+// (through the vault), injects it onto a fresh upstream request per the
+// binding's scheme, re-issues the request, and streams the response
+// back to the in-container client. The credential bytes never reach the
+// container: only the upstream status, headers, and body are written
+// back. On a resolve/inject failure the request fails closed with an
+// error response carrying no secret bytes, and a rejection is recorded;
+// passthrough is NOT taken for a bound host whose credential is
+// unavailable. It returns handled=false (without writing anything) only
+// when no binding matched, so the caller falls through to passthrough.
+//
+// The private-IP-literal refusal that guards the passthrough path is
+// applied here too: a bound host that is a private IP literal is
+// refused before any upstream dial, closing the same SSRF vector.
+func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) bool {
+	hostForMatch := targetHost
+	if h, _, err := net.SplitHostPort(targetHost); err == nil {
+		hostForMatch = h
+	}
+	hb, ok := s.hostBindings.Match(hostForMatch)
+	if !ok {
+		return false
+	}
+
+	if sandboxForwardProxyTargetIsPrivateIPLiteral(targetHost) {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_target_not_allowed")
+		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy passthrough refuses private, loopback, or link-local IP literals")
+		return true
+	}
+
+	body, contentType, err := readSandboxForwardProxyRequestBody(decrypted)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, sandboxForwardProxyBodyRejectReason(err))
+		writeSandboxForwardProxyError(conn, http.StatusRequestEntityTooLarge, auth.SessionID, targetHost, err.Error())
+		return true
+	}
+
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	upstreamReq, err := http.NewRequestWithContext(decrypted.Context(), decrypted.Method, upstream.String(), reqBody)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "binding_upstream_request_invalid")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy host-binding upstream request is invalid")
+		return true
+	}
+	upstreamReq.ContentLength = int64(len(body))
+	copyPassthroughRequestHeaders(upstreamReq.Header, decrypted.Header)
+	if contentType != "" {
+		upstreamReq.Header.Set("Content-Type", contentType)
+	}
+
+	if injected, reason := s.injectSandboxProxyHostBindingCredential(decrypted.Context(), upstreamReq, hb); !injected {
+		status := http.StatusInternalServerError
+		if reason == hostBindingRejectUnsupportedScheme {
+			status = http.StatusForbidden
+		}
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, reason)
+		writeSandboxForwardProxyError(conn, status, auth.SessionID, targetHost, "sandbox proxy host-binding credential is unavailable")
+		return true
+	}
+
+	client := sandboxProxyHTTPClient(s.sandboxProxyClient)
+	resp, err := client.Do(upstreamReq)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "binding_upstream_unreachable")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy host-binding upstream unreachable")
+		return true
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, sandboxProxyMaxResponseBytes+1))
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "binding_upstream_read_failed")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy host-binding upstream response read failed")
+		return true
+	}
+	if len(respBody) > sandboxProxyMaxResponseBytes {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "binding_upstream_response_too_large")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy host-binding upstream response exceeded size limit")
+		return true
+	}
+
+	s.recordSandboxProxyBindingInjected(decrypted, sandboxProxySourceTransparentConnectTLS, hb.HostPattern, hb.Scheme, upstream, resp.StatusCode)
+	writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, resp, respBody)
+	return true
 }
 
 // passthroughSandboxForwardProxy forwards a decrypted CONNECT/TLS

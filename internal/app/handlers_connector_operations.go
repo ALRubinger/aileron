@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +14,12 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/binding"
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 const connectorOperationNotProxyableMessage = "connector operation is not proxyable through the daemon HTTPS data plane; the spec lacks a required field (method, hosts, path) or uses an unsupported HTTP method"
@@ -511,6 +514,109 @@ func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.
 		return false
 	}
 	return true
+}
+
+// Stable reject reasons emitted when a host-binding match resolves to a
+// credential the daemon cannot inject. Wire identifiers carried in the
+// rejection audit payload (aileron.proxy.reject_reason) — never the
+// credential bytes or the credential-ref.
+const (
+	hostBindingRejectLockedVault           = "binding_locked_vault"
+	hostBindingRejectCredentialUnavailable = "binding_credential_unavailable"
+	hostBindingRejectUnsupportedScheme     = "binding_unsupported_scheme"
+)
+
+// injectSandboxProxyHostBindingCredential resolves the credential a
+// matched host binding points at (daemon-side, through the vault) and
+// injects it onto the upstream request per the binding's scheme. It
+// returns ok=true when the request is ready to dial upstream, or
+// ok=false and a stable reject reason when resolution or injection
+// fails closed.
+//
+// Resolution goes through credential.VaultResolver against the daemon's
+// vault keyed by hb.CredentialRef, so a locked or absent vault yields a
+// resolver error and the request fails closed (the caller writes a 5xx
+// to the in-container client). No secret bytes are logged, echoed into
+// the response body, or written into the audit payload.
+//
+// The scheme switch is the seam #1194 slots into: this PR implements
+// the `bearer` path concretely (mirroring injectSandboxProxyCredential's
+// Authorization: Bearer behavior) and rejects any other scheme as
+// unsupported until #1194's scheme-keyed injector replaces the switch.
+func (s *apiServer) injectSandboxProxyHostBindingCredential(ctx context.Context, req *http.Request, hb binding.HostBinding) (bool, string) {
+	if s.vault == nil {
+		return false, hostBindingRejectCredentialUnavailable
+	}
+	// The credential-ref's first segment is its kind (<kind>/<service>/<identity>).
+	expectedKind, _, _ := strings.Cut(hb.CredentialRef, "/")
+	resolver := &credential.VaultResolver{
+		Vault:        s.vault,
+		VaultPath:    hb.CredentialRef,
+		ExpectedKind: expectedKind,
+	}
+	cred, err := resolver.Resolve(ctx)
+	if err != nil {
+		if errors.Is(err, vault.ErrCredentialUnavailable) {
+			return false, hostBindingRejectLockedVault
+		}
+		return false, hostBindingRejectCredentialUnavailable
+	}
+	return applyHostBindingScheme(req, hb.Scheme, cred)
+}
+
+// applyHostBindingScheme applies the named injection scheme to the
+// upstream request using the resolved credential. This is the narrow
+// seam #1194's scheme-keyed injector replaces: its signature is
+// (req, scheme, cred) so the binding-match wiring is untouched when the
+// closed scheme set lands. v1 implements `bearer`; every other scheme
+// in binding.HostBindingSchemes is accepted at config time but rejected
+// here until #1194 fills it in, which fails closed rather than silently
+// passing an un-injected request upstream.
+func applyHostBindingScheme(req *http.Request, scheme string, cred credential.Credential) (bool, string) {
+	switch scheme {
+	case binding.SchemeBearer:
+		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
+		return true, ""
+	default:
+		return false, hostBindingRejectUnsupportedScheme
+	}
+}
+
+// recordSandboxProxyBindingInjected emits sandbox.proxy.binding_injected
+// for a request that matched a host binding and was re-issued upstream
+// with the bound credential injected. The payload carries the matched
+// host pattern, scheme, and upstream destination/status; it never
+// carries the credential bytes or the credential-ref. nil-recorder safe
+// like its siblings.
+func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source, hostPattern, scheme string, upstream *url.URL, upstreamStatus int) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
+		"aileron.proxy.source":          source,
+		"aileron.proxy.decision":        "binding_injected",
+		"aileron.proxy.method":          r.Method,
+		"aileron.proxy.binding.host":    hostPattern,
+		"aileron.proxy.binding.scheme":  scheme,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+		"aileron.proxy.upstream.status": upstreamStatus,
+	}
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyBindingInjected,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
 }
 
 func ptrNonEmpty(value string) *string {
