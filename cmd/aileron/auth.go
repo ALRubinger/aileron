@@ -14,9 +14,14 @@ import (
 
 const authUsage = `usage:
   aileron auth <agent> --import-from-host
+  aileron auth github [--runtime <auto|docker>] [--image <ref>]
 
 Seed the vault from an already-authenticated host install.
-<agent> must be claude or codex.`
+<agent> must be claude or codex.
+
+aileron auth github runs gh's OAuth device-authorization flow inside a
+container that ships gh, then stores the captured bearer token at the
+user/github vault path.`
 
 // runAuth dispatches `aileron auth <agent> ...`. The only verb in v1 is
 // `--import-from-host`, which reads an already-authenticated host
@@ -30,6 +35,14 @@ func runAuth(args []string, registry *launch.Registry, stdout, stderr io.Writer)
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, authUsage)
 		return 1
+	}
+
+	// `github` is a standalone user-level acquisition verb, not an
+	// <agent>. Intercept it before the host-import path so it is not
+	// parsed as the <agent> positional. It drives gh's OAuth device flow
+	// inside a container and stores the result at user/github.
+	if args[0] == "github" {
+		return runAuthGitHub(args[1:], stdout, stderr)
 	}
 
 	// Require <agent> as the first positional so the flag parser does

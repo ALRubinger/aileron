@@ -110,6 +110,15 @@ Approval-gated actions return an approval-pending message instead of running imm
 
 The `put`, `delete`, and `list` verbs talk to the running daemon and operate only on the `agents/<name>/oauth` namespace. They never open the vault file directly and reject any other path. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the seeding and recovery flows.
 
+## Auth
+
+| Command | Purpose | Ratified by |
+|---|---|---|
+| `aileron auth <agent> --import-from-host` | Seed the vault from an already-authenticated host install of claude or codex. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+| `aileron auth github [--runtime <auto\|docker>] [--image <ref>]` | Run gh's OAuth device-authorization flow inside a gh-bearing container and store the captured bearer token at `user/github`. HTTPS only; no refresh machinery. | — |
+
+`aileron auth github` is a one-time acquisition flow: it drives `gh auth login` and `gh auth token` in the same container, then PUTs the token to the user-level `user/github` vault namespace through the daemon.
+
 ## Utility
 
 | Command | Purpose | Ratified by |
