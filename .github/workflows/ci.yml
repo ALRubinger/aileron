@@ -294,6 +294,14 @@ jobs:
     name: UI Tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    container:
+      # Pinned to match the Playwright version resolved in ui/pnpm-lock.yaml
+      # (currently 1.60.0). The image bakes Chromium + its system deps, so no
+      # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
+      # ui/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
+      # (and the matching tag in the test-webapp job) so the baked browser
+      # stays compatible with the installed @playwright/test.
+      image: mcr.microsoft.com/playwright:v1.60.0-noble
     steps:
       - uses: actions/checkout@v6
 
@@ -318,16 +326,6 @@ jobs:
       - name: Build for E2E (with coverage instrumentation)
         working-directory: ui
         run: E2E_COVERAGE=1 pnpm build
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-ui-${{ hashFiles('ui/pnpm-lock.yaml') }}
-
-      - name: Install Playwright browsers
-        working-directory: ui
-        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run E2E tests
         working-directory: ui
@@ -376,6 +374,14 @@ jobs:
     name: Webapp Tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    container:
+      # Pinned to match the Playwright version resolved in webapp/pnpm-lock.yaml
+      # (currently 1.60.0). The image bakes Chromium + its system deps, so no
+      # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
+      # webapp/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
+      # (and the matching tag in the test-ui job) so the baked browser
+      # stays compatible with the installed @playwright/test.
+      image: mcr.microsoft.com/playwright:v1.60.0-noble
     steps:
       - uses: actions/checkout@v6
 
@@ -403,16 +409,6 @@ jobs:
       - name: Build for E2E
         working-directory: webapp
         run: pnpm build
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-webapp-${{ hashFiles('webapp/pnpm-lock.yaml') }}
-
-      - name: Install Playwright browsers
-        working-directory: webapp
-        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run E2E tests (mocked)
         working-directory: webapp
