@@ -27,13 +27,21 @@ Each binding is a quad plus scheme-specific fields.
 - `host` is the upstream host matched at the proxy boundary. It is an exact host (`api.linear.app`) or a single leading-wildcard form (`*.example.com`). Ports are not part of the pattern.
 - `credential_ref` is a vault credential reference the daemon resolves at injection time. It is a connector-style binding name (`<kind>/<service>/<identity>`) or a user-level reference (`user/<service>`), the namespace `aileron auth <service>` writes. It is never the credential bytes. The descriptor names where the credential lives, never its value.
 - `scheme` is one of the closed injection-scheme set: `bearer`, `basic`, `header-template`, `query-param`, `sigv4-resign`. An unknown scheme is a load-time error. `sigv4-resign` is enumerated but not yet implemented.
-- `emit_mechanism` declares how the credential reaches egress. `A` injects the credential unconditionally at the proxy. `B` is sentinel-swap, where the launcher plants a non-secret sentinel the proxy swaps for the real credential. The field is optional and defaults to `A`. Mechanism `B` is rejected at load time until the sentinel-swap egress path ([#1196](https://github.com/ALRubinger/aileron/issues/1196)) is wired, because a descriptor must never validate against a mechanism no proxy code can honor. Today only `A` is accepted; an unknown value is also a load-time error.
+- `emit_mechanism` declares how the credential reaches egress. `A` injects the credential unconditionally at the proxy. `B` is sentinel-swap, where the launcher plants a non-secret sentinel the proxy swaps for the real credential. The field is optional and defaults to `A`. A value outside the closed set (`A`, `B`) is a load-time error. A mechanism-`B` binding must declare a `sentinel` block. A mechanism-`A` binding must declare none.
 
 Scheme-specific fields:
 
 - `username` is required for the `basic` scheme. It is the non-secret HTTP basic-auth username (e.g. `x-access-token` for git-over-HTTPS). The token always rides in the password field.
 - `header` and `template` are required for the `header-template` scheme. `header` is the header name to set. `template` is the verbatim header value with a `{token}` placeholder the daemon substitutes with the credential at injection time.
 - `query_param` is required for the `query-param` scheme. It is the query-parameter name the credential is set on.
+
+Mechanism-`B` fields:
+
+- `sentinel` is a nested block required for the `B` emit mechanism and forbidden for `A`. It has two fields, both non-secret.
+- `sentinel.value` is the format-mimicking placeholder the launcher plants inside the container and the proxy recognizes at egress. The value is non-secret and safe to commit. Presenting it upstream authenticates nothing. The proxy swaps it for the real credential before the request leaves the boundary.
+- `sentinel.env` is the environment-variable name the launcher sets to `sentinel.value` inside the container. This is what generalizes the plant target, so the launcher is not hardcoded to one CLI's variable.
+
+The plant target is an environment-variable name only. A CLI that reads its token from a config file rather than an environment variable is not yet expressible. `sentinel.env` covers `gh` and the common token-in-environment case.
 
 Decoding is strict. An unknown YAML key is an error, not a silently ignored field, so a typo fails fast instead of shipping a binding that does nothing. A wrong or missing `version` is an error so the format can evolve without a silent misparse.
 
@@ -61,6 +69,24 @@ aileron auth linear
 The built-in Linear descriptor (shown at the top of this page) then seals every request to `api.linear.app`. The Linear CLI inside the sandbox holds no key. The daemon resolves `user/linear` and injects it at egress. If the vault has no `user/linear` entry, the binding still matches but resolution fails closed: no header is added and no secret leaks. An unauthenticated request behaves exactly as it would with no binding configured.
 
 This is the whole generalization proof. Linear is a tool nobody special-cased in the proxy. It is sealed entirely by a descriptor. Adding another vendor is a new descriptor, never new proxy code.
+
+## Worked example: a mechanism-B sentinel
+
+Some CLIs refuse to issue a request when they hold no token. They validate locally and short-circuit, so the proxy never sees an outbound request to seal. `gh` is the canonical case. Mechanism `B` closes this gap. The launcher plants a non-secret placeholder under an environment variable the CLI reads, the CLI's local check passes, and the CLI issues the request. The proxy recognizes the placeholder at egress and swaps in the real credential.
+
+```yaml
+version: v1
+bindings:
+  - host: api.github.com
+    credential_ref: user/github
+    scheme: bearer
+    emit_mechanism: B
+    sentinel:
+      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA
+      env: GH_TOKEN
+```
+
+This example is the schema only. The descriptor loader validates the `sentinel` block here. The egress code that plants the value and swaps it at the proxy boundary is tracked separately in [issue #1247](https://github.com/ALRubinger/aileron/issues/1247). The `value` is a placeholder with no authority, so it is safe to commit in a shipped descriptor.
 
 ## Out of scope: stateful CLI caches
 
