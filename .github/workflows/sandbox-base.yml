@@ -104,6 +104,20 @@ jobs:
             AILERON_VERSION=${{ steps.ver.outputs.version }}
             AILERON_COMMIT=${{ github.sha }}
 
+      # Single-arch local load of the Tier 0 Containerfile so the smoke step can
+      # `docker run` it. This recipe takes the images/sandbox-base context (no
+      # repo-root, no AILERON_VERSION/COMMIT build-args) and is UNBAKED (no
+      # aileron-mcp). Building it here is the only CI gate on the local recipe;
+      # without it, dropping github-cli from Containerfile would stay green
+      # (issue #1151 P1).
+      - name: Build local Tier 0 image for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: images/sandbox-base
+          file: images/sandbox-base/Containerfile
+          load: true
+          tags: aileron-sandbox-base-local:smoke
+
       # Image-fidelity smoke against the published (baked) image: the bash
       # substrate, the baked-MCP invariants (#957, the binary runs and the
       # version label is present), and the #959 invariants (no tools.txt or
@@ -113,6 +127,21 @@ jobs:
       - name: Smoke test image
         run: |
           set -euo pipefail
+
+          # github-cli is part of the base substrate (issue #1146): both recipes
+          # install it from Alpine's community repo. assertGhVersion runs
+          # `gh --version` and relies on set -e to fail the job on a non-zero
+          # exit, exercising the "gh exists and exits 0" acceptance. Invoked
+          # against BOTH the local Tier 0 image (the #1151 P1 gate on the local
+          # recipe) and the published image (proving the recipes stay in sync).
+          assertGhVersion() {
+            local img="$1"
+            echo "asserting gh --version on $img"
+            docker run --rm "$img" gh --version
+          }
+          assertGhVersion aileron-sandbox-base-local:smoke
+          assertGhVersion aileron-sandbox-base:smoke
+
           IMG=aileron-sandbox-base:smoke
           docker run --rm "$IMG" bash -c 'echo hi' | grep -q '^hi$'
           bash_path=$(docker run --rm "$IMG" which bash)
