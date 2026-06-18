@@ -29,12 +29,20 @@ type Codex struct{}
 func (c Codex) Name() string          { return "codex" }
 func (c Codex) BinaryNames() []string { return []string{"codex"} }
 
-// Args returns no extra arguments. Approval policy + sandbox mode for
-// Codex live in `~/.codex/config.toml` (e.g. `approval_policy = "never"`
-// for fully autonomous runs); we do not override them at launch time.
-// Users who want Codex's own approval prompt suppressed can set that in
-// their config or pass `--dangerously-bypass-approvals-and-sandbox`
-// themselves.
+// Args returns no extra arguments. Approval policy, sandbox mode, and
+// folder trust for Codex live in `~/.codex/config.toml`, not on the CLI.
+//
+// In ModeHost we do NOT override them: a host launch runs against the
+// user's real machine, so Codex's own approval prompt and folder-trust
+// dialog stay in force and the user owns those settings.
+//
+// In ModeSandbox the generated config.toml (mergeCodexSandboxConfig)
+// pre-sets them for an ephemeral, non-interactive run: `approval_policy
+// = "never"` suppresses per-tool approval prompts, `sandbox_mode =
+// "danger-full-access"` defers isolation to the outer container, and a
+// `[projects."/home/agent/workspace"]` block pre-accepts the
+// folder-trust prompt. The sandbox container is the trust boundary
+// (ADR-0015), so auto-approving inside it is safe.
 func (c Codex) Args() []string { return nil }
 
 func (c Codex) Env() map[string]string { return nil }
@@ -59,12 +67,17 @@ func (c Codex) LLMEndpointEnv() string { return "OPENAI_BASE_URL" }
 //     The host `~/.codex/config.toml` is never touched. The in-
 //     container Codex reads this file at startup. See ADR-0024.
 //
-// Sandbox mode emits ONLY the [mcp_servers.aileron] block — no merge
-// against a host-side config — so any other [mcp_servers.foo] entries
-// the user has on the host don't leak into the container. Users
+// For MCP, sandbox mode emits ONLY the [mcp_servers.aileron] block — no
+// merge against a host-side config — so any other [mcp_servers.foo]
+// entries the user has on the host don't leak into the container. Users
 // wanting extra MCP servers under Codex+sandbox configure them via
 // their devcontainer or via a wrapper merge; the manual recipe at
 // docs/development/sandbox-mcp-walkthrough.md documents the limitation.
+//
+// Sandbox mode additionally pre-sets Codex's non-interactive keys
+// (approval_policy, sandbox_mode, folder trust_level) so the ephemeral
+// container runs end-to-end without operator prompts; see
+// mergeCodexSandboxConfig. Host mode leaves all of those to the user.
 func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, mode launch.Mode) ([]string, []launch.MCPMount, error) {
 	if mode == launch.ModeSandbox {
 		return c.configureSandboxMCP(mcpBin, mcpEnv)
@@ -139,6 +152,15 @@ func (c Codex) configureHostMCP(mcpBin string, mcpEnv map[string]string) ([]stri
 // inside the sandbox container.
 const codexSandboxConfigContainerPath = "/home/agent/.codex/config.toml"
 
+// codexSandboxWorkspacePath is the in-container directory the launcher
+// runs Codex in (the bind-mounted project workspace). It must match
+// container.WorkspacePath and the runtime `--workdir`; it is spelled
+// out literally here, mirroring claudeWorkspacePath, to keep the agents
+// package free of an import on the container package. The generated
+// sandbox config.toml pre-trusts this folder so Codex does not block on
+// its folder-trust prompt on every launch.
+const codexSandboxWorkspacePath = "/home/agent/workspace"
+
 func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]string, []launch.MCPMount, error) {
 	dir, err := os.MkdirTemp("", "aileron-codex-sandbox-*")
 	if err != nil {
@@ -148,13 +170,17 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 	// Sandbox mode emits only our [mcp_servers.aileron] block — no
 	// merge with a host-side config. The empty-string baseline mirrors
 	// what mergeCodexMCPBlock produces when called with no prior file.
-	// Sandbox mode also emits two top-level keys:
+	// Sandbox mode also emits the non-interactive keys that let an
+	// ephemeral container run end-to-end without operator prompts:
+	// `approval_policy = "never"` suppresses per-tool approval prompts,
 	// `sandbox_mode = "danger-full-access"` disables Codex's redundant
 	// in-container OS sandbox (the Alpine image ships no bubblewrap, so
-	// it would only warn and fall back), and
-	// `cli_auth_credentials_store = "file"` so the in-container Codex
-	// resolves auth from auth.json — the AuthSpec FileBinding writes
-	// auth.json into the same directory at launch (R22).
+	// it would only warn and fall back), `cli_auth_credentials_store =
+	// "file"` so the in-container Codex resolves auth from auth.json —
+	// the AuthSpec FileBinding writes auth.json into the same directory
+	// at launch (R22) — and a [projects."/home/agent/workspace"] block
+	// with `trust_level = "trusted"` to pre-accept the folder-trust
+	// prompt for the bind-mounted workspace.
 	body := mergeCodexSandboxConfig(mcpBin, mcpEnv)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return nil, nil, fmt.Errorf("writing codex sandbox config: %w", err)
@@ -168,9 +194,16 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 }
 
 // mergeCodexSandboxConfig is the ModeSandbox variant of the merge.
-// In addition to the [mcp_servers.aileron] block, it prepends two
-// top-level keys:
+// In addition to the [mcp_servers.aileron] block, it prepends the
+// non-interactive top-level keys and a folder-trust block that let an
+// ephemeral container run end-to-end without operator prompts:
 //
+//   - `approval_policy = "never"` suppresses Codex's per-tool approval
+//     prompts (the operator hit these on list_recent_emails / get_email).
+//     The sandbox container is the trust boundary (ADR-0015) and Aileron
+//     still mediates every action the agent calls through aileron-mcp +
+//     the gateway, so auto-approving Codex's local exec inside the
+//     ephemeral container is safe.
 //   - `sandbox_mode = "danger-full-access"` disables Codex's own
 //     OS sandbox (bubblewrap/Landlock on the Linux container) for
 //     local exec. The Alpine sandbox-base image ships no bwrap binary,
@@ -188,13 +221,23 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 //     CLI reads auth.json instead of trying to use the macOS Keychain
 //     / Linux secret-tool keyring (which do not exist inside the
 //     sandbox).
+//   - a [projects."/home/agent/workspace"] block with `trust_level =
+//     "trusted"` pre-accepts Codex's "trust the current folder?" prompt
+//     for the bind-mounted workspace, mirroring how Claude pre-sets
+//     hasTrustDialogAccepted for the same path (claude_auth.go).
 //
-// The host config is never touched under ModeSandbox.
+// All of these are sandbox-mode only. The host config is never touched
+// under ModeSandbox, and host launches keep Codex's normal approval
+// policy, sandboxing, and folder-trust behavior.
 func mergeCodexSandboxConfig(mcpBin string, mcpEnv map[string]string) string {
-	// Start with the top-level keys, then append the [mcp_servers.*]
-	// block via the existing merge over an empty baseline.
-	return `sandbox_mode = "danger-full-access"` + "\n" +
-		`cli_auth_credentials_store = "file"` + "\n" +
+	// Start with the top-level keys, append the workspace folder-trust
+	// block, then the [mcp_servers.*] block via the existing merge over
+	// an empty baseline.
+	return `approval_policy = "never"` + "\n" +
+		`sandbox_mode = "danger-full-access"` + "\n" +
+		`cli_auth_credentials_store = "file"` + "\n\n" +
+		`[projects."` + codexSandboxWorkspacePath + `"]` + "\n" +
+		`trust_level = "trusted"` + "\n\n" +
 		mergeCodexMCPBlock("", mcpBin, mcpEnv)
 }
 

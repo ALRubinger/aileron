@@ -152,6 +152,16 @@ The most common cause is a cross-arch host: an `arm64` host bind-mounting into a
 
 Claude Code's `mcp__<server>__<tool>` convention disambiguates by server. A user's `draft_email` from `userthing` appears as `mcp__userthing__draft_email` alongside `mcp__aileron__draft_email`. Both work independently; the agent picks based on intent. There is no conflict.
 
+### Codex: sandbox runs non-interactively (approval + folder trust)
+
+Under `aileron launch --sandbox`, the generated `/home/agent/.codex/config.toml` pre-sets Codex's non-interactive keys so an ephemeral container runs end-to-end without operator prompts:
+
+- `approval_policy = "never"` suppresses Codex's per-tool approval prompts (the ones you would otherwise hit on each MCP tool call, e.g. `list_recent_emails` / `get_email`).
+- `sandbox_mode = "danger-full-access"` defers OS isolation to the outer Aileron container.
+- a `[projects."/home/agent/workspace"]` block with `trust_level = "trusted"` pre-accepts Codex's "trust the current folder?" prompt for the bind-mounted workspace.
+
+This is **sandbox-mode only**. The outer container is the trust boundary ([ADR-0015](/adr/0015-launch-audit-scope/)) and Aileron still mediates every action the agent calls through `aileron-mcp` + the gateway (the HITL approval chain in this walkthrough is unaffected — it runs in the daemon, not in Codex). A host-mode launch never touches `~/.codex/config.toml`'s approval, sandbox, or folder-trust settings; you own those.
+
 ### Codex: user devcontainer MCP entries masked
 
 The Codex sandbox path bind-mounts a generated `config.toml` into the container at `/home/agent/.codex/config.toml`. Any user-shipped `[mcp_servers.foo]` entry in a devcontainer-baked config is silently masked by the launcher-provided file. Aileron does NOT promise a Codex multi-config-file workaround today — whether Codex reads additional `~/.codex/*.toml` files is unverified. If you want Codex + sandbox with extra MCP servers, pre-merge your entries into a wrapper script that writes a combined config before `aileron launch` invokes Codex.

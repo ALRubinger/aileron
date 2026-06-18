@@ -186,6 +186,45 @@ func TestCodex_ConfigureMCP_SandboxMode_WritesTempAndReturnsMount(t *testing.T) 
 	}
 }
 
+// TestCodex_ConfigureMCP_SandboxMode_NonInteractiveKeys pins the
+// non-interactive contract for an ephemeral sandbox run (feedback #1162):
+// the generated config.toml must suppress Codex's per-tool approval
+// prompts, defer isolation to the outer container, and pre-accept the
+// folder-trust prompt for the bind-mounted workspace. Without these the
+// operator hits an approval prompt on each MCP tool call
+// (list_recent_emails / get_email) and a "trust the current folder?"
+// dialog at launch. The sandbox container is the trust boundary
+// (ADR-0015), so auto-approving inside it is safe.
+func TestCodex_ConfigureMCP_SandboxMode_NonInteractiveKeys(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, mounts, err := agents.Codex{}.ConfigureMCP("/usr/local/bin/aileron-mcp", map[string]string{
+		"AILERON_URL": "http://host.docker.internal:7000",
+	}, "", launch.ModeSandbox)
+	if err != nil {
+		t.Fatalf("ConfigureMCP sandbox: %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1", len(mounts))
+	}
+	body, err := os.ReadFile(mounts[0].Source)
+	if err != nil {
+		t.Fatalf("read temp config.toml: %v", err)
+	}
+	content := string(body)
+	for _, want := range []string{
+		`approval_policy = "never"`,
+		`sandbox_mode = "danger-full-access"`,
+		`[projects."/home/agent/workspace"]`,
+		`trust_level = "trusted"`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("sandbox config.toml missing non-interactive key %q:\n%s", want, content)
+		}
+	}
+}
+
 // TestCodex_ConfigureMCP_SandboxMode_DoesNotTouchHostConfig is the
 // load-bearing safety guarantee: a sandbox launch must not mutate the
 // host ~/.codex/config.toml. A user running both host-mode and

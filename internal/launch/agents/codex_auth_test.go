@@ -426,8 +426,20 @@ func TestCodex_HostConfig_OmitsSandboxMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read host config.toml: %v", err)
 	}
-	if strings.Contains(string(body), "sandbox_mode") {
-		t.Errorf("host config.toml must not contain sandbox_mode:\n%s", body)
+	// #1162 guard: the sandbox-only non-interactive keys (approval
+	// policy override + workspace folder-trust block) must likewise never
+	// leak into the host config. configureHostMCP only writes the
+	// [mcp_servers.aileron] block; host launches keep the user's own
+	// approval policy and folder-trust behavior.
+	for _, forbidden := range []string{
+		"sandbox_mode",
+		`approval_policy = "never"`,
+		"trust_level",
+		"[projects.",
+	} {
+		if strings.Contains(string(body), forbidden) {
+			t.Errorf("host config.toml must not contain %q:\n%s", forbidden, body)
+		}
 	}
 }
 
