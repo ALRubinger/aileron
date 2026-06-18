@@ -24,7 +24,7 @@
 //
 // # Scope
 //
-// This package defines the descriptor format and the three-layer loader.
+// This package defines the descriptor format and the two-layer loader.
 // It does not implement the binding-table consult (#1193), the injectors
 // (#1194), or the sentinel-swap mechanism (#1196, mechanism B); it only
 // validates the emit_mechanism field against the implemented set. Because

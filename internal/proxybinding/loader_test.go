@@ -69,49 +69,35 @@ func TestLoad_UserOverridesBuiltin(t *testing.T) {
 	}
 }
 
-// Precedence is built-in < project < user. The project layer overrides the
-// built-in for a host, and the user layer overrides the project.
+// Precedence is built-in < user. The user layer overrides the built-in for
+// a host.
 func TestLoad_PrecedenceOrder(t *testing.T) {
 	dir := t.TempDir()
-	projectPath := writeDescriptor(t, dir, "project.yaml",
-		"version: v1\nbindings:\n  - host: api.linear.app\n    credential_ref: user/from-project\n    scheme: bearer\n")
 	userPath := writeDescriptor(t, dir, "user.yaml",
 		"version: v1\nbindings:\n  - host: api.linear.app\n    credential_ref: user/from-user\n    scheme: bearer\n")
 
-	// Project overrides built-in (no user layer).
-	entries, err := Load(LoadOptions{ProjectPath: projectPath})
+	entries, err := Load(LoadOptions{UserPath: userPath})
 	if err != nil {
-		t.Fatalf("Load (project only): %v", err)
+		t.Fatalf("Load (user): %v", err)
 	}
 	e, _ := findEntry(entries, "api.linear.app")
-	if e.CredentialRef != "user/from-project" {
-		t.Errorf("project-only credential_ref = %q, want user/from-project", e.CredentialRef)
-	}
-
-	// User overrides project.
-	entries, err = Load(LoadOptions{ProjectPath: projectPath, UserPath: userPath})
-	if err != nil {
-		t.Fatalf("Load (project+user): %v", err)
-	}
-	e, _ = findEntry(entries, "api.linear.app")
 	if e.CredentialRef != "user/from-user" {
-		t.Errorf("project+user credential_ref = %q, want user/from-user (user wins)", e.CredentialRef)
+		t.Errorf("user credential_ref = %q, want user/from-user (user wins)", e.CredentialRef)
 	}
 }
 
-// Absent project/user files are not errors: an absent layer is an empty
-// layer, leaving the built-in floor intact.
+// An absent user file is not an error: an absent layer is an empty layer,
+// leaving the built-in floor intact.
 func TestLoad_AbsentLayersNoError(t *testing.T) {
 	dir := t.TempDir()
 	entries, err := Load(LoadOptions{
-		ProjectPath: filepath.Join(dir, "does-not-exist-project.yaml"),
-		UserPath:    filepath.Join(dir, "does-not-exist-user.yaml"),
+		UserPath: filepath.Join(dir, "does-not-exist-user.yaml"),
 	})
 	if err != nil {
-		t.Fatalf("Load with absent layers: %v", err)
+		t.Fatalf("Load with absent layer: %v", err)
 	}
 	if _, ok := findEntry(entries, "api.linear.app"); !ok {
-		t.Error("absent override layers should leave built-in Linear entry")
+		t.Error("absent override layer should leave built-in Linear entry")
 	}
 }
 
@@ -128,21 +114,6 @@ func TestLoad_InvalidLayerFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "user layer") {
 		t.Errorf("error %q should name the offending layer", err.Error())
-	}
-}
-
-// An invalid project layer fails the load and names the project layer.
-func TestLoad_InvalidProjectLayerFails(t *testing.T) {
-	dir := t.TempDir()
-	bad := writeDescriptor(t, dir, "bad-project.yaml",
-		"version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: not-a-scheme\n")
-
-	_, err := Load(LoadOptions{ProjectPath: bad})
-	if err == nil {
-		t.Fatal("Load with invalid project layer = nil error, want error")
-	}
-	if !strings.Contains(err.Error(), "project layer") {
-		t.Errorf("error %q should name the project layer", err.Error())
 	}
 }
 
