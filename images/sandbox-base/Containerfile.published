@@ -66,12 +66,19 @@ LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
 ARG AILERON_VERSION=dev
 LABEL ai.aileron.mcp.version="${AILERON_VERSION}"
 
+# github-cli ships only in Alpine's community repo, which alpine:3.24 does not
+# enable by default. Scope the community repo to this single apk invocation via
+# --repository (pinned to v3.24 to match the FROM tag) so the rest of the
+# package set stays main-only. Keep this list in sync with Containerfile (the
+# local Tier 0 recipe; issue #957).
 RUN apk add --no-cache \
+    --repository=https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
     bash \
     ca-certificates \
     coreutils \
     findutils \
     gawk \
+    github-cli \
     grep \
     procps \
     sed \
