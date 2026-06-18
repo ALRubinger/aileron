@@ -296,7 +296,7 @@ jobs:
     timeout-minutes: 25
     container:
       # Pinned to match the Playwright version resolved in ui/pnpm-lock.yaml
-      # (currently 1.60.0). The image bakes Chromium + its system deps, so no
+      # (currently 1.61.0). The image bakes Chromium + its system deps, so no
       # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
       # ui/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-webapp job) so the baked browser
@@ -330,6 +330,29 @@ jobs:
       - name: Run E2E tests
         working-directory: ui
         run: pnpm test:e2e
+
+      # Anti-silent-skip guard: a Playwright run that executes zero tests
+      # (config drift, glob mismatch, an offline browser image that makes
+      # every spec self-skip) still exits 0. Fail the job unless the JUnit
+      # report records at least one executed testcase, so "green" always
+      # means "tests actually ran".
+      - name: Assert E2E tests executed (anti-silent-skip)
+        working-directory: ui
+        run: |
+          report="test-results/junit-playwright.xml"
+          if [ ! -f "$report" ]; then
+            echo "::error::Playwright JUnit report $report not found; E2E tests did not produce results" >&2
+            exit 1
+          fi
+          # Count <testcase> elements: each one is an executed test. grep -o
+          # counts occurrences (not lines), so multiple testcases on one line
+          # are each counted.
+          cases="$(grep -o '<testcase' "$report" | wc -l | tr -d ' ')"
+          echo "Playwright executed $cases test(s)"
+          if [ "$cases" -eq 0 ]; then
+            echo "::error::Playwright executed 0 tests; refusing to pass on a silent skip" >&2
+            exit 1
+          fi
 
       - name: Generate E2E coverage report
         if: ${{ !cancelled() }}
@@ -376,7 +399,7 @@ jobs:
     timeout-minutes: 25
     container:
       # Pinned to match the Playwright version resolved in webapp/pnpm-lock.yaml
-      # (currently 1.60.0). The image bakes Chromium + its system deps, so no
+      # (currently 1.61.0). The image bakes Chromium + its system deps, so no
       # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
       # webapp/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-ui job) so the baked browser
@@ -413,6 +436,29 @@ jobs:
       - name: Run E2E tests (mocked)
         working-directory: webapp
         run: pnpm test:e2e
+
+      # Anti-silent-skip guard: a Playwright run that executes zero tests
+      # (config drift, glob mismatch, an offline browser image that makes
+      # every spec self-skip) still exits 0. Fail the job unless the JUnit
+      # report records at least one executed testcase, so "green" always
+      # means "tests actually ran".
+      - name: Assert E2E tests executed (anti-silent-skip)
+        working-directory: webapp
+        run: |
+          report="test-results/junit-playwright.xml"
+          if [ ! -f "$report" ]; then
+            echo "::error::Playwright JUnit report $report not found; E2E tests did not produce results" >&2
+            exit 1
+          fi
+          # Count <testcase> elements: each one is an executed test. grep -o
+          # counts occurrences (not lines), so multiple testcases on one line
+          # are each counted.
+          cases="$(grep -o '<testcase' "$report" | wc -l | tr -d ' ')"
+          echo "Playwright executed $cases test(s)"
+          if [ "$cases" -eq 0 ]; then
+            echo "::error::Playwright executed 0 tests; refusing to pass on a silent skip" >&2
+            exit 1
+          fi
 
       - name: Upload Playwright report on failure
         if: failure()
