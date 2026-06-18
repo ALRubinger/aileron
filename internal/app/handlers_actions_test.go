@@ -11,8 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"testing"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/action"
@@ -852,6 +852,185 @@ func eventTypesForSession(t *testing.T, store *audit.MemStore, sessionID string)
 	return out
 }
 
+// assertApprovedExecutionChain verifies the partial order that the system
+// actually guarantees for an approved action's audit chain.
+//
+// The chain is written by two goroutines with no happens-before on their
+// audit-store writes: ActionApprovalQueue.Decide emits approval.approved,
+// and a broadcast subscriber launches executeApprovedAction, which emits
+// execution.started then execution.succeeded. Approval causally gates
+// execution, but the two goroutines' audit-store writes have no ordering
+// guarantee relative to each other, so approval.approved may appear anywhere
+// after approval.requested, including after execution.succeeded. Asserting a
+// fixed [requested, approved, started, succeeded] sequence is therefore flaky.
+//
+// The contract this enforces:
+//   - the four event types present are exactly {approval.requested,
+//     approval.approved, execution.started, execution.succeeded};
+//   - approval.requested is first;
+//   - execution.started appears before execution.succeeded (by index);
+//   - approval.approved is present and appears after approval.requested.
+//
+// It deliberately makes no assertion about approval.approved's position
+// relative to the execution events. The optional label prefixes failure
+// messages (e.g. "approval \"id\" ") when several chains are checked in a loop.
+func assertApprovedExecutionChain(t *testing.T, label string, chain []model.EventType) {
+	t.Helper()
+
+	want := map[model.EventType]bool{
+		model.EventTypeApprovalRequested:  true,
+		model.EventTypeApprovalApproved:   true,
+		model.EventTypeExecutionStarted:   true,
+		model.EventTypeExecutionSucceeded: true,
+	}
+	if len(chain) != len(want) {
+		t.Fatalf("%schain = %v; want 4 events {approval.requested, approval.approved, execution.started, execution.succeeded}", label, chain)
+	}
+
+	idx := make(map[model.EventType]int, len(chain))
+	for i, ev := range chain {
+		if !want[ev] {
+			t.Errorf("%schain has unexpected event %s; chain = %v", label, ev, chain)
+		}
+		if _, dup := idx[ev]; dup {
+			t.Errorf("%schain has duplicate event %s; chain = %v", label, ev, chain)
+		}
+		idx[ev] = i
+	}
+	for ev := range want {
+		if _, ok := idx[ev]; !ok {
+			t.Errorf("%schain is missing event %s; chain = %v", label, ev, chain)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	if chain[0] != model.EventTypeApprovalRequested {
+		t.Errorf("%schain[0] = %s; want %s first", label, chain[0], model.EventTypeApprovalRequested)
+	}
+	if idx[model.EventTypeExecutionStarted] >= idx[model.EventTypeExecutionSucceeded] {
+		t.Errorf("%sexecution.started (idx %d) must precede execution.succeeded (idx %d); chain = %v",
+			label, idx[model.EventTypeExecutionStarted], idx[model.EventTypeExecutionSucceeded], chain)
+	}
+	if idx[model.EventTypeApprovalApproved] <= idx[model.EventTypeApprovalRequested] {
+		t.Errorf("%sapproval.approved (idx %d) must follow approval.requested (idx %d); chain = %v",
+			label, idx[model.EventTypeApprovalApproved], idx[model.EventTypeApprovalRequested], chain)
+	}
+}
+
+// TestAssertApprovedExecutionChain pins the contract of the partial-order
+// assertion shared by the approval round-trip tests. It is the regression
+// guard for feedback #1168: the helper must accept the observed flaky order
+// (approval.approved persisted after execution.succeeded) while still
+// rejecting chains that violate the order the system genuinely guarantees.
+func TestAssertApprovedExecutionChain(t *testing.T) {
+	cases := []struct {
+		name    string
+		chain   []model.EventType
+		wantErr bool
+	}{
+		{
+			name: "canonical order",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeApprovalApproved,
+				model.EventTypeExecutionStarted,
+				model.EventTypeExecutionSucceeded,
+			},
+		},
+		{
+			// The exact interleaving observed flaking on the CI gate: the
+			// background executor's events land before the Decide path's
+			// approval.approved write. This MUST pass.
+			name: "approved persisted after succeeded",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeExecutionStarted,
+				model.EventTypeExecutionSucceeded,
+				model.EventTypeApprovalApproved,
+			},
+		},
+		{
+			name: "approved persisted between execution events",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeExecutionStarted,
+				model.EventTypeApprovalApproved,
+				model.EventTypeExecutionSucceeded,
+			},
+		},
+		{
+			name: "missing approval.approved",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeExecutionStarted,
+				model.EventTypeExecutionSucceeded,
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing execution.started",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeApprovalApproved,
+				model.EventTypeExecutionSucceeded,
+			},
+			wantErr: true,
+		},
+		{
+			name: "succeeded before started",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeApprovalApproved,
+				model.EventTypeExecutionSucceeded,
+				model.EventTypeExecutionStarted,
+			},
+			wantErr: true,
+		},
+		{
+			name: "approval.requested not first",
+			chain: []model.EventType{
+				model.EventTypeApprovalApproved,
+				model.EventTypeApprovalRequested,
+				model.EventTypeExecutionStarted,
+				model.EventTypeExecutionSucceeded,
+			},
+			wantErr: true,
+		},
+		{
+			name: "unexpected event present",
+			chain: []model.EventType{
+				model.EventTypeApprovalRequested,
+				model.EventTypeApprovalApproved,
+				model.EventTypeExecutionStarted,
+				model.EventTypeApprovalDenied,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Run the assertion against a throwaway *testing.T in its own
+			// goroutine: the helper's t.Fatalf path calls runtime.Goexit,
+			// which would otherwise abort this subtest before we can read
+			// the result. The closure returns only after Goexit (via the
+			// deferred close), so fake.Failed() is safe to read afterward.
+			fake := &testing.T{}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				assertApprovedExecutionChain(fake, "", tc.chain)
+			}()
+			<-done
+			if got := fake.Failed(); got != tc.wantErr {
+				t.Errorf("assertApprovedExecutionChain(%v) failed=%v; want failed=%v", tc.chain, got, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestRunAction_NoApproval_EmitsExecutionStartedAndSucceeded covers
 // R6 / R7 for the synchronous path: a non-approval action invoked via
 // /v1/actions/{name}/run lands an execution.started → execution.succeeded
@@ -1042,21 +1221,13 @@ func TestRunAction_Approval_FullChainEmitsApprovalAndExecutionEvents(t *testing.
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// approval.approved (Decide path) and the execution events (background
+	// executor goroutine) are written to the audit store by two goroutines
+	// with no ordering guarantee, so approval.approved can land anywhere after
+	// approval.requested — including after execution.succeeded. Assert the
+	// partial order the system guarantees rather than a fixed sequence.
 	chain := eventTypesForSession(t, store, "sess-u8-approval")
-	want := []model.EventType{
-		model.EventTypeApprovalRequested,
-		model.EventTypeApprovalApproved,
-		model.EventTypeExecutionStarted,
-		model.EventTypeExecutionSucceeded,
-	}
-	if len(chain) != len(want) {
-		t.Fatalf("event chain for session = %v; want %v", chain, want)
-	}
-	for i, w := range want {
-		if chain[i] != w {
-			t.Errorf("chain[%d] = %s; want %s", i, chain[i], w)
-		}
-	}
+	assertApprovedExecutionChain(t, "", chain)
 }
 
 // TestRunAction_Approval_Denied_OmitsExecutionEvents pins R6a's deny

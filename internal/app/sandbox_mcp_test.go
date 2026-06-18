@@ -717,26 +717,12 @@ func TestSandboxMCP_Approval_RoundTripsWithApprovedDecide(t *testing.T) {
 
 	waitForChain(t, h.auditStore, sessionID, model.EventTypeExecutionSucceeded, 5*time.Second)
 
+	// Approval causally gates execution, but approval.approved (Decide path)
+	// and the execution events (background executor goroutine) are written to
+	// the audit store by two goroutines with no ordering guarantee, so assert
+	// only the partial order the system actually provides.
 	chain := eventChainForSession(t, h.auditStore, sessionID)
-	if len(chain) != 4 {
-		t.Fatalf("event chain = %v; want 4 events (approval.requested, approval.approved, execution.started, execution.succeeded)", chain)
-	}
-	// approval.requested is always first and execution.succeeded always last.
-	// The middle pair (approval.approved from the Decide path, execution.started
-	// from the background executor goroutine) is emitted from two goroutines with
-	// no guaranteed audit-write ordering, so assert it as an unordered set rather
-	// than a fixed sequence. Approval still causally precedes execution; only the
-	// two log writes may interleave.
-	if chain[0] != model.EventTypeApprovalRequested {
-		t.Errorf("chain[0] = %s; want %s", chain[0], model.EventTypeApprovalRequested)
-	}
-	if chain[3] != model.EventTypeExecutionSucceeded {
-		t.Errorf("chain[3] = %s; want %s", chain[3], model.EventTypeExecutionSucceeded)
-	}
-	middle := map[model.EventType]bool{chain[1]: true, chain[2]: true}
-	if !middle[model.EventTypeApprovalApproved] || !middle[model.EventTypeExecutionStarted] {
-		t.Errorf("chain middle = [%s %s]; want {approval.approved, execution.started} in either order", chain[1], chain[2])
-	}
+	assertApprovedExecutionChain(t, "", chain)
 }
 
 // TestSandboxMCP_Denied exercises R6a: when the user denies the
@@ -1014,26 +1000,11 @@ func TestSandboxMCP_Concurrency_DistinctApprovalsAttributedCorrectly(t *testing.
 
 	for _, entry := range pending {
 		waitForApprovalChain(t, h.auditStore, entry.ID, model.EventTypeExecutionSucceeded, 5*time.Second)
+		// Each approval's chain must be its own complete sequence. As above,
+		// approval.approved and the execution events come from two goroutines
+		// with no audit-write ordering guarantee, so assert the partial order.
 		chain := eventChainForApproval(t, h.auditStore, entry.ID)
-		if len(chain) != 4 {
-			t.Fatalf("approval %q chain = %v; want 4 events (approval.requested, approval.approved, execution.started, execution.succeeded)", entry.ID, chain)
-		}
-		// approval.requested is always first and execution.succeeded always last.
-		// The middle pair (approval.approved from the Decide path, execution.started
-		// from the background executor goroutine) is emitted from two goroutines
-		// with no guaranteed audit-write ordering, so assert it as an unordered set
-		// rather than a fixed sequence. Approval still causally precedes execution;
-		// only the two log writes may interleave.
-		if chain[0] != model.EventTypeApprovalRequested {
-			t.Errorf("approval %q chain[0] = %s; want %s", entry.ID, chain[0], model.EventTypeApprovalRequested)
-		}
-		if chain[3] != model.EventTypeExecutionSucceeded {
-			t.Errorf("approval %q chain[3] = %s; want %s", entry.ID, chain[3], model.EventTypeExecutionSucceeded)
-		}
-		middle := map[model.EventType]bool{chain[1]: true, chain[2]: true}
-		if !middle[model.EventTypeApprovalApproved] || !middle[model.EventTypeExecutionStarted] {
-			t.Errorf("approval %q chain middle = [%s %s]; want {approval.approved, execution.started} in either order", entry.ID, chain[1], chain[2])
-		}
+		assertApprovedExecutionChain(t, fmt.Sprintf("approval %q ", entry.ID), chain)
 	}
 
 	// The executor ran exactly twice, once per call, with the two
