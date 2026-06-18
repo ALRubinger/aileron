@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -37,10 +38,14 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	}
 	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
 
-	// Sealed model (#1195): the merge appends the secret-free gitconfig
-	// mount but adds NO GH_TOKEN. The token never reaches agentEnv.
-	if _, ok := agentEnv["GH_TOKEN"]; ok {
-		t.Errorf("GH_TOKEN merged into agentEnv; sealed model must not env-inject the secret")
+	// Sealed model (#1195/#1196): the merge appends the secret-free
+	// gitconfig mount and sets GH_TOKEN to the NON-SECRET sentinel. The
+	// real token never reaches agentEnv.
+	if agentEnv["GH_TOKEN"] != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN merged into agentEnv = %q, want the sentinel %q", agentEnv["GH_TOKEN"], sentinel.GitHubTokenSentinel)
+	}
+	if agentEnv["GH_TOKEN"] == "ghp_launch" {
+		t.Errorf("GH_TOKEN merged into agentEnv holds the real token; sealed model must not env-inject the secret")
 	}
 	if agentEnv["CLAUDE_CODE_OAUTH_TOKEN"] != "agent-oauth" {
 		t.Errorf("GitHub inject clobbered the AuthSpec env binding: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])

@@ -34,6 +34,30 @@ const SchemeBearer = "bearer"
 // credential bytes.
 const SchemeBasic = "basic"
 
+// EmitMechanism names how the in-container client is made to emit a
+// request the proxy can seal at egress (ADR-0019, #1196). It is
+// orthogonal to [HostBinding.Scheme], which is how the proxy injects the
+// credential once the request arrives.
+type EmitMechanism string
+
+const (
+	// EmitMechanismA is the default: the launcher plants no token. The
+	// client emits an unauthenticated (or no-credential) request, and the
+	// proxy unconditionally injects the bound credential at egress. Used
+	// for clients that issue the request without holding a token (curl,
+	// git-over-HTTPS with a no-op credential helper).
+	EmitMechanismA EmitMechanism = "A"
+
+	// EmitMechanismB is sentinel-swap: the launcher plants a non-secret,
+	// format-mimicking sentinel token so a client that short-circuits
+	// locally without a token (e.g. `gh`) issues its request. The proxy
+	// swaps the sentinel for the real credential at egress, and ONLY
+	// swaps when it recognizes its own planted sentinel. A foreign token
+	// on a mechanism-B host is left untouched (no steal-swap, no real
+	// secret injected). See the swap recognizer at the egress seam.
+	EmitMechanismB EmitMechanism = "B"
+)
+
 // HostBinding is the declarative triple that maps an upstream host
 // pattern to a vault credential and the scheme used to inject it. It is
 // a distinct concept from [Binding]: a [Binding] is keyed on
@@ -68,6 +92,14 @@ type HostBinding struct {
 	// in the password field, never here. Required for the basic scheme,
 	// ignored for every other scheme.
 	BasicUsername string
+
+	// EmitMechanism declares how the in-container client is made to emit
+	// a sealable request (see [EmitMechanism]). The zero value is
+	// [EmitMechanismA] (plant nothing, inject unconditionally), which
+	// preserves the pre-#1196 behavior. [EmitMechanismB] enables the
+	// sentinel-swap gate at egress for hosts whose client short-circuits
+	// without a planted token. Set via [WithEmitMechanismB].
+	EmitMechanism EmitMechanism
 }
 
 // userRefRe matches the user-level credential namespace `user/<service>`
@@ -86,6 +118,17 @@ type HostBindingOption func(*HostBinding)
 // username used by [SchemeBasic]. It is required for that scheme.
 func WithBasicUsername(username string) HostBindingOption {
 	return func(hb *HostBinding) { hb.BasicUsername = username }
+}
+
+// WithEmitMechanismB marks the binding as [EmitMechanismB] (sentinel-
+// swap). Use it for a host whose in-container client short-circuits
+// locally without a planted token (e.g. `gh`): the launcher plants a
+// non-secret sentinel and the egress seam swaps it for the real
+// credential only when it recognizes its own plant. Without this option
+// a binding defaults to [EmitMechanismA] (plant nothing, inject
+// unconditionally).
+func WithEmitMechanismB() HostBindingOption {
+	return func(hb *HostBinding) { hb.EmitMechanism = EmitMechanismB }
 }
 
 // NewHostBinding validates and constructs a HostBinding. It rejects an
@@ -113,7 +156,7 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	if _, ok := HostBindingSchemes[scheme]; !ok {
 		return HostBinding{}, fmt.Errorf("host binding: unknown injection scheme %q", scheme)
 	}
-	hb := HostBinding{HostPattern: hp, CredentialRef: credentialRef, Scheme: scheme}
+	hb := HostBinding{HostPattern: hp, CredentialRef: credentialRef, Scheme: scheme, EmitMechanism: EmitMechanismA}
 	for _, opt := range opts {
 		opt(&hb)
 	}

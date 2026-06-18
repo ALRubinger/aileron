@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -57,10 +58,15 @@ type userCredsDaemon interface {
 // per-agent AuthSpec.
 type githubInjectPrep struct {
 	// EnvAdditions merge into the agent's env. Under the ADR-0019
-	// sealing model (#1195) this never carries a GitHub secret: the
-	// token is resolved daemon-side and injected at the TLS boundary, so
-	// no GH_TOKEN is set. The field is retained for shape parity with
-	// authSpecPrep and for any future non-secret GitHub env.
+	// sealing model this never carries a GitHub secret. It does carry a
+	// non-secret GH_TOKEN set to sentinel.GitHubTokenSentinel when a
+	// usable user/github entry exists: `gh` short-circuits locally
+	// without a token in its env, so emit-mechanism A (plant nothing,
+	// seal the emitted request) cannot work for `gh`. The sentinel is a
+	// format-mimicking placeholder that passes `gh`'s local validation so
+	// `gh` issues its request; the daemon recognizes the sentinel at the
+	// TLS boundary and swaps in the real credential (emit-mechanism B,
+	// #1196). The sentinel is non-secret and safe to place in the env.
 	EnvAdditions map[string]string
 
 	// Mounts append to the sandbox volume list. Carries the individual
@@ -174,10 +180,16 @@ func prepareGitHubInject(
 	}
 
 	prep := emptyGitHubInjectPrep()
-	// No GH_TOKEN: the secret never enters the container under the
-	// ADR-0019 sealing model (#1195). The daemon resolves user/github
-	// and injects it at the TLS boundary via the host bindings. The
-	// mount below carries only the secret-free no-op gitconfig.
+	// GH_TOKEN carries the non-secret sentinel, never the real token.
+	// `gh` short-circuits locally without a token, so we plant the
+	// sentinel to make it issue its request; the daemon recognizes the
+	// sentinel at the TLS boundary and swaps in the real user/github
+	// credential (emit-mechanism B, #1196). The real secret never enters
+	// the container in env, mount, or args. The mount below carries only
+	// the secret-free no-op git credential helper (emit-mechanism A for
+	// git-over-HTTPS, which the daemon seals from the unauthenticated
+	// request git emits).
+	prep.EnvAdditions["GH_TOKEN"] = sentinel.GitHubTokenSentinel
 	prep.Mounts = []sandboxcontainer.Volume{{
 		Source:   hostPath,
 		Target:   githubConfigTarget,

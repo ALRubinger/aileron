@@ -8,6 +8,23 @@ This page is how you confirm the v4 sandbox HTTPS proxy is mediating credentials
 
 The matrix complements the [Sandbox MCP walkthrough](/development/sandbox-mcp-walkthrough/) (which exercises the same data plane from the agent's MCP transport) and the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) (which is what these CLIs depend on inside the container).
 
+## Per-CLI sealing properties
+
+Each CLI has two properties that govern how Aileron seals its traffic. These are documentation properties, not config fields.
+
+| CLI | proxy-sealable | emit-mechanism |
+|---|---|---|
+| curl | yes | A |
+| gh | yes | B |
+| aws | yes | A |
+
+`proxy-sealable` means the daemon can inject the real credential at the TLS forward-proxy boundary so the container never holds it.
+
+`emit-mechanism` is how the in-container client is made to emit a request the proxy can seal. It is independent of the injection scheme (bearer, basic, and so on), which is how the proxy writes the credential once the request arrives.
+
+- Mechanism A: the launcher plants no token. The client emits an unauthenticated request, and the proxy injects the bound credential unconditionally at egress. `curl` issues the request with no token. `git`-over-HTTPS issues an unauthenticated request because the launcher mounts a no-op credential helper.
+- Mechanism B: the launcher plants a non-secret, format-mimicking sentinel token. Some clients short-circuit locally when they hold no token, so they never issue the request and there is nothing for the proxy to seal. The sentinel makes the client treat itself as authenticated and issue the request. The proxy then swaps the sentinel for the real credential at egress. The proxy swaps only the sentinel it itself planted. A foreign token on a mechanism-B host is forwarded unchanged. See [ADR-0019](/adr/0019-v4-https-data-plane/).
+
 ## What the proxy guarantees
 
 When you call an installed connector operation through the proxy:
@@ -112,7 +129,11 @@ Expected:
 
 ## gh (GitHub CLI)
 
-`gh` honors `HTTPS_PROXY` once you set it, and it picks up the system CA store, so it works through the Aileron proxy with no extra config — as long as you have an installed GitHub connector spec whose host is `api.github.com` (or `github.com` for `git`-shaped operations).
+`gh` is `proxy-sealable` via `emit-mechanism` B. It honors `HTTPS_PROXY` once you set it, and it picks up the system CA store, so it works through the Aileron proxy with no extra config. Aileron seals it against the built-in `api.github.com` host binding, so you do not need an installed GitHub connector spec for `gh api` to work.
+
+`gh` is the reason mechanism B exists. `gh` validates its auth state locally before making a request. With no token it short-circuits and never issues the request, so mechanism A (plant nothing, seal the emitted request) has nothing to seal. The launcher closes this gap by planting a non-secret, format-mimicking sentinel as `GH_TOKEN` when a `user/github` entry exists in your vault. The sentinel passes `gh`'s own local validation, so `gh` issues its request. The daemon recognizes the sentinel at the TLS boundary and swaps in your real GitHub token before the request leaves the host. The real token never enters the container. The sentinel is non-secret and safe to see in `echo $GH_TOKEN` output; presenting it to GitHub authenticates nothing.
+
+Store your token once with `aileron auth github`. The launcher does the rest on every sandbox launch.
 
 ### Install
 
@@ -124,16 +145,18 @@ Expected:
 
 ### Configure
 
+There is nothing to configure inside the container. The launcher already set `HTTPS_PROXY` and planted the sentinel `GH_TOKEN`. You can confirm both:
+
 ```bash
-# Confirm HTTPS_PROXY is set by the launcher
+# Set by the launcher
 echo $HTTPS_PROXY
 
-# gh requires you to "log in" to a host once per profile.
-# Through the Aileron proxy, the credential is injected by the daemon,
-# so use the "token" flow with a placeholder — gh's own auth state
-# only needs to think it's authenticated.
-echo "placeholder-token-aileron-injects-real" | gh auth login --with-token
+# The non-secret sentinel the launcher planted. This is NOT your real
+# token; the daemon swaps it for the real one at egress.
+echo $GH_TOKEN
 ```
+
+Do not run `gh auth login` with a hand-typed placeholder. The launcher's sentinel is the only token `gh` needs, and the daemon owns the swap.
 
 ### Success case
 
@@ -144,18 +167,25 @@ gh api user
 Expected:
 
 - 200 with the authenticated user's JSON.
-- `connector.proxy.proxied` audit, `aileron.proxy.upstream.host: "api.github.com"`.
+- A `sandbox.proxy.binding_injected` audit event with `aileron.proxy.binding.host: "api.github.com"` and `aileron.proxy.binding.scheme: "bearer"`. The daemon swapped the sentinel for the real token; the upstream saw `Authorization: Bearer <real-token>` and the audit payload holds no token or sentinel bytes.
 
-### Unmatched case
+### Foreign-token case
+
+If you supply your own token instead of the sentinel (for example you ran `gh auth login --with-token` with a real token), the proxy does not swap it. It seals only the sentinel it planted.
 
 ```bash
-gh repo list --json id  # unmatched if no `repos` operation is in the spec
+echo "ghp_your_own_real_token" | gh auth login --with-token
+gh api user
 ```
 
 Expected:
 
-- `gh` reports the upstream's actual response. Without an installed credential the GitHub API returns 401; `gh` surfaces that to the user.
-- `sandbox.proxy.passthrough` audit, `aileron.proxy.upstream.host: "api.github.com"`. The proxy does not inject a credential and does not refuse the request.
+- The upstream sees your own token unchanged. The daemon injects nothing.
+- A `sandbox.proxy.foreign_token_not_swapped` audit event with `aileron.proxy.binding.host: "api.github.com"`. The payload holds no token bytes.
+
+### Verification status
+
+The `gh` sentinel-swap is asserted by the deterministic end-to-end test `TestSentinelSwap_*` in `internal/app/sandbox_forward_proxy_sentinel_swap_test.go`, which drives a sentinel-bearing and a foreign-token request through the real CONNECT/TLS proxy boundary against a fake `api.github.com` upstream and asserts the swap, the no-swap, the isolation, and the audit shape. A real `gh` against live `api.github.com` over the network is not exercised in CI (it requires a real GitHub token and network egress from the test runner), so this row is asserted by the deterministic test rather than by an empirical live-network run.
 
 ## aws (AWS CLI)
 
@@ -231,4 +261,6 @@ The test stands up a fake HTTPS upstream, runs `curl` as a host subprocess point
 3. The container's `curl` invocation does not carry the credential (proves credential isolation).
 4. A `connector.proxy.proxied` audit event is emitted with the matched connector FQN, tool, operation, upstream host (not URL), and `aileron.connector.boundary: https_proxy`.
 
-The `gh` and `aws` recipes above are manual-only for now; the same harness can be extended to cover them when there's a published Aileron connector spec for each upstream.
+The `gh` sentinel-swap is covered deterministically by `internal/app/sandbox_forward_proxy_sentinel_swap_test.go`, which drives sentinel-bearing and foreign-token requests through the in-process proxy against a fake `api.github.com` upstream and asserts the swap, the no-swap, the sentinel-never-reaches-upstream isolation, and the no-secret audit shape. It does not require real `gh`, a real token, or real network.
+
+The `aws` recipe above is manual-only for now. The same harness can be extended to cover it when there is a published Aileron connector spec for the upstream.
