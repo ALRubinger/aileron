@@ -186,6 +186,15 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	// published per-agent image the launcher would (launch/check parity). With
 	// no .devcontainer and a published agent, this plans TierPublished and the
 	// build step pulls (or inspects) the per-agent image.
+	//
+	// NOTE: `command` does double duty here. It is both the PATH binary validated
+	// in-image AND the agent-id key Discover passes to PublishedAgentExists ->
+	// recipeForAgent (agentRecipes is keyed by agent id: "claude", "codex"). That
+	// only works because binary == id for every agent today. A future agent whose
+	// PATH binary differs from its recipe id would not match agentRecipes, so
+	// Discover would silently fall back to TierBase and lose launch/check
+	// parity. If such an agent is added, thread the binary and the agent id
+	// separately into Discover instead of relying on this conflation.
 	plan, err := sandboxcomposition.Discover(cwd, version.Version, command)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
