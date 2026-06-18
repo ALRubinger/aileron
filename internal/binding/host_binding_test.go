@@ -39,6 +39,50 @@ func TestNewHostBinding_RejectsInvalidScheme(t *testing.T) {
 	}
 }
 
+func TestNewHostBinding_AcceptsUserCredentialRef(t *testing.T) {
+	// The user-level namespace (`user/<service>`) is the second valid
+	// credential-ref shape: it is what `aileron auth <service>` writes
+	// and what the GitHub bindings (#1195) name.
+	hb, err := binding.NewHostBinding("api.github.com", "user/github", "bearer")
+	if err != nil {
+		t.Fatalf("unexpected error for user/github ref: %v", err)
+	}
+	if hb.CredentialRef != "user/github" {
+		t.Errorf("CredentialRef = %q, want user/github", hb.CredentialRef)
+	}
+}
+
+func TestNewHostBinding_RejectsOtherTwoSegmentRefs(t *testing.T) {
+	// Only `user/<service>` is a valid two-segment ref; a connector-style
+	// ref must still carry the full triple. A two-segment connector ref
+	// remains a configuration error.
+	for _, ref := range []string{"oauth2/github", "api_key/stripe", "user/", "user/Bad-CASE"} {
+		if _, err := binding.NewHostBinding("api.example.com", ref, "bearer"); err == nil {
+			t.Errorf("expected error for credential ref %q, got nil", ref)
+		}
+	}
+}
+
+func TestNewHostBinding_BasicSchemeRequiresUsername(t *testing.T) {
+	// A basic binding with no username can never produce a well-formed
+	// Authorization header, so it is rejected at construction rather than
+	// failing closed at egress.
+	if _, err := binding.NewHostBinding("github.com", "user/github", "basic"); err == nil {
+		t.Fatal("expected error for basic scheme without username, got nil")
+	}
+	hb, err := binding.NewHostBinding("github.com", "user/github", "basic",
+		binding.WithBasicUsername("x-access-token"))
+	if err != nil {
+		t.Fatalf("unexpected error for basic scheme with username: %v", err)
+	}
+	if hb.BasicUsername != "x-access-token" {
+		t.Errorf("BasicUsername = %q, want x-access-token", hb.BasicUsername)
+	}
+	if hb.Scheme != binding.SchemeBasic {
+		t.Errorf("Scheme = %q, want %q", hb.Scheme, binding.SchemeBasic)
+	}
+}
+
 func TestNewHostBinding_RejectsInvalidCredentialRef(t *testing.T) {
 	for _, ref := range []string{"", "not-a-binding-name", "oauth2/github", "../escape/x"} {
 		if _, err := binding.NewHostBinding("api.example.com", ref, "bearer"); err == nil {

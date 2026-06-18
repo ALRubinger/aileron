@@ -26,12 +26,21 @@ const githubUserService = "github"
 // .claude.json carve-out so the workspace mount is not masked.
 const githubConfigTarget = "/home/agent/.gitconfig"
 
-// gitCredentialHelperConfig is the static, token-independent gitconfig
-// that wires git's HTTPS credential helper to `gh`. The token never
-// appears in this file; it flows only via the GH_TOKEN env var, which
-// `gh auth git-credential` reads at request time. Because the content
-// never changes, the mount is read-only.
-const gitCredentialHelperConfig = "[credential \"https://github.com\"]\n\thelper = !gh auth git-credential\n"
+// gitCredentialHelperConfig is the static, token-independent, and
+// secret-free gitconfig mounted at /home/agent/.gitconfig. Under the
+// ADR-0019 sealing model (#1195) the GitHub token never enters the
+// container: it is resolved daemon-side and injected at the TLS
+// forward-proxy boundary by the user/github host bindings. This file
+// therefore carries no secret and no reference to `gh`.
+//
+// The helper is a no-op that returns empty credentials. Resetting the
+// helper list (the bare `helper =`) clears any inherited helper, and
+// the empty-credential shell helper makes git emit a fully-formed but
+// *unauthenticated* HTTPS request instead of blocking on an interactive
+// prompt or shelling out to `gh`. The daemon proxy then seals that
+// request at egress. Because the content never changes and holds no
+// secret, the mount is read-only and identical on every launch.
+const gitCredentialHelperConfig = "[credential \"https://github.com\"]\n\thelper =\n\thelper = \"!f() { test \\\"$1\\\" = get && exit 0; }; f\"\n"
 
 // userCredsDaemon is the one-method subset of *daemonClient the GitHub
 // injector depends on. Defined as an interface so tests substitute a
@@ -47,12 +56,16 @@ type userCredsDaemon interface {
 // user-level and runs on every sandbox launch independent of the
 // per-agent AuthSpec.
 type githubInjectPrep struct {
-	// EnvAdditions merge into the agent's env. Carries GH_TOKEN when a
-	// usable token was found; empty otherwise.
+	// EnvAdditions merge into the agent's env. Under the ADR-0019
+	// sealing model (#1195) this never carries a GitHub secret: the
+	// token is resolved daemon-side and injected at the TLS boundary, so
+	// no GH_TOKEN is set. The field is retained for shape parity with
+	// authSpecPrep and for any future non-secret GitHub env.
 	EnvAdditions map[string]string
 
 	// Mounts append to the sandbox volume list. Carries the individual
-	// gitconfig file mount when a token was found; empty otherwise.
+	// secret-free gitconfig file mount when a usable user/github entry
+	// was found; empty otherwise. The mount holds no secret regardless.
 	Mounts []sandboxcontainer.Volume
 
 	// Cleanup removes the transient host directory holding the rendered
@@ -72,10 +85,19 @@ func emptyGitHubInjectPrep() githubInjectPrep {
 	}
 }
 
-// prepareGitHubInject reads the user-level GitHub token from the vault
-// and, when present, produces a GH_TOKEN env addition plus a read-only
-// bind mount of a static git credential-helper gitconfig at
-// /home/agent/.gitconfig.
+// prepareGitHubInject probes the user-level GitHub entry in the vault
+// and, when a usable token is present, mounts a read-only, secret-free
+// no-op gitconfig at /home/agent/.gitconfig.
+//
+// Under the ADR-0019 sealing model (#1195) the token never enters the
+// container: no GH_TOKEN env is set and the gitconfig carries no secret
+// bytes. The mounted helper makes git emit a fully-formed but
+// unauthenticated HTTPS request that the daemon proxy seals at egress
+// via the user/github host bindings. The vault probe is retained only
+// to drive the locked-vault warning UX and to gate the (secret-free)
+// mount the same way the pre-sealing code did, keeping the prep shape
+// stable; the daemon binding independently handles the locked/empty
+// case fail-closed, so a missed mount never leaks or breaks auth.
 //
 // Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or
 // a locked vault (vault.ErrCredentialUnavailable) returns an empty prep
@@ -152,7 +174,10 @@ func prepareGitHubInject(
 	}
 
 	prep := emptyGitHubInjectPrep()
-	prep.EnvAdditions["GH_TOKEN"] = token
+	// No GH_TOKEN: the secret never enters the container under the
+	// ADR-0019 sealing model (#1195). The daemon resolves user/github
+	// and injects it at the TLS boundary via the host bindings. The
+	// mount below carries only the secret-free no-op gitconfig.
 	prep.Mounts = []sandboxcontainer.Volume{{
 		Source:   hostPath,
 		Target:   githubConfigTarget,

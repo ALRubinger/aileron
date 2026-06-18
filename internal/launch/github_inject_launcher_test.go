@@ -23,7 +23,7 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("ghp_launch")}}
 
 	// Pre-existing agent env (e.g. AuthSpec EnvBindings) with a distinct
-	// key set — GH_TOKEN must not clobber it and vice-versa.
+	// key set — the GitHub merge must not clobber it.
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
 	var proxyMounts []sandboxcontainer.Volume
 
@@ -37,13 +37,16 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	}
 	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
 
-	if agentEnv["GH_TOKEN"] != "ghp_launch" {
-		t.Errorf("agentEnv[GH_TOKEN] = %q, want ghp_launch", agentEnv["GH_TOKEN"])
+	// Sealed model (#1195): the merge appends the secret-free gitconfig
+	// mount but adds NO GH_TOKEN. The token never reaches agentEnv.
+	if _, ok := agentEnv["GH_TOKEN"]; ok {
+		t.Errorf("GH_TOKEN merged into agentEnv; sealed model must not env-inject the secret")
 	}
 	if agentEnv["CLAUDE_CODE_OAUTH_TOKEN"] != "agent-oauth" {
 		t.Errorf("GitHub inject clobbered the AuthSpec env binding: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])
 	}
 
+	// The mount shape is preserved: the static gitconfig is still mounted.
 	var found bool
 	for _, m := range proxyMounts {
 		if m.Target == "/home/agent/.gitconfig" {

@@ -46,16 +46,19 @@ func withStubDeviceFlow(t *testing.T, stub deviceFlowRunner, capErr error) {
 
 func TestRunAuthGitHub_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
 	token := []byte("gho_exampletoken1234567890")
-	var gotMethod, gotPath string
+	var gotMethod, gotPath, gotType string
 	var gotValue []byte
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		var body agentCredentialsBody
+		var body userCredentialsBody
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode body: %v", err)
 		}
 		gotValue = body.Value
+		if body.Metadata != nil {
+			gotType = body.Metadata.Type
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	withStubDeviceFlow(t, stubDeviceFlow{token: token}, nil)
@@ -70,6 +73,12 @@ func TestRunAuthGitHub_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
 	}
 	if !bytes.Equal(gotValue, token) {
 		t.Errorf("stored value = %q, want %q", gotValue, token)
+	}
+	// The metadata Type must be "user" so the daemon's host-binding
+	// resolver (ADR-0019, #1195) can validate the kind it resolves for
+	// user/github at the TLS boundary.
+	if gotType != "user" {
+		t.Errorf("stored metadata.type = %q, want user", gotType)
 	}
 	if !strings.Contains(stdout.String(), "Stored user/github") {
 		t.Errorf("stdout = %q, want success message", stdout.String())

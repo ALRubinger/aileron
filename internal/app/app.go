@@ -442,10 +442,21 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// forward-proxy boundary when no connector spec matches a decrypted
 	// request (ADR-0019 launch passthrough). v1 has no config wire
 	// format yet (the launch/policy schema and authoring CLI are a
-	// follow-on); the daemon leaves server.hostBindings at its nil
-	// zero value, which preserves today's passthrough behavior exactly.
-	// A nil/empty binding.HostBindings never matches, so the regression
-	// path is the default until a config source populates the table.
+	// follow-on), so the only bindings seeded here are the built-in
+	// GitHub pair (#1195): github.com -> basic and api.github.com ->
+	// bearer, both resolving user/github daemon-side. The agent never
+	// holds the GitHub secret; the daemon injects it at egress. With no
+	// user/github entry the bindings still match but resolution fails
+	// closed (no secret, no Authorization header), so an unauthenticated
+	// GitHub request behaves exactly as before today's passthrough.
+	if ghBindings, err := gitHubHostBindings(); err != nil {
+		// A construction error here is a programming bug (the host
+		// patterns and schemes are constants), not operator input;
+		// surface it rather than silently dropping the seal.
+		return nil, fmt.Errorf("seed github host bindings: %w", err)
+	} else {
+		server.hostBindings = ghBindings
+	}
 
 	// --- Scope-drift detection (#726) ---
 	// Hook fires after every successful connector install. If the
