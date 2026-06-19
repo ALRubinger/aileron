@@ -17,22 +17,23 @@ import (
 )
 
 // TestRunAuthGitHub_PUTReachesRealDaemonRoute is the path-drift guard the
-// /cw-sweep decision (2026-06-18, issue #1157) called for. The CLI PUTs the
-// captured GitHub token to a HARDCODED string in auth_github.go
-// ("/vault/user/github/credentials", base URL supplies the "/v1" prefix),
-// while the daemon registers the route INDEPENDENTLY from the OpenAPI spec
-// via api.HandlerFromMux ("/v1/vault/user/{service}/credentials", backed by
+// /cw-sweep decision (2026-06-18, issue #1157) called for. The CLI's
+// production store closure (userCredentialStore) PUTs the captured token to
+// /vault/<storeAt>/credentials, deriving the path from the descriptor's
+// store_at ("user/github") plus the "/v1" base-URL prefix, while the daemon
+// registers the route INDEPENDENTLY from the OpenAPI spec via
+// api.HandlerFromMux ("/v1/vault/user/{service}/credentials", backed by
 // userCredentialVaultPath in internal/app). The existing unit tests
-// (auth_github_test.go) re-encode the same hardcoded path into their fake
-// server, so they cannot catch the two drifting out of lockstep.
+// (auth_github_test.go) re-encode the same path into their fake server, so
+// they cannot catch the two drifting out of lockstep.
 //
 // This test closes that blind spot: it stands up the REAL daemon handler
 // (app.NewHandlerWithConfig, which registers the user-credentials route
 // through the generated mux derived from the spec) over a MemVault, points
-// the CLI at it, stubs the device flow so no container/GitHub is touched,
-// and asserts runAuthGitHub returns exit 0 with the success message — i.e.
-// the PUT resolved to the real PutUserCredentials handler and stored the
-// credential, NOT a 404 from a route mismatch.
+// the CLI at it, stubs the capture so no container/GitHub is touched, and
+// asserts the descriptor-routed entrypoint returns exit 0 with the success
+// message — i.e. the PUT resolved to the real PutUserCredentials handler
+// and stored the credential, NOT a 404 from a route mismatch.
 //
 // Because the request reaches the handler through the spec-derived mux,
 // changing userCredentialVaultPath or the spec's route template without
@@ -58,13 +59,13 @@ func TestRunAuthGitHub_PUTReachesRealDaemonRoute(t *testing.T) {
 	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
 	t.Setenv("AILERON_TOKEN", "test-token")
 
-	// Stub the device flow so the test drives only the store path: no
+	// Stub the capture so the test drives only the store path: no
 	// container, no GitHub. A real (non-empty) token so the empty-token
 	// guard does not short-circuit before the PUT.
-	withStubDeviceFlow(t, stubDeviceFlow{token: []byte("gho_routedrifttoken1234567890")}, nil)
+	withFakeCaptureDriver(t, &fakeCaptureRunner{token: "gho_routedrifttoken1234567890"}, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (the PUT must resolve to the real daemon route, not 404); stderr=%s",
 			code, stderr.String())

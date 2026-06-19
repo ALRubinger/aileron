@@ -9,43 +9,116 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/ALRubinger/aileron/internal/auth/capture"
 )
 
-// These tests pin the contract of `aileron auth github`:
+// These tests pin the CALLER-SIDE contract of the descriptor-driven
+// `aileron auth github` verb, after the bespoke device-flow body was
+// dissolved into the generic capture.Driver (#1288):
 //
-//   - The captured bearer token is PUT base64-encoded to
-//     /v1/vault/user/github/credentials (the #1147 user namespace).
-//   - A capture failure, an empty token, and a non-204 daemon status
-//     each surface a clean message with exit 1 and (for capture/empty)
-//     no PUT.
-//   - The production containerDeviceFlow runs ONE shared container for
-//     both gh calls (req 1): the token read sees the hosts.yml the login
-//     wrote because it is the same container, not a second docker run.
+//   - The captured bearer token is PUT to /vault/user/github/credentials
+//     (the daemon's user namespace) with metadata.type == "user".
+//   - A capture failure, an empty token, and a non-204 daemon status each
+//     surface a clean message with exit 1 and (for capture/empty) no PUT.
+//   - The verb routes through the descriptor registry: a half-wired
+//     dispatch (verb resolved but no driver / no store) reddens the route
+//     regression test.
+//
+// The DRIVER-INTERNAL behaviors (one shared container for both gh calls,
+// the TTY gate, the BROWSER shim, teardown-on-failure, stderr surfacing,
+// the empty-token guard mechanics) are owned and tested by
+// internal/auth/capture/capture_test.go and are NOT duplicated here.
 
-// stubDeviceFlow is an injectable deviceFlowRunner for the store-path
-// tests. It never touches a container or GitHub.
-type stubDeviceFlow struct {
-	token []byte
-	err   error
+// fakeCaptureRunner is a sandboxcontainer.Runner that drives the generic
+// capture.Driver to a captured token without touching a container or
+// GitHub. It models the load-bearing shared-container behavior: `gh auth
+// token` only yields a token when a prior `gh auth login` ran against the
+// SAME container name, so a half-wired driver (wrong container, no login
+// exec) fails to produce a token.
+type fakeCaptureRunner struct {
+	token         string
+	loggedInNames map[string]bool
+	runContainer  string
 }
 
-func (s stubDeviceFlow) Capture(context.Context) ([]byte, error) {
-	return s.token, s.err
-}
-
-// withStubDeviceFlow swaps newDeviceFlowRunner for one that returns the
-// given stub, restoring the original on cleanup.
-func withStubDeviceFlow(t *testing.T, stub deviceFlowRunner, capErr error) {
-	t.Helper()
-	orig := newDeviceFlowRunner
-	newDeviceFlowRunner = func(runtime, image string) (deviceFlowRunner, error) {
-		return stub, capErr
+func (r *fakeCaptureRunner) Run(_ context.Context, _ string, args []string, stdout, _ io.Writer) error {
+	if r.loggedInNames == nil {
+		r.loggedInNames = map[string]bool{}
 	}
-	t.Cleanup(func() { newDeviceFlowRunner = orig })
+	if len(args) == 0 {
+		return nil
+	}
+	switch args[0] {
+	case "run":
+		for i, a := range args {
+			if a == "--name" && i+1 < len(args) {
+				r.runContainer = args[i+1]
+			}
+		}
+		return nil
+	case "exec":
+		// Skip exec flags to find the container name and the gh subcommand.
+		i := 1
+		for i < len(args) && strings.HasPrefix(args[i], "-") {
+			i++
+		}
+		if i >= len(args) {
+			return nil
+		}
+		cname := args[i]
+		i++
+		if i >= len(args) || args[i] != "gh" {
+			return nil
+		}
+		var sub string
+		if i+2 < len(args) && args[i+1] == "auth" {
+			sub = args[i+2]
+		}
+		switch sub {
+		case "login":
+			r.loggedInNames[cname] = true
+		case "token":
+			if !r.loggedInNames[cname] {
+				return errors.New("gh auth token: not logged in to this container")
+			}
+			_, _ = io.WriteString(stdout, r.token+"\n")
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
-func TestRunAuthGitHub_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
-	token := []byte("gho_exampletoken1234567890")
+// withFakeCaptureDriver swaps newCaptureDriver for one that binds the gh
+// descriptor onto a Driver backed by the given runner, with runtime/image
+// resolution stubbed out. constructErr, when non-nil, models a
+// runtime-resolution / registry failure before any driver runs. It uses
+// the real registry + descriptor so the route stays exercised end-to-end.
+func withFakeCaptureDriver(t *testing.T, runner *fakeCaptureRunner, constructErr error) {
+	t.Helper()
+	orig := newCaptureDriver
+	newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
+		if constructErr != nil {
+			return nil, constructErr
+		}
+		registry, err := capture.DefaultRegistry()
+		if err != nil {
+			return nil, err
+		}
+		desc, ok := registry.Resolve(descriptorName)
+		if !ok {
+			return nil, errors.New("descriptor not registered: " + descriptorName)
+		}
+		drv := &capture.Driver{Runner: runner, RuntimeExe: "docker"}
+		desc.Apply(drv, "img", store)
+		return drv, nil
+	}
+	t.Cleanup(func() { newCaptureDriver = orig })
+}
+
+func TestRunAuthCapture_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
+	token := "gho_exampletoken1234567890"
 	var gotMethod, gotPath, gotType string
 	var gotValue []byte
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -61,22 +134,22 @@ func TestRunAuthGitHub_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	withStubDeviceFlow(t, stubDeviceFlow{token: token}, nil)
+	withFakeCaptureDriver(t, &fakeCaptureRunner{token: token}, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if gotMethod != http.MethodPut || gotPath != "/vault/user/github/credentials" {
 		t.Errorf("request = %s %s, want PUT /vault/user/github/credentials", gotMethod, gotPath)
 	}
-	if !bytes.Equal(gotValue, token) {
+	if string(gotValue) != token {
 		t.Errorf("stored value = %q, want %q", gotValue, token)
 	}
 	// The metadata Type must be "user" so the daemon's host-binding
-	// resolver (ADR-0019, #1195) can validate the kind it resolves for
-	// user/github at the TLS boundary.
+	// resolver (ADR-0019, #1195) validates the kind it resolves for
+	// user/github at the TLS boundary. It comes from the descriptor's kind.
 	if gotType != "user" {
 		t.Errorf("stored metadata.type = %q, want user", gotType)
 	}
@@ -85,40 +158,110 @@ func TestRunAuthGitHub_HappyPathStoresTokenAtUserGitHub(t *testing.T) {
 	}
 }
 
-func TestRunAuthGitHub_CaptureFailureNoPUT(t *testing.T) {
+// TestRunAuth_GitHubVerbRoutesThroughRegistry is the route regression
+// guard the issue requires: `aileron auth github` must reach the
+// descriptor-driven path and succeed end-to-end. A half-wired dispatch
+// (verb resolved but driver not built / store not wired) cannot produce
+// the PUT + success message, so it reddens this test.
+func TestRunAuth_GitHubVerbRoutesThroughRegistry(t *testing.T) {
+	token := "gho_routedtoken0987654321"
+	var gotPath string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	withFakeCaptureDriver(t, &fakeCaptureRunner{token: token}, nil)
+
+	var stdout, stderr bytes.Buffer
+	// Drive the full runAuth dispatch with the user-facing `github` verb so
+	// the verb→descriptor alias + registry lookup are both exercised.
+	code := runAuth([]string{"github"}, authTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPath != "/vault/user/github/credentials" {
+		t.Errorf("PUT path = %q, want /vault/user/github/credentials (route did not reach the driver)", gotPath)
+	}
+	if !strings.Contains(stdout.String(), "Stored user/github") {
+		t.Errorf("stdout = %q, want success message", stdout.String())
+	}
+}
+
+func TestRunAuthCapture_CaptureFailureNoPUT(t *testing.T) {
 	called := false
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	})
-	withStubDeviceFlow(t, stubDeviceFlow{err: errors.New("device flow timed out")}, nil)
+	// A runner that errors the login exec makes Capture fail before any
+	// token read, so Acquire never calls Store.
+	withFailingLoginCaptureDriver(t)
 
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	if called {
 		t.Error("daemon PUT was issued despite a capture failure")
 	}
-	if !strings.Contains(stderr.String(), "device-flow login failed") {
-		t.Errorf("stderr = %q, want capture failure message", stderr.String())
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("stderr = %q, want a clean capture-failure message", stderr.String())
 	}
 }
 
-func TestRunAuthGitHub_EmptyTokenGuardNoPUT(t *testing.T) {
+// withFailingLoginCaptureDriver swaps newCaptureDriver for one whose runner
+// errors the login exec, so Capture fails before any token read or store.
+func withFailingLoginCaptureDriver(t *testing.T) {
+	t.Helper()
+	orig := newCaptureDriver
+	newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
+		registry, err := capture.DefaultRegistry()
+		if err != nil {
+			return nil, err
+		}
+		desc, ok := registry.Resolve(descriptorName)
+		if !ok {
+			return nil, errors.New("descriptor not registered: " + descriptorName)
+		}
+		drv := &capture.Driver{Runner: runnerFunc(func(_ context.Context, _ string, args []string, _, _ io.Writer) error {
+			if len(args) > 0 && args[0] == "exec" {
+				// Find the gh subcommand; fail the login exec.
+				for i, a := range args {
+					if a == "gh" && i+2 < len(args) && args[i+1] == "auth" && args[i+2] == "login" {
+						return errors.New("login failed")
+					}
+				}
+			}
+			return nil
+		}), RuntimeExe: "docker"}
+		desc.Apply(drv, "img", store)
+		return drv, nil
+	}
+	t.Cleanup(func() { newCaptureDriver = orig })
+}
+
+// runnerFunc adapts a function to the sandboxcontainer.Runner interface.
+type runnerFunc func(context.Context, string, []string, io.Writer, io.Writer) error
+
+func (f runnerFunc) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return f(ctx, name, args, stdout, stderr)
+}
+
+func TestRunAuthCapture_EmptyTokenGuardNoPUT(t *testing.T) {
 	called := false
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// Whitespace-only is treated as empty after trimming.
-	withStubDeviceFlow(t, stubDeviceFlow{token: []byte("  \n")}, nil)
+	// A whitespace-only token is empty after trimming: the driver's
+	// ErrEmptyToken guard fires and Store is never called.
+	withFakeCaptureDriver(t, &fakeCaptureRunner{token: "  "}, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
 	}
 	if called {
 		t.Error("daemon PUT was issued despite an empty token")
@@ -128,7 +271,7 @@ func TestRunAuthGitHub_EmptyTokenGuardNoPUT(t *testing.T) {
 	}
 }
 
-func TestRunAuthGitHub_StoreFailureSurfacesCleanly(t *testing.T) {
+func TestRunAuthCapture_StoreFailureSurfacesCleanly(t *testing.T) {
 	cases := []struct {
 		name   string
 		status int
@@ -143,10 +286,10 @@ func TestRunAuthGitHub_StoreFailureSurfacesCleanly(t *testing.T) {
 			fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)
 			})
-			withStubDeviceFlow(t, stubDeviceFlow{token: []byte("gho_tok")}, nil)
+			withFakeCaptureDriver(t, &fakeCaptureRunner{token: "gho_tok"}, nil)
 
 			var stdout, stderr bytes.Buffer
-			code := runAuthGitHub(nil, &stdout, &stderr)
+			code := runAuthCapture("gh", nil, &stdout, &stderr)
 			if code != 1 {
 				t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
 			}
@@ -157,53 +300,30 @@ func TestRunAuthGitHub_StoreFailureSurfacesCleanly(t *testing.T) {
 	}
 }
 
-func TestRunAuthGitHub_RunnerConstructionErrorSurfaces(t *testing.T) {
-	orig := newDeviceFlowRunner
-	newDeviceFlowRunner = func(runtime, image string) (deviceFlowRunner, error) {
-		return nil, errors.New("no container runtime found on PATH")
-	}
-	t.Cleanup(func() { newDeviceFlowRunner = orig })
+func TestRunAuthCapture_DriverConstructionErrorSurfaces(t *testing.T) {
+	withFakeCaptureDriver(t, nil, errors.New("no container runtime found on PATH"))
 
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "no container runtime") {
-		t.Errorf("stderr = %q, want runtime-resolution error", stderr.String())
+		t.Errorf("stderr = %q, want construction error", stderr.String())
 	}
 }
 
-func TestRunAuthGitHub_RejectsUnknownFlag(t *testing.T) {
+func TestRunAuthCapture_RejectsUnknownFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub([]string{"--nope"}, &stdout, &stderr)
+	code := runAuthCapture("gh", []string{"--nope"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
 }
 
-func TestRunAuthGitHub_TransportErrorSurfaces(t *testing.T) {
-	// Capture succeeds, but the daemon is unreachable: vaultDoRequest's
-	// transport error must surface cleanly with exit 1 and no panic.
-	withStubDeviceFlow(t, stubDeviceFlow{token: []byte("gho_tok")}, nil)
-	// Point at a closed port so the HTTP client errors at the transport
-	// layer rather than returning a status.
-	t.Setenv("AILERON_API_URL", "http://127.0.0.1:0/v1")
-	t.Setenv("AILERON_TOKEN", "test-token")
-
+func TestRunAuthCapture_RejectsExtraPositionalArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub(nil, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "error:") {
-		t.Errorf("stderr = %q, want a transport error", stderr.String())
-	}
-}
-
-func TestRunAuthGitHub_RejectsExtraPositionalArgs(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runAuthGitHub([]string{"unexpected"}, &stdout, &stderr)
+	code := runAuthCapture("gh", []string{"unexpected"}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
@@ -212,23 +332,22 @@ func TestRunAuthGitHub_RejectsExtraPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestNewDeviceFlowRunner_RejectsUnsupportedRuntime(t *testing.T) {
-	// An unsupported runtime fails fast in ResolveRuntime before any
-	// container work, exercising the production constructor's error path.
-	if _, err := newDeviceFlowRunner("podman", ""); err == nil {
-		t.Fatal("expected an error for an unsupported runtime")
-	}
-}
+func TestRunAuthCapture_TransportErrorSurfaces(t *testing.T) {
+	// Capture succeeds, but the daemon is unreachable: the store closure's
+	// transport error must surface cleanly with exit 1 and no panic.
+	withFakeCaptureDriver(t, &fakeCaptureRunner{token: "gho_tok"}, nil)
+	// Point at a closed port so the HTTP client errors at the transport
+	// layer rather than returning a status.
+	t.Setenv("AILERON_API_URL", "http://127.0.0.1:0/v1")
+	t.Setenv("AILERON_TOKEN", "test-token")
 
-func TestStderrSuffix(t *testing.T) {
-	if got := stderrSuffix(bytes.NewBufferString("")); got != "" {
-		t.Errorf("empty stderr suffix = %q, want empty", got)
+	var stdout, stderr bytes.Buffer
+	code := runAuthCapture("gh", nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
 	}
-	if got := stderrSuffix(bytes.NewBufferString("   \n")); got != "" {
-		t.Errorf("whitespace stderr suffix = %q, want empty", got)
-	}
-	if got := stderrSuffix(bytes.NewBufferString("boom\n")); got != ": boom" {
-		t.Errorf("stderr suffix = %q, want %q", got, ": boom")
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("stderr = %q, want a transport error", stderr.String())
 	}
 }
 
@@ -244,387 +363,97 @@ func TestResolveDeviceFlowImage(t *testing.T) {
 	}
 }
 
-// --- req 1: shared-container regression guard ---
-
-// recordingRunner is a fake sandboxcontainer.Runner that records every
-// invocation and models the load-bearing shared-container behavior:
-// `gh auth token` only yields a token when a prior `gh auth login` exec
-// ran against the SAME container name. An ephemeral-container
-// implementation (a second `docker run` before the token read) cannot
-// satisfy this — there would be no logged-in container to read from.
-type recordingRunner struct {
-	calls         [][]string
-	loggedInNames map[string]bool
-	runContainer  string // the container name created by `run -d`
-	token         string
-}
-
-func (r *recordingRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
-	r.calls = append(r.calls, args)
-	if r.loggedInNames == nil {
-		r.loggedInNames = map[string]bool{}
-	}
-	if len(args) == 0 {
-		return nil
-	}
-	switch args[0] {
-	case "run":
-		// docker run -d --name <name> <image> sleep <n>
-		r.runContainer = containerNameFromRunArgs(args)
-		return nil
-	case "exec":
-		cname, gh := parseExecArgs(args)
-		if !gh.isGH {
-			return nil
-		}
-		switch {
-		case gh.sub == "login":
-			if cname != r.runContainer {
-				return errors.New("login targeted a container that was never created")
-			}
-			r.loggedInNames[cname] = true
-			return nil
-		case gh.sub == "token":
-			// The token read must hit the SAME container the login ran in.
-			if !r.loggedInNames[cname] {
-				return errors.New("gh auth token: not logged in to this container")
-			}
-			_, _ = io.WriteString(stdout, r.token+"\n")
-			return nil
-		}
-	case "rm":
-		return nil
-	}
-	return nil
-}
-
-type ghCall struct {
-	isGH bool
-	sub  string
-}
-
-// parseExecArgs extracts the container name and the gh subcommand from a
-// `docker exec [-i] <name> gh <sub> ...` arg slice.
-func parseExecArgs(args []string) (container string, gh ghCall) {
-	i := 1 // skip "exec"
-	for i < len(args) && strings.HasPrefix(args[i], "-") {
-		i++ // skip exec flags like -i
-	}
-	if i >= len(args) {
-		return "", ghCall{}
-	}
-	container = args[i]
-	i++
-	// gh invocations are `gh auth <sub> ...`; the meaningful subcommand
-	// is the token after "auth".
-	if i < len(args) && args[i] == "gh" {
-		gh.isGH = true
-		if i+1 < len(args) && args[i+1] == "auth" && i+2 < len(args) {
-			gh.sub = args[i+2]
-		}
-	}
-	return container, gh
-}
-
-// containerNameFromRunArgs returns the value following --name in a run
-// arg slice.
-func containerNameFromRunArgs(args []string) string {
-	for i, a := range args {
-		if a == "--name" && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
-}
-
-func TestContainerDeviceFlow_UsesOneSharedContainerForBothGHCalls(t *testing.T) {
-	rr := &recordingRunner{token: "gho_sharedcontainertoken"}
-	flow := &containerDeviceFlow{
-		runner:        rr,
-		runtimeExe:    "docker",
-		image:         "ghcr.io/alrubinger/aileron-sandbox-base:edge",
-		containerName: "aileron-auth-github",
-	}
-
-	token, err := flow.Capture(context.Background())
-	if err != nil {
-		t.Fatalf("Capture: %v", err)
-	}
-	if string(token) != "gho_sharedcontainertoken" {
-		t.Errorf("token = %q, want the captured value (trimmed)", token)
-	}
-
-	// Exactly one `docker run` — no ephemeral second run for the token read.
-	runs := 0
-	for _, c := range rr.calls {
-		if len(c) > 0 && c[0] == "run" {
-			runs++
-		}
-	}
-	if runs != 1 {
-		t.Fatalf("docker run count = %d, want exactly 1 (shared container)", runs)
-	}
-
-	// The login and token execs both target the one created container.
-	if rr.runContainer != "aileron-auth-github" {
-		t.Fatalf("created container = %q, want aileron-auth-github", rr.runContainer)
-	}
-	var loginContainer, tokenContainer string
-	for _, c := range rr.calls {
-		if len(c) == 0 || c[0] != "exec" {
-			continue
-		}
-		cname, gh := parseExecArgs(c)
-		switch gh.sub {
-		case "login":
-			loginContainer = cname
-		case "token":
-			tokenContainer = cname
-		}
-	}
-	if loginContainer != rr.runContainer {
-		t.Errorf("login container = %q, want %q", loginContainer, rr.runContainer)
-	}
-	if tokenContainer != rr.runContainer {
-		t.Errorf("token container = %q, want %q (same as login)", tokenContainer, rr.runContainer)
-	}
-
-	// The container is torn down.
-	teardown := false
-	for _, c := range rr.calls {
-		if len(c) >= 3 && c[0] == "rm" && c[1] == "-f" && c[2] == "aileron-auth-github" {
-			teardown = true
-		}
-	}
-	if !teardown {
-		t.Error("container was not torn down with rm -f")
+// TestUserCredentialStore_ProductionRealRuntime exercises the production
+// newCaptureDriver path far enough to assert the runtime-resolution error
+// surfaces: an unsupported runtime fails fast in capture.New before any
+// container work, exercising the real (non-stubbed) constructor.
+func TestNewCaptureDriver_RejectsUnsupportedRuntime(t *testing.T) {
+	if _, err := newCaptureDriver("gh", "podman", "img", userCredentialStore); err == nil {
+		t.Fatal("expected an error for an unsupported runtime")
 	}
 }
 
-// TestContainerDeviceFlow_LoginExecAllocatesTTYWithStdin is the
-// regression guard for #1165: `gh auth login --web` renders an
-// interactive prompt that needs a pseudo-TTY, so the login exec must
-// carry `-t` when the operator's stdin is a real terminal (without it
-// the command hangs with no visible prompt). A non-terminal / CI stdin
-// must NOT get `-t` (docker rejects a PTY on non-tty input), and the
-// non-interactive token read must never allocate a PTY. `-i` and `-t`
-// must be separate args so the Runner's interactiveTTYRun gate matches.
-func TestContainerDeviceFlow_LoginExecAllocatesTTYWithStdin(t *testing.T) {
-	loginAndTokenArgs := func(t *testing.T, isTTY bool) (login, token []string) {
-		t.Helper()
-		orig := stdinIsTerminal
-		stdinIsTerminal = func() bool { return isTTY }
-		t.Cleanup(func() { stdinIsTerminal = orig })
-
-		rr := &recordingRunner{token: "gho_tok"}
-		flow := &containerDeviceFlow{
-			runner:        rr,
-			runtimeExe:    "docker",
-			image:         "img",
-			containerName: "aileron-auth-github",
-		}
-		if _, err := flow.Capture(context.Background()); err != nil {
-			t.Fatalf("Capture: %v", err)
-		}
-		for _, c := range rr.calls {
-			if len(c) == 0 || c[0] != "exec" {
-				continue
-			}
-			_, gh := parseExecArgs(c)
-			switch gh.sub {
-			case "login":
-				login = c
-			case "token":
-				token = c
-			}
-		}
-		return login, token
-	}
-
-	hasFlag := func(args []string, f string) bool {
-		for _, a := range args {
-			if a == f {
-				return true
-			}
-		}
-		return false
-	}
-
-	t.Run("terminal stdin allocates a PTY for the login exec", func(t *testing.T) {
-		login, token := loginAndTokenArgs(t, true)
-		if !hasFlag(login, "-t") {
-			t.Errorf("login exec = %v; want a standalone -t (PTY) flag when stdin is a terminal", login)
-		}
-		if !hasFlag(login, "-i") {
-			t.Errorf("login exec = %v; want -i", login)
-		}
-		if hasFlag(login, "-it") {
-			t.Errorf("login exec = %v; -i and -t must be separate args (not -it) so interactiveTTYRun matches -t", login)
-		}
-		if hasFlag(token, "-t") {
-			t.Errorf("token exec = %v; the non-interactive token read must not allocate a PTY", token)
-		}
-	})
-
-	t.Run("non-terminal stdin omits the PTY flag", func(t *testing.T) {
-		login, _ := loginAndTokenArgs(t, false)
-		if hasFlag(login, "-t") {
-			t.Errorf("login exec = %v; want NO -t when stdin is not a terminal (docker rejects a PTY on non-tty input)", login)
-		}
-		if !hasFlag(login, "-i") {
-			t.Errorf("login exec = %v; want -i even without a terminal", login)
-		}
-	})
-}
-
-// TestContainerDeviceFlow_LoginSilencesBrowserOpen guards the browser
-// no-op: the capture container ships no browser, so gh's default
-// open-in-browser step fails with a noisy "executable file not found"
-// that reads like an error. The login exec sets BROWSER=echo (as a
-// single `--env=K=V` token so it stays a `-`-prefixed flag) to make the
-// open a clean no-op. The non-interactive token read must not carry it.
-func TestContainerDeviceFlow_LoginSilencesBrowserOpen(t *testing.T) {
-	rr := &recordingRunner{token: "gho_tok"}
-	flow := &containerDeviceFlow{
-		runner:        rr,
-		runtimeExe:    "docker",
-		image:         "img",
-		containerName: "aileron-auth-github",
-	}
-	if _, err := flow.Capture(context.Background()); err != nil {
-		t.Fatalf("Capture: %v", err)
-	}
-
-	has := func(args []string, want string) bool {
-		for _, a := range args {
-			if a == want {
-				return true
-			}
-		}
-		return false
-	}
-	var login, token []string
-	for _, c := range rr.calls {
-		if len(c) == 0 || c[0] != "exec" {
-			continue
-		}
-		_, gh := parseExecArgs(c)
-		switch gh.sub {
-		case "login":
-			login = c
-		case "token":
-			token = c
-		}
-	}
-	if !has(login, "--env=BROWSER=echo") {
-		t.Errorf("login exec = %v; want --env=BROWSER=echo to silence gh's failed browser-open", login)
-	}
-	if has(token, "--env=BROWSER=echo") {
-		t.Errorf("token exec = %v; the non-interactive token read must not set BROWSER", token)
-	}
-}
-
-func TestContainerDeviceFlow_TearsDownOnLoginFailure(t *testing.T) {
-	// A runner that fails the login exec but records all calls, so we can
-	// assert the deferred teardown still ran.
-	rr := &failingLoginRunner{}
-	flow := &containerDeviceFlow{
-		runner:        rr,
-		runtimeExe:    "docker",
-		image:         "img",
-		containerName: "aileron-auth-github",
-	}
-	_, err := flow.Capture(context.Background())
+// TestNewCaptureDriver_UnknownDescriptor exercises the registry-miss
+// branch of the production binder: an unregistered name is a clear error
+// naming the registered tools, not a nil driver.
+func TestNewCaptureDriver_UnknownDescriptor(t *testing.T) {
+	_, err := newCaptureDriver("nope", "docker", "img", userCredentialStore)
 	if err == nil {
-		t.Fatal("expected an error from the failing login")
-	}
-	if !rr.removed {
-		t.Error("container was not removed after a mid-flow failure")
+		t.Fatal("expected an error for an unregistered descriptor")
 	}
 }
 
-type failingLoginRunner struct {
-	removed bool
+// TestDescriptorForVerb pins the verb→descriptor spelling alias: the
+// user-facing `github` verb maps to the shipped `gh` descriptor, while a
+// verb with no alias entry is used as the descriptor name directly.
+func TestDescriptorForVerb(t *testing.T) {
+	if got := descriptorForVerb("github"); got != "gh" {
+		t.Errorf("descriptorForVerb(github) = %q, want gh", got)
+	}
+	if got := descriptorForVerb("gh"); got != "gh" {
+		t.Errorf("descriptorForVerb(gh) = %q, want gh (no alias, used directly)", got)
+	}
 }
 
-func (r *failingLoginRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		return nil
+// TestIsCaptureDescriptor confirms the dispatch predicate resolves the
+// shipped descriptor and rejects an unknown name, so runAuth dispatches
+// `github` (via its `gh` alias) but falls through for an agent name.
+func TestIsCaptureDescriptor(t *testing.T) {
+	if !isCaptureDescriptor("gh") {
+		t.Error("isCaptureDescriptor(gh) = false, want true (shipped descriptor)")
 	}
-	switch args[0] {
-	case "run":
-		return nil
-	case "exec":
-		_, gh := parseExecArgs(args)
-		if gh.sub == "login" {
-			return errors.New("login failed")
-		}
-		return nil
-	case "rm":
-		r.removed = true
-		return nil
+	if isCaptureDescriptor("claude") {
+		t.Error("isCaptureDescriptor(claude) = true, want false (an agent, not a capture verb)")
 	}
-	return nil
 }
 
-// scriptedRunner fails a chosen step and writes a stderr fragment, so we
-// can assert Capture surfaces the runtime's stderr (via stderrSuffix).
-type scriptedRunner struct {
-	failStep  string // "run" or "token"
-	stderrMsg string
-	removed   bool
+// withFailingCaptureRegistry forces the shared registry constructor to
+// fail, exercising the fail-closed branch in both isCaptureDescriptor and
+// newCaptureDriver: a registry that cannot load must not crash or
+// mis-dispatch.
+func withFailingCaptureRegistry(t *testing.T) {
+	t.Helper()
+	orig := captureRegistry
+	captureRegistry = func() (*capture.Registry, error) {
+		return nil, errors.New("registry load failed")
+	}
+	t.Cleanup(func() { captureRegistry = orig })
 }
 
-func (r *scriptedRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
-	if len(args) == 0 {
-		return nil
+// TestIsCaptureDescriptor_RegistryLoadErrorFailsClosed pins the fail-closed
+// dispatch: when the registry cannot load, isCaptureDescriptor returns
+// false so runAuth falls through to the agent path rather than treating the
+// verb as a (now-unresolvable) capture descriptor.
+func TestIsCaptureDescriptor_RegistryLoadErrorFailsClosed(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	if isCaptureDescriptor("gh") {
+		t.Error("isCaptureDescriptor(gh) = true on a registry load error, want false (fail closed)")
 	}
-	switch args[0] {
-	case "run":
-		if r.failStep == "run" {
-			_, _ = io.WriteString(stderr, r.stderrMsg)
-			return errors.New("exit status 125")
-		}
-		return nil
-	case "exec":
-		_, gh := parseExecArgs(args)
-		if gh.sub == "token" && r.failStep == "token" {
-			_, _ = io.WriteString(stderr, r.stderrMsg)
-			return errors.New("exit status 1")
-		}
-		return nil
-	case "rm":
-		r.removed = true
-		return nil
-	}
-	return nil
 }
 
-func TestContainerDeviceFlow_StartFailureSurfacesStderr(t *testing.T) {
-	rr := &scriptedRunner{failStep: "run", stderrMsg: "image not found"}
-	flow := &containerDeviceFlow{runner: rr, runtimeExe: "docker", image: "img", containerName: "aileron-auth-github"}
-	_, err := flow.Capture(context.Background())
-	if err == nil {
-		t.Fatal("expected an error when the container fails to start")
+// TestNewCaptureDriver_RegistryLoadErrorSurfaces pins that a registry load
+// error surfaces from the driver builder rather than panicking on a nil
+// registry.
+func TestNewCaptureDriver_RegistryLoadErrorSurfaces(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	if _, err := newCaptureDriver("gh", "docker", "img", userCredentialStore); err == nil {
+		t.Fatal("expected the registry load error to surface")
 	}
-	if !strings.Contains(err.Error(), "starting container") || !strings.Contains(err.Error(), "image not found") {
-		t.Errorf("err = %v, want start-failure context with runtime stderr", err)
-	}
-	// No container was created, so no teardown is expected; the defer
-	// still runs but the assertion here is only that we surfaced cleanly.
 }
 
-func TestContainerDeviceFlow_TokenReadFailureSurfacesStderrAndTearsDown(t *testing.T) {
-	rr := &scriptedRunner{failStep: "token", stderrMsg: "no oauth token"}
-	flow := &containerDeviceFlow{runner: rr, runtimeExe: "docker", image: "img", containerName: "aileron-auth-github"}
-	_, err := flow.Capture(context.Background())
-	if err == nil {
-		t.Fatal("expected an error when gh auth token fails")
+// TestRunAuth_GitHubVerbFallsThroughOnRegistryError confirms the
+// integration of the fail-closed dispatch: with the registry unavailable,
+// `aileron auth github` is not treated as a capture verb and instead hits
+// the agent path, which rejects "github" as unsupported (no PUT, exit 1).
+func TestRunAuth_GitHubVerbFallsThroughOnRegistryError(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"github"}, authTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(err.Error(), "gh auth token") || !strings.Contains(err.Error(), "no oauth token") {
-		t.Errorf("err = %v, want token-failure context with runtime stderr", err)
-	}
-	if !rr.removed {
-		t.Error("container was not torn down after a token-read failure")
+	// It fell through to the agent path: --import-from-host is required.
+	if !strings.Contains(stderr.String(), "--import-from-host is required") {
+		t.Errorf("stderr = %q, want the agent-path fall-through error", stderr.String())
 	}
 }
