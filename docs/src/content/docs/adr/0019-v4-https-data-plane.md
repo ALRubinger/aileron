@@ -91,17 +91,17 @@ The initial implementation lands four schemes fully (`bearer`, `basic`, `header-
 
 #### Emit mechanisms
 
-The substrate emits the injected credential to the upstream by one of two mechanisms.
+The substrate emits the injected credential to the upstream by one of two mechanisms. A binding descriptor names the mechanism in its `emit_mechanism` field, with the value `inject` or `sentinel-swap`.
 
-The first is empty or no-op credential config. The agent holds no credential material and the request carries no placeholder; the proxy adds the credential at the TLS boundary on a request that arrived without one.
+The first is `inject`. The agent holds no credential material and the request carries no placeholder. The proxy adds the credential at the TLS boundary on a request that arrived without one. This is the default for a binding that declares no `emit_mechanism`.
 
-The second is sentinel-swap. The agent holds a non-secret, format-mimicking placeholder that looks like a credential of the right shape but carries no secret value. The agent puts the sentinel where the credential would go, and the proxy swaps the sentinel for the real secret at egress. This covers clients that refuse to issue a request unless a syntactically valid credential is present.
+The second is `sentinel-swap`. The agent holds a non-secret, format-mimicking placeholder that looks like a credential of the right shape but carries no secret value. The agent puts the sentinel where the credential would go, and the proxy swaps the sentinel for the real secret at egress. This covers clients that refuse to issue a request unless a syntactically valid credential is present.
 
 Both mechanisms preserve the sealing claim. The agent only ever holds the sentinel, which is useless on its own, so the "agent never sees raw secret bytes" decision above still holds. Raw credential bytes are still never written to container env, image layers, mounted project files, or command-line args; the swap happens at the proxy, not in the container.
 
 #### Sealability rule and residual exception
 
-A credential is proxy-sealable if and only if some scheme plus emit-mechanism combination completes its request at the proxy boundary. Most credentials are sealable: pick the scheme the service expects, pick empty config or sentinel-swap depending on whether the client tolerates a missing credential, and the proxy finishes the request without the agent ever holding the secret.
+A credential is proxy-sealable if and only if some scheme plus emit-mechanism combination completes its request at the proxy boundary. Most credentials are sealable: pick the scheme the service expects, pick `inject` or `sentinel-swap` depending on whether the client tolerates a missing credential, and the proxy finishes the request without the agent ever holding the secret.
 
 The residual exception is narrow. It is the conjunction of two conditions: a CLI that short-circuits the proxy (it does not honor `HTTPS_PROXY` or otherwise bypasses the TLS boundary) and that also rejects a syntactically valid sentinel (so sentinel-swap cannot satisfy it). A CLI that does only one of these is still sealable. Only the conjunction forces env injection, which is unsealed. This sits inside the existing threat-model scope: the cooperative-client assumption already governs whether the proxy sees the request, and a short-circuiting client is the same class of non-cooperative behavior described in [the threat model scope](#threat-model-scope) below.
 

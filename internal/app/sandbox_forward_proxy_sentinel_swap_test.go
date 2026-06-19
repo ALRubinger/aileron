@@ -15,9 +15,9 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// Emit-mechanism B sentinel-swap contract at the egress boundary (#1196),
+// Sentinel-swap contract at the egress boundary,
 // driven through the real forward-proxy CONNECT/TLS path against the
-// built-in api.github.com binding (bearer, mechanism B):
+// built-in api.github.com binding (bearer, sentinel-swap):
 //
 //	(a) a request bearing the reserved sentinel is swapped: the upstream
 //	    sees the real credential via the bearer scheme, never the sentinel.
@@ -28,15 +28,15 @@ import (
 //	    sentinel, or foreign-token bytes.
 
 func TestSentinelSwap_SecondDistinctBindingSwapsIndependently(t *testing.T) {
-	// A second, distinct mechanism-B binding swaps its own sentinel for its
-	// own credential through the real proxy path, independently of GitHub
-	// (#1247). The GitHub sentinel on this host is foreign and must not be
+	// A second, distinct sentinel-swap binding swaps its own sentinel for its
+	// own credential through the real proxy path, independently of GitHub.
+	// The GitHub sentinel on this host is foreign and must not be
 	// swapped, proving recognition is per-binding, not GitHub-special.
 	const otherSentinelVal = "sk_AILERONSENTINELSECONDBINDINGXXXXXXXX"
 	const realOther = "sk_realsecondbinding_secret"
 
 	other, err := binding.NewHostBinding("api.second.test", "user/second", binding.SchemeBearer,
-		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinelVal, "SECOND_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel(otherSentinelVal, "SECOND_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding(second): %v", err)
 	}
@@ -222,7 +222,7 @@ func TestSentinelSwap_BareSentinelWithoutSchemePrefixIsSwapped(t *testing.T) {
 }
 
 func TestSentinelSwap_NoCarrierStillInjects(t *testing.T) {
-	// A mechanism-B host with no inbound carrier injects per the binding's
+	// A sentinel-swap host with no inbound carrier injects per the binding's
 	// scheme (the sentinel-swap gate governs only the carrier-present case).
 	const realToken = "ghp_nocarrier_secret"
 	v := mustVaultWith(t, "user/github", "user", []byte(realToken))
@@ -238,7 +238,7 @@ func TestSentinelSwap_NoCarrierStillInjects(t *testing.T) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if upstreamAuth != "Bearer "+realToken {
-		t.Errorf("upstream Authorization = %q, want Bearer %s on a no-carrier mechanism-B request", upstreamAuth, realToken)
+		t.Errorf("upstream Authorization = %q, want Bearer %s on a no-carrier sentinel-swap request", upstreamAuth, realToken)
 	}
 }
 

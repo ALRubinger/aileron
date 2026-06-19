@@ -9,19 +9,18 @@ import (
 
 // sentinelSwapDecision is the result of inspecting the inbound credential
 // carrier on a matched host binding to decide whether the egress seam
-// should inject the bound credential (emit-mechanism B sentinel-swap,
-// ADR-0019, #1196).
+// should inject the bound credential (sentinel-swap, ADR-0019).
 type sentinelSwapDecision int
 
 const (
 	// sentinelSwapInject means proceed with the binding's injection
-	// scheme: either the binding is emit-mechanism A (the default, always
-	// inject), or it is mechanism B and the inbound carrier is the
+	// scheme: either the binding is emit-mechanism inject (the default,
+	// always inject), or it is sentinel-swap and the inbound carrier is the
 	// recognized sentinel (which is stripped before injection so it never
-	// reaches upstream), or it is mechanism B with no carrier at all.
+	// reaches upstream), or it is sentinel-swap with no carrier at all.
 	sentinelSwapInject sentinelSwapDecision = iota
 
-	// sentinelSwapPassthroughForeign means the binding is mechanism B and
+	// sentinelSwapPassthroughForeign means the binding is sentinel-swap and
 	// the inbound carrier is a foreign (non-sentinel) token. The proxy
 	// must NOT swap it: it seals only tokens it planted. The request is
 	// forwarded unchanged with the foreign carrier intact and no real
@@ -38,24 +37,24 @@ const carrierHeader = "Authorization"
 // matched host binding and returns whether the egress seam should inject
 // the bound credential or forward a foreign token unchanged.
 //
-// For an emit-mechanism A binding it always returns sentinelSwapInject:
-// mechanism A plants nothing and injects unconditionally, the pre-#1196
-// behavior, so the carrier (if any) is overwritten by the scheme.
+// For an inject binding it always returns sentinelSwapInject: the inject
+// mechanism plants nothing and injects unconditionally, so the carrier
+// (if any) is overwritten by the scheme.
 //
-// For an emit-mechanism B binding it gates on the carrier:
+// For a sentinel-swap binding it gates on the carrier:
 //   - the recognized sentinel  -> strip the carrier and inject (the
 //     sentinel value is never forwarded upstream);
 //   - a foreign, non-empty token -> do not inject; forward unchanged;
 //   - no carrier / empty carrier -> inject per the binding's scheme.
 //
-// Recognition is binding-driven (#1247): the matched binding carries the
-// sentinel value the launcher planted (HostBinding.SentinelValue), so the
+// Recognition is binding-driven: the matched binding carries the sentinel
+// value the launcher planted (HostBinding.SentinelValue), so the
 // launch-side plant and the proxy-side recognizer read one source of
 // truth and cannot drift. There is no GitHub special-casing here. Any
-// mechanism-B host is recognized by its own binding's sentinel value with
-// no change to this decision path.
+// sentinel-swap host is recognized by its own binding's sentinel value
+// with no change to this decision path.
 func decideSentinelSwap(req *http.Request, hb binding.HostBinding) sentinelSwapDecision {
-	if hb.EmitMechanism != binding.EmitMechanismB {
+	if hb.EmitMechanism != binding.EmitMechanismSentinelSwap {
 		return sentinelSwapInject
 	}
 
@@ -78,17 +77,17 @@ func decideSentinelSwap(req *http.Request, hb binding.HostBinding) sentinelSwapD
 }
 
 // bindingSentinelMatches reports whether carrier bears the sentinel the
-// launcher plants for this mechanism-B binding. The carrier may be the
+// launcher plants for this sentinel-swap binding. The carrier may be the
 // bare sentinel (gh sets GH_TOKEN verbatim and some clients send the
 // token alone) or a "Bearer <sentinel>" / "token <sentinel>" form, so
 // the scheme prefix is tolerated before the exact sentinel match.
 //
-// The match reads the binding's own SentinelValue (#1247): there is no
-// GitHub special-casing. The comparison is exact, case-sensitive, and
-// does no trimming beyond the auth-scheme prefix, preserving the
-// foreign-token-safe property (only our own plant is swapped). A
-// SentinelValue of "" never matches, so an A-or-misconstructed binding
-// can never match an empty or any carrier.
+// The match reads the binding's own SentinelValue: there is no GitHub
+// special-casing. The comparison is exact, case-sensitive, and does no
+// trimming beyond the auth-scheme prefix, preserving the foreign-token-safe
+// property (only our own plant is swapped). A SentinelValue of "" never
+// matches, so an inject-or-misconstructed binding can never match an empty
+// or any carrier.
 func bindingSentinelMatches(hb binding.HostBinding, carrier string) bool {
 	return hb.SentinelValue != "" && stripAuthScheme(carrier) == hb.SentinelValue
 }

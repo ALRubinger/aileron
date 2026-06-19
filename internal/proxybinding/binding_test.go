@@ -13,7 +13,7 @@ func TestToHostBinding_LinearMapsParams(t *testing.T) {
 		Host:          "api.linear.app",
 		CredentialRef: "user/linear",
 		Scheme:        binding.SchemeHeaderTemplate,
-		EmitMechanism: "A",
+		EmitMechanism: "inject",
 		Header:        "Authorization",
 		Template:      "{token}",
 	}
@@ -33,8 +33,8 @@ func TestToHostBinding_LinearMapsParams(t *testing.T) {
 	if hb.HeaderName != "Authorization" || hb.HeaderTemplate != "{token}" {
 		t.Errorf("header params = (%q,%q), want (Authorization,{token})", hb.HeaderName, hb.HeaderTemplate)
 	}
-	if hb.EmitMechanism != binding.EmitMechanismA {
-		t.Errorf("emit mechanism = %q, want A", hb.EmitMechanism)
+	if hb.EmitMechanism != binding.EmitMechanismInject {
+		t.Errorf("emit mechanism = %q, want inject", hb.EmitMechanism)
 	}
 }
 
@@ -70,22 +70,22 @@ func TestToHostBinding_QueryParamCarriesName(t *testing.T) {
 	}
 }
 
-func TestToHostBinding_EmitMechanismBCarriesSentinel(t *testing.T) {
-	// A mechanism-B entry's sentinel value and env adapt onto the binding
-	// (#1247) so the launcher and the proxy read one source of truth.
+func TestToHostBinding_SentinelSwapCarriesSentinel(t *testing.T) {
+	// A sentinel-swap entry's sentinel value and env adapt onto the binding
+	// so the launcher and the proxy read one source of truth.
 	e := Entry{
 		Host:          "api.example.com",
 		CredentialRef: "user/example",
 		Scheme:        binding.SchemeBearer,
-		EmitMechanism: "B",
+		EmitMechanism: "sentinel-swap",
 		Sentinel:      &Sentinel{Value: "sent_example", Env: "EXAMPLE_TOKEN"},
 	}
 	hb, err := e.ToHostBinding()
 	if err != nil {
 		t.Fatalf("ToHostBinding: %v", err)
 	}
-	if hb.EmitMechanism != binding.EmitMechanismB {
-		t.Errorf("emit mechanism = %q, want B", hb.EmitMechanism)
+	if hb.EmitMechanism != binding.EmitMechanismSentinelSwap {
+		t.Errorf("emit mechanism = %q, want sentinel-swap", hb.EmitMechanism)
 	}
 	if hb.SentinelValue != "sent_example" {
 		t.Errorf("SentinelValue = %q, want sent_example", hb.SentinelValue)
@@ -95,35 +95,35 @@ func TestToHostBinding_EmitMechanismBCarriesSentinel(t *testing.T) {
 	}
 }
 
-func TestToHostBinding_EmitMechanismBWithoutSentinelErrors(t *testing.T) {
-	// A mechanism-B entry that reached adaptation with no sentinel block is
-	// rejected by the constructor — a B binding that could never be planted
-	// or recognized must fail loudly rather than ship.
+func TestToHostBinding_SentinelSwapWithoutSentinelErrors(t *testing.T) {
+	// A sentinel-swap entry that reached adaptation with no sentinel block is
+	// rejected by the constructor — a sentinel-swap binding that could never
+	// be planted or recognized must fail loudly rather than ship.
 	e := Entry{
 		Host:          "api.example.com",
 		CredentialRef: "user/example",
 		Scheme:        binding.SchemeBearer,
-		EmitMechanism: "B",
+		EmitMechanism: "sentinel-swap",
 	}
 	if _, err := e.ToHostBinding(); err == nil {
-		t.Fatal("ToHostBinding for mechanism-B entry with no sentinel = nil error, want error")
+		t.Fatal("ToHostBinding for sentinel-swap entry with no sentinel = nil error, want error")
 	}
 }
 
-func TestToHostBinding_MechanismACarriesNoSentinel(t *testing.T) {
-	// A mechanism-A entry adapts with empty sentinel fields.
+func TestToHostBinding_InjectCarriesNoSentinel(t *testing.T) {
+	// An inject entry adapts with empty sentinel fields.
 	e := Entry{
 		Host:          "api.example.com",
 		CredentialRef: "user/example",
 		Scheme:        binding.SchemeBearer,
-		EmitMechanism: "A",
+		EmitMechanism: "inject",
 	}
 	hb, err := e.ToHostBinding()
 	if err != nil {
 		t.Fatalf("ToHostBinding: %v", err)
 	}
 	if hb.SentinelValue != "" || hb.SentinelEnv != "" {
-		t.Errorf("mechanism-A binding carries a sentinel (%q,%q), want none", hb.SentinelValue, hb.SentinelEnv)
+		t.Errorf("inject binding carries a sentinel (%q,%q), want none", hb.SentinelValue, hb.SentinelEnv)
 	}
 }
 

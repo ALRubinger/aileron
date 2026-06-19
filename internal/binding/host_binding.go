@@ -47,27 +47,28 @@ const SchemeHeaderTemplate = "header-template"
 const SchemeQueryParam = "query-param"
 
 // EmitMechanism names how the in-container client is made to emit a
-// request the proxy can seal at egress (ADR-0019, #1196). It is
-// orthogonal to [HostBinding.Scheme], which is how the proxy injects the
-// credential once the request arrives.
+// request the proxy can seal at egress (ADR-0019). It is orthogonal to
+// [HostBinding.Scheme], which is how the proxy injects the credential
+// once the request arrives.
 type EmitMechanism string
 
 const (
-	// EmitMechanismA is the default: the launcher plants no token. The
+	// EmitMechanismInject is the default: the launcher plants no token. The
 	// client emits an unauthenticated (or no-credential) request, and the
 	// proxy unconditionally injects the bound credential at egress. Used
 	// for clients that issue the request without holding a token (curl,
 	// git-over-HTTPS with a no-op credential helper).
-	EmitMechanismA EmitMechanism = "A"
+	EmitMechanismInject EmitMechanism = "inject"
 
-	// EmitMechanismB is sentinel-swap: the launcher plants a non-secret,
-	// format-mimicking sentinel token so a client that short-circuits
-	// locally without a token (e.g. `gh`) issues its request. The proxy
-	// swaps the sentinel for the real credential at egress, and ONLY
-	// swaps when it recognizes its own planted sentinel. A foreign token
-	// on a mechanism-B host is left untouched (no steal-swap, no real
-	// secret injected). See the swap recognizer at the egress seam.
-	EmitMechanismB EmitMechanism = "B"
+	// EmitMechanismSentinelSwap is sentinel-swap: the launcher plants a
+	// non-secret, format-mimicking sentinel token so a client that
+	// short-circuits locally without a token (e.g. `gh`) issues its
+	// request. The proxy swaps the sentinel for the real credential at
+	// egress, and ONLY swaps when it recognizes its own planted sentinel. A
+	// foreign token on a sentinel-swap host is left untouched (no
+	// steal-swap, no real secret injected). See the swap recognizer at the
+	// egress seam.
+	EmitMechanismSentinelSwap EmitMechanism = "sentinel-swap"
 )
 
 // HostBinding is the declarative triple that maps an upstream host
@@ -128,11 +129,11 @@ type HostBinding struct {
 
 	// EmitMechanism declares how the in-container client is made to emit
 	// a sealable request (see [EmitMechanism]). The zero value is
-	// [EmitMechanismA] (plant nothing, inject unconditionally), which
-	// preserves the pre-#1196 behavior. [EmitMechanismB] enables the
-	// sentinel-swap gate at egress for hosts whose client short-circuits
-	// without a planted token. Set via [WithEmitMechanismB], which also
-	// requires the sentinel shape below.
+	// [EmitMechanismInject] (plant nothing, inject unconditionally).
+	// [EmitMechanismSentinelSwap] enables the sentinel-swap gate at egress
+	// for hosts whose client short-circuits without a planted token. Set
+	// via [WithEmitMechanismSentinelSwap], which also requires the sentinel
+	// shape below.
 	EmitMechanism EmitMechanism
 
 	// SentinelValue is the non-secret, format-mimicking placeholder the
@@ -141,15 +142,17 @@ type HostBinding struct {
 	// egress recognizer compares the inbound carrier against this exact
 	// value to decide whether to swap in the real credential. It carries
 	// no authority and is safe to embed, log, and read in-sandbox (see the
-	// internal/sentinel package doc). Required for [EmitMechanismB],
-	// forbidden for [EmitMechanismA]. Set via [WithSentinel].
+	// internal/sentinel package doc). Required for
+	// [EmitMechanismSentinelSwap], forbidden for [EmitMechanismInject]. Set
+	// via [WithSentinel].
 	SentinelValue string
 
 	// SentinelEnv is the environment-variable name the launcher sets to
 	// [HostBinding.SentinelValue] in the sandbox so the client treats
 	// itself as authenticated (e.g. `GH_TOKEN`). It is a non-secret env
-	// name, never the credential bytes. Required for [EmitMechanismB],
-	// forbidden for [EmitMechanismA]. Set via [WithSentinel].
+	// name, never the credential bytes. Required for
+	// [EmitMechanismSentinelSwap], forbidden for [EmitMechanismInject]. Set
+	// via [WithSentinel].
 	SentinelEnv string
 }
 
@@ -189,30 +192,31 @@ func WithQueryParam(name string) HostBindingOption {
 	return func(hb *HostBinding) { hb.QueryParamName = name }
 }
 
-// WithEmitMechanismB marks the binding as [EmitMechanismB] (sentinel-
-// swap). Use it for a host whose in-container client short-circuits
-// locally without a planted token (e.g. `gh`): the launcher plants a
-// non-secret sentinel and the egress seam swaps it for the real
-// credential only when it recognizes its own plant. Without this option
-// a binding defaults to [EmitMechanismA] (plant nothing, inject
-// unconditionally).
+// WithEmitMechanismSentinelSwap marks the binding as
+// [EmitMechanismSentinelSwap]. Use it for a host whose in-container
+// client short-circuits locally without a planted token (e.g. `gh`): the
+// launcher plants a non-secret sentinel and the egress seam swaps it for
+// the real credential only when it recognizes its own plant. Without this
+// option a binding defaults to [EmitMechanismInject] (plant nothing,
+// inject unconditionally).
 //
-// A mechanism-B binding also requires the sentinel shape: pair this
+// A sentinel-swap binding also requires the sentinel shape: pair this
 // option with [WithSentinel] so the binding carries the value to plant
 // and the env var to plant it into. The constructor rejects a
-// mechanism-B binding with no sentinel, since it could never be planted
+// sentinel-swap binding with no sentinel, since it could never be planted
 // or recognized.
-func WithEmitMechanismB() HostBindingOption {
-	return func(hb *HostBinding) { hb.EmitMechanism = EmitMechanismB }
+func WithEmitMechanismSentinelSwap() HostBindingOption {
+	return func(hb *HostBinding) { hb.EmitMechanism = EmitMechanismSentinelSwap }
 }
 
 // WithSentinel sets the non-secret [HostBinding.SentinelValue] and
-// [HostBinding.SentinelEnv] the launcher plants for a mechanism-B
-// binding. Both are required for [EmitMechanismB] and must not be set on
-// an [EmitMechanismA] binding (an A binding plants nothing, so a stray
-// sentinel is a configuration error caught at construction). The value
-// is the single source of truth shared by the launch-side planter and
-// the proxy-side recognizer, so the two cannot drift.
+// [HostBinding.SentinelEnv] the launcher plants for a sentinel-swap
+// binding. Both are required for [EmitMechanismSentinelSwap] and must not
+// be set on an [EmitMechanismInject] binding (an inject binding plants
+// nothing, so a stray sentinel is a configuration error caught at
+// construction). The value is the single source of truth shared by the
+// launch-side planter and the proxy-side recognizer, so the two cannot
+// drift.
 func WithSentinel(value, env string) HostBindingOption {
 	return func(hb *HostBinding) {
 		hb.SentinelValue = value
@@ -245,7 +249,7 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	if _, ok := HostBindingSchemes[scheme]; !ok {
 		return HostBinding{}, fmt.Errorf("host binding: unknown injection scheme %q", scheme)
 	}
-	hb := HostBinding{HostPattern: hp, CredentialRef: credentialRef, Scheme: scheme, EmitMechanism: EmitMechanismA}
+	hb := HostBinding{HostPattern: hp, CredentialRef: credentialRef, Scheme: scheme, EmitMechanism: EmitMechanismInject}
 	for _, opt := range opts {
 		opt(&hb)
 	}
@@ -258,11 +262,11 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	if scheme == SchemeQueryParam && hb.QueryParamName == "" {
 		return HostBinding{}, fmt.Errorf("host binding: query-param scheme requires a param name (WithQueryParam)")
 	}
-	if hb.EmitMechanism == EmitMechanismB && (hb.SentinelValue == "" || hb.SentinelEnv == "") {
-		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism B requires a sentinel value and env (WithSentinel)")
+	if hb.EmitMechanism == EmitMechanismSentinelSwap && (hb.SentinelValue == "" || hb.SentinelEnv == "") {
+		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism sentinel-swap requires a sentinel value and env (WithSentinel)")
 	}
-	if hb.EmitMechanism == EmitMechanismA && (hb.SentinelValue != "" || hb.SentinelEnv != "") {
-		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism A must not carry a sentinel (WithSentinel)")
+	if hb.EmitMechanism == EmitMechanismInject && (hb.SentinelValue != "" || hb.SentinelEnv != "") {
+		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism inject must not carry a sentinel (WithSentinel)")
 	}
 	return hb, nil
 }

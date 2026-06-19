@@ -543,9 +543,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// /home/agent/.gitconfig. The real token never enters the
 		// container: `gh` issues its request because the sentinel passes
 		// its local validation, and the daemon swaps the sentinel for the
-		// real credential at the TLS boundary (emit-mechanism B, #1196);
+		// real credential at the TLS boundary (sentinel-swap);
 		// git-over-HTTPS emits an unauthenticated request the daemon seals
-		// the same way (emit-mechanism A). A missing entry or locked vault
+		// the same way (inject). A missing entry or locked vault
 		// is a clean, non-fatal skip — the launch proceeds with GitHub
 		// operations unauthenticated. The chown hook mirrors the AuthSpec
 		// one: on rootful Docker Linux the host operator owns the
@@ -554,16 +554,16 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		ghChownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
 		// Assemble the same host-binding table the daemon recognizer reads
-		// (GitHub Go bindings + descriptor bindings) and pass the
-		// mechanism-B subset to the planter, so the launch-side plant and
-		// the proxy-side swap share one source of truth (#1247). A
-		// malformed descriptor fails the launch loudly rather than silently
-		// shipping no sentinel.
-		mechBBindings, err := mechanismBHostBindings()
+		// (every binding flows from the descriptor layers) and pass the
+		// sentinel-swap subset to the planter, so the launch-side plant and
+		// the proxy-side swap share one source of truth. A malformed
+		// descriptor fails the launch loudly rather than silently shipping
+		// no sentinel.
+		sentinelSwapBindings, err := sentinelSwapHostBindings()
 		if err != nil {
-			return LaunchResult{}, fmt.Errorf("assemble mechanism-B host bindings: %w", err)
+			return LaunchResult{}, fmt.Errorf("assemble sentinel-swap host bindings: %w", err)
 		}
-		ghPrep, err := prepareGitHubInject(ctx, client, mechBBindings, sessionLog, os.Stderr, ghChownHook)
+		ghPrep, err := prepareGitHubInject(ctx, client, sentinelSwapBindings, sessionLog, os.Stderr, ghChownHook)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare github inject: %w", err)
 		}

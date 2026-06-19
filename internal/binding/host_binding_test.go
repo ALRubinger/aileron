@@ -33,27 +33,26 @@ func TestNewHostBinding_AcceptsValidInput(t *testing.T) {
 	}
 }
 
-func TestNewHostBinding_DefaultsToEmitMechanismA(t *testing.T) {
+func TestNewHostBinding_DefaultsToEmitMechanismInject(t *testing.T) {
 	// A binding constructed without an emit-mechanism option defaults to
-	// mechanism A (plant nothing, inject unconditionally), preserving the
-	// pre-#1196 behavior.
+	// the inject mechanism (plant nothing, inject unconditionally).
 	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if hb.EmitMechanism != binding.EmitMechanismA {
-		t.Errorf("EmitMechanism = %q, want A by default", hb.EmitMechanism)
+	if hb.EmitMechanism != binding.EmitMechanismInject {
+		t.Errorf("EmitMechanism = %q, want inject by default", hb.EmitMechanism)
 	}
 }
 
-func TestNewHostBinding_WithEmitMechanismB(t *testing.T) {
+func TestNewHostBinding_WithEmitMechanismSentinelSwap(t *testing.T) {
 	hb, err := binding.NewHostBinding("api.github.com", "user/github", "bearer",
-		binding.WithEmitMechanismB(), binding.WithSentinel("ghp_sentinel", "GH_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel("ghp_sentinel", "GH_TOKEN"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if hb.EmitMechanism != binding.EmitMechanismB {
-		t.Errorf("EmitMechanism = %q, want B after WithEmitMechanismB", hb.EmitMechanism)
+	if hb.EmitMechanism != binding.EmitMechanismSentinelSwap {
+		t.Errorf("EmitMechanism = %q, want sentinel-swap after WithEmitMechanismSentinelSwap", hb.EmitMechanism)
 	}
 	if hb.SentinelValue != "ghp_sentinel" {
 		t.Errorf("SentinelValue = %q, want ghp_sentinel", hb.SentinelValue)
@@ -63,45 +62,45 @@ func TestNewHostBinding_WithEmitMechanismB(t *testing.T) {
 	}
 }
 
-func TestNewHostBinding_MechanismBRequiresSentinel(t *testing.T) {
+func TestNewHostBinding_SentinelSwapRequiresSentinel(t *testing.T) {
 	if _, err := binding.NewHostBinding("api.github.com", "user/github", "bearer",
-		binding.WithEmitMechanismB()); err == nil {
-		t.Fatal("expected error for mechanism-B binding with no sentinel, got nil")
+		binding.WithEmitMechanismSentinelSwap()); err == nil {
+		t.Fatal("expected error for sentinel-swap binding with no sentinel, got nil")
 	}
 	if _, err := binding.NewHostBinding("api.github.com", "user/github", "bearer",
-		binding.WithEmitMechanismB(), binding.WithSentinel("ghp_sentinel", "")); err == nil {
-		t.Fatal("expected error for mechanism-B binding with empty sentinel env, got nil")
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel("ghp_sentinel", "")); err == nil {
+		t.Fatal("expected error for sentinel-swap binding with empty sentinel env, got nil")
 	}
 	if _, err := binding.NewHostBinding("api.github.com", "user/github", "bearer",
-		binding.WithEmitMechanismB(), binding.WithSentinel("", "GH_TOKEN")); err == nil {
-		t.Fatal("expected error for mechanism-B binding with empty sentinel value, got nil")
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel("", "GH_TOKEN")); err == nil {
+		t.Fatal("expected error for sentinel-swap binding with empty sentinel value, got nil")
 	}
 }
 
-func TestNewHostBinding_MechanismARejectsSentinel(t *testing.T) {
+func TestNewHostBinding_InjectRejectsSentinel(t *testing.T) {
 	if _, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
 		binding.WithSentinel("ghp_sentinel", "GH_TOKEN")); err == nil {
-		t.Fatal("expected error for mechanism-A binding carrying a sentinel, got nil")
+		t.Fatal("expected error for inject binding carrying a sentinel, got nil")
 	}
 }
 
 func TestNewHostBinding_SentinelIndependentOfScheme(t *testing.T) {
 	bearer, err := binding.NewHostBinding("api.bearer.test", "user/bearer", binding.SchemeBearer,
-		binding.WithEmitMechanismB(), binding.WithSentinel("sent_bearer", "BEARER_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel("sent_bearer", "BEARER_TOKEN"))
 	if err != nil {
-		t.Fatalf("bearer-B with sentinel: %v", err)
+		t.Fatalf("bearer sentinel-swap with sentinel: %v", err)
 	}
 	if bearer.SentinelValue != "sent_bearer" || bearer.SentinelEnv != "BEARER_TOKEN" {
-		t.Errorf("bearer-B sentinel = (%q,%q)", bearer.SentinelValue, bearer.SentinelEnv)
+		t.Errorf("bearer sentinel-swap sentinel = (%q,%q)", bearer.SentinelValue, bearer.SentinelEnv)
 	}
 	header, err := binding.NewHostBinding("api.header.test", "user/header", binding.SchemeHeaderTemplate,
 		binding.WithHeaderTemplate("Authorization", "<token>"),
-		binding.WithEmitMechanismB(), binding.WithSentinel("sent_header", "HEADER_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel("sent_header", "HEADER_TOKEN"))
 	if err != nil {
-		t.Fatalf("header-template-B with sentinel: %v", err)
+		t.Fatalf("header-template sentinel-swap with sentinel: %v", err)
 	}
 	if header.SentinelValue != "sent_header" || header.SentinelEnv != "HEADER_TOKEN" {
-		t.Errorf("header-template-B sentinel = (%q,%q)", header.SentinelValue, header.SentinelEnv)
+		t.Errorf("header-template sentinel-swap sentinel = (%q,%q)", header.SentinelValue, header.SentinelEnv)
 	}
 }
 

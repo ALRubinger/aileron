@@ -26,13 +26,12 @@
 //
 // This package defines the descriptor format and the two-layer loader.
 // It does not implement the binding-table consult (#1193) or the injectors
-// (#1194). It accepts both emit mechanisms: mechanism "A" (inject at the
-// proxy) and mechanism "B" (sentinel-swap). A mechanism-B binding declares
-// a non-secret `sentinel` block (a placeholder value plus the env-var name
-// the launcher plants it under); this loader validates that schema while
-// the egress code that consumes those fields lands separately (#1247).
-// Persisting a stateful CLI's local cache across ephemeral sandboxes is out
-// of scope and tracked separately (#1190).
+// (#1194). It accepts both emit mechanisms: "inject" (inject at the proxy)
+// and "sentinel-swap". A sentinel-swap binding declares a non-secret
+// `sentinel` block (a placeholder value plus the env-var name the launcher
+// plants it under); this loader validates that schema and the egress code
+// consumes those fields. Persisting a stateful CLI's local cache across
+// ephemeral sandboxes is out of scope and tracked separately (#1190).
 //
 // [ADR-0019]: https://docs.withaileron.ai/adr/0019-v4-https-data-plane
 package proxybinding
@@ -55,17 +54,16 @@ import (
 const SchemaVersion = "v1"
 
 // EmitMechanisms is the closed set of emit-mechanism values a descriptor
-// may declare at load time. Mechanism "A" injects unconditionally at the
-// proxy (the client emits a no-credential request). Mechanism "B" is
-// sentinel-swap (the launcher plants a non-secret sentinel the proxy swaps
-// for the real credential at egress); a mechanism-B binding must declare a
-// `sentinel` block naming the placeholder value and the env-var name the
-// launcher plants it under. A value outside this set (e.g. "C") is a
-// load-time error, so a descriptor never validates against a mechanism the
-// proxy cannot enforce.
+// may declare at load time. "inject" injects unconditionally at the proxy
+// (the client emits a no-credential request). "sentinel-swap" plants a
+// non-secret sentinel the proxy swaps for the real credential at egress;
+// a sentinel-swap binding must declare a `sentinel` block naming the
+// placeholder value and the env-var name the launcher plants it under. A
+// value outside this set (e.g. "C") is a load-time error, so a descriptor
+// never validates against a mechanism the proxy cannot enforce.
 var EmitMechanisms = map[string]struct{}{
-	string(binding.EmitMechanismA): {},
-	string(binding.EmitMechanismB): {},
+	string(binding.EmitMechanismInject):       {},
+	string(binding.EmitMechanismSentinelSwap): {},
 }
 
 // Descriptor is a parsed, versioned binding-descriptor document. One
@@ -110,21 +108,21 @@ type Entry struct {
 	// unknown scheme is a load-time error (fail closed, no silent skip).
 	Scheme string `yaml:"scheme"`
 
-	// EmitMechanism declares how the credential reaches egress: "A"
-	// (inject at the proxy) or "B" (sentinel-swap). Optional; empty
-	// defaults to "A". A mechanism-B binding must declare a non-empty
-	// [Entry.Sentinel] block; a mechanism-A binding (explicit or defaulted)
+	// EmitMechanism declares how the credential reaches egress: "inject"
+	// (inject at the proxy) or "sentinel-swap". Optional; empty defaults to
+	// "inject". A sentinel-swap binding must declare a non-empty
+	// [Entry.Sentinel] block; an inject binding (explicit or defaulted)
 	// must declare none. Any value outside the closed set is a load-time
 	// error.
 	EmitMechanism string `yaml:"emit_mechanism"`
 
-	// Sentinel is the mechanism-B placeholder declaration: the non-secret
+	// Sentinel is the sentinel-swap placeholder declaration: the non-secret
 	// value the launcher plants inside the container and the env-var name it
-	// plants under. It is required and non-empty for mechanism "B" and
-	// forbidden for mechanism "A" (a stray sentinel on a mechanism-A binding
-	// is a load-time error, since the field is meaningless without B). It is
-	// a pointer so an absent block is distinguishable from a present block
-	// with empty fields. See [Sentinel].
+	// plants under. It is required and non-empty for "sentinel-swap" and
+	// forbidden for "inject" (a stray sentinel on an inject binding is a
+	// load-time error, since the field is meaningless without sentinel-swap).
+	// It is a pointer so an absent block is distinguishable from a present
+	// block with empty fields. See [Sentinel].
 	Sentinel *Sentinel `yaml:"sentinel"`
 
 	// Username is the non-secret HTTP basic-auth username, required only
@@ -147,7 +145,7 @@ type Entry struct {
 	QueryParam string `yaml:"query_param"`
 }
 
-// Sentinel is the per-binding mechanism-B placeholder declaration. It makes
+// Sentinel is the per-binding sentinel-swap placeholder declaration. It makes
 // both the placeholder value and its plant location data rather than Go
 // constants, so a token-in-env CLI is expressible purely by a descriptor.
 //
@@ -161,12 +159,12 @@ type Sentinel struct {
 	// Value is the non-secret, format-mimicking placeholder the launcher
 	// plants and the proxy recognizes (e.g.
 	// "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"). It is required and
-	// non-empty for mechanism "B". It is non-secret and safe to commit.
+	// non-empty for "sentinel-swap". It is non-secret and safe to commit.
 	Value string `yaml:"value"`
 
 	// Env is the environment-variable name the launcher sets to [Sentinel.Value]
 	// inside the container (e.g. "GH_TOKEN"). It is required and non-empty for
-	// mechanism "B". It generalizes the plant target so the launcher is not
+	// "sentinel-swap". It generalizes the plant target so the launcher is not
 	// hardcoded to a single CLI's env var.
 	Env string `yaml:"env"`
 }
@@ -238,30 +236,30 @@ func (e *Entry) Validate() error {
 
 	mech := e.EmitMechanism
 	if mech == "" {
-		mech = string(binding.EmitMechanismA)
+		mech = string(binding.EmitMechanismInject)
 	}
 	if _, ok := EmitMechanisms[mech]; !ok {
-		return fmt.Errorf("unknown emit_mechanism %q (want one of %q or %q)", e.EmitMechanism, string(binding.EmitMechanismA), string(binding.EmitMechanismB))
+		return fmt.Errorf("unknown emit_mechanism %q (want one of %q or %q)", e.EmitMechanism, string(binding.EmitMechanismInject), string(binding.EmitMechanismSentinelSwap))
 	}
 
-	// Mechanism B requires a non-empty sentinel block (value + env);
-	// mechanism A (explicit or defaulted) forbids one. The sentinel names
-	// the placeholder the launcher plants and the env var it plants it
-	// under, so the field is meaningless without B (fail closed).
+	// Sentinel-swap requires a non-empty sentinel block (value + env);
+	// inject (explicit or defaulted) forbids one. The sentinel names the
+	// placeholder the launcher plants and the env var it plants it under,
+	// so the field is meaningless without sentinel-swap (fail closed).
 	switch mech {
-	case string(binding.EmitMechanismB):
+	case string(binding.EmitMechanismSentinelSwap):
 		if e.Sentinel == nil {
-			return fmt.Errorf("emit_mechanism %q requires a sentinel block", string(binding.EmitMechanismB))
+			return fmt.Errorf("emit_mechanism %q requires a sentinel block", string(binding.EmitMechanismSentinelSwap))
 		}
 		if e.Sentinel.Value == "" {
-			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.value", string(binding.EmitMechanismB))
+			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.value", string(binding.EmitMechanismSentinelSwap))
 		}
 		if e.Sentinel.Env == "" {
-			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.env", string(binding.EmitMechanismB))
+			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.env", string(binding.EmitMechanismSentinelSwap))
 		}
 	default:
 		if e.Sentinel != nil {
-			return fmt.Errorf("emit_mechanism %q must not declare a sentinel block (sentinel applies only to mechanism %q)", string(binding.EmitMechanismA), string(binding.EmitMechanismB))
+			return fmt.Errorf("emit_mechanism %q must not declare a sentinel block (sentinel applies only to %q)", string(binding.EmitMechanismInject), string(binding.EmitMechanismSentinelSwap))
 		}
 	}
 

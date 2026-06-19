@@ -20,13 +20,13 @@
 #
 # Two hosts, two schemes, two emit mechanisms:
 #
-#   - github.com -> basic, mechanism A. git-over-HTTPS sends
+#   - github.com -> basic, inject. git-over-HTTPS sends
 #     "Authorization: Basic base64(x-access-token:<token>)", the
 #     documented convention for authenticating git with a GitHub token.
 #     git issues an unauthenticated request (its no-op credential helper
 #     supplies empty credentials), so the proxy injects unconditionally
 #     with no sentinel needed.
-#   - api.github.com -> bearer, mechanism B. `gh`/REST sends
+#   - api.github.com -> bearer, sentinel-swap. `gh`/REST sends
 #     "Authorization: Bearer <token>". `gh` short-circuits locally
 #     without a token, so the launcher plants a non-secret sentinel as
 #     GH_TOKEN; the proxy swaps the sentinel for the real credential at
@@ -43,12 +43,12 @@ bindings:
   - host: github.com
     credential_ref: user/github
     scheme: basic
-    emit_mechanism: A
+    emit_mechanism: inject
     username: x-access-token
   - host: api.github.com
     credential_ref: user/github
     scheme: bearer
-    emit_mechanism: B
+    emit_mechanism: sentinel-swap
     sentinel:
       value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA
       env: GH_TOKEN

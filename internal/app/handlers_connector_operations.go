@@ -652,8 +652,8 @@ func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source, h
 }
 
 // recordSandboxProxyForeignTokenNotSwapped emits
-// sandbox.proxy.foreign_token_not_swapped for a request on an
-// emit-mechanism B host binding (#1196) that carried a foreign
+// sandbox.proxy.foreign_token_not_swapped for a request on a
+// sentinel-swap host binding that carried a foreign
 // (non-sentinel) token. The proxy did not swap it: it forwarded the
 // request unchanged with no real credential injected. The payload
 // carries the matched host pattern, scheme, and upstream

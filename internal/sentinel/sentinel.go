@@ -4,18 +4,19 @@
 // recognizes and swaps for the real credential at egress (ADR-0019,
 // umbrella #1191).
 //
-// # Why a sentinel exists (emit-mechanism B)
+// # Why a sentinel exists (sentinel-swap)
 //
 // Some CLIs short-circuit locally when they hold no auth token: they
 // never issue the network request, so the proxy has nothing to seal.
 // `gh` is the canonical example. `gh api user` with no configured token
 // fails locally and emits no request to api.github.com.
 //
-// Emit-mechanism A (the launcher plants nothing; the CLI emits an
+// The inject mechanism (the launcher plants nothing; the CLI emits an
 // unauthenticated request the proxy seals at egress) therefore does not
-// work for such CLIs. Emit-mechanism B closes the gap: the launcher
-// plants a reserved, non-secret placeholder that passes the CLI's local
-// format check, so the CLI does issue the request. The proxy then
+// work for such CLIs. The sentinel-swap mechanism closes the gap: the
+// launcher plants a reserved, non-secret placeholder that passes the
+// CLI's local format check, so the CLI does issue the request. The proxy
+// then
 // recognizes the placeholder at egress and swaps in the real credential
 // it resolves daemon-side. The placeholder bytes never reach upstream.
 //
@@ -31,8 +32,8 @@
 // # Single source of truth
 //
 // This package supplies the canonical sentinel *value*, but the
-// recognizer no longer lives here (#1247). Recognition is binding-driven
-// at the proxy seam: a mechanism-B host binding carries the value it was
+// recognizer no longer lives here. Recognition is binding-driven
+// at the proxy seam: a sentinel-swap host binding carries the value it was
 // planted with, and the egress recognizer compares the inbound carrier
 // against that binding's value. The launch-side planter reads the same
 // value from the same binding, so the plant and the match cannot drift.
@@ -47,10 +48,10 @@ package sentinel
 // launcher plants as GH_TOKEN so `gh` treats itself as authenticated and
 // issues its request instead of short-circuiting. It is the canonical
 // GitHub sentinel value the GitHub host binding declares via WithSentinel
-// (and later github.yaml, #1248). The daemon proxy recognizes it at
-// egress by comparing the inbound carrier against the matched binding's
-// SentinelValue and swaps in the real user/github credential before the
-// request leaves the host (#1247).
+// in github.yaml. The daemon proxy recognizes it at egress by comparing
+// the inbound carrier against the matched binding's SentinelValue and
+// swaps in the real user/github credential before the request leaves the
+// host.
 //
 // Shape: it mimics `gh`'s classic personal-access-token format so `gh`'s
 // own local validation accepts it: the `ghp_` prefix followed by a

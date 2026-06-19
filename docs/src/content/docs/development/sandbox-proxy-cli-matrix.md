@@ -14,16 +14,16 @@ Each CLI has two properties that govern how Aileron seals its traffic. These are
 
 | CLI | proxy-sealable | emit-mechanism |
 |---|---|---|
-| curl | yes | A |
-| gh | yes | B |
-| aws | yes | A |
+| curl | yes | inject |
+| gh | yes | sentinel-swap |
+| aws | yes | inject |
 
 `proxy-sealable` means the daemon can inject the real credential at the TLS forward-proxy boundary so the container never holds it.
 
 `emit-mechanism` is how the in-container client is made to emit a request the proxy can seal. It is independent of the injection scheme (bearer, basic, and so on), which is how the proxy writes the credential once the request arrives.
 
-- Mechanism A: the launcher plants no token. The client emits an unauthenticated request, and the proxy injects the bound credential unconditionally at egress. `curl` issues the request with no token. `git`-over-HTTPS issues an unauthenticated request because the launcher mounts a no-op credential helper.
-- Mechanism B: the launcher plants a non-secret, format-mimicking sentinel token. Some clients short-circuit locally when they hold no token, so they never issue the request and there is nothing for the proxy to seal. The sentinel makes the client treat itself as authenticated and issue the request. The proxy then swaps the sentinel for the real credential at egress. The proxy swaps only the sentinel it itself planted. A foreign token on a mechanism-B host is forwarded unchanged. See [ADR-0019](/adr/0019-v4-https-data-plane/).
+- The `inject` mechanism: the launcher plants no token. The client emits an unauthenticated request, and the proxy injects the bound credential unconditionally at egress. `curl` issues the request with no token. `git`-over-HTTPS issues an unauthenticated request because the launcher mounts a no-op credential helper.
+- The `sentinel-swap` mechanism: the launcher plants a non-secret, format-mimicking sentinel token. Some clients short-circuit locally when they hold no token, so they never issue the request and there is nothing for the proxy to seal. The sentinel makes the client treat itself as authenticated and issue the request. The proxy then swaps the sentinel for the real credential at egress. The proxy swaps only the sentinel it itself planted. A foreign token on a `sentinel-swap` host is forwarded unchanged. See [ADR-0019](/adr/0019-v4-https-data-plane/).
 
 ## What the proxy guarantees
 
@@ -129,9 +129,9 @@ Expected:
 
 ## gh (GitHub CLI)
 
-`gh` is `proxy-sealable` via `emit-mechanism` B. It honors `HTTPS_PROXY` once you set it, and it picks up the system CA store, so it works through the Aileron proxy with no extra config. Aileron seals it against the built-in `api.github.com` host binding, so you do not need an installed GitHub connector spec for `gh api` to work.
+`gh` is `proxy-sealable` via `sentinel-swap`. It honors `HTTPS_PROXY` once you set it, and it picks up the system CA store, so it works through the Aileron proxy with no extra config. Aileron seals it against the built-in `api.github.com` host binding, so you do not need an installed GitHub connector spec for `gh api` to work.
 
-`gh` is the reason mechanism B exists. `gh` validates its auth state locally before making a request. With no token it short-circuits and never issues the request, so mechanism A (plant nothing, seal the emitted request) has nothing to seal. The launcher closes this gap by planting a non-secret, format-mimicking sentinel as `GH_TOKEN` when a `user/github` entry exists in your vault. The sentinel passes `gh`'s own local validation, so `gh` issues its request. The daemon recognizes the sentinel at the TLS boundary and swaps in your real GitHub token before the request leaves the host. The real token never enters the container. The sentinel is non-secret and safe to see in `echo $GH_TOKEN` output; presenting it to GitHub authenticates nothing.
+`gh` is the reason the `sentinel-swap` mechanism exists. `gh` validates its auth state locally before making a request. With no token it short-circuits and never issues the request, so the `inject` mechanism (plant nothing, seal the emitted request) has nothing to seal. The launcher closes this gap by planting a non-secret, format-mimicking sentinel as `GH_TOKEN` when a `user/github` entry exists in your vault. The sentinel passes `gh`'s own local validation, so `gh` issues its request. The daemon recognizes the sentinel at the TLS boundary and swaps in your real GitHub token before the request leaves the host. The real token never enters the container. The sentinel is non-secret and safe to see in `echo $GH_TOKEN` output; presenting it to GitHub authenticates nothing.
 
 Store your token once with `aileron auth github`. The launcher does the rest on every sandbox launch.
 
