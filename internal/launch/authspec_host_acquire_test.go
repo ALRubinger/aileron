@@ -49,12 +49,12 @@ func (s *spyAcquirer) acquire(_ context.Context, deps HostAcquireDeps) (vault.Se
 	return s.secret, s.err
 }
 
-func claudeEnvelope(access string) []byte {
-	return []byte(`{"claudeAiOauth":{"accessToken":"` + access + `","refreshToken":"rt"}}`)
-}
+// futureExpiresAtMS is a far-future expiry in MILLISECONDS, matching the real
+// claude .credentials.json claudeAiOauth.expiresAt format (ms, not seconds).
+const futureExpiresAtMS int64 = 1893456000000 // 2030-01-01Z
 
 func TestPrepareAuthSpec_HostAcquireSeedsVaultAndRenders(t *testing.T) {
-	envelope := claudeEnvelope("acquired-tok")
+	envelope := claudeEnvelope("acquired-tok", futureExpiresAtMS)
 	daemon := newFakeDaemon() // empty vault
 
 	spy := &spyAcquirer{secret: vault.Secret{Value: envelope, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}}
@@ -194,7 +194,7 @@ func TestPrepareAuthSpec_HostAcquireEmptySecretFallsBack(t *testing.T) {
 
 func TestPrepareAuthSpec_HostLoginDisabledSkipsAcquirer(t *testing.T) {
 	daemon := newFakeDaemon()
-	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok")}}
+	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok", futureExpiresAtMS)}}
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{
 			VaultPath:     "agents/claude/oauth",
@@ -227,7 +227,7 @@ func TestPrepareAuthSpec_HostLoginDisabledSkipsAcquirer(t *testing.T) {
 func TestPrepareAuthSpec_HostAcquirePutFailureAbortsLaunch(t *testing.T) {
 	daemon := newFakeDaemon()
 	daemon.putErrors["claude"] = errors.New("vault locked")
-	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok")}}
+	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok", futureExpiresAtMS)}}
 
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{
@@ -258,7 +258,7 @@ func TestPrepareAuthSpec_HostAcquirePutFailureAbortsLaunch(t *testing.T) {
 
 func TestPrepareAuthSpec_RequiredBindingIgnoresAcquirer(t *testing.T) {
 	daemon := newFakeDaemon() // empty vault
-	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok")}}
+	spy := &spyAcquirer{secret: vault.Secret{Value: claudeEnvelope("tok", futureExpiresAtMS)}}
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{
 			VaultPath:     "agents/claude/oauth",
@@ -285,7 +285,7 @@ func TestPrepareAuthSpec_RequiredBindingIgnoresAcquirer(t *testing.T) {
 // daemon PUT match the file written into the mount.
 func TestPrepareAuthSpec_HostAcquireRoundTripsClaudeEnvelope(t *testing.T) {
 	daemon := newFakeDaemon()
-	envelope := claudeEnvelope("round-trip-tok")
+	envelope := claudeEnvelope("round-trip-tok", futureExpiresAtMS)
 	spy := &spyAcquirer{secret: vault.Secret{Value: envelope}}
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{
