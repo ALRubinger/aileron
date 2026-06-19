@@ -21,11 +21,10 @@ type SystemBrowser struct{}
 // an error if the platform is unsupported or the spawned process
 // fails.
 func (SystemBrowser) Open(url string) error {
-	argv, err := browserArgv(runtime.GOOS, url)
+	cmd, err := browserCommand(url)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(argv[0], argv[1:]...)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("oauth: open browser: %w", err)
 	}
@@ -34,6 +33,20 @@ func (SystemBrowser) Open(url string) error {
 	// the opened browser.
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// browserCommand returns an unexec'd *exec.Cmd that opens url in the
+// platform's default browser, delegating the per-GOOS argv decision to
+// the pure [browserArgv] helper. The error branch is exercised by
+// browserArgv's table test; browserCommand itself always passes the
+// running platform's GOOS, so on a supported target the error is
+// unreachable here.
+func browserCommand(url string) (*exec.Cmd, error) {
+	argv, err := browserArgv(runtime.GOOS, url)
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(argv[0], argv[1:]...), nil
 }
 
 // browserArgv returns the platform-native argv that opens url in the

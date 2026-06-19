@@ -46,6 +46,17 @@ func TestBrowserArgv_RunningPlatform(t *testing.T) {
 				t.Errorf("windows command = %q, want cmd", argv[0])
 			}
 		}
+		// browserCommand wraps the same argv into an unexec'd *exec.Cmd.
+		// Assert it builds (without Start) so the wrapper's happy path is
+		// covered; the spawn itself stays out of the test to avoid
+		// launching a real browser window.
+		cmd, cmdErr := browserCommand(url)
+		if cmdErr != nil {
+			t.Fatalf("browserCommand on %s: %v", runtime.GOOS, cmdErr)
+		}
+		if cmd == nil || len(cmd.Args) == 0 || cmd.Args[0] != argv[0] {
+			t.Errorf("browserCommand args = %v; want first arg %q", cmd.Args, argv[0])
+		}
 	default:
 		// Unsupported GOOS should report an error.
 		if err == nil {
