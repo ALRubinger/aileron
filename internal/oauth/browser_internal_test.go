@@ -6,48 +6,50 @@ import (
 	"testing"
 )
 
-// TestBrowserCommand_BuildsPlatformInvocation exercises the
-// command-build path without actually starting a process. We can't
-// portably guarantee the platform's `open`/`xdg-open`/`start` is
-// installed in the test environment, and even when it is, spawning
-// it would launch a real browser window during `go test`. So we
-// inspect the returned *exec.Cmd shape instead.
-func TestBrowserCommand_BuildsPlatformInvocation(t *testing.T) {
+// TestBrowserArgv_RunningPlatform exercises the argv-build path for the
+// platform the test process actually runs on, without spawning a
+// process. We can't portably guarantee the platform's
+// `open`/`xdg-open`/`start` is installed in the test environment, and
+// even when it is, spawning it would launch a real browser window
+// during `go test`. So we inspect the returned argv instead. The
+// exhaustive per-GOOS contract (including the platforms this runner is
+// not) is in TestBrowserArgv_PerPlatformContract below.
+func TestBrowserArgv_RunningPlatform(t *testing.T) {
 	const url = "https://example.test/oauth/authorize"
-	cmd, err := browserCommand(url)
+	argv, err := browserArgv(runtime.GOOS, url)
 	switch runtime.GOOS {
 	case "darwin", "linux", "windows":
 		if err != nil {
-			t.Fatalf("browserCommand on %s: %v", runtime.GOOS, err)
+			t.Fatalf("browserArgv on %s: %v", runtime.GOOS, err)
 		}
-		if cmd == nil {
-			t.Fatal("cmd is nil")
+		if len(argv) == 0 {
+			t.Fatal("argv is empty")
 		}
 		// The URL must appear in the args verbatim, regardless of
 		// platform.
-		joined := strings.Join(cmd.Args, " ")
+		joined := strings.Join(argv, " ")
 		if !strings.Contains(joined, url) {
-			t.Errorf("cmd.Args = %v; want URL %q in arglist", cmd.Args, url)
+			t.Errorf("argv = %v; want URL %q in arglist", argv, url)
 		}
 		// Platform-specific spot-check.
 		switch runtime.GOOS {
 		case "darwin":
-			if cmd.Args[0] != "open" {
-				t.Errorf("darwin command = %q, want open", cmd.Args[0])
+			if argv[0] != "open" {
+				t.Errorf("darwin command = %q, want open", argv[0])
 			}
 		case "linux":
-			if cmd.Args[0] != "xdg-open" {
-				t.Errorf("linux command = %q, want xdg-open", cmd.Args[0])
+			if argv[0] != "xdg-open" {
+				t.Errorf("linux command = %q, want xdg-open", argv[0])
 			}
 		case "windows":
-			if cmd.Args[0] != "cmd" {
-				t.Errorf("windows command = %q, want cmd", cmd.Args[0])
+			if argv[0] != "cmd" {
+				t.Errorf("windows command = %q, want cmd", argv[0])
 			}
 		}
 	default:
 		// Unsupported GOOS should report an error.
 		if err == nil {
-			t.Errorf("browserCommand on %s should return an error", runtime.GOOS)
+			t.Errorf("browserArgv on %s should return an error", runtime.GOOS)
 		}
 	}
 }
