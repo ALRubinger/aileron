@@ -1,6 +1,7 @@
 package agents_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -115,11 +116,13 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	opener := &recordingOpener{}
+	var out bytes.Buffer
 	fb := claudeHostAcquireBinding(t)
 	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
-		Ctx:          context.Background(),
-		HTTPClient:   testHTTPClient(srv.URL),
-		Browser: opener,
+		Ctx:        context.Background(),
+		HTTPClient: testHTTPClient(srv.URL),
+		Browser:    opener,
+		Out:        &out,
 		// Paste a bare code (no #state). The acquirer generates the
 		// state internally and tolerates a bare-code paste since PKCE
 		// already binds the exchange; a state-carrying paste is covered
@@ -140,6 +143,11 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	// Browser was opened with the consent URL carrying the client id.
 	if !strings.Contains(opener.opened, "client_id=9d1c250a") {
 		t.Errorf("browser opened %q, want consent URL with client_id", opener.opened)
+	}
+	// The authorize URL is surfaced on deps.Out so the user has a
+	// copyable record of what was launched, mirroring the Codex flow.
+	if !strings.Contains(out.String(), "client_id=9d1c250a") {
+		t.Errorf("Out missing the authorize URL; got %q", out.String())
 	}
 	// Token exchange used authorization_code + PKCE verifier, no secret.
 	if gotForm.Get("grant_type") != "authorization_code" {
