@@ -41,8 +41,8 @@ func preLaunchRefreshHTTPClient() *http.Client {
 // runtime depends on. Defined as an interface so tests substitute a
 // fake without spinning up an httptest server for every scenario.
 type authSpecDaemon interface {
-	GetAgentCredentials(ctx context.Context, name string) (vault.Secret, error)
-	PutAgentCredentials(ctx context.Context, name string, secret vault.Secret) error
+	GetAgentCredentials(ctx context.Context, name, purpose string) (vault.Secret, error)
+	PutAgentCredentials(ctx context.Context, name, purpose string, secret vault.Secret) error
 }
 
 // authSpecPrep is the output of prepareAuthSpec — everything the
@@ -165,7 +165,8 @@ func prepareAuthSpec(
 	// don't need the transient dir, so a Required-but-missing env
 	// binding fails fast before any mount setup.
 	for i, eb := range spec.EnvBindings {
-		secret, err := daemon.GetAgentCredentials(ctx, vaultBindingTail(eb.VaultPath))
+		ebName, ebPurpose := vaultBindingNameAndPurpose(eb.VaultPath)
+		secret, err := daemon.GetAgentCredentials(ctx, ebName, ebPurpose)
 		switch {
 		case errors.Is(err, ErrAgentCredentialsNotFound):
 			if eb.Required {
@@ -243,9 +244,10 @@ func prepareAuthSpec(
 	// here so CaptureFn closes over the prepared state and doesn't
 	// re-traverse the spec.
 	type fileCapture struct {
-		HostPath  string
-		VaultName string // last segment of VaultPath
-		Capture   func([]byte) (vault.Secret, error)
+		HostPath     string
+		VaultName    string // <name> segment of VaultPath
+		VaultPurpose string // <purpose> segment of VaultPath
+		Capture      func([]byte) (vault.Secret, error)
 		// PresentAtRender records whether the vault entry existed when
 		// the launcher rendered this binding. It is the only correct
 		// disambiguator between a first-login seed (absent@render) and
@@ -284,9 +286,11 @@ func prepareAuthSpec(
 			return fmt.Errorf("auth spec: write %s: %w", hostPath, err)
 		}
 		prep.RenderedAnyCredential = true
+		fbName, fbPurpose := vaultBindingNameAndPurpose(fb.VaultPath)
 		captureTargets = append(captureTargets, fileCapture{
 			HostPath:        hostPath,
-			VaultName:       vaultBindingTail(fb.VaultPath),
+			VaultName:       fbName,
+			VaultPurpose:    fbPurpose,
 			Capture:         fb.Capture,
 			PresentAtRender: true,
 			Fresher:         fb.Fresher,
@@ -307,6 +311,7 @@ func prepareAuthSpec(
 	}
 
 	for i, fb := range spec.FileBindings {
+		fbName, fbPurpose := vaultBindingNameAndPurpose(fb.VaultPath)
 		containerParent := path.Dir(fb.ContainerPath)
 		hostDir, err := ensureGroup(containerParent)
 		if err != nil {
@@ -319,7 +324,7 @@ func prepareAuthSpec(
 		if !fb.MountAsFile {
 			fileMountOnlyGroups[containerParent] = false
 		}
-		secret, getErr := daemon.GetAgentCredentials(ctx, vaultBindingTail(fb.VaultPath))
+		secret, getErr := daemon.GetAgentCredentials(ctx, fbName, fbPurpose)
 		emptyVault := errors.Is(getErr, ErrAgentCredentialsNotFound)
 		switch {
 		case emptyVault:
@@ -373,7 +378,7 @@ func prepareAuthSpec(
 					// container starts. A PUT failure aborts the launch
 					// rather than silently dropping a just-acquired
 					// credential.
-					if err := daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), acquired); err != nil {
+					if err := daemon.PutAgentCredentials(ctx, fbName, fbPurpose, acquired); err != nil {
 						cleanup()
 						return prep, fmt.Errorf("auth spec: persist host-acquired credential %q: %w", fb.VaultPath, err)
 					}
@@ -391,7 +396,8 @@ func prepareAuthSpec(
 			// parent.
 			captureTargets = append(captureTargets, fileCapture{
 				HostPath:        filepath.Join(hostDir, path.Base(fb.ContainerPath)),
-				VaultName:       vaultBindingTail(fb.VaultPath),
+				VaultName:       fbName,
+				VaultPurpose:    fbPurpose,
 				Capture:         fb.Capture,
 				PresentAtRender: false,
 				Fresher:         fb.Fresher,
@@ -410,7 +416,7 @@ func prepareAuthSpec(
 				Ctx:        ctx,
 				HTTPClient: preLaunchRefreshHTTPClient(),
 				PutAgentCredentials: func(s vault.Secret) error {
-					return daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), s)
+					return daemon.PutAgentCredentials(ctx, fbName, fbPurpose, s)
 				},
 			})
 			if refreshErr != nil {
@@ -563,7 +569,7 @@ func prepareAuthSpec(
 				// operator deleted the entry mid-session and we must
 				// honor the delete; absent-now plus absent-at-render is
 				// a first-login seed and must PUT.
-				current, getErr := daemon.GetAgentCredentials(captureCtx, target.VaultName)
+				current, getErr := daemon.GetAgentCredentials(captureCtx, target.VaultName, target.VaultPurpose)
 				absentNow := errors.Is(getErr, ErrAgentCredentialsNotFound)
 				switch {
 				case getErr != nil && !absentNow:
@@ -623,14 +629,14 @@ func prepareAuthSpec(
 						}
 					}
 				}
-				if err := daemon.PutAgentCredentials(captureCtx, target.VaultName, captured); err != nil {
+				if err := daemon.PutAgentCredentials(captureCtx, target.VaultName, target.VaultPurpose, captured); err != nil {
 					captureWarn(sessionLog, stderr, agentName, target.HostPath,
 						fmt.Errorf("persist captured credential: %w (rerun the launch to retry)",
 							err))
 					continue
 				}
 				sessionLog.Info("captured agent credentials to vault",
-					"agent", agentName, "vault_path", "agents/"+target.VaultName+"/oauth",
+					"agent", agentName, "vault_path", "agents/"+target.VaultName+"/"+target.VaultPurpose,
 					"source", target.HostPath)
 			}
 		}
@@ -650,24 +656,32 @@ func captureWarn(log *slog.Logger, stderr io.Writer, agentName, hostPath string,
 	}
 }
 
-// vaultBindingTail extracts the agent identifier from a binding's
-// vault path (e.g. `agents/claude/oauth` → `claude`). The daemon's
-// per-agent credential endpoints scope by name, so the launcher
-// passes only the agent identifier and the daemon reconstructs the
-// canonical vault path internally.
+// vaultBindingNameAndPurpose splits a binding's vault path into the
+// agent name and the credential purpose (e.g. `agents/claude/oauth` →
+// (`claude`, `oauth`); `agents/claude/apikey` → (`claude`, `apikey`)).
+// The daemon's per-agent credential endpoints scope by name and carry
+// the purpose as a query parameter, so the launcher threads both
+// segments through rather than discarding the purpose.
 //
 // validateAuthSpec rejects bindings whose VaultPath does not follow
-// the documented `agents/<name>/oauth` scheme, so this helper does
-// not need to defend against malformed input on the live path; the
-// fallbacks below cover the test paths that probe edge cases.
-func vaultBindingTail(vaultPath string) string {
+// the documented `agents/<name>/<purpose>` scheme, so on the live path
+// the input is well-formed. The fallbacks below cover the test paths
+// that probe edge cases: a missing purpose segment defaults to the
+// canonical `oauth` so callers always receive a usable purpose.
+func vaultBindingNameAndPurpose(vaultPath string) (name, purpose string) {
 	parts := strings.SplitN(strings.TrimLeft(vaultPath, "/"), "/", 3)
 	switch len(parts) {
 	case 0:
-		return ""
+		return "", defaultAgentCredentialPurpose
 	case 1:
-		return parts[0]
+		return parts[0], defaultAgentCredentialPurpose
+	case 2:
+		return parts[1], defaultAgentCredentialPurpose
 	default:
-		return parts[1]
+		purpose = parts[2]
+		if purpose == "" {
+			purpose = defaultAgentCredentialPurpose
+		}
+		return parts[1], purpose
 	}
 }

@@ -19,6 +19,13 @@ import (
 // JSON round-trips on loopback; 5 seconds is conservative.
 const daemonHTTPTimeout = 5 * time.Second
 
+// defaultAgentCredentialPurpose is the third vault-path segment used
+// when no explicit purpose is supplied. It matches the daemon-side
+// default (`agents/<name>/oauth`), so a request carrying this purpose
+// is omitted from the query string and routes byte-for-byte like the
+// pre-purpose wire shape.
+const defaultAgentCredentialPurpose = "oauth"
+
 // daemonClient is a thin HTTP client over the daemon's /v1 surface,
 // used by Launch to register and end the agent's session and to peek
 // at the vault state for the startup banner. Production code creates
@@ -161,14 +168,28 @@ type agentCredentialsMetadataDTO struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 }
 
+// agentCredentialsEndpoint builds the per-agent credential URL for the
+// given agent name and purpose. The `purpose` query parameter is
+// omitted when it is the default (`oauth`) so a default request is
+// byte-for-byte identical on the wire to the pre-purpose behavior; a
+// non-default purpose is appended as `?purpose=<value>`.
+func (c *daemonClient) agentCredentialsEndpoint(name, purpose string) string {
+	endpoint := c.baseURL + "/v1/vault/agents/" + url.PathEscape(name) + "/credentials"
+	if purpose != "" && purpose != defaultAgentCredentialPurpose {
+		endpoint += "?" + url.Values{"purpose": {purpose}}.Encode()
+	}
+	return endpoint
+}
+
 // GetAgentCredentials fetches the per-agent credential envelope at
-// `agents/<name>/oauth` through the daemon's HTTP surface. The
+// `agents/<name>/<purpose>` through the daemon's HTTP surface
+// (purpose defaults to `oauth`). The
 // daemon's `vault_not_found` error code surfaces as
 // [ErrAgentCredentialsNotFound]; a locked vault surfaces as
 // [vault.ErrCredentialUnavailable]. Callers wrap typed checks with
 // `errors.Is`.
-func (c *daemonClient) GetAgentCredentials(ctx context.Context, name string) (vault.Secret, error) {
-	endpoint := c.baseURL + "/v1/vault/agents/" + url.PathEscape(name) + "/credentials"
+func (c *daemonClient) GetAgentCredentials(ctx context.Context, name, purpose string) (vault.Secret, error) {
+	endpoint := c.agentCredentialsEndpoint(name, purpose)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return vault.Secret{}, err
@@ -286,7 +307,7 @@ func (c *daemonClient) GetUserCredentials(ctx context.Context, service string) (
 // to the daemon's vault. Used by the launcher's Capture pass on
 // clean container exit and by Codex's pre-launch refresh hook (the
 // rotated bundle must be in vault before container start per AE6).
-func (c *daemonClient) PutAgentCredentials(ctx context.Context, name string, secret vault.Secret) error {
+func (c *daemonClient) PutAgentCredentials(ctx context.Context, name, purpose string, secret vault.Secret) error {
 	body := agentCredentialsBody{Value: secret.Value}
 	if secret.Metadata.Type != "" || secret.Metadata.Environment != "" || len(secret.Metadata.Labels) > 0 {
 		body.Metadata = &agentCredentialsMetadataDTO{
@@ -299,7 +320,7 @@ func (c *daemonClient) PutAgentCredentials(ctx context.Context, name string, sec
 	if err != nil {
 		return fmt.Errorf("marshal agent credentials: %w", err)
 	}
-	endpoint := c.baseURL + "/v1/vault/agents/" + url.PathEscape(name) + "/credentials"
+	endpoint := c.agentCredentialsEndpoint(name, purpose)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(buf))
 	if err != nil {
 		return err

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
@@ -95,10 +96,11 @@ func vaultCredentialActor(r *http.Request) (actor model.ActorRef, sessionID stri
 // the log line. The audit call is a no-op when no recorder is wired, but
 // the slog line always fires so a nil-recorder daemon still leaves a
 // session-log signal.
-func (s *apiServer) emitVaultCredentialEvent(ctx context.Context, eventType model.EventType, name string, actor model.ActorRef, sessionID, errClass string) {
+func (s *apiServer) emitVaultCredentialEvent(ctx context.Context, eventType model.EventType, name, purpose string, actor model.ActorRef, sessionID, errClass string) {
 	logArgs := []any{
 		"event", string(eventType),
 		"agent", name,
+		"purpose", purpose,
 		"actor", actor.ID,
 	}
 	if sessionID != "" {
@@ -119,7 +121,8 @@ func (s *apiServer) emitVaultCredentialEvent(ctx context.Context, eventType mode
 		return
 	}
 	payload := map[string]any{
-		"aileron.vault.agent": name,
+		"aileron.vault.agent":   name,
+		"aileron.vault.purpose": purpose,
 	}
 	if sessionID != "" {
 		payload["aileron.session.id"] = sessionID
@@ -130,14 +133,48 @@ func (s *apiServer) emitVaultCredentialEvent(ctx context.Context, eventType mode
 	s.auditRecorder.RecordSuccess(ctx, eventType, actor, payload)
 }
 
+// defaultAgentCredentialPurpose is the third vault-path segment used
+// when the `purpose` query parameter is omitted. Keeping it `oauth`
+// makes a request with no purpose route byte-for-byte identically to
+// the pre-purpose behavior (ADR-0025 path scheme:
+// `agents/<name>/<purpose>`).
+const defaultAgentCredentialPurpose = "oauth"
+
+// agentCredentialPurposeRe constrains the `purpose` segment before it
+// is interpolated into the raw vault map key. It mirrors the
+// user-endpoint `{service}` rule (a leading lowercase alphanumeric
+// followed by lowercase alphanumerics, `-`, or `_`, anchored at both
+// ends) so a value containing `/`, `..`, or percent-encoded separators
+// cannot escape the `agents/<name>/` namespace.
+var agentCredentialPurposeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// validateAgentCredentialPurpose reports whether purpose is a safe
+// third path segment. It is the single defensive validation site for
+// the `purpose` query parameter; the spec declares the same pattern,
+// but the std-router does not enforce it, so the handler re-checks.
+func validateAgentCredentialPurpose(purpose string) bool {
+	return agentCredentialPurposeRe.MatchString(purpose)
+}
+
+// resolveAgentCredentialPurpose maps the optional `purpose` query value
+// to its effective segment: an absent or empty value defaults to
+// `oauth`. Validation is the caller's responsibility (the default is
+// always valid).
+func resolveAgentCredentialPurpose(p *string) string {
+	if p == nil || *p == "" {
+		return defaultAgentCredentialPurpose
+	}
+	return *p
+}
+
 // agentCredentialVaultPath is the canonical vault path scheme for
-// per-agent OAuth/credential envelopes. The HTTP path uses the
-// stable URL word `credentials`; the vault stays on `oauth` so
-// existing `aileron vault list`-style tooling continues to surface
-// entries by their established key. Plan-pinned (ADR-0025 path
-// scheme: `agents/<name>/<purpose>`).
-func agentCredentialVaultPath(name string) string {
-	return "agents/" + name + "/oauth"
+// per-agent credential envelopes: `agents/<name>/<purpose>`. The HTTP
+// path uses the stable URL word `credentials`; the `purpose` segment
+// (default `oauth`) selects which credential the agent addresses. The
+// caller MUST have passed purpose through validateAgentCredentialPurpose
+// (or supplied the validated default) before reaching here.
+func agentCredentialVaultPath(name, purpose string) string {
+	return "agents/" + name + "/" + purpose
 }
 
 // agentNameFromVaultPath is the inverse of agentCredentialVaultPath:
@@ -169,41 +206,48 @@ func agentNameFromVaultPath(path string) (string, bool) {
 // the launcher discriminates by code rather than status alone — a
 // future status-code change would not silently re-route the
 // fallthrough-to-in-container-login path documented in ADR-0025.
-func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, name string, params api.GetAgentCredentialsParams) {
 	ctx := r.Context()
 	actor, sessionID := vaultCredentialActor(r)
+	purpose := resolveAgentCredentialPurpose(params.Purpose)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "invalid_request")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "invalid_request")
+		return
+	}
+	if !validateAgentCredentialPurpose(purpose) {
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"purpose must match ^[a-z0-9][a-z0-9_-]*$")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "no_local_vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "no_local_vault")
 		return
 	}
 
-	secret, err := s.vault.Get(ctx, agentCredentialVaultPath(name))
+	secret, err := s.vault.Get(ctx, agentCredentialVaultPath(name, purpose))
 	if vault.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "vault_not_found",
 			"no credential entry for agent "+name)
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_not_found")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "vault_not_found")
 		return
 	}
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before reading agent credentials")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_locked")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_get_failed", err.Error())
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_get_failed")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "vault_get_failed")
 		return
 	}
 
-	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "")
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, purpose, actor, sessionID, "")
 	writeJSON(w, http.StatusOK, agentCredentialsResponse(secret))
 }
 
@@ -212,49 +256,56 @@ func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, 
 // pre-launch refresh hook (Codex's PreLaunchRefresh rotates the
 // token against the vendor's auth server and persists the new
 // bundle before starting the container per AE6).
-func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, name string, params api.PutAgentCredentialsParams) {
 	ctx := r.Context()
 	actor, sessionID := vaultCredentialActor(r)
+	purpose := resolveAgentCredentialPurpose(params.Purpose)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "invalid_request")
+		return
+	}
+	if !validateAgentCredentialPurpose(purpose) {
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"purpose must match ^[a-z0-9][a-z0-9_-]*$")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "no_local_vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "no_local_vault")
 		return
 	}
 
 	var req api.AgentCredentials
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "invalid_request")
 		return
 	}
 	if len(req.Value) == 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"value is required and must be non-empty")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "invalid_request")
 		return
 	}
 
 	meta := agentCredentialsMetadataFromRequest(req.Metadata)
-	err := s.vault.Put(ctx, agentCredentialVaultPath(name), req.Value, meta)
+	err := s.vault.Put(ctx, agentCredentialVaultPath(name, purpose), req.Value, meta)
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before writing agent credentials")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "vault_locked")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_put_failed", err.Error())
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "vault_put_failed")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "vault_put_failed")
 		return
 	}
 
-	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "")
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, purpose, actor, sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -269,22 +320,29 @@ func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, 
 // is the only way to honor the 404-on-miss contract while reusing the
 // existing store primitive. A locked vault makes Get return
 // ErrCredentialUnavailable, which yields 423 before any delete.
-func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Request, name string, params api.DeleteAgentCredentialsParams) {
 	ctx := r.Context()
 	actor, sessionID := vaultCredentialActor(r)
+	purpose := resolveAgentCredentialPurpose(params.Purpose)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "invalid_request")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "invalid_request")
+		return
+	}
+	if !validateAgentCredentialPurpose(purpose) {
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"purpose must match ^[a-z0-9][a-z0-9_-]*$")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "no_local_vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "no_local_vault")
 		return
 	}
 
-	path := agentCredentialVaultPath(name)
+	path := agentCredentialVaultPath(name, purpose)
 	// The existence check decrypts the stored credential, but the secret
 	// is intentionally discarded with `_`: DELETE binds only the agent
 	// name, never the loaded value. emitVaultCredentialEvent takes only
@@ -295,18 +353,18 @@ func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Reques
 	if vault.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "vault_not_found",
 			"no credential entry for agent "+name)
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_not_found")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "vault_not_found")
 		return
 	}
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before deleting agent credentials")
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_locked")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_get_failed", err.Error())
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_get_failed")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "vault_get_failed")
 		return
 	}
 
@@ -314,15 +372,15 @@ func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Reques
 		if errors.Is(err, vault.ErrCredentialUnavailable) {
 			writeError(w, http.StatusLocked, "vault_locked",
 				"unlock the vault before deleting agent credentials")
-			s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_locked")
+			s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "vault_locked")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "vault_delete_failed", err.Error())
-		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_delete_failed")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "vault_delete_failed")
 		return
 	}
 
-	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "")
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, purpose, actor, sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

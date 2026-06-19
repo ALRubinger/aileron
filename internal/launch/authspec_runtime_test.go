@@ -54,12 +54,18 @@ type fakeDaemon struct {
 	// other. getSeq takes precedence over getErrors for that name.
 	getSeq map[string][]error
 	puts   []putRecord
-	gets   []string
+	gets   []getRecord
 }
 
 type putRecord struct {
-	Name   string
-	Secret vault.Secret
+	Name    string
+	Purpose string
+	Secret  vault.Secret
+}
+
+type getRecord struct {
+	Name    string
+	Purpose string
 }
 
 func newFakeDaemon() *fakeDaemon {
@@ -86,10 +92,10 @@ func (f *fakeDaemon) deleteEntry(name string) {
 	delete(f.store, name)
 }
 
-func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name string) (vault.Secret, error) {
+func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name, purpose string) (vault.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.gets = append(f.gets, name)
+	f.gets = append(f.gets, getRecord{Name: name, Purpose: purpose})
 	if seq, ok := f.getSeq[name]; ok && len(seq) > 0 {
 		err := seq[0]
 		f.getSeq[name] = seq[1:]
@@ -112,13 +118,13 @@ func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name string) (vault.
 	return s, nil
 }
 
-func (f *fakeDaemon) PutAgentCredentials(_ context.Context, name string, secret vault.Secret) error {
+func (f *fakeDaemon) PutAgentCredentials(_ context.Context, name, purpose string, secret vault.Secret) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err, ok := f.putErrors[name]; ok {
 		return err
 	}
-	f.puts = append(f.puts, putRecord{Name: name, Secret: secret})
+	f.puts = append(f.puts, putRecord{Name: name, Purpose: purpose, Secret: secret})
 	f.store[name] = secret
 	return nil
 }
@@ -207,6 +213,17 @@ func TestPrepareAuthSpec_FileBindingRendersFromVault(t *testing.T) {
 	}
 	if rootInfo.Mode().Perm() != 0o700 {
 		t.Errorf("transient root mode = %v, want 0700", rootInfo.Mode().Perm())
+	}
+
+	// The binding's purpose (oauth, from agents/claude/oauth) must be
+	// threaded through to the daemon GET rather than discarded. This is
+	// the foundation SUB2/SUB3 extend to a second purpose.
+	if len(daemon.gets) == 0 {
+		t.Fatal("expected at least one GET")
+	}
+	if daemon.gets[0].Name != "claude" || daemon.gets[0].Purpose != "oauth" {
+		t.Errorf("GET = (%q, %q), want (claude, oauth)",
+			daemon.gets[0].Name, daemon.gets[0].Purpose)
 	}
 }
 
@@ -1207,19 +1224,28 @@ func TestPrepareAuthSpec_CaptureGetCancelledSkipsPut(t *testing.T) {
 	}
 }
 
-func TestVaultBindingTail(t *testing.T) {
+func TestVaultBindingNameAndPurpose(t *testing.T) {
 	tests := []struct {
-		in, want string
+		in, wantName, wantPurpose string
 	}{
-		{"agents/claude/oauth", "claude"},
-		{"agents/codex/oauth", "codex"},
-		{"/agents/claude/oauth", "claude"},
-		{"agents/example/oauth", "example"},
-		{"orphan", "orphan"},
+		{"agents/claude/oauth", "claude", "oauth"},
+		{"agents/codex/oauth", "codex", "oauth"},
+		{"/agents/claude/oauth", "claude", "oauth"},
+		{"agents/example/oauth", "example", "oauth"},
+		// A non-oauth purpose is threaded through, not discarded — the
+		// SUB2/SUB3 foundation this PR establishes.
+		{"agents/claude/apikey", "claude", "apikey"},
+		{"agents/codex/apikey", "codex", "apikey"},
+		// Malformed/short paths fall back to the canonical oauth purpose
+		// so callers always receive a usable purpose segment.
+		{"agents/claude", "claude", "oauth"},
+		{"orphan", "orphan", "oauth"},
 	}
 	for _, tc := range tests {
-		if got := vaultBindingTail(tc.in); got != tc.want {
-			t.Errorf("vaultBindingTail(%q) = %q, want %q", tc.in, got, tc.want)
+		name, purpose := vaultBindingNameAndPurpose(tc.in)
+		if name != tc.wantName || purpose != tc.wantPurpose {
+			t.Errorf("vaultBindingNameAndPurpose(%q) = (%q, %q), want (%q, %q)",
+				tc.in, name, purpose, tc.wantName, tc.wantPurpose)
 		}
 	}
 }
