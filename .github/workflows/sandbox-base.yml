@@ -76,41 +76,102 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # context is the repo root so the builder stage can compile aileron-mcp
-      # from go.work + source; the baked recipe lives in Containerfile.published.
-      - name: Build image
+      - name: Resolve publish flag
+        id: publish
+        run: echo "publish=${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}" >> "$GITHUB_OUTPUT"
+
+      # Node + @devcontainers/cli, pinned to match ci.yml and
+      # sandbox-features.yml so the three workflows stay aligned (umbrella #1319).
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli@0.87.0
+
+      # Stage 1 (substrate): build the repo-root, multi-arch, mcp-baked substrate
+      # exactly as before, minus github-cli (gh now ships as a Feature, composed
+      # in stage 2). context is the repo root so the mcp-builder stage can compile
+      # aileron-mcp from go.work + source. On publish the multi-arch substrate is
+      # pushed to a short-lived per-sha ref that the compose stage FROMs; on PR it
+      # is loaded single-arch for the smoke compose.
+      - name: Build substrate (publish, multi-arch)
+        if: ${{ steps.publish.outputs.publish == 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: .
           file: images/sandbox-base/Containerfile.published
           platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:substrate-${{ github.sha }}
           build-args: |
             AILERON_VERSION=${{ steps.ver.outputs.version }}
             AILERON_COMMIT=${{ github.sha }}
 
-      # Single-arch local load so the next step can `docker run` the image.
-      # The multi-arch build above cannot use `load: true`.
-      - name: Build image for smoke test
+      - name: Build substrate (PR, single-arch load)
+        if: ${{ steps.publish.outputs.publish != 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: .
           file: images/sandbox-base/Containerfile.published
           load: true
-          tags: aileron-sandbox-base:smoke
+          tags: aileron-sandbox-base-substrate:pr
           build-args: |
             AILERON_VERSION=${{ steps.ver.outputs.version }}
             AILERON_COMMIT=${{ github.sha }}
 
+      # Stage 2 (compose): render a scratch devcontainer workspace that FROMs the
+      # substrate and composes the gh Feature on top, then build it with
+      # @devcontainers/cli. The compose installs gh and emits the
+      # devcontainer.metadata label carrying gh's customizations.aileron.cli unit
+      # (the unit loader, #1322, reads it). renderWorkspace mirrors the umbrella's
+      # verified probe: a .devcontainer/devcontainer.json from the committed
+      # template plus a copy of images/sandbox-features/gh.
+      - name: Compose gh + publish multi-arch manifest
+        run: |
+          set -euo pipefail
+
+          renderWorkspace() {
+            local ws="$1" substrate="$2"
+            rm -rf "$ws" && mkdir -p "$ws/.devcontainer"
+            cp -r images/sandbox-features/gh "$ws/.devcontainer/gh"
+            SUBSTRATE_IMAGE="$substrate" envsubst < images/sandbox-base/compose/devcontainer.json.tmpl \
+              > "$ws/.devcontainer/devcontainer.json"
+          }
+
+          if [ "${{ steps.publish.outputs.publish }}" = "true" ]; then
+            SUBSTRATE="${IMAGE_NAME}:substrate-${{ github.sha }}"
+            DIGESTS=()
+            for arch in amd64 arm64; do
+              renderWorkspace "compose-$arch" "$SUBSTRATE"
+              FINAL="${IMAGE_NAME}:compose-${{ github.sha }}-$arch"
+              devcontainer build \
+                --workspace-folder "compose-$arch" \
+                --platform "linux/$arch" \
+                --image-name "$FINAL"
+              docker push "$FINAL"
+              DIGESTS+=("${IMAGE_NAME}@$(docker buildx imagetools inspect "$FINAL" --format '{{.Manifest.Digest}}')")
+            done
+            # Assemble the published multi-arch manifest under every meta tag.
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              docker buildx imagetools create --tag "$tag" "${DIGESTS[@]}"
+            done <<< "${{ steps.meta.outputs.tags }}"
+          else
+            # PR: compose single-arch onto the loaded substrate for smoke only.
+            renderWorkspace compose-pr aileron-sandbox-base-substrate:pr
+            devcontainer build \
+              --workspace-folder compose-pr \
+              --image-name aileron-sandbox-base:smoke
+          fi
+
       # Single-arch local load of the Tier 0 Containerfile so the smoke step can
       # `docker run` it. This recipe takes the images/sandbox-base context (no
       # repo-root, no AILERON_VERSION/COMMIT build-args) and is UNBAKED (no
-      # aileron-mcp). Building it here is the only CI gate on the local recipe;
-      # without it, dropping github-cli from Containerfile would stay green
-      # (issue #1151 P1).
+      # aileron-mcp). It still installs gh via apk (the local Tier 0
+      # Feature-compose move is #1321b), so it remains the #1151 P1 gate on the
+      # local recipe.
       - name: Build local Tier 0 image for smoke test
+        if: ${{ steps.publish.outputs.publish != 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: images/sandbox-base
@@ -118,22 +179,18 @@ jobs:
           load: true
           tags: aileron-sandbox-base-local:smoke
 
-      # Image-fidelity smoke against the published (baked) image: the bash
-      # substrate, the baked-MCP invariants (#957, the binary runs and the
-      # version label is present), and the #959 invariants (no tools.txt or
-      # tools profile banner survives, the proxy CA path is intact for
-      # bootstrap). Earlier matrices exercised the #801 shell-mediation
-      # surface that #952 fully removed.
+      # Image-fidelity smoke against the composed published image (PR only, where
+      # the composed image is loaded as :smoke): gh is present via the Feature AND
+      # the devcontainer.metadata label carries gh's CLI unit, plus the bash
+      # substrate, the baked-MCP invariants (#957), and the #959 invariants.
       - name: Smoke test image
+        if: ${{ steps.publish.outputs.publish != 'true' }}
         run: |
           set -euo pipefail
 
-          # github-cli is part of the base substrate (issue #1146): both recipes
-          # install it from Alpine's community repo. assertGhVersion runs
-          # `gh --version` and relies on set -e to fail the job on a non-zero
-          # exit, exercising the "gh exists and exits 0" acceptance. Invoked
-          # against BOTH the local Tier 0 image (the #1151 P1 gate on the local
-          # recipe) and the published image (proving the recipes stay in sync).
+          # gh present on both the composed published image (via the Feature) and
+          # the local Tier 0 image (still apk, until #1321b). set -e fails the job
+          # on a non-zero `gh --version`.
           assertGhVersion() {
             local img="$1"
             echo "asserting gh --version on $img"
@@ -141,6 +198,16 @@ jobs:
           }
           assertGhVersion aileron-sandbox-base-local:smoke
           assertGhVersion aileron-sandbox-base:smoke
+
+          # The composed image carries gh's CLI-capability unit in the
+          # devcontainer.metadata label (the #1322 loader's source of truth).
+          meta=$(docker inspect --format '{{ index .Config.Labels "devcontainer.metadata" }}' aileron-sandbox-base:smoke)
+          if ! printf '%s' "$meta" | grep -q '"key":"user/github"'; then
+            echo "devcontainer.metadata label missing gh's customizations.aileron.cli unit"
+            echo "$meta"
+            exit 1
+          fi
+          echo "devcontainer.metadata carries gh unit"
 
           IMG=aileron-sandbox-base:smoke
           docker run --rm "$IMG" bash -c 'echo hi' | grep -q '^hi$'
