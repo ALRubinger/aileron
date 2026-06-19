@@ -351,6 +351,11 @@ func prepareAuthSpec(
 						}
 						return defaultHostCodePrompter(ctx, promptW)
 					},
+					// Out is the launcher's stderr so a write-only host
+					// flow (Codex device-authorization) can surface the
+					// verification URL + user_code on the HOST terminal,
+					// even on a headless host where the browser cannot open.
+					Out: stderr,
 				})
 				switch {
 				case acqErr != nil:
