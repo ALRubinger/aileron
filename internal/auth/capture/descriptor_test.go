@@ -46,6 +46,9 @@ func TestParseCaptureDescriptor_ValidRoundTrip(t *testing.T) {
 	if d.ConfigDir != "" {
 		t.Errorf("ConfigDir = %q, want empty", d.ConfigDir)
 	}
+	if d.Image != "" {
+		t.Errorf("Image = %q, want empty", d.Image)
+	}
 	if d.StoreAt != "user/github" {
 		t.Errorf("StoreAt = %q", d.StoreAt)
 	}
