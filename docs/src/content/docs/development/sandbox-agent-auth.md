@@ -75,9 +75,19 @@ When the container exits cleanly, Capture reads the file the agent wrote and PUT
 
 Goose's EnvBinding has no Capture (there is no credential file to snapshot), so first-launch seeding for Goose is by manual `aileron vault put agents/goose/oauth` rather than by an in-container login that Capture stores.
 
-## Host-side seeding (Claude)
+## Host-side seeding (Claude and Codex)
 
 When the vault is empty, the binding is not `Required`, and host-login is enabled, a binding may declare a host-side acquirer (`FileBinding.HostAcquire`, [ADR-0025](/adr/0025-vault-backed-agent-auth)). The launcher runs the acquirer on the **host** before the container starts, PUTs the returned credential to the vault, and renders it into the bind-mount, so the very first launch is silent instead of dropping into the in-container login. A cancelled or failed acquire is non-fatal: the launcher falls back to the in-container login path described above.
+
+### Codex (device-authorization flow)
+
+Codex declares a host-side acquirer that runs OpenAI's device-authorization flow against `auth.openai.com`. The launcher surfaces a verification URL and a one-time `user_code` on the **host terminal**, then opens the verification page in the host browser. The user signs in and enters the code in their own browser, never inside the container TTY. The launcher polls for completion, exchanges the resulting code for tokens, and stores a chatgpt-mode `auth.json` envelope carrying the access token, refresh token, id token, and account id.
+
+The device flow needs no localhost callback and no host `codex` CLI, so the acquirer is pure Go. The verification URL and code are printed before the browser opens, so a headless host or a failed browser open still gives the user everything they need to finish the login by hand. When the user kills the launch the poll loop stops on context cancellation. The seeded refresh token keeps the credential fresh on later launches through the `PreLaunchRefresh` hook.
+
+If host-login is disabled, or the acquire fails or is cancelled, the launcher falls back to the in-container device-auth login described above.
+
+### Claude (paste-code OAuth)
 
 Claude Code declares such an acquirer. It tries two mechanisms in order:
 

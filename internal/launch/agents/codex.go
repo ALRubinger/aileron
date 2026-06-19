@@ -125,6 +125,15 @@ func (c Codex) AuthSpec() launch.AuthSpec {
 			Capture:          codexCapture,
 			Fresher:          codexFresher,
 			PreLaunchRefresh: codexPreLaunchRefresh,
+			// HostAcquire runs the OpenAI device-authorization flow on the
+			// host when the vault is empty and host-login is enabled: the
+			// user opens a verification URL and enters a one-time code in
+			// their own browser rather than logging in inside the
+			// container TTY. It needs no localhost callback and no host
+			// codex CLI (pure Go). The launcher owns the vault PUT and the
+			// validating Render; a cancel/failure is non-fatal and falls
+			// back to the in-container device-auth login.
+			HostAcquire: codexHostAcquire,
 		}},
 	}
 }

@@ -284,6 +284,22 @@ type HostAcquireDeps struct {
 	// non-fatal acquire failure and let the launcher fall back to the
 	// in-container login.
 	CodePrompter func(ctx context.Context, promptW io.Writer) (string, error)
+
+	// Out is where a write-only host flow surfaces user-facing
+	// instructions. The device-authorization grant (Codex) has no
+	// loopback callback and no paste-back step: its whole interaction
+	// is showing the user a verification URL plus a one-time user_code
+	// to enter in their browser. On a headless host, or when the
+	// browser open fails, this printed line is the only path the user
+	// has to complete the login, so it must be a writer the acquirer
+	// can rely on rather than a direct os.Stderr reference.
+	//
+	// The launcher defaults this to its own stderr (mirroring the
+	// CodePrompter stderr default); tests inject a bytes.Buffer to
+	// assert the user_code line is surfaced. A nil Out is tolerated by
+	// acquirers (they skip the display), but the launcher always fills
+	// it in on the live path.
+	Out io.Writer
 }
 
 // ErrAuthSpecRenderNil is returned by validateAuthSpec when a
