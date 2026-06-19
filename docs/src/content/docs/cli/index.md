@@ -105,10 +105,10 @@ Approval-gated actions return an approval-pending message instead of running imm
 |---|---|---|
 | `aileron vault init [--passphrase-file <path>]` | Create the local file vault. Deliberate first-run flow; refuses to overwrite an existing vault. | [ADR-0011](/adr/0011-local-credential-vault) |
 | `aileron vault put agents/<name>/oauth --from-file <path>` | Write a per-agent credential envelope from a file, bytes verbatim. Daemon-backed; agents namespace only. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
-| `aileron vault delete agents/<name>/oauth [--yes]` | Delete a per-agent credential envelope. Confirms first unless `--yes`. Daemon-backed; agents namespace only. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
-| `aileron vault list [--json]` | List agents with a stored credential entry, metadata only. The credential value is never listed. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+| `aileron vault delete <name> [--yes]` | Delete a per-agent credential envelope. `<name>` is the identifier `vault list` prints (e.g. `claude`); the `agents/<name>/oauth` path form is also accepted. Confirms first unless `--yes`. Daemon-backed; agents namespace only. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+| `aileron vault list [--json]` | List agents with a stored credential entry, metadata only. The credential value is never listed. Each printed name is exactly what `vault delete` accepts. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
 
-The `put`, `delete`, and `list` verbs talk to the running daemon and operate only on the `agents/<name>/oauth` namespace. They never open the vault file directly and reject any other path. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the seeding and recovery flows.
+The `put`, `delete`, and `list` verbs talk to the running daemon and operate only on the `agents/<name>/oauth` namespace. They never open the vault file directly and reject any other path. What `vault list` prints for an entry is exactly what `vault delete` takes to remove it, so a listed line can be pasted straight into `delete`. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the seeding and recovery flows.
 
 ## Auth
 
