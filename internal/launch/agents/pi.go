@@ -17,7 +17,7 @@ func (p Pi) BinaryNames() []string { return []string{"pi"} }
 // tools. Per ADR-0015, Aileron is not the trust surface for the agent's
 // local shell commands; --tools just suppresses Pi's per-tool prompt
 // surface so the user is not double-prompted.
-func (p Pi) Args() []string {
+func (p Pi) Args(_ launch.Mode) []string {
 	return []string{"--tools", "bash,read,edit,write,grep,find,ls"}
 }
 

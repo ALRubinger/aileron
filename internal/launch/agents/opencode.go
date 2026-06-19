@@ -24,8 +24,8 @@ type OpenCode struct{}
 func (o OpenCode) Name() string          { return "opencode" }
 func (o OpenCode) BinaryNames() []string { return []string{"opencode"} }
 
-func (o OpenCode) Args() []string         { return nil }
-func (o OpenCode) Env() map[string]string { return nil }
+func (o OpenCode) Args(_ launch.Mode) []string { return nil }
+func (o OpenCode) Env() map[string]string      { return nil }
 
 // LLMEndpointEnv returns "" — OpenCode configures the LLM provider
 // base URL per provider in `opencode.json`, not via a single env var.

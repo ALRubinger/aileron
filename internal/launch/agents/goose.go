@@ -36,7 +36,7 @@ func (g Goose) BinaryNames() []string { return []string{"goose"} }
 // --with-extension …`. `--with-extension` is a session-subcommand
 // flag in Goose's clap config; without an explicit subcommand the
 // flag isn't recognized.
-func (g Goose) Args() []string { return []string{"session"} }
+func (g Goose) Args(_ launch.Mode) []string { return []string{"session"} }
 
 // Env sets GOOSE_MODE=auto so Goose runs without per-tool approval
 // prompts. Users who want Goose's own approval prompts can override

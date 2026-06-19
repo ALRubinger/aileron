@@ -112,11 +112,11 @@ type scriptAgent struct {
 	mcpArgs  []string
 }
 
-func (a scriptAgent) Name() string           { return "test-script" }
-func (a scriptAgent) BinaryNames() []string  { return []string{a.script} }
-func (a scriptAgent) Args() []string         { return nil }
-func (a scriptAgent) Env() map[string]string { return a.extraEnv }
-func (a scriptAgent) LLMEndpointEnv() string { return "" }
+func (a scriptAgent) Name() string                { return "test-script" }
+func (a scriptAgent) BinaryNames() []string       { return []string{a.script} }
+func (a scriptAgent) Args(_ launch.Mode) []string { return nil }
+func (a scriptAgent) Env() map[string]string      { return a.extraEnv }
+func (a scriptAgent) LLMEndpointEnv() string      { return "" }
 func (a scriptAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) ([]string, []launch.MCPMount, error) {
 	return a.mcpArgs, nil, nil
 }
@@ -1448,11 +1448,11 @@ func TestLaunch_Sandbox_AileronMCPMissing_FailsLoud(t *testing.T) {
 
 type claudeTestAgent struct{}
 
-func (claudeTestAgent) Name() string           { return "claude" }
-func (claudeTestAgent) BinaryNames() []string  { return []string{"claude"} }
-func (claudeTestAgent) Args() []string         { return nil }
-func (claudeTestAgent) Env() map[string]string { return nil }
-func (claudeTestAgent) LLMEndpointEnv() string { return "" }
+func (claudeTestAgent) Name() string                { return "claude" }
+func (claudeTestAgent) BinaryNames() []string       { return []string{"claude"} }
+func (claudeTestAgent) Args(_ launch.Mode) []string { return nil }
+func (claudeTestAgent) Env() map[string]string      { return nil }
+func (claudeTestAgent) LLMEndpointEnv() string      { return "" }
 func (claudeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON := encodeJSON(t1, mcpEnv)
 	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
@@ -1461,11 +1461,11 @@ func (claudeTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
 
 type piTestAgent struct{}
 
-func (piTestAgent) Name() string           { return "pi" }
-func (piTestAgent) BinaryNames() []string  { return []string{"pi"} }
-func (piTestAgent) Args() []string         { return nil }
-func (piTestAgent) Env() map[string]string { return nil }
-func (piTestAgent) LLMEndpointEnv() string { return "" }
+func (piTestAgent) Name() string                { return "pi" }
+func (piTestAgent) BinaryNames() []string       { return []string{"pi"} }
+func (piTestAgent) Args(_ launch.Mode) []string { return nil }
+func (piTestAgent) Env() map[string]string      { return nil }
+func (piTestAgent) LLMEndpointEnv() string      { return "" }
 func (piTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON := encodeJSON(t1, mcpEnv)
 	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
@@ -1474,11 +1474,11 @@ func (piTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
 
 type gooseTestAgent struct{}
 
-func (gooseTestAgent) Name() string           { return "goose" }
-func (gooseTestAgent) BinaryNames() []string  { return []string{"goose"} }
-func (gooseTestAgent) Args() []string         { return []string{"session"} }
-func (gooseTestAgent) Env() map[string]string { return nil }
-func (gooseTestAgent) LLMEndpointEnv() string { return "" }
+func (gooseTestAgent) Name() string                { return "goose" }
+func (gooseTestAgent) BinaryNames() []string       { return []string{"goose"} }
+func (gooseTestAgent) Args(_ launch.Mode) []string { return []string{"session"} }
+func (gooseTestAgent) Env() map[string]string      { return nil }
+func (gooseTestAgent) LLMEndpointEnv() string      { return "" }
 func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	// Mirror agents/goose.go's "ENV=val ENV=val cmd" shape, deterministic order.
 	keys := []string{}
@@ -1497,11 +1497,11 @@ func (gooseTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
 
 type openCodeTestAgent struct{}
 
-func (openCodeTestAgent) Name() string           { return "opencode" }
-func (openCodeTestAgent) BinaryNames() []string  { return []string{"opencode"} }
-func (openCodeTestAgent) Args() []string         { return nil }
-func (openCodeTestAgent) Env() map[string]string { return nil }
-func (openCodeTestAgent) LLMEndpointEnv() string { return "" }
+func (openCodeTestAgent) Name() string                { return "opencode" }
+func (openCodeTestAgent) BinaryNames() []string       { return []string{"opencode"} }
+func (openCodeTestAgent) Args(_ launch.Mode) []string { return nil }
+func (openCodeTestAgent) Env() map[string]string      { return nil }
+func (openCodeTestAgent) LLMEndpointEnv() string      { return "" }
 func (openCodeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	if dir == "" {
 		cwd, _ := os.Getwd()

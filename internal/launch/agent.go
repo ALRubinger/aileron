@@ -56,7 +56,13 @@ type Agent interface {
 	BinaryNames() []string
 	// Args returns CLI arguments the agent requires. These are prepended
 	// before any user-supplied arguments.
-	Args() []string
+	//
+	// mode is host vs sandbox. Agents whose approval posture differs by
+	// trust boundary branch on it: under ModeSandbox the container is the
+	// trust boundary (ADR-0015), so an agent may pass a broader
+	// auto-approve flag than under ModeHost. Agents whose flags are the
+	// same in both modes ignore the parameter.
+	Args(mode Mode) []string
 	// Env returns additional environment variables to set for the agent
 	// process. Returns nil if no extra env is needed.
 	Env() map[string]string

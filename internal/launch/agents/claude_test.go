@@ -25,19 +25,41 @@ func TestClaude_Identity(t *testing.T) {
 	}
 }
 
-func TestClaude_Args_AllowsBashAndAileronMCP(t *testing.T) {
-	args := agents.Claude{}.Args()
+// TestClaude_Args_HostAllowsBashAndAileronMCP pins the host-launch
+// posture: a host launch runs against the user's real machine, so
+// Claude keeps the narrower --allowedTools whitelist rather than full
+// permission skipping.
+func TestClaude_Args_HostAllowsBashAndAileronMCP(t *testing.T) {
+	args := agents.Claude{}.Args(launch.ModeHost)
 	if len(args) != 2 {
-		t.Fatalf("Args() = %v, want 2 entries", args)
+		t.Fatalf("Args(ModeHost) = %v, want 2 entries", args)
 	}
 	if args[0] != "--allowedTools" {
-		t.Errorf("Args()[0] = %q, want --allowedTools", args[0])
+		t.Errorf("Args(ModeHost)[0] = %q, want --allowedTools", args[0])
 	}
 	if !strings.Contains(args[1], "Bash(*)") {
-		t.Errorf("Args()[1] = %q, should allow Bash(*)", args[1])
+		t.Errorf("Args(ModeHost)[1] = %q, should allow Bash(*)", args[1])
 	}
 	if !strings.Contains(args[1], "mcp__"+launch.MCPServerName) {
-		t.Errorf("Args()[1] = %q, should allow mcp__%s", args[1], launch.MCPServerName)
+		t.Errorf("Args(ModeHost)[1] = %q, should allow mcp__%s", args[1], launch.MCPServerName)
+	}
+}
+
+// TestClaude_Args_SandboxSkipsPermissions is the regression test for
+// the container/sandbox parity fix: under ModeSandbox the container is
+// the trust boundary (ADR-0015), so Claude must pass
+// --dangerously-skip-permissions alone, mirroring Codex's container
+// YOLO posture. The narrower --allowedTools flag must NOT appear: the
+// skip flag subsumes it, and combining them would be redundant.
+func TestClaude_Args_SandboxSkipsPermissions(t *testing.T) {
+	args := agents.Claude{}.Args(launch.ModeSandbox)
+	if len(args) != 1 || args[0] != "--dangerously-skip-permissions" {
+		t.Fatalf("Args(ModeSandbox) = %v, want [--dangerously-skip-permissions]", args)
+	}
+	for _, a := range args {
+		if a == "--allowedTools" {
+			t.Errorf("Args(ModeSandbox) = %v, must not include --allowedTools alongside the skip flag", args)
+		}
 	}
 }
 

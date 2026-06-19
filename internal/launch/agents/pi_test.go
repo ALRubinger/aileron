@@ -26,7 +26,7 @@ func TestPi_Identity(t *testing.T) {
 }
 
 func TestPi_Args_AutoApproveTools(t *testing.T) {
-	args := agents.Pi{}.Args()
+	args := agents.Pi{}.Args(launch.ModeHost)
 	if len(args) != 2 || args[0] != "--tools" {
 		t.Fatalf("Args() = %v, want [--tools <list>]", args)
 	}

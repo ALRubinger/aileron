@@ -39,7 +39,7 @@ func TestGoose_Env_ForcesAutonomousMode(t *testing.T) {
 // Goose's clap config; without an explicit subcommand the flag
 // isn't recognized and our extension wiring silently disappears.
 func TestGoose_Args_StartsSessionSubcommand(t *testing.T) {
-	args := agents.Goose{}.Args()
+	args := agents.Goose{}.Args(launch.ModeHost)
 	if len(args) != 1 || args[0] != "session" {
 		t.Errorf("Args() = %v, want [\"session\"]", args)
 	}

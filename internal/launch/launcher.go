@@ -770,7 +770,7 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 		return LaunchResult{}, err
 	}
 
-	allArgs := append(config.Agent.Args(), config.Args...)
+	allArgs := append(config.Agent.Args(ModeHost), config.Args...)
 	mcpEnv := map[string]string{
 		"AILERON_URL":          daemonURL,
 		"AILERON_COMMS_URL":    daemonURL,
@@ -924,7 +924,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	}
 	mounts = collapsed
 
-	command := append([]string{commandName}, config.Agent.Args()...)
+	command := append([]string{commandName}, config.Agent.Args(ModeSandbox)...)
 	command = append(command, extraArgs...)
 	command = append(command, config.Args...)
 	user := ""

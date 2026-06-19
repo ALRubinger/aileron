@@ -21,7 +21,7 @@ type emptyBinaryAgent struct{}
 
 func (emptyBinaryAgent) Name() string           { return "empty" }
 func (emptyBinaryAgent) BinaryNames() []string  { return nil }
-func (emptyBinaryAgent) Args() []string         { return nil }
+func (emptyBinaryAgent) Args(_ Mode) []string   { return nil }
 func (emptyBinaryAgent) Env() map[string]string { return nil }
 func (emptyBinaryAgent) LLMEndpointEnv() string { return "" }
 func (emptyBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
@@ -33,7 +33,7 @@ type namedBinaryAgent struct{ name string }
 
 func (a namedBinaryAgent) Name() string           { return "named" }
 func (a namedBinaryAgent) BinaryNames() []string  { return []string{a.name} }
-func (a namedBinaryAgent) Args() []string         { return nil }
+func (a namedBinaryAgent) Args(_ Mode) []string   { return nil }
 func (a namedBinaryAgent) Env() map[string]string { return nil }
 func (a namedBinaryAgent) LLMEndpointEnv() string { return "" }
 func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
@@ -48,7 +48,7 @@ type publishedNameAgent struct{ name string }
 
 func (a publishedNameAgent) Name() string           { return a.name }
 func (a publishedNameAgent) BinaryNames() []string  { return []string{a.name} }
-func (a publishedNameAgent) Args() []string         { return nil }
+func (a publishedNameAgent) Args(_ Mode) []string   { return nil }
 func (a publishedNameAgent) Env() map[string]string { return nil }
 func (a publishedNameAgent) LLMEndpointEnv() string { return "" }
 func (a publishedNameAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
