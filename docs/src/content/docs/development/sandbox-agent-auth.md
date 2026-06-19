@@ -97,6 +97,10 @@ Claude Code declares such an acquirer. It tries two mechanisms in order:
 
 The OAuth client is Claude Code's public client, registered only for the hosted callback `https://platform.claude.com/oauth/code/callback`; loopback (`127.0.0.1`) redirect URIs are rejected by the token endpoint, which is why this flow uses the paste mechanism rather than a loopback listener or device-auth.
 
+### Cold launch versus import-from-host
+
+The host-side acquirer and `aileron auth <agent> --import-from-host` are different mechanisms for different users. The acquirer serves the **cold** case: the user has never logged the agent in, or has not installed the agent CLI on the host at all. It runs a fresh login on the host at launch time and seeds the result. Import-from-host serves the **warm** case: the user already ran `claude` or `codex` login on the host, so a working credential already exists, and the command copies it into the vault without a second login. Neither path supersedes the other. A user who already authenticated the host CLI can skip the acquirer's browser dance with one `--import-from-host`, while a user on a fresh machine reaches a silent first launch through the acquirer alone. Both paths land at the same place, an `agents/<agent>/oauth` envelope the launcher renders into the container.
+
 ## Manual seeding
 
 `aileron vault put` writes a per-agent credential envelope directly. It is a daemon-backed command, so the daemon must be running and the vault unlocked.

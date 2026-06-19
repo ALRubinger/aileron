@@ -363,6 +363,87 @@ func TestPrepareAuthSpec_HostAcquireMalformedSecretAborts(t *testing.T) {
 	}
 }
 
+// statusLineForPrep reproduces the launcher's R30 gate (launcher.go
+// ~line 559): it emits NoVaultCredentialMsgFormat exactly when the
+// spec declared bindings but none rendered a credential. Tests use it
+// to assert the observable status-line behavior against the LIVE
+// launcher constant, never against a re-typed literal or the ADR's
+// quoted copy.
+func statusLineForPrep(prep authSpecPrep, agentName string) string {
+	if prep.HasBindings && !prep.RenderedAnyCredential {
+		return fmt.Sprintf(NoVaultCredentialMsgFormat, agentName)
+	}
+	return ""
+}
+
+// TestHostAcquireSilentRender_StatusLineGate pins the end-to-end
+// silent-render contract against the live launcher constant: a
+// successful host-acquire renders the credential, so the R30
+// "agent will prompt for login" status line is SUPPRESSED; a failed
+// acquire falls back to the in-container path, so the status line is
+// EMITTED. This is the assertion the brief calls for — the silent path
+// is verified against launcher.go's constant, not the ADR quote.
+func TestHostAcquireSilentRender_StatusLineGate(t *testing.T) {
+	envelope := acquireClaudeEnvelope("seed-tok", futureExpiresAtMS)
+
+	t.Run("successful acquire suppresses the status line", func(t *testing.T) {
+		daemon := newFakeDaemon() // empty vault
+		spy := &spyAcquirer{secret: vault.Secret{Value: envelope}}
+		spec := AuthSpec{
+			FileBindings: []FileBinding{{
+				VaultPath:     "agents/claude/oauth",
+				ContainerPath: "/home/agent/.claude/.credentials.json",
+				Mode:          0o600,
+				Required:      false,
+				Render:        claudeShapedRender,
+				Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+				HostAcquire:   spy.acquire,
+			}},
+		}
+		prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+		if err != nil {
+			t.Fatalf("prepareAuthSpec: %v", err)
+		}
+		defer prep.Cleanup()
+
+		if !prep.RenderedAnyCredential {
+			t.Fatal("RenderedAnyCredential = false; a successful acquire must render the seed")
+		}
+		if line := statusLineForPrep(prep, "claude"); line != "" {
+			t.Errorf("status line emitted on silent path: %q", line)
+		}
+	})
+
+	t.Run("failed acquire emits the status line", func(t *testing.T) {
+		daemon := newFakeDaemon() // empty vault
+		spy := &spyAcquirer{err: errors.New("user cancelled consent")}
+		spec := AuthSpec{
+			FileBindings: []FileBinding{{
+				VaultPath:     "agents/claude/oauth",
+				ContainerPath: "/home/agent/.claude/.credentials.json",
+				Mode:          0o600,
+				Required:      false,
+				Render:        claudeShapedRender,
+				Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+				HostAcquire:   spy.acquire,
+			}},
+		}
+		prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+		if err != nil {
+			t.Fatalf("prepareAuthSpec: %v", err)
+		}
+		defer prep.Cleanup()
+
+		if prep.RenderedAnyCredential {
+			t.Fatal("RenderedAnyCredential = true; a failed acquire must fall back")
+		}
+		want := fmt.Sprintf(NoVaultCredentialMsgFormat, "claude")
+		if line := statusLineForPrep(prep, "claude"); line != want {
+			t.Errorf("status line = %q, want %q", line, want)
+		}
+	})
+}
+
 // claudeShapedRender mirrors the Claude credential envelope's Render
 // contract: it requires a non-empty accessToken under claudeAiOauth and
 // returns the canonical bytes. It lives in the test because the launch

@@ -51,3 +51,62 @@ func TestBrowserCommand_BuildsPlatformInvocation(t *testing.T) {
 		}
 	}
 }
+
+// TestBrowserArgv_PerPlatformContract pins the exact argv each
+// supported platform produces, for every GOOS, regardless of where
+// this test runs. The Windows row is load-bearing: it must open the
+// browser on the host with no terminal interaction (the
+// no-container-TTY guarantee the host-side acquirer relies on), and
+// the empty title argument is what stops `start` from treating a
+// quoted URL as a window title. CI runs on Linux, so without this
+// table the Windows and macOS argv shapes would never be asserted.
+//
+// True end-to-end Windows verification (a real browser window opening
+// and the code paste landing on the host terminal) is not automatable
+// here; it is the manual v4-acceptance step.
+func TestBrowserArgv_PerPlatformContract(t *testing.T) {
+	const url = "https://example.test/oauth/authorize"
+	tests := []struct {
+		goos    string
+		want    []string
+		wantErr bool
+	}{
+		{goos: "darwin", want: []string{"open", url}},
+		{goos: "linux", want: []string{"xdg-open", url}},
+		{goos: "windows", want: []string{"cmd", "/c", "start", "", url}},
+		{goos: "plan9", wantErr: true},
+		{goos: "", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.goos, func(t *testing.T) {
+			argv, err := browserArgv(tc.goos, url)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("browserArgv(%q) = %v, nil; want error", tc.goos, argv)
+				}
+				if argv != nil {
+					t.Errorf("browserArgv(%q) returned argv %v alongside error", tc.goos, argv)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("browserArgv(%q): unexpected error %v", tc.goos, err)
+			}
+			if !equalArgv(argv, tc.want) {
+				t.Errorf("browserArgv(%q) = %v; want %v", tc.goos, argv, tc.want)
+			}
+		})
+	}
+}
+
+func equalArgv(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
