@@ -75,6 +75,18 @@ When the container exits cleanly, Capture reads the file the agent wrote and PUT
 
 Goose's EnvBinding has no Capture (there is no credential file to snapshot), so first-launch seeding for Goose is by manual `aileron vault put agents/goose/oauth` rather than by an in-container login that Capture stores.
 
+## Host-side seeding (Claude)
+
+When the vault is empty, the binding is not `Required`, and host-login is enabled, a binding may declare a host-side acquirer (`FileBinding.HostAcquire`, [ADR-0025](/adr/0025-vault-backed-agent-auth)). The launcher runs the acquirer on the **host** before the container starts, PUTs the returned credential to the vault, and renders it into the bind-mount, so the very first launch is silent instead of dropping into the in-container login. A cancelled or failed acquire is non-fatal: the launcher falls back to the in-container login path described above.
+
+Claude Code declares such an acquirer. It tries two mechanisms in order:
+
+1. **`claude setup-token` shortcut.** When the `claude` CLI is on the host `PATH`, the launcher runs `claude setup-token`, which prints a single long-lived bare token. The launcher wraps it into a `claudeAiOauth` envelope with `accessToken` set and `refreshToken`/`expiresAt`/`scopes` left empty (the setup-token path has no refresh token or expiry). If the CLI is absent or the command fails, it falls through to the paste flow.
+
+2. **Hosted-callback paste flow (PKCE).** The launcher opens Claude's consent URL in the host browser and prompts on the **host terminal** (not the container TTY) for the `<code>#<state>` string the consent page renders. It exchanges the code for tokens against Claude's token endpoint using PKCE (no client secret) and stores an envelope whose `expiresAt` is in milliseconds. The paste happening on the host terminal is what makes this flow work on Windows, where reading from the container TTY was the blocker.
+
+The OAuth client is Claude Code's public client, registered only for the hosted callback `https://platform.claude.com/oauth/code/callback`; loopback (`127.0.0.1`) redirect URIs are rejected by the token endpoint, which is why this flow uses the paste mechanism rather than a loopback listener or device-auth.
+
 ## Manual seeding
 
 `aileron vault put` writes a per-agent credential envelope directly. It is a daemon-backed command, so the daemon must be running and the vault unlocked.

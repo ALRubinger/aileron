@@ -94,6 +94,14 @@ func (c Claude) AuthSpec() launch.AuthSpec {
 			Render:   claudeRender,
 			Capture:  claudeCapture,
 			Fresher:  claudeFresher,
+			// HostAcquire runs a host-side OAuth flow (setup-token
+			// shortcut, else hosted-callback paste with PKCE) when the
+			// vault is empty and host-login is enabled, so the user
+			// authenticates in their own browser/terminal rather than
+			// inside the container TTY. The launcher owns the vault PUT
+			// and the validating Render; a cancel/failure is non-fatal
+			// and falls back to the in-container login.
+			HostAcquire: claudeHostAcquire,
 		}},
 		StaticFiles: []launch.StaticFile{{
 			ContainerPath: claudeOnboardingContainerPath,

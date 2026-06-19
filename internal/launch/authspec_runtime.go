@@ -341,6 +341,16 @@ func prepareAuthSpec(
 					Ctx:        ctx,
 					HTTPClient: preLaunchRefreshHTTPClient(),
 					Browser:    oauth.SystemBrowser{},
+					// Default the paste prompt to a controlling-terminal
+					// line reader writing to the launcher's stderr, so the
+					// code is pasted on the HOST terminal (not the
+					// container TTY). Tests inject a scripted prompter.
+					CodePrompter: func(ctx context.Context, promptW io.Writer) (string, error) {
+						if promptW == nil {
+							promptW = stderr
+						}
+						return defaultHostCodePrompter(ctx, promptW)
+					},
 				})
 				switch {
 				case acqErr != nil:

@@ -1,13 +1,132 @@
 package agents
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/launch"
+	"github.com/ALRubinger/aileron/internal/oauth"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
+
+// Claude Code subscription-OAuth client + endpoints.
+//
+// These values are Anthropic's public Claude Code client; they were
+// verified against the live `claude` install / public documentation
+// before this code was written (see the PR body for #1270 for the
+// citations). The client is a PUBLIC OAuth client — no client_secret —
+// and is registered ONLY for the hosted callback below.
+//
+//   - claudeOAuthClientID is Claude Code's public client id.
+//   - claudeAuthorizeURL is the consent page the host browser opens.
+//   - claudeTokenURL is the token-exchange endpoint (PKCE, no secret).
+//   - claudeHostedCallbackURL is the ONLY redirect_uri the token
+//     endpoint accepts for this client. Loopback (127.0.0.1) redirect
+//     URIs return `400 invalid_grant`, which is why the host flow uses
+//     the hosted-callback "paste the code" mechanism rather than a
+//     loopback listener or device-auth (see #1275 P0).
+//
+// The authorize page renders the authorization response as a
+// `<code>#<state>` string for the user to copy; the acquirer splits on
+// `#` before the token exchange.
+const (
+	claudeOAuthClientID     = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	claudeAuthorizeURL      = "https://claude.ai/oauth/authorize"
+	claudeTokenURL          = "https://platform.claude.com/v1/oauth/token"
+	claudeHostedCallbackURL = "https://platform.claude.com/oauth/code/callback"
+)
+
+// claudeOAuthScopes are the scopes Claude Code requests for a
+// subscription (Pro/Max) login. `user:inference` is what lets the
+// seeded token drive model calls; the others mirror the upstream CLI's
+// requested set so the consent screen matches what a native `claude`
+// login shows.
+var claudeOAuthScopes = []string{
+	"user:inference",
+	"user:profile",
+	"user:sessions:claude_code",
+	"user:mcp_servers",
+}
+
+// buildClaudeAuthorizeURL composes Claude's consent URL with PKCE +
+// state. The `code=true` query param tells the authorize page to render
+// the authorization response as a copyable `<code>#<state>` string
+// (the hosted-callback paste mechanism) rather than auto-redirecting.
+func buildClaudeAuthorizeURL(pkce oauth.PKCEPair, state string) string {
+	q := url.Values{
+		"code":                  {"true"},
+		"client_id":             {claudeOAuthClientID},
+		"response_type":         {"code"},
+		"redirect_uri":          {claudeHostedCallbackURL},
+		"scope":                 {strings.Join(claudeOAuthScopes, " ")},
+		"state":                 {state},
+		"code_challenge":        {pkce.Challenge},
+		"code_challenge_method": {pkce.Method},
+	}
+	sep := "?"
+	if strings.Contains(claudeAuthorizeURL, "?") {
+		sep = "&"
+	}
+	return claudeAuthorizeURL + sep + q.Encode()
+}
+
+// claudeEnvelopeFromTokenResponse converts a successful token-exchange
+// response into the on-disk `claudeAiOauth` envelope.
+//
+// expiresInSec is the provider's `expires_in` (SECONDS). Claude's
+// `.credentials.json` stores `claudeAiOauth.expiresAt` in MILLISECONDS
+// (the real file carries values like 1775212290694), so we convert to
+// an absolute ms timestamp. A non-positive expiresInSec leaves
+// expiresAt at 0 (omitted), matching envelopes that ship without an
+// expiry.
+func claudeEnvelopeFromTokenResponse(access, refresh string, expiresInSec int, scopes []string) ([]byte, error) {
+	env := claudeCredentialEnvelope{
+		ClaudeAiOauth: claudeAiOauth{
+			AccessToken:  access,
+			RefreshToken: refresh,
+			Scopes:       scopes,
+		},
+	}
+	if expiresInSec > 0 {
+		env.ClaudeAiOauth.ExpiresAt = time.Now().
+			Add(time.Duration(expiresInSec) * time.Second).UnixMilli()
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		// The shape is fixed; marshaling only fails on a programming
+		// error. Wrap rather than panic so a caller in the acquire path
+		// degrades to the in-container fallback instead of crashing.
+		return nil, fmt.Errorf("claude: marshal acquired envelope: %w", err)
+	}
+	return b, nil
+}
+
+// claudeEnvelopeFromBareToken builds an envelope from the single bare
+// token `claude setup-token` prints on stdout. Unlike the
+// hosted-callback exchange, setup-token yields no refresh token, no
+// expiry, and no scope list — it is a long-lived token. We populate
+// `accessToken` only and leave `refreshToken`/`expiresAt`/`scopes`
+// empty (omitted). This is a deliberate divergence from the
+// hosted-callback envelope, documented so a reader does not mistake the
+// missing fields for a bug.
+func claudeEnvelopeFromBareToken(token string) ([]byte, error) {
+	env := claudeCredentialEnvelope{
+		ClaudeAiOauth: claudeAiOauth{AccessToken: token},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("claude: marshal setup-token envelope: %w", err)
+	}
+	return b, nil
+}
 
 // claudeCredentialsContainerPath is where Claude Code reads its
 // subscription-OAuth credentials inside the sandbox container. The
@@ -207,4 +326,223 @@ func validateClaudeEnvelope(b []byte) error {
 			errClaudeEnvelopeMalformed)
 	}
 	return nil
+}
+
+// claudeHostAcquire is Claude's host-side credential acquirer, wired to
+// the FileBinding's HostAcquire hook (see AuthSpec in claude.go). The
+// launcher invokes it only when the vault GET misses, the binding is not
+// Required, and host-login is enabled; it returns a vault.Secret that
+// the launcher PUTs to agents/claude/oauth and renders before the
+// container starts.
+//
+// Contract (per #1268, enforced by the launcher):
+//   - A returned Secret with a non-empty Value seeds the vault.
+//   - An empty Secret (with a nil error) or a non-nil error is
+//     NON-FATAL: the launcher logs and falls back to the legacy
+//     in-container login. So a cancel / unavailable-CLI / failed
+//     exchange must surface as one of those, never as a partial seed.
+//
+// Two acquisition mechanisms, tried in order:
+//
+//  1. `claude setup-token` SHORTCUT (opportunistic). When the `claude`
+//     CLI is on PATH we run it first; it prints a single long-lived
+//     bare token on stdout (NOT a full claudeAiOauth JSON envelope). We
+//     wrap that bare token into an envelope with accessToken only
+//     (refreshToken/expiresAt/scopes empty — see
+//     claudeEnvelopeFromBareToken). The CLI may be absent; that is
+//     expected, not an error.
+//
+//  2. Hosted-callback PASTE flow (the real OAuth, with PKCE). Open the
+//     consent URL in the host browser, have the user paste the
+//     `<code>#<state>` string from the hosted callback page on the HOST
+//     terminal, verify state, exchange the code for tokens (PKCE, no
+//     client_secret), and build a ms-expiry envelope.
+func claudeHostAcquire(ctx context.Context, deps launch.HostAcquireDeps) (vault.Secret, error) {
+	// 1. setup-token shortcut.
+	if secret, ok := claudeSetupTokenShortcut(ctx); ok {
+		return secret, nil
+	}
+	// 2. Hosted-callback paste flow.
+	return claudeHostedCallbackAcquire(ctx, deps)
+}
+
+// claudeSetupTokenShortcut tries `claude setup-token`. It returns
+// (secret, true) only on a clean run that yields a usable bare token;
+// any failure (CLI absent, non-zero exit, empty/garbled output,
+// envelope build error) returns (_, false) so the caller falls through
+// to the hosted-callback flow. It never returns an error: a failed
+// shortcut is not itself a fatal acquire failure.
+func claudeSetupTokenShortcut(ctx context.Context) (vault.Secret, bool) {
+	if _, err := exec.LookPath("claude"); err != nil {
+		return vault.Secret{}, false
+	}
+	out, err := exec.CommandContext(ctx, "claude", "setup-token").Output()
+	if err != nil {
+		return vault.Secret{}, false
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return vault.Secret{}, false
+	}
+	envelope, err := claudeEnvelopeFromBareToken(token)
+	if err != nil {
+		return vault.Secret{}, false
+	}
+	return vault.Secret{
+		Value:    envelope,
+		Metadata: vault.Metadata{Type: "oauth_refresh_token"},
+	}, true
+}
+
+// claudeHostedCallbackAcquire runs the PKCE authorization-code flow
+// against Claude's hosted callback, reading the pasted code from the
+// host terminal via deps.CodePrompter.
+func claudeHostedCallbackAcquire(ctx context.Context, deps launch.HostAcquireDeps) (vault.Secret, error) {
+	if deps.CodePrompter == nil {
+		// No way to read the pasted code. Non-fatal: let the launcher
+		// fall back to the in-container login.
+		return vault.Secret{}, errors.New("claude: no code prompter available for host paste flow")
+	}
+
+	pkce, err := oauth.NewPKCE()
+	if err != nil {
+		return vault.Secret{}, fmt.Errorf("claude: %w", err)
+	}
+	state, err := oauth.NewState()
+	if err != nil {
+		return vault.Secret{}, fmt.Errorf("claude: %w", err)
+	}
+
+	authURL := buildClaudeAuthorizeURL(pkce, state)
+	if deps.Browser != nil {
+		if err := deps.Browser.Open(authURL); err != nil {
+			// Opening the browser failed (headless host, no opener).
+			// Non-fatal: fall back to in-container login.
+			return vault.Secret{}, fmt.Errorf("claude: open consent URL: %w", err)
+		}
+	}
+
+	pasted, err := deps.CodePrompter(ctx, nil)
+	if err != nil {
+		return vault.Secret{}, fmt.Errorf("claude: read pasted code: %w", err)
+	}
+	code, gotState := splitClaudeCodeState(pasted)
+	if code == "" {
+		return vault.Secret{}, errors.New("claude: pasted code was empty")
+	}
+	// The hosted-callback page renders `<code>#<state>`. When the user
+	// pasted the state too, verify it matches to bind the code to this
+	// session. A paste of the bare code (no `#state`) is tolerated —
+	// some users copy only the code — because PKCE already binds the
+	// exchange to this client's verifier.
+	if gotState != "" && gotState != state {
+		return vault.Secret{}, errors.New("claude: pasted state does not match; aborting to avoid a cross-session code")
+	}
+
+	access, refresh, expiresIn, scopes, err := claudeExchangeCode(ctx, deps.HTTPClient, code, pkce.Verifier, state)
+	if err != nil {
+		return vault.Secret{}, err
+	}
+	envelope, err := claudeEnvelopeFromTokenResponse(access, refresh, expiresIn, scopes)
+	if err != nil {
+		return vault.Secret{}, err
+	}
+	return vault.Secret{
+		Value:    envelope,
+		Metadata: vault.Metadata{Type: "oauth_refresh_token"},
+	}, nil
+}
+
+// splitClaudeCodeState splits a pasted `<code>#<state>` string on the
+// first `#`. A paste with no `#` yields (code, "").
+func splitClaudeCodeState(pasted string) (code, state string) {
+	pasted = strings.TrimSpace(pasted)
+	if i := strings.Index(pasted, "#"); i >= 0 {
+		return strings.TrimSpace(pasted[:i]), strings.TrimSpace(pasted[i+1:])
+	}
+	return pasted, ""
+}
+
+// claudeExchangeCode POSTs the authorization code to Claude's token
+// endpoint with PKCE (no client_secret — public client) and returns the
+// access token, refresh token, expires_in (seconds), and granted
+// scopes.
+//
+// Per RFC 6749 §5.2 a token-error body may carry token hints; mirroring
+// credential.DoRefresh's posture, a non-2xx response surfaces only the
+// HTTP status (and the standard `error` code when present), never the
+// raw body, so a hostile or verbose provider response cannot leak into
+// the user-facing launch error.
+func claudeExchangeCode(ctx context.Context, client *http.Client, code, verifier, state string) (access, refresh string, expiresIn int, scopes []string, err error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	body := url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {claudeHostedCallbackURL},
+		"client_id":     {claudeOAuthClientID},
+		"code_verifier": {verifier},
+		"state":         {state},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claudeTokenURL,
+		strings.NewReader(body.Encode()))
+	if err != nil {
+		return "", "", 0, nil, fmt.Errorf("claude: build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", 0, nil, fmt.Errorf("claude: token exchange: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		// Redact the raw body; surface only status + standard error code.
+		if errCode := parseClaudeTokenErrorCode(respBody); errCode != "" {
+			return "", "", 0, nil, fmt.Errorf("claude: token exchange failed: provider returned %d (%s)",
+				resp.StatusCode, errCode)
+		}
+		return "", "", 0, nil, fmt.Errorf("claude: token exchange failed: provider returned %d", resp.StatusCode)
+	}
+
+	var parsed struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", "", 0, nil, fmt.Errorf("claude: parse token response: %w", err)
+	}
+	if parsed.AccessToken == "" {
+		return "", "", 0, nil, errors.New("claude: token response missing access_token")
+	}
+	granted := strings.Fields(parsed.Scope)
+	if len(granted) == 0 {
+		// Provider omitted `scope` (RFC 6749 §5.1 permits this when the
+		// granted set matches the requested set); record what we asked
+		// for.
+		granted = append([]string(nil), claudeOAuthScopes...)
+	}
+	return parsed.AccessToken, parsed.RefreshToken, parsed.ExpiresIn, granted, nil
+}
+
+// parseClaudeTokenErrorCode extracts the RFC 6749 §5.2 `error` field
+// from a token-error body, if present. Returns "" when the body does
+// not parse or carries no `error` — the caller then surfaces the bare
+// HTTP status. Only the short standardized code is surfaced; the
+// free-text `error_description` is intentionally not, since it may echo
+// request material.
+func parseClaudeTokenErrorCode(body []byte) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil {
+		return ""
+	}
+	return e.Error
 }
