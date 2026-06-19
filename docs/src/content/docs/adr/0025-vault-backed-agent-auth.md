@@ -56,6 +56,16 @@ The daemon's new endpoints are namespace-scoped at the routing layer: `{name}` t
 
 **Two distinct host-seed paths for two distinct populations.** The daemon-driven cold-launch acquirer described here handles the never-logged-in or not-installed user, acquiring a fresh credential on the host at first launch. It is a different mechanism from `aileron auth <agent> --import-from-host` (described under Alternatives Considered below), which reads an already-authenticated host CLI install into the vault. Import-from-host serves the user who already logged the host CLI in. The cold-launch acquirer serves the user who never has. They are complementary and neither supersedes the other.
 
+**Descriptor-driven acquisition (amendment, umbrella [#1290](https://github.com/ALRubinger/aileron/issues/1290)).** This amendment generalizes the standalone user-level acquisition path, `aileron auth github`, so a tool's login flow ships as data rather than as compiled-in Go. The unit of that data is a **capture descriptor**, which is distinct from the AuthSpec FileBinding "descriptor" used elsewhere in this ADR. The AuthSpec FileBinding descriptor governs the **binding** side: rendering a stored vault credential into the running sandbox and capturing in-container rotations back. A capture descriptor governs the **acquisition** side: how a one-time login is run in a container to mint a credential the vault did not yet hold. The two senses are kept separate throughout this file.
+
+`aileron auth github` resolves the `gh` capture descriptor **by name** through a registry, then drives the generic `capture.Driver` from the descriptor's fields. The descriptor supplies the login flow, the container image, the vault path, and the credential kind. No provider knowledge is compiled into core. Adding a second tool is a new shipped YAML descriptor under the capture defaults, never new Go.
+
+The `gh` descriptor ships as a **trusted YAML default loaded by the auth domain's own embed and loader in `internal/auth/capture`** (`embed.go`, `loader.go`, and the by-name `Registry` in `registry.go`). It follows the same two-layer built-in-then-user convention as the proxybinding `github.yaml` trusted default, and it is **not** loaded by proxybinding. The auth domain owns its acquisition descriptors and proxybinding owns its binding descriptors; the two loaders are independent.
+
+The GitHub one-command UX is unchanged. `aileron auth github` still runs `gh auth login` and `gh auth token` in one container, prints the device URL, stores the token at `user/github`, and returns the same exit codes. The in-container interactive login remains the documented acquisition path the descriptor drives; the descriptor expresses that flow as data rather than replacing it.
+
+This acquisition-side generalization mirrors the binding and egress-side generalization that routed GitHub through the uniform proxybinding descriptor path (issues [#1244](https://github.com/ALRubinger/aileron/issues/1244) and [#1245](https://github.com/ALRubinger/aileron/issues/1245)).
+
 **Sandbox-only in v1.** Host launch (`aileron launch <agent>` with no sandbox flag) is deliberately not vault-backed. Host launch already resolves a working install's credentials from the host user's own `~/.claude/` and `~/.codex/`. `prepareAuthSpec` runs only on the sandbox path and is intentionally not wired into host launch. Intervening on the host path risks breaking a working install, so the host path stays untouched in v1. Vault-backed host auth would render vault entries into host paths and capture rotations back to the vault. That work warrants a separate PR with explicit user testing, and is deferred. The host-parity question was evaluated under issue [#983](https://github.com/ALRubinger/aileron/issues/983): three options were weighed, extending `AuthSpec` to host launch, a hybrid, and documenting the sandbox-only stance. Documenting the sandbox-only stance was chosen for v1. Host-launch parity for `AuthSpec` stays architecturally clean to extend later, and is not part of this decision.
 
 ## Consequences
@@ -123,6 +133,9 @@ The current decision stores refresh tokens in the vault and hands them to the ag
 
 - [Issue #969](https://github.com/ALRubinger/aileron/issues/969). Vault-backed agent auth injection (this ADR's tracking issue)
 - [Issue #1267](https://github.com/ALRubinger/aileron/issues/1267). Host-side cold-launch credential acquirer umbrella (the host-acquirer-phase amendment)
+- [Issue #1290](https://github.com/ALRubinger/aileron/issues/1290). Descriptor-driven acquisition umbrella (the capture-descriptor amendment)
+- [Issue #1244](https://github.com/ALRubinger/aileron/issues/1244). Generalize the emit mechanism so GitHub is just another binding descriptor (the binding-side sibling)
+- [Issue #1245](https://github.com/ALRubinger/aileron/issues/1245). Route GitHub through the uniform binding descriptor path (the binding-side sibling)
 - [Issue #747](https://github.com/ALRubinger/aileron/issues/747). Milestone v4 umbrella
 - [ADR-0011](/adr/0011-local-credential-vault). Vault is the daemon's trust boundary
 - [ADR-0012](/adr/0012-local-daemon-architecture). Daemon owns the unlocked vault
