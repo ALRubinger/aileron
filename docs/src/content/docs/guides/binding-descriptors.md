@@ -1,6 +1,6 @@
 ---
 title: "Binding Descriptors"
-description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the two-layer loading order, and a worked Linear example."
+description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the two-layer loading order, and the shipped Linear and GitHub built-ins."
 ---
 
 A command-line tool that talks to a third-party API needs a credential. The usual answer is to hand that credential to the tool, which means the credential lives wherever the tool runs. Aileron's credential-sealing substrate takes a different path. The credential stays in your vault, the agent in the sandbox never holds it, and the daemon injects it at the TLS forward-proxy boundary on the way out. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the data-plane design this builds on.
@@ -49,7 +49,7 @@ Decoding is strict. An unknown YAML key is an error, not a silently ignored fiel
 
 Descriptors load from two layers, in increasing precedence.
 
-1. **Built-in defaults.** Community profiles Aileron ships, embedded at build time. The Linear descriptor above is one.
+1. **Built-in defaults.** Trusted community profiles Aileron ships, embedded at build time. The Linear descriptor above is one. GitHub is a second one (see below). This is the trusted layer, distinct from the user layer below.
 2. **User layer.** `~/.aileron/binding-descriptors.yaml`.
 
 A later layer overrides an earlier one per `host` key. A user descriptor can replace a shipped community profile for the same host without editing the shipped file. A new host in any layer is added on top of the others rather than replacing them. An absent user file is not an error. It simply contributes nothing.
@@ -86,7 +86,44 @@ bindings:
       env: GH_TOKEN
 ```
 
-This example is the schema only. The descriptor loader validates the `sentinel` block here. The egress code that plants the value and swaps it at the proxy boundary is tracked separately in [issue #1247](https://github.com/ALRubinger/aileron/issues/1247). The `value` is a placeholder with no authority, so it is safe to commit in a shipped descriptor.
+This is the exact binding GitHub ships with as a trusted built-in (see below). The launcher plants `sentinel.value` under `GH_TOKEN`, `gh`'s local check passes, and the proxy swaps the placeholder for the real `user/github` credential at egress. The `value` is a placeholder with no authority, so it is safe to commit in a shipped descriptor.
+
+## Shipped built-in: GitHub
+
+GitHub is the second profile Aileron ships as a trusted built-in, after Linear. It used to be special-cased as Go code in the proxy. It now ships as a trusted default expressed purely as data, flowing the same generic loader every community profile uses. GitHub is no longer special-cased in Go.
+
+GitHub needs two bindings because git-over-HTTPS and `gh` authenticate differently.
+
+```yaml
+version: v1
+bindings:
+  - host: github.com
+    credential_ref: user/github
+    scheme: basic
+    emit_mechanism: A
+    username: x-access-token
+  - host: api.github.com
+    credential_ref: user/github
+    scheme: bearer
+    emit_mechanism: B
+    sentinel:
+      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA
+      env: GH_TOKEN
+```
+
+`github.com` is `basic`, mechanism `A`. git-over-HTTPS sends `Authorization: Basic base64(x-access-token:<token>)`, the documented convention for authenticating git with a GitHub token. git issues an unauthenticated request, so the proxy injects the credential unconditionally with no sentinel needed.
+
+`api.github.com` is `bearer`, mechanism `B`. `gh` short-circuits locally without a token, so the launcher plants the sentinel as `GH_TOKEN`, `gh` issues the request, and the proxy swaps the sentinel for the real credential at egress. A foreign token the agent supplies itself is left untouched.
+
+Both bindings resolve the same `user/github` reference. Store your token once:
+
+```sh
+aileron auth github
+```
+
+Only the two exact apexes are sealed. A request to any other `*.github.com` host (`raw.githubusercontent.com` is a different apex entirely) falls through to passthrough rather than being injected with a credential it was never scoped for.
+
+Because GitHub ships in the built-in layer, it is a normal default in the built-in less-than user precedence. A user descriptor that redefines `github.com` or `api.github.com` overrides the shipped default for that host, exactly as it would for Linear. GitHub is a trusted default, not privileged code.
 
 ## Out of scope: stateful CLI caches
 

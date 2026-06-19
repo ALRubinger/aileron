@@ -28,10 +28,7 @@ import (
 
 func newGitHubBindingServer(t *testing.T, v vault.Vault, captureAuth *string) *apiServer {
 	t.Helper()
-	ghBindings, err := gitHubHostBindings()
-	if err != nil {
-		t.Fatalf("gitHubHostBindings: %v", err)
-	}
+	ghBindings := githubDefaultBindings(t)
 	auditStore := audit.NewMemStore()
 	return &apiServer{
 		auditStore:    auditStore,

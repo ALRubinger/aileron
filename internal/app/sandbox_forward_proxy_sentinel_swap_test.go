@@ -98,10 +98,7 @@ func TestSentinelSwap_SecondDistinctBindingSwapsIndependently(t *testing.T) {
 
 func newGitHubSentinelServer(t *testing.T, v vault.Vault, capture *string) (*apiServer, *audit.MemStore) {
 	t.Helper()
-	ghBindings, err := gitHubHostBindings()
-	if err != nil {
-		t.Fatalf("gitHubHostBindings: %v", err)
-	}
+	ghBindings := githubDefaultBindings(t)
 	store := audit.NewMemStore()
 	srv := &apiServer{
 		auditStore:    store,
