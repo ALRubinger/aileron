@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -265,6 +266,24 @@ type HostAcquireDeps struct {
 	// is oauth.SystemBrowser{}; tests inject a fake Opener so the flow
 	// runs headless.
 	Browser oauth.Opener
+
+	// CodePrompter reads the authorization code the user copies out of
+	// the provider's hosted-callback page and pastes back. It is the
+	// seam that keeps the paste on the HOST terminal rather than the
+	// container TTY (the original Windows blocker the host flow fixes).
+	//
+	// promptW is where the acquirer writes the human-facing prompt
+	// ("paste the code from your browser:"); the returned string is the
+	// trimmed line the user typed. The launcher defaults this to a
+	// controlling-terminal line reader (defaultHostCodePrompter); tests
+	// inject a scripted prompter so the acquirer stays pure-Go and
+	// headless-testable.
+	//
+	// A nil CodePrompter means the acquirer has no way to read the
+	// pasted code: the hosted-callback path must treat that as a
+	// non-fatal acquire failure and let the launcher fall back to the
+	// in-container login.
+	CodePrompter func(ctx context.Context, promptW io.Writer) (string, error)
 }
 
 // ErrAuthSpecRenderNil is returned by validateAuthSpec when a
