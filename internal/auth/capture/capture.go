@@ -101,7 +101,11 @@ type Driver struct {
 	// Empty omits it. The non-interactive token read never carries it.
 	BrowserShim string
 
-	// StoreAt is the vault path the captured credential is stored at.
+	// StoreAt is the logical vault key the captured credential is stored
+	// at (e.g. "user/github"), passed verbatim to Store. The Driver does
+	// not interpret it: the configured StoreFunc owns the convention. The
+	// production StoreFunc expands it to the daemon path
+	// /vault/<StoreAt>/credentials; a test StoreFunc may record it as-is.
 	StoreAt string
 	// Kind is the metadata Type stamped on the stored credential.
 	Kind string

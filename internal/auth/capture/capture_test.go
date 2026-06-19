@@ -188,7 +188,7 @@ func newTestDriver(runner interface {
 		ContainerName: "aileron-auth-cli",
 		LoginArgs:     []string{"gh", "auth", "login", "--web"},
 		TokenArgs:     []string{"gh", "auth", "token"},
-		StoreAt:       "/vault/user/github/credentials",
+		StoreAt:       "user/github",
 		Kind:          "user",
 		Store:         store,
 	}
@@ -443,8 +443,8 @@ func TestAcquire_HappyPathStoresTrimmedToken(t *testing.T) {
 	if store.called != 1 {
 		t.Fatalf("Store called %d times, want exactly 1", store.called)
 	}
-	if store.storeAt != "/vault/user/github/credentials" {
-		t.Errorf("storeAt = %q, want the configured path", store.storeAt)
+	if store.storeAt != "user/github" {
+		t.Errorf("storeAt = %q, want the configured logical key", store.storeAt)
 	}
 	if store.kind != "user" {
 		t.Errorf("kind = %q, want the configured stamp", store.kind)
