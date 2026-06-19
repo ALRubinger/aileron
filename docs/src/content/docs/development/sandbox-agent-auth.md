@@ -118,7 +118,7 @@ The other vault writes are:
 
 The bytes must match the envelope schema in the table above when set manually. Render validates on the way in; a malformed envelope fails the launch with a clear error before the container starts.
 
-`aileron vault list` shows which agents currently have an entry, metadata only. The credential value is never listed. Each name it prints is exactly what `aileron vault delete` accepts, so a listed line can be pasted straight into a delete.
+`aileron vault list` shows which agents currently have an entry, metadata only. The credential value is never listed. Each line it prints is the fully-qualified path (`agents/<name>/oauth`), exactly what `aileron vault delete` accepts, so a listed line can be pasted straight into a delete.
 
 ```
 aileron vault list
@@ -147,10 +147,10 @@ When the host install is not authenticated (the file is absent or empty, or the 
 
 To re-login from scratch (vault entry stale, refresh token revoked, or just starting over), the recovery path is whichever of these you can execute:
 
-- Delete the agent's entry with `aileron vault delete <agent>` (the name `aileron vault list` prints; the `agents/<agent>/oauth` path form also works). The next launch finds no entry, falls through to the in-container login bootstrap, and re-seeds a fresh credential on clean exit. This is a daemon-backed command, so the daemon must be running.
+- Delete the agent's entry with `aileron vault delete agents/<agent>/oauth` (the fully-qualified path `aileron vault list` prints). The next launch finds no entry, falls through to the in-container login bootstrap, and re-seeds a fresh credential on clean exit. This is a daemon-backed command, so the daemon must be running.
 
   ```
-  aileron vault delete claude
+  aileron vault delete agents/claude/oauth
   ```
 
   The command confirms before deleting. Pass `--yes` to skip the prompt in scripts.

@@ -61,11 +61,11 @@ const envVaultPassphrase = "AILERON_VAULT_PASSPHRASE"
 const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/oauth --from-file <path>
-  aileron vault delete <name> [--yes]
+  aileron vault delete agents/<name>/oauth [--yes]
   aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]
 
-The <name> delete accepts is exactly what vault list prints (e.g. claude);
-the full agents/<name>/oauth path form is also accepted.`
+vault delete takes the fully-qualified agents/<name>/oauth path, exactly
+what vault list prints for an agent entry.`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
@@ -100,37 +100,26 @@ func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // client-side before issuing an HTTP call, so the operator CLI can never
 // reach a non-agent vault key (ADR-0025).
 //
-// Two equivalent forms are accepted so the identifier round-trips with
-// `vault list`, which prints the bare agent name (#1302):
-//   - the bare agent name `list` emits, e.g. `claude`
-//   - the full path form, e.g. `agents/claude/oauth`
+// Only the fully-qualified path form is accepted, exactly what `vault
+// list` prints for an agent entry (#1317):
+//   - agents/<name>/oauth, e.g. `agents/claude/oauth`
 //
-// Both resolve to the same <name>; whatever `list` shows can be pasted
-// straight into delete.
+// Whatever `list` shows for an agent can be pasted straight into delete.
 func agentOAuthPathName(arg string) (string, error) {
 	const prefix = "agents/"
 	const suffix = "/oauth"
-	// Full path form: agents/<name>/oauth. Guard the length before
-	// slicing — "agents/oauth" passes both HasPrefix and HasSuffix (the
-	// prefix and suffix overlap) but would slice out of range.
-	if strings.HasPrefix(arg, prefix) || strings.HasSuffix(arg, suffix) {
-		if len(arg) < len(prefix)+len(suffix) ||
-			!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
-			return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
-		}
-		name := arg[len(prefix) : len(arg)-len(suffix)]
-		if name == "" || strings.Contains(name, "/") {
-			return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
-		}
-		return name, nil
+	// Fully-qualified form only: agents/<name>/oauth. Guard the length
+	// before slicing — "agents/oauth" passes both HasPrefix and HasSuffix
+	// (the prefix and suffix overlap) but would slice out of range.
+	if len(arg) < len(prefix)+len(suffix) ||
+		!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
+		return "", fmt.Errorf("name must be agents/<name>/oauth (got %q)", arg)
 	}
-	// Bare-name form: the identifier `vault list` prints. Reject any
-	// path-shaped or empty value so a stray prefix/suffix can't slip a
-	// non-agent key through.
-	if arg == "" || strings.Contains(arg, "/") {
-		return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
+	name := arg[len(prefix) : len(arg)-len(suffix)]
+	if name == "" || strings.Contains(name, "/") {
+		return "", fmt.Errorf("name must be agents/<name>/oauth (got %q)", arg)
 	}
-	return arg, nil
+	return name, nil
 }
 
 // agentCredentialsBody is the local minimal subset of the
@@ -238,7 +227,7 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	pathArg, flagArgs, ok := splitPathArg(args)
 	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault delete <name> [--yes] (name as shown by vault list, or agents/<name>/oauth)")
+		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/oauth [--yes] (exactly what vault list prints)")
 		return 1
 	}
 	flags := flag.NewFlagSet("vault delete", flag.ContinueOnError)
@@ -364,7 +353,7 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 				}
 				emitted++
 			} else {
-				lines = append(lines, a.Name)
+				lines = append(lines, "agents/"+a.Name+"/oauth")
 			}
 		}
 	}
@@ -389,7 +378,7 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 				}
 				emitted++
 			} else {
-				lines = append(lines, u.Service)
+				lines = append(lines, "user/"+u.Service)
 			}
 		}
 	}

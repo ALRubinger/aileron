@@ -124,21 +124,40 @@ func TestRunVaultDelete_YesSkipsPromptAndDeletes(t *testing.T) {
 	}
 }
 
-// #1302: the identifier `vault list` prints (the bare agent name) must
-// be deletable as-is — copy a list line, paste it into delete, done. The
-// full agents/<name>/oauth path form keeps working too.
-func TestRunVaultDelete_AcceptsBareNameFromList(t *testing.T) {
-	const listed = "codex" // exactly what `vault list` prints for this entry
+// #1317 flips the canonical form: `vault list` now prints the
+// fully-qualified agents/<name>/oauth, and delete accepts ONLY that form.
+// Regression for the flip — the bare agent name (what #1302/#1310
+// accepted) is now rejected before any HTTP, while the fully-qualified
+// line `list` emits round-trips straight into delete.
+func TestRunVaultDelete_AcceptsFullyQualifiedFromList(t *testing.T) {
+	const bare = "codex"                       // the pre-#1317 form, now rejected
+	const listed = "agents/" + bare + "/oauth" // exactly what `vault list` prints
+
+	// The bare name is rejected client-side, no DELETE issued.
+	bareCalled := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		bareCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var bstdout, bstderr bytes.Buffer
+	if code := runVault([]string{"delete", bare, "--yes"},
+		strings.NewReader(""), &bstdout, &bstderr); code == 0 {
+		t.Errorf("bare name %q: exit = 0, want non-zero (bare form no longer accepted)", bare)
+	}
+	if bareCalled {
+		t.Errorf("bare name %q: HTTP issued for rejected form", bare)
+	}
+
+	// The fully-qualified line from `list` round-trips into delete.
 	gotDelete := false
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/"+listed+"/credentials" {
+		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/"+bare+"/credentials" {
 			gotDelete = true
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 	})
-
 	var stdout, stderr bytes.Buffer
 	code := runVault([]string{"delete", listed, "--yes"},
 		strings.NewReader(""), &stdout, &stderr)
@@ -146,31 +165,33 @@ func TestRunVaultDelete_AcceptsBareNameFromList(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !gotDelete {
-		t.Errorf("DELETE not issued for bare name %q", listed)
+		t.Errorf("DELETE not issued for fully-qualified %q", listed)
 	}
-	if !strings.Contains(stdout.String(), "Deleted agents/"+listed+"/oauth") {
+	if !strings.Contains(stdout.String(), "Deleted agents/"+bare+"/oauth") {
 		t.Errorf("stdout = %q", stdout.String())
 	}
 }
 
-// The list-output == delete-input contract (#1302): every name `vault
-// list` emits must resolve, via the delete validator, back to the same
-// agent the daemon keys the DELETE on. This pins the round-trip directly
-// against the identifier list prints, so the two verbs can't drift apart.
+// The list-output == delete-input contract (#1317): every line `vault
+// list` emits for an agent must resolve, via the delete validator, back
+// to the same agent the daemon keys the DELETE on. list now prints the
+// fully-qualified agents/<name>/oauth, so feed exactly that. The bare
+// name (the pre-#1317 form) must no longer validate.
 func TestVaultListNamesRoundTripIntoDelete(t *testing.T) {
-	for _, listed := range []string{"claude", "codex", "my-agent"} {
+	for _, agent := range []string{"claude", "codex", "my-agent"} {
+		// The fully-qualified line list prints is the sole accepted form.
+		listed := "agents/" + agent + "/oauth"
 		name, err := agentOAuthPathName(listed)
 		if err != nil {
-			t.Errorf("agentOAuthPathName(%q) errored: %v; a name from `vault list` must be deletable", listed, err)
+			t.Errorf("agentOAuthPathName(%q) errored: %v; a line from `vault list` must be deletable", listed, err)
 			continue
 		}
-		if name != listed {
-			t.Errorf("agentOAuthPathName(%q) = %q, want %q (the listed name)", listed, name, listed)
+		if name != agent {
+			t.Errorf("agentOAuthPathName(%q) = %q, want %q", listed, name, agent)
 		}
-		// The full-path form list could equivalently emit must resolve identically.
-		full := "agents/" + listed + "/oauth"
-		if got, err := agentOAuthPathName(full); err != nil || got != listed {
-			t.Errorf("agentOAuthPathName(%q) = (%q, %v), want (%q, nil)", full, got, err, listed)
+		// The bare name is no longer a valid delete input.
+		if got, err := agentOAuthPathName(agent); err == nil {
+			t.Errorf("agentOAuthPathName(%q) = (%q, nil), want error (bare form no longer accepted)", agent, got)
 		}
 	}
 }
@@ -282,8 +303,8 @@ func TestRunVaultList_DefaultAndJSON(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	lines := strings.Fields(stdout.String())
-	if len(lines) != 2 || lines[0] != "claude" || lines[1] != "codex" {
-		t.Errorf("default output = %q, want claude/codex one per line", stdout.String())
+	if len(lines) != 2 || lines[0] != "agents/claude/oauth" || lines[1] != "agents/codex/oauth" {
+		t.Errorf("default output = %q, want fully-qualified agents/<name>/oauth one per line", stdout.String())
 	}
 
 	var jout, jerr bytes.Buffer
@@ -528,8 +549,8 @@ func TestRunVaultList_ScopeUser(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "github" {
-		t.Errorf("stdout = %q, want github", stdout.String())
+	if strings.TrimSpace(stdout.String()) != "user/github" {
+		t.Errorf("stdout = %q, want user/github", stdout.String())
 	}
 	if strings.Contains(stdout.String(), secret) || strings.Contains(stdout.String(), "value") {
 		t.Errorf("stdout leaked credential material: %q", stdout.String())
@@ -594,8 +615,8 @@ func TestRunVaultList_ScopeAll(t *testing.T) {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	lines := strings.Fields(stdout.String())
-	if len(lines) != 2 || lines[0] != "claude" || lines[1] != "github" {
-		t.Errorf("output = %q, want claude then github", stdout.String())
+	if len(lines) != 2 || lines[0] != "agents/claude/oauth" || lines[1] != "user/github" {
+		t.Errorf("output = %q, want agents/claude/oauth then user/github", stdout.String())
 	}
 }
 
