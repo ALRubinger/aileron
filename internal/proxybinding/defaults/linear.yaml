@@ -17,6 +17,6 @@ bindings:
   - host: api.linear.app
     credential_ref: user/linear
     scheme: header-template
-    emit_mechanism: A
+    emit_mechanism: inject
     header: Authorization
     template: "{token}"

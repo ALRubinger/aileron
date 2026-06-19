@@ -24,12 +24,12 @@ const githubUserService = "github"
 // githubCredentialRef is the vault path the user-level GitHub token lives
 // at (`user/github`). The launcher resolves it to gate the no-op
 // gitconfig warnings and to reuse the resolved token when planting the
-// GitHub mechanism-B binding's sentinel, avoiding a second daemon call.
+// GitHub sentinel-swap binding's sentinel, avoiding a second daemon call.
 const githubCredentialRef = "user/github"
 
 // userRefPrefix is the namespace prefix of a user-level credential ref
 // (`user/<service>`). The launcher derives the service slug a
-// mechanism-B binding's sentinel is gated on by trimming this prefix.
+// sentinel-swap binding's sentinel is gated on by trimming this prefix.
 const userRefPrefix = "user/"
 
 // githubConfigTarget is where the credential-helper gitconfig is mounted
@@ -71,15 +71,15 @@ type userCredsDaemon interface {
 type githubInjectPrep struct {
 	// EnvAdditions merge into the agent's env. Under the ADR-0019
 	// sealing model this never carries a secret. It does carry the
-	// non-secret sentinel of each mechanism-B binding whose credential
+	// non-secret sentinel of each sentinel-swap binding whose credential
 	// resolves to a usable vault entry: a client that short-circuits
 	// locally without a token (e.g. `gh`) issues its request only when a
 	// format-mimicking placeholder passes its local validation. Each
 	// planted pair is the binding's own SentinelEnv set to its
-	// SentinelValue (#1247), so the GitHub binding still plants GH_TOKEN
+	// SentinelValue, so the GitHub binding still plants GH_TOKEN
 	// with sentinel.GitHubTokenSentinel byte-for-byte. The daemon
 	// recognizes the sentinel at the TLS boundary and swaps in the real
-	// credential (emit-mechanism B, #1196). The sentinel is non-secret and
+	// credential (sentinel-swap). The sentinel is non-secret and
 	// safe to place in the env.
 	EnvAdditions map[string]string
 
@@ -170,19 +170,19 @@ func renderNoopGitconfigMount(
 // request the daemon proxy seals at egress via the user/github host
 // bindings, instead of blocking on a prompt or shelling out to `gh`.
 //
-// It then plants the sentinel of each mechanism-B binding in mechBBindings
-// whose credential resolves to a usable vault entry (#1247): the binding's
-// non-secret SentinelValue is set into its SentinelEnv. The GitHub binding
-// still plants GH_TOKEN with sentinel.GitHubTokenSentinel byte-for-byte;
-// any additional B binding plants its own pair independently. The real
-// credential never enters the container: it is resolved daemon-side and
-// injected at the TLS boundary.
+// It then plants the sentinel of each sentinel-swap binding in
+// sentinelSwapBindings whose credential resolves to a usable vault entry:
+// the binding's non-secret SentinelValue is set into its SentinelEnv. The
+// GitHub binding still plants GH_TOKEN with sentinel.GitHubTokenSentinel
+// byte-for-byte; any additional sentinel-swap binding plants its own pair
+// independently. The real credential never enters the container: it is
+// resolved daemon-side and injected at the TLS boundary.
 //
 // Under the ADR-0019 sealing model (#1195) the token never enters the
 // container in env, mount, or args. The GitHub vault probe drives the
 // locked-vault warning UX and supplies the reused GitHub token; it no
-// longer gates the mount, and each B binding's sentinel is gated on that
-// binding's own credential resolving.
+// longer gates the mount, and each sentinel-swap binding's sentinel is
+// gated on that binding's own credential resolving.
 //
 // Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or a
 // locked vault (vault.ErrCredentialUnavailable) still mounts the no-op
@@ -198,15 +198,15 @@ func renderNoopGitconfigMount(
 func prepareGitHubInject(
 	ctx context.Context,
 	daemon userCredsDaemon,
-	mechBBindings []binding.HostBinding,
+	sentinelSwapBindings []binding.HostBinding,
 	sessionLog *slog.Logger,
 	stderr io.Writer,
 	chownHook func(dir string) error,
 ) (githubInjectPrep, error) {
 	// Resolve the GitHub user credential first: it drives the locked-vault
 	// warning UX and is reused (without a second daemon call) when planting
-	// the GitHub mechanism-B binding's sentinel below. A missing entry or a
-	// locked vault is a clean skip for GitHub (githubToken stays empty, so
+	// the GitHub sentinel-swap binding's sentinel below. A missing entry or
+	// a locked vault is a clean skip for GitHub (githubToken stays empty, so
 	// the GitHub sentinel is gated out), never a launch abort; only an
 	// unexpected daemon error aborts.
 	var githubToken string
@@ -225,22 +225,23 @@ func prepareGitHubInject(
 		return githubInjectPrep{}, fmt.Errorf("read user github credentials: %w", err)
 	}
 
-	// Always mount the secret-free no-op gitconfig (mechanism A for
+	// Always mount the secret-free no-op gitconfig (inject mechanism for
 	// git-over-HTTPS) on every path, regardless of vault state.
 	prep, err := renderNoopGitconfigMount(sessionLog, stderr, chownHook)
 	if err != nil {
 		return githubInjectPrep{}, err
 	}
 
-	// Plant each mechanism-B binding's sentinel into its env, gated on the
+	// Plant each sentinel-swap binding's sentinel into its env, gated on the
 	// binding's credential resolving to a usable token. The GitHub token
 	// resolved above is reused so the GitHub binding is not probed twice;
-	// any other B binding's credential is resolved fresh and independently.
-	plantSentinels(ctx, daemon, &prep, mechBBindings, githubToken)
+	// any other sentinel-swap binding's credential is resolved fresh and
+	// independently.
+	plantSentinels(ctx, daemon, &prep, sentinelSwapBindings, githubToken)
 	return prep, nil
 }
 
-// plantSentinels plants each mechanism-B binding's non-secret sentinel
+// plantSentinels plants each sentinel-swap binding's non-secret sentinel
 // value into its env var, but only when the binding's credential
 // resolves to a usable token (the swap has nothing to swap to otherwise).
 // A binding's sentinel is non-secret, so the planted env never carries a
@@ -256,15 +257,15 @@ func plantSentinels(
 	ctx context.Context,
 	daemon userCredsDaemon,
 	prep *githubInjectPrep,
-	mechBBindings []binding.HostBinding,
+	sentinelSwapBindings []binding.HostBinding,
 	githubToken string,
 ) {
-	for _, hb := range mechBBindings {
-		if hb.EmitMechanism != binding.EmitMechanismB {
+	for _, hb := range sentinelSwapBindings {
+		if hb.EmitMechanism != binding.EmitMechanismSentinelSwap {
 			continue
 		}
-		// A B binding with no sentinel shape cannot be planted. The
-		// constructor rejects this, so it is a defensive skip.
+		// A sentinel-swap binding with no sentinel shape cannot be planted.
+		// The constructor rejects this, so it is a defensive skip.
 		if hb.SentinelValue == "" || hb.SentinelEnv == "" {
 			continue
 		}
@@ -297,23 +298,22 @@ func hasUsableCredential(ctx context.Context, daemon userCredsDaemon, credential
 	return strings.TrimSpace(string(secret.Value)) != ""
 }
 
-// mechanismBHostBindings assembles the canonical host-binding table the
+// sentinelSwapHostBindings assembles the canonical host-binding table the
 // daemon recognizer reads (proxybinding.LoadHostBindings: every binding
 // flows from the descriptor layers, including the trusted GitHub built-in
 // shipped as defaults/github.yaml since #1248) and returns only the
-// mechanism-B subset the planter plants sentinels for. Sharing the
+// sentinel-swap subset the planter plants sentinels for. Sharing the
 // assembly keeps the launch-side plant and the proxy-side match reading
-// one source of truth across the process boundary (#1247). A malformed
-// descriptor surfaces an error rather than degrading to an empty plant
-// set.
-func mechanismBHostBindings() ([]binding.HostBinding, error) {
+// one source of truth across the process boundary. A malformed descriptor
+// surfaces an error rather than degrading to an empty plant set.
+func sentinelSwapHostBindings() ([]binding.HostBinding, error) {
 	all, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
 	if err != nil {
 		return nil, err
 	}
 	var out []binding.HostBinding
 	for _, hb := range all {
-		if hb.EmitMechanism == binding.EmitMechanismB {
+		if hb.EmitMechanism == binding.EmitMechanismSentinelSwap {
 			out = append(out, hb)
 		}
 	}

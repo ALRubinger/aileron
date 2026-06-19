@@ -15,8 +15,8 @@ import (
 //
 // The proxy/sentinel-swap tests use this to source the GitHub bindings
 // from the same place production reads them, replacing the deleted bespoke
-// Go constructor. Their behavioral assertions (mechanism A basic-auth
-// sealing, mechanism B sentinel-swap, foreign-token passthrough) are
+// Go constructor. Their behavioral assertions (inject basic-auth
+// sealing, sentinel-swap, foreign-token passthrough) are
 // unchanged; only the binding source moved from bespoke Go to the
 // descriptor path.
 func githubDefaultBindings(t *testing.T) binding.HostBindings {

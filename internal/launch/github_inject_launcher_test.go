@@ -28,7 +28,7 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
 	var proxyMounts []sandboxcontainer.Volume
 
-	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubSentinelSwapBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	}
 	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
 
-	// Sealed model (#1195/#1196): the merge appends the secret-free
+	// Sealed model (#1195): the merge appends the secret-free
 	// gitconfig mount and sets GH_TOKEN to the NON-SECRET sentinel. The
 	// real token never reaches agentEnv.
 	if agentEnv["GH_TOKEN"] != sentinel.GitHubTokenSentinel {
@@ -73,7 +73,7 @@ func TestLauncherMergesGitHubInject_NoEntryStillMountsNoopGitconfig(t *testing.T
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
 	var proxyMounts []sandboxcontainer.Volume
 
-	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubSentinelSwapBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}

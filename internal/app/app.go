@@ -449,8 +449,8 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// per-CLI proxy code.
 	//
 	// GitHub is no longer special-cased in Go (#1248). Its two bindings
-	// (github.com -> basic, mechanism A; api.github.com -> bearer,
-	// mechanism B with a sentinel-swap) now ship as a trusted built-in
+	// (github.com -> basic, inject; api.github.com -> bearer,
+	// sentinel-swap) now ship as a trusted built-in
 	// descriptor (internal/proxybinding/defaults/github.yaml) alongside
 	// Linear, picked up by the same embedded defaults glob. A user
 	// descriptor can override either host, so GitHub is a normal default

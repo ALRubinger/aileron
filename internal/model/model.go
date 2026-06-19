@@ -337,8 +337,8 @@ const (
 	// ADR-0019.
 	EventTypeSandboxProxyBindingInjected EventType = "sandbox.proxy.binding_injected"
 
-	// Sandbox proxy event for a request on an emit-mechanism B host
-	// binding (sentinel-swap, #1196) whose inbound credential carrier
+	// Sandbox proxy event for a request on a sentinel-swap host
+	// binding whose inbound credential carrier
 	// bore a FOREIGN (non-sentinel) token. The proxy seals only tokens it
 	// itself planted, so it did NOT swap: it forwarded the request
 	// upstream with the agent-supplied token intact and injected no real

@@ -271,14 +271,14 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 		upstreamReq.Header.Set("Content-Type", contentType)
 	}
 
-	// Emit-mechanism B sentinel-swap gate (#1196). For a mechanism-B
-	// binding the proxy seals only tokens it itself planted: the
-	// recognized sentinel is stripped here and replaced by the real
-	// credential below, while a foreign token is forwarded unchanged with
-	// no real secret injected. A mechanism-A binding always injects.
+	// Sentinel-swap gate. For a sentinel-swap binding the proxy seals only
+	// tokens it itself planted: the recognized sentinel is stripped here and
+	// replaced by the real credential below, while a foreign token is
+	// forwarded unchanged with no real secret injected. An inject binding
+	// always injects.
 	switch decideSentinelSwap(upstreamReq, hb) {
 	case sentinelSwapPassthroughForeign:
-		// The agent supplied its own token on a mechanism-B host. Do not
+		// The agent supplied its own token on a sentinel-swap host. Do not
 		// swap: dial upstream with the foreign carrier intact and no real
 		// credential injected. The sentinel/secret never enter this path.
 		resp, err := s.dialSandboxForwardProxyHostBinding(conn, decrypted, auth, targetHost, upstream, upstreamReq)

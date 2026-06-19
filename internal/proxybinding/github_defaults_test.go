@@ -12,8 +12,9 @@ import (
 // #1248), replacing the bespoke Go bindings. These tests assert the
 // descriptor contract through the public Load/LoadHostBindings output: the
 // two GitHub bindings appear in the built-in layer with no user descriptor
-// configured, github.com is basic/A with no sentinel, and api.github.com
-// is bearer/B carrying the GitHub sentinel value and GH_TOKEN env. They
+// configured, github.com is basic/inject with no sentinel, and
+// api.github.com is bearer/sentinel-swap carrying the GitHub sentinel value
+// and GH_TOKEN env. They
 // assert against the loaded table, never the file internals, so they
 // survive a descriptor reformat that preserves the contract.
 
@@ -29,8 +30,8 @@ func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
 	if apex.Scheme != binding.SchemeBasic {
 		t.Errorf("github.com scheme = %q, want basic", apex.Scheme)
 	}
-	if apex.EmitMechanism != string(binding.EmitMechanismA) {
-		t.Errorf("github.com emit_mechanism = %q, want A", apex.EmitMechanism)
+	if apex.EmitMechanism != string(binding.EmitMechanismInject) {
+		t.Errorf("github.com emit_mechanism = %q, want inject", apex.EmitMechanism)
 	}
 	if apex.CredentialRef != "user/github" {
 		t.Errorf("github.com credential_ref = %q, want user/github", apex.CredentialRef)
@@ -38,9 +39,9 @@ func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
 	if apex.Username != "x-access-token" {
 		t.Errorf("github.com username = %q, want x-access-token", apex.Username)
 	}
-	// Mechanism A carries no sentinel block.
+	// The inject mechanism carries no sentinel block.
 	if apex.Sentinel != nil {
-		t.Errorf("github.com carries a sentinel block %+v, want none for mechanism A", apex.Sentinel)
+		t.Errorf("github.com carries a sentinel block %+v, want none for inject", apex.Sentinel)
 	}
 
 	api, ok := findEntry(entries, "api.github.com")
@@ -50,14 +51,14 @@ func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
 	if api.Scheme != binding.SchemeBearer {
 		t.Errorf("api.github.com scheme = %q, want bearer", api.Scheme)
 	}
-	if api.EmitMechanism != string(binding.EmitMechanismB) {
-		t.Errorf("api.github.com emit_mechanism = %q, want B", api.EmitMechanism)
+	if api.EmitMechanism != string(binding.EmitMechanismSentinelSwap) {
+		t.Errorf("api.github.com emit_mechanism = %q, want sentinel-swap", api.EmitMechanism)
 	}
 	if api.CredentialRef != "user/github" {
 		t.Errorf("api.github.com credential_ref = %q, want user/github", api.CredentialRef)
 	}
 	if api.Sentinel == nil {
-		t.Fatal("api.github.com missing sentinel block, want one for mechanism B")
+		t.Fatal("api.github.com missing sentinel block, want one for sentinel-swap")
 	}
 	if api.Sentinel.Value != sentinel.GitHubTokenSentinel {
 		t.Errorf("api.github.com sentinel.value = %q, want %q", api.Sentinel.Value, sentinel.GitHubTokenSentinel)
@@ -87,11 +88,11 @@ func TestLoadHostBindings_MatchesGitHub(t *testing.T) {
 	if apex.BasicUsername != "x-access-token" {
 		t.Errorf("github.com BasicUsername = %q, want x-access-token", apex.BasicUsername)
 	}
-	if apex.EmitMechanism != binding.EmitMechanismA {
-		t.Errorf("github.com EmitMechanism = %q, want A", apex.EmitMechanism)
+	if apex.EmitMechanism != binding.EmitMechanismInject {
+		t.Errorf("github.com EmitMechanism = %q, want inject", apex.EmitMechanism)
 	}
 	if apex.SentinelValue != "" || apex.SentinelEnv != "" {
-		t.Errorf("github.com carries a sentinel (%q,%q), want none for mechanism A", apex.SentinelValue, apex.SentinelEnv)
+		t.Errorf("github.com carries a sentinel (%q,%q), want none for inject", apex.SentinelValue, apex.SentinelEnv)
 	}
 
 	api, ok := table.Match("api.github.com")
@@ -101,8 +102,8 @@ func TestLoadHostBindings_MatchesGitHub(t *testing.T) {
 	if api.Scheme != binding.SchemeBearer {
 		t.Errorf("api.github.com scheme = %q, want bearer", api.Scheme)
 	}
-	if api.EmitMechanism != binding.EmitMechanismB {
-		t.Errorf("api.github.com EmitMechanism = %q, want B", api.EmitMechanism)
+	if api.EmitMechanism != binding.EmitMechanismSentinelSwap {
+		t.Errorf("api.github.com EmitMechanism = %q, want sentinel-swap", api.EmitMechanism)
 	}
 	if api.SentinelValue != sentinel.GitHubTokenSentinel {
 		t.Errorf("api.github.com SentinelValue = %q, want %q", api.SentinelValue, sentinel.GitHubTokenSentinel)
@@ -188,13 +189,13 @@ func TestLoad_UserOverridesGitHub(t *testing.T) {
 	}
 
 	// api.github.com is untouched by the override and stays the shipped
-	// default (bearer, mechanism B, GitHub sentinel).
+	// default (bearer, sentinel-swap, GitHub sentinel).
 	api, ok := findEntry(entries, "api.github.com")
 	if !ok {
 		t.Fatal("user override of github.com dropped the shipped api.github.com default")
 	}
-	if api.Scheme != binding.SchemeBearer || api.EmitMechanism != string(binding.EmitMechanismB) {
-		t.Errorf("api.github.com = %q/%q, want bearer/B (default preserved)", api.Scheme, api.EmitMechanism)
+	if api.Scheme != binding.SchemeBearer || api.EmitMechanism != string(binding.EmitMechanismSentinelSwap) {
+		t.Errorf("api.github.com = %q/%q, want bearer/sentinel-swap (default preserved)", api.Scheme, api.EmitMechanism)
 	}
 	if api.Sentinel == nil || api.Sentinel.Value != sentinel.GitHubTokenSentinel {
 		t.Errorf("api.github.com sentinel changed under a github.com-only override: %+v", api.Sentinel)

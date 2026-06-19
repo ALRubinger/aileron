@@ -9,14 +9,14 @@ import (
 )
 
 // Unit-level coverage of the sentinel-swap decision helper, independent
-// of the proxy plumbing (#1196). The end-to-end behavior is covered in
+// of the proxy plumbing. The end-to-end behavior is covered in
 // sandbox_forward_proxy_sentinel_swap_test.go; these assert the decision
 // branches and that the sentinel is stripped from the carrier on a swap.
 
-func mustHostBindingB(t *testing.T) binding.HostBinding {
+func mustHostBindingSentinelSwap(t *testing.T) binding.HostBinding {
 	t.Helper()
 	hb, err := binding.NewHostBinding("api.github.com", "user/github", binding.SchemeBearer,
-		binding.WithEmitMechanismB(), binding.WithSentinel(sentinel.GitHubTokenSentinel, "GH_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel(sentinel.GitHubTokenSentinel, "GH_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
@@ -31,20 +31,21 @@ func reqWithAuth(value string) *http.Request {
 	return r
 }
 
-func TestDecideSentinelSwap_MechanismAAlwaysInjects(t *testing.T) {
+func TestDecideSentinelSwap_InjectAlwaysInjects(t *testing.T) {
 	hb, err := binding.NewHostBinding("github.com", "user/github", binding.SchemeBasic, binding.WithBasicUsername("x-access-token"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
-	// Even with a foreign carrier present, mechanism A injects (overwrites).
+	// Even with a foreign carrier present, the inject mechanism injects
+	// (overwrites).
 	r := reqWithAuth("Bearer ghp_someforeigntoken")
 	if got := decideSentinelSwap(r, hb); got != sentinelSwapInject {
-		t.Errorf("mechanism A decision = %v, want inject", got)
+		t.Errorf("inject decision = %v, want inject", got)
 	}
 }
 
 func TestDecideSentinelSwap_SentinelIsStrippedAndInjected(t *testing.T) {
-	hb := mustHostBindingB(t)
+	hb := mustHostBindingSentinelSwap(t)
 	r := reqWithAuth("Bearer " + sentinel.GitHubTokenSentinel)
 	if got := decideSentinelSwap(r, hb); got != sentinelSwapInject {
 		t.Errorf("sentinel decision = %v, want inject", got)
@@ -57,7 +58,7 @@ func TestDecideSentinelSwap_SentinelIsStrippedAndInjected(t *testing.T) {
 }
 
 func TestDecideSentinelSwap_ForeignTokenIsNotSwapped(t *testing.T) {
-	hb := mustHostBindingB(t)
+	hb := mustHostBindingSentinelSwap(t)
 	const foreign = "Bearer ghp_theusersowntoken1234567890abcd"
 	r := reqWithAuth(foreign)
 	if got := decideSentinelSwap(r, hb); got != sentinelSwapPassthroughForeign {
@@ -70,7 +71,7 @@ func TestDecideSentinelSwap_ForeignTokenIsNotSwapped(t *testing.T) {
 }
 
 func TestDecideSentinelSwap_NoCarrierInjects(t *testing.T) {
-	hb := mustHostBindingB(t)
+	hb := mustHostBindingSentinelSwap(t)
 	r := reqWithAuth("")
 	if got := decideSentinelSwap(r, hb); got != sentinelSwapInject {
 		t.Errorf("no-carrier decision = %v, want inject", got)
@@ -95,7 +96,7 @@ func TestStripAuthScheme(t *testing.T) {
 }
 
 func TestBindingSentinelMatches_ReadsBindingSentinelValue(t *testing.T) {
-	gh := mustHostBindingB(t)
+	gh := mustHostBindingSentinelSwap(t)
 	if !bindingSentinelMatches(gh, "Bearer "+sentinel.GitHubTokenSentinel) {
 		t.Error("github binding did not recognize its own sentinel")
 	}
@@ -108,10 +109,10 @@ func TestBindingSentinelMatches_ReadsBindingSentinelValue(t *testing.T) {
 }
 
 func TestBindingSentinelMatches_DistinctSentinelsAreIndependent(t *testing.T) {
-	gh := mustHostBindingB(t)
+	gh := mustHostBindingSentinelSwap(t)
 	const otherSentinel = "sk_AILERONSENTINELOTHER"
 	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
-		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestBindingSentinelMatches_DistinctSentinelsAreIndependent(t *testing.T) {
 }
 
 func TestBindingSentinelMatches_EmptySentinelNeverMatches(t *testing.T) {
-	hb := binding.HostBinding{EmitMechanism: binding.EmitMechanismB}
+	hb := binding.HostBinding{EmitMechanism: binding.EmitMechanismSentinelSwap}
 	if bindingSentinelMatches(hb, "") {
 		t.Error("empty-sentinel binding matched an empty carrier")
 	}
@@ -139,7 +140,7 @@ func TestBindingSentinelMatches_EmptySentinelNeverMatches(t *testing.T) {
 func TestDecideSentinelSwap_SecondBindingSwapsIndependently(t *testing.T) {
 	const otherSentinel = "sk_AILERONSENTINELOTHER"
 	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
-		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
+		binding.WithEmitMechanismSentinelSwap(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}

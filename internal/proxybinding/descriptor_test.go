@@ -16,7 +16,7 @@ bindings:
   - host: api.linear.app
     credential_ref: user/linear
     scheme: header-template
-    emit_mechanism: A
+    emit_mechanism: inject
     header: Authorization
     template: "{token}"
 `
@@ -120,37 +120,48 @@ func TestParse_Errors(t *testing.T) {
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: C\n",
 		},
 		{
-			// Mechanism B requires a sentinel block; a bare "B" with no
-			// sentinel is a load-time error (fail-closed).
-			name: "emit_mechanism B without sentinel block",
+			// The closed set accepts only "inject"/"sentinel-swap"; the bare
+			// legacy value "A" is no longer a valid mechanism.
+			name: "legacy emit_mechanism A rejected",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: A\n",
+		},
+		{
+			// The bare legacy value "B" is no longer a valid mechanism.
+			name: "legacy emit_mechanism B rejected",
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: B\n",
 		},
 		{
-			// Mechanism B with a sentinel block missing its value.
-			name: "emit_mechanism B with empty sentinel.value",
-			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: B\n    sentinel:\n      env: GH_TOKEN\n",
+			// Sentinel-swap requires a sentinel block; a bare "sentinel-swap"
+			// with no sentinel is a load-time error (fail-closed).
+			name: "emit_mechanism sentinel-swap without sentinel block",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: sentinel-swap\n",
 		},
 		{
-			// Mechanism B with a sentinel block missing its env.
-			name: "emit_mechanism B with empty sentinel.env",
-			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: B\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n",
+			// Sentinel-swap with a sentinel block missing its value.
+			name: "emit_mechanism sentinel-swap with empty sentinel.value",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: sentinel-swap\n    sentinel:\n      env: GH_TOKEN\n",
 		},
 		{
-			// A stray sentinel on an explicit mechanism-A binding is an error.
-			name: "emit_mechanism A with a stray sentinel block",
-			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: A\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n",
+			// Sentinel-swap with a sentinel block missing its env.
+			name: "emit_mechanism sentinel-swap with empty sentinel.env",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: sentinel-swap\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n",
 		},
 		{
-			// A stray sentinel on a defaulted (omitted) mechanism-A binding
-			// is an error.
-			name: "defaulted mechanism A with a stray sentinel block",
+			// A stray sentinel on an explicit inject binding is an error.
+			name: "emit_mechanism inject with a stray sentinel block",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: inject\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n",
+		},
+		{
+			// A stray sentinel on a defaulted (omitted) inject binding is an
+			// error.
+			name: "defaulted inject with a stray sentinel block",
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n",
 		},
 		{
 			// Strict decode recurses into the nested sentinel mapping: an
 			// unknown key inside the block is a load-time error.
 			name: "unknown key nested under sentinel",
-			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: B\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n      bogus: nope\n",
+			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n    emit_mechanism: sentinel-swap\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n      bogus: nope\n",
 		},
 		{
 			name: "header-template missing header",
@@ -206,38 +217,38 @@ func TestParse_Errors(t *testing.T) {
 	}
 }
 
-// TestParse_EmitMechanismBSentinelSchema pins the mechanism-B schema this
-// issue freezes (#1246). A well-formed mechanism-B descriptor declares a
-// sentinel block with both value and env, and those fields round-trip onto
-// the parsed Entry. A mechanism-B descriptor missing the block or either
-// field is rejected, and a mechanism-A descriptor that carries a stray
-// sentinel is rejected. Mechanism "A" and the empty default still parse.
-// This is the fail-closed contract; it is intentionally decoupled from the
-// table-driven cases so the policy is explicit and survives refactors.
-func TestParse_EmitMechanismBSentinelSchema(t *testing.T) {
+// TestParse_SentinelSwapSchema pins the sentinel-swap schema. A well-formed
+// sentinel-swap descriptor declares a sentinel block with both value and
+// env, and those fields round-trip onto the parsed Entry. A sentinel-swap
+// descriptor missing the block or either field is rejected, and an inject
+// descriptor that carries a stray sentinel is rejected. "inject" and the
+// empty default still parse. This is the fail-closed contract; it is
+// intentionally decoupled from the table-driven cases so the policy is
+// explicit and survives refactors.
+func TestParse_SentinelSwapSchema(t *testing.T) {
 	const base = "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n"
 
-	// "A" and the empty default are accepted with no sentinel.
-	if _, err := Parse([]byte(base + "    emit_mechanism: A\n")); err != nil {
-		t.Errorf("emit_mechanism A: Parse = %v, want nil", err)
+	// "inject" and the empty default are accepted with no sentinel.
+	if _, err := Parse([]byte(base + "    emit_mechanism: inject\n")); err != nil {
+		t.Errorf("emit_mechanism inject: Parse = %v, want nil", err)
 	}
 	if _, err := Parse([]byte(base)); err != nil {
-		t.Errorf("emit_mechanism omitted (defaults to A): Parse = %v, want nil", err)
+		t.Errorf("emit_mechanism omitted (defaults to inject): Parse = %v, want nil", err)
 	}
 
-	// A well-formed mechanism-B descriptor parses and the sentinel fields
+	// A well-formed sentinel-swap descriptor parses and the sentinel fields
 	// round-trip onto the Entry.
 	const wantValue = "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"
 	const wantEnv = "GH_TOKEN"
-	bYAML := base + "    emit_mechanism: " + string(binding.EmitMechanismB) + "\n" +
+	swapYAML := base + "    emit_mechanism: " + string(binding.EmitMechanismSentinelSwap) + "\n" +
 		"    sentinel:\n      value: " + wantValue + "\n      env: " + wantEnv + "\n"
-	d, err := Parse([]byte(bYAML))
+	d, err := Parse([]byte(swapYAML))
 	if err != nil {
-		t.Fatalf("well-formed mechanism B: Parse = %v, want nil", err)
+		t.Fatalf("well-formed sentinel-swap: Parse = %v, want nil", err)
 	}
 	e := d.Bindings[0]
-	if e.EmitMechanism != string(binding.EmitMechanismB) {
-		t.Errorf("emit_mechanism = %q, want %q", e.EmitMechanism, string(binding.EmitMechanismB))
+	if e.EmitMechanism != string(binding.EmitMechanismSentinelSwap) {
+		t.Errorf("emit_mechanism = %q, want %q", e.EmitMechanism, string(binding.EmitMechanismSentinelSwap))
 	}
 	if e.Sentinel == nil {
 		t.Fatalf("sentinel block = nil, want populated")
@@ -249,9 +260,9 @@ func TestParse_EmitMechanismBSentinelSchema(t *testing.T) {
 		t.Errorf("sentinel.env = %q, want %q", e.Sentinel.Env, wantEnv)
 	}
 
-	// The canonical constant is the value mechanism-B descriptors declare.
-	if string(binding.EmitMechanismB) != "B" {
-		t.Errorf("binding.EmitMechanismB = %q, want %q", string(binding.EmitMechanismB), "B")
+	// The canonical constant is the value sentinel-swap descriptors declare.
+	if string(binding.EmitMechanismSentinelSwap) != "sentinel-swap" {
+		t.Errorf("binding.EmitMechanismSentinelSwap = %q, want %q", string(binding.EmitMechanismSentinelSwap), "sentinel-swap")
 	}
 }
 
@@ -269,13 +280,13 @@ func TestParse_NoSecretBytesInDescriptor(t *testing.T) {
 		t.Errorf("credential_ref = %q, expected a vault reference, not a secret", e.CredentialRef)
 	}
 
-	// A mechanism-B sentinel value is a recognizable placeholder, not a
+	// A sentinel-swap sentinel value is a recognizable placeholder, not a
 	// secret: it embeds the reserved "AILERONSENTINEL" marker so a reader
 	// (or a log) can tell at a glance it carries no authority.
-	const bYAML = "version: v1\nbindings:\n  - host: api.github.com\n    credential_ref: user/github\n    scheme: bearer\n    emit_mechanism: B\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n"
-	db, err := Parse([]byte(bYAML))
+	const swapYAML = "version: v1\nbindings:\n  - host: api.github.com\n    credential_ref: user/github\n    scheme: bearer\n    emit_mechanism: sentinel-swap\n    sentinel:\n      value: ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA\n      env: GH_TOKEN\n"
+	db, err := Parse([]byte(swapYAML))
 	if err != nil {
-		t.Fatalf("Parse mechanism B: %v", err)
+		t.Fatalf("Parse sentinel-swap: %v", err)
 	}
 	sentinel := db.Bindings[0].Sentinel
 	if sentinel == nil {
