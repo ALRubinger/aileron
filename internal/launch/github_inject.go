@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/proxybinding"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
-	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -19,6 +20,17 @@ import (
 // injector reads from the vault (`user/github`). The route shape lives
 // in the daemon client; this constant names only the service slug.
 const githubUserService = "github"
+
+// githubCredentialRef is the vault path the user-level GitHub token lives
+// at (`user/github`). The launcher resolves it to gate the no-op
+// gitconfig warnings and to reuse the resolved token when planting the
+// GitHub mechanism-B binding's sentinel, avoiding a second daemon call.
+const githubCredentialRef = "user/github"
+
+// userRefPrefix is the namespace prefix of a user-level credential ref
+// (`user/<service>`). The launcher derives the service slug a
+// mechanism-B binding's sentinel is gated on by trimming this prefix.
+const userRefPrefix = "user/"
 
 // githubConfigTarget is where the credential-helper gitconfig is mounted
 // inside the container. It sits directly under /home/agent — the same
@@ -58,15 +70,17 @@ type userCredsDaemon interface {
 // per-agent AuthSpec.
 type githubInjectPrep struct {
 	// EnvAdditions merge into the agent's env. Under the ADR-0019
-	// sealing model this never carries a GitHub secret. It does carry a
-	// non-secret GH_TOKEN set to sentinel.GitHubTokenSentinel when a
-	// usable user/github entry exists: `gh` short-circuits locally
-	// without a token in its env, so emit-mechanism A (plant nothing,
-	// seal the emitted request) cannot work for `gh`. The sentinel is a
-	// format-mimicking placeholder that passes `gh`'s local validation so
-	// `gh` issues its request; the daemon recognizes the sentinel at the
-	// TLS boundary and swaps in the real credential (emit-mechanism B,
-	// #1196). The sentinel is non-secret and safe to place in the env.
+	// sealing model this never carries a secret. It does carry the
+	// non-secret sentinel of each mechanism-B binding whose credential
+	// resolves to a usable vault entry: a client that short-circuits
+	// locally without a token (e.g. `gh`) issues its request only when a
+	// format-mimicking placeholder passes its local validation. Each
+	// planted pair is the binding's own SentinelEnv set to its
+	// SentinelValue (#1247), so the GitHub binding still plants GH_TOKEN
+	// with sentinel.GitHubTokenSentinel byte-for-byte. The daemon
+	// recognizes the sentinel at the TLS boundary and swaps in the real
+	// credential (emit-mechanism B, #1196). The sentinel is non-secret and
+	// safe to place in the env.
 	EnvAdditions map[string]string
 
 	// Mounts append to the sandbox volume list. Always carries the
@@ -147,28 +161,36 @@ func renderNoopGitconfigMount(
 	}, nil
 }
 
-// prepareGitHubInject probes the user-level GitHub entry in the vault and
-// always mounts a read-only, secret-free no-op gitconfig at
-// /home/agent/.gitconfig — on every path, whether the entry is present,
-// missing, the vault is locked, or the token is empty (Key Decision 4,
-// #1195). The gitconfig content is invariant and carries no secret bytes,
-// so mounting it unconditionally leaks nothing while ensuring
-// git-over-HTTPS always emits a completable unauthenticated request the
-// daemon proxy seals at egress via the user/github host bindings, instead
-// of blocking on a prompt or shelling out to `gh`.
+// prepareGitHubInject always mounts a read-only, secret-free no-op
+// gitconfig at /home/agent/.gitconfig — on every path, whether the GitHub
+// entry is present, missing, the vault is locked, or the token is empty
+// (Key Decision 4, #1195). The gitconfig content is invariant and carries
+// no secret bytes, so mounting it unconditionally leaks nothing while
+// ensuring git-over-HTTPS always emits a completable unauthenticated
+// request the daemon proxy seals at egress via the user/github host
+// bindings, instead of blocking on a prompt or shelling out to `gh`.
+//
+// It then plants the sentinel of each mechanism-B binding in mechBBindings
+// whose credential resolves to a usable vault entry (#1247): the binding's
+// non-secret SentinelValue is set into its SentinelEnv. The GitHub binding
+// still plants GH_TOKEN with sentinel.GitHubTokenSentinel byte-for-byte;
+// any additional B binding plants its own pair independently. The real
+// credential never enters the container: it is resolved daemon-side and
+// injected at the TLS boundary.
 //
 // Under the ADR-0019 sealing model (#1195) the token never enters the
-// container: the gitconfig carries no secret bytes and GH_TOKEN, when
-// set, holds only the non-secret sentinel. The vault probe drives the
-// locked-vault warning UX and gates the GH_TOKEN sentinel (which requires
-// a real daemon-side credential to swap), but no longer gates the mount.
+// container in env, mount, or args. The GitHub vault probe drives the
+// locked-vault warning UX and supplies the reused GitHub token; it no
+// longer gates the mount, and each B binding's sentinel is gated on that
+// binding's own credential resolving.
 //
-// Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or
-// a locked vault (vault.ErrCredentialUnavailable) still mounts the no-op
-// gitconfig with no error and no GH_TOKEN — the launch proceeds with
-// GitHub operations simply unauthenticated. A token that is empty after
-// trimming is treated the same way. Only an unexpected daemon error
-// aborts. The locked-vault warning is still emitted.
+// Skip-clean semantics: a missing entry (ErrUserCredentialsNotFound) or a
+// locked vault (vault.ErrCredentialUnavailable) still mounts the no-op
+// gitconfig with no error and plants no sentinel for the unresolved
+// binding — the launch proceeds with those operations unauthenticated. A
+// token that is empty after trimming is treated the same way. Only an
+// unexpected daemon error aborts. The locked-vault warning is still
+// emitted.
 //
 // chownHook is threaded into renderNoopGitconfigMount; see its doc for
 // the rootful-Docker-Linux rationale and the non-fatal-on-failure
@@ -176,52 +198,124 @@ func renderNoopGitconfigMount(
 func prepareGitHubInject(
 	ctx context.Context,
 	daemon userCredsDaemon,
+	mechBBindings []binding.HostBinding,
 	sessionLog *slog.Logger,
 	stderr io.Writer,
 	chownHook func(dir string) error,
 ) (githubInjectPrep, error) {
+	// Resolve the GitHub user credential first: it drives the locked-vault
+	// warning UX and is reused (without a second daemon call) when planting
+	// the GitHub mechanism-B binding's sentinel below. A missing entry or a
+	// locked vault is a clean skip for GitHub (githubToken stays empty, so
+	// the GitHub sentinel is gated out), never a launch abort; only an
+	// unexpected daemon error aborts.
+	var githubToken string
 	secret, err := daemon.GetUserCredentials(ctx, githubUserService)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrUserCredentialsNotFound):
-			// No user/github entry — proceed unauthenticated, but still
-			// mount the secret-free no-op gitconfig.
-			return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
-		case errors.Is(err, vault.ErrCredentialUnavailable):
-			// Vault locked — no token available this launch. Warn so the
-			// user knows GitHub ops will be unauthenticated, but never
-			// abort the launch; still mount the secret-free no-op gitconfig.
-			githubInjectWarn(sessionLog, stderr,
-				fmt.Errorf("vault locked; GitHub operations in the sandbox will be unauthenticated until you unlock the vault"))
-			return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
-		default:
-			return githubInjectPrep{}, fmt.Errorf("read user github credentials: %w", err)
-		}
+	switch {
+	case err == nil:
+		githubToken = strings.TrimSpace(string(secret.Value))
+	case errors.Is(err, ErrUserCredentialsNotFound):
+		// No user/github entry — proceed unauthenticated.
+	case errors.Is(err, vault.ErrCredentialUnavailable):
+		// Vault locked — no token available this launch. Warn so the user
+		// knows GitHub ops will be unauthenticated, but never abort.
+		githubInjectWarn(sessionLog, stderr,
+			fmt.Errorf("vault locked; GitHub operations in the sandbox will be unauthenticated until you unlock the vault"))
+	default:
+		return githubInjectPrep{}, fmt.Errorf("read user github credentials: %w", err)
 	}
 
-	token := strings.TrimSpace(string(secret.Value))
-	if token == "" {
-		// An entry with no usable token is equivalent to no entry: mount
-		// the no-op gitconfig, set no GH_TOKEN.
-		return renderNoopGitconfigMount(sessionLog, stderr, chownHook)
-	}
-
+	// Always mount the secret-free no-op gitconfig (mechanism A for
+	// git-over-HTTPS) on every path, regardless of vault state.
 	prep, err := renderNoopGitconfigMount(sessionLog, stderr, chownHook)
 	if err != nil {
 		return githubInjectPrep{}, err
 	}
-	// GH_TOKEN carries the non-secret sentinel, never the real token.
-	// `gh` short-circuits locally without a token, so we plant the
-	// sentinel to make it issue its request; the daemon recognizes the
-	// sentinel at the TLS boundary and swaps in the real user/github
-	// credential (emit-mechanism B, #1196). The real secret never enters
-	// the container in env, mount, or args. The mount carries only the
-	// secret-free no-op git credential helper (emit-mechanism A for
-	// git-over-HTTPS, which the daemon seals from the unauthenticated
-	// request git emits). The sentinel is gated to the token-present path
-	// because the sentinel-swap requires a real daemon-side credential.
-	prep.EnvAdditions["GH_TOKEN"] = sentinel.GitHubTokenSentinel
+
+	// Plant each mechanism-B binding's sentinel into its env, gated on the
+	// binding's credential resolving to a usable token. The GitHub token
+	// resolved above is reused so the GitHub binding is not probed twice;
+	// any other B binding's credential is resolved fresh and independently.
+	plantSentinels(ctx, daemon, &prep, mechBBindings, githubToken)
 	return prep, nil
+}
+
+// plantSentinels plants each mechanism-B binding's non-secret sentinel
+// value into its env var, but only when the binding's credential
+// resolves to a usable token (the swap has nothing to swap to otherwise).
+// A binding's sentinel is non-secret, so the planted env never carries a
+// secret. The real credential is resolved daemon-side and injected at the
+// TLS boundary; it never enters the container.
+//
+// githubToken is the already-resolved user/github token (trimmed, may be
+// empty): a binding whose credential ref is user/github reuses it rather
+// than issuing a second daemon call. Any other ref is resolved here; an
+// unavailable, missing, or empty credential plants nothing for that
+// binding (a clean skip, no error).
+func plantSentinels(
+	ctx context.Context,
+	daemon userCredsDaemon,
+	prep *githubInjectPrep,
+	mechBBindings []binding.HostBinding,
+	githubToken string,
+) {
+	for _, hb := range mechBBindings {
+		if hb.EmitMechanism != binding.EmitMechanismB {
+			continue
+		}
+		// A B binding with no sentinel shape cannot be planted. The
+		// constructor rejects this, so it is a defensive skip.
+		if hb.SentinelValue == "" || hb.SentinelEnv == "" {
+			continue
+		}
+		if hasUsableCredential(ctx, daemon, hb.CredentialRef, githubToken) {
+			prep.EnvAdditions[hb.SentinelEnv] = hb.SentinelValue
+		}
+	}
+}
+
+// hasUsableCredential reports whether credentialRef resolves to a
+// non-empty token. The user/github ref reuses the already-resolved
+// githubToken to avoid a redundant daemon call. Any other user/<service>
+// ref is resolved through the daemon; a missing entry, a locked vault, or
+// an empty-after-trim token all report false (a clean skip). A ref
+// outside the user/<service> namespace reports false: the launcher only
+// resolves user-level credentials, so a connector-style ref plants no
+// sentinel here.
+func hasUsableCredential(ctx context.Context, daemon userCredsDaemon, credentialRef, githubToken string) bool {
+	if credentialRef == githubCredentialRef {
+		return githubToken != ""
+	}
+	service, ok := strings.CutPrefix(credentialRef, userRefPrefix)
+	if !ok || service == "" {
+		return false
+	}
+	secret, err := daemon.GetUserCredentials(ctx, service)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(secret.Value)) != ""
+}
+
+// mechanismBHostBindings assembles the canonical host-binding table the
+// daemon recognizer reads (proxybinding.AllHostBindings: GitHub Go
+// bindings plus descriptor bindings) and returns only the mechanism-B
+// subset the planter plants sentinels for. Sharing the assembly keeps the
+// launch-side plant and the proxy-side match reading one source of truth
+// across the process boundary (#1247). A malformed descriptor surfaces an
+// error rather than degrading to an empty plant set.
+func mechanismBHostBindings() ([]binding.HostBinding, error) {
+	all, err := proxybinding.AllHostBindings(proxybinding.DefaultLoadOptions())
+	if err != nil {
+		return nil, err
+	}
+	var out []binding.HostBinding
+	for _, hb := range all {
+		if hb.EmitMechanism == binding.EmitMechanismB {
+			out = append(out, hb)
+		}
+	}
+	return out, nil
 }
 
 // githubInjectWarn emits a non-fatal diagnostic to the session log and

@@ -31,6 +31,16 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 
 	if e.EmitMechanism == string(binding.EmitMechanismB) {
 		opts = append(opts, binding.WithEmitMechanismB())
+		// A mechanism-B entry carries the sentinel shape (value + env) it
+		// validated at parse time (#1246). Carry it onto the binding so the
+		// launcher plants the value into the env and the proxy recognizes it
+		// at egress, both reading one source of truth (#1247). The
+		// constructor enforces the B-requires-sentinel rule, so a malformed
+		// entry that reached here with no sentinel fails construction below
+		// rather than silently shipping an unplantable binding.
+		if e.Sentinel != nil {
+			opts = append(opts, binding.WithSentinel(e.Sentinel.Value, e.Sentinel.Env))
+		}
 	}
 
 	hb, err := binding.NewHostBinding(e.Host, e.CredentialRef, e.Scheme, opts...)

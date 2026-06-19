@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/sentinel"
 )
 
 // gitHubHostBindings contract (#1195): the constructor returns exactly
@@ -87,6 +88,46 @@ func TestGitHubHostBindings_EmitMechanisms(t *testing.T) {
 	}
 	if api.EmitMechanism != binding.EmitMechanismB {
 		t.Errorf("api.github.com EmitMechanism = %q, want B (gh short-circuits without a token)", api.EmitMechanism)
+	}
+}
+
+func TestGitHubHostBindings_APICarriesSentinelShape(t *testing.T) {
+	// The api.github.com binding now carries the sentinel value and env
+	// name (#1247) so the planter and the proxy recognizer read one source
+	// of truth. The value is the canonical GitHub sentinel and the env is
+	// GH_TOKEN — byte-for-byte the pre-change plant.
+	bindings, err := gitHubHostBindings()
+	if err != nil {
+		t.Fatalf("gitHubHostBindings: %v", err)
+	}
+	api, ok := bindings.Match("api.github.com")
+	if !ok {
+		t.Fatal("no binding matched api.github.com")
+	}
+	if api.SentinelValue != sentinel.GitHubTokenSentinel {
+		t.Errorf("api.github.com SentinelValue = %q, want %q", api.SentinelValue, sentinel.GitHubTokenSentinel)
+	}
+	if api.SentinelEnv != "GH_TOKEN" {
+		t.Errorf("api.github.com SentinelEnv = %q, want GH_TOKEN", api.SentinelEnv)
+	}
+}
+
+func TestGitHubHostBindings_ApexCarriesNoSentinel(t *testing.T) {
+	// The github.com basic binding is mechanism A: it plants nothing, so it
+	// must carry no sentinel shape.
+	bindings, err := gitHubHostBindings()
+	if err != nil {
+		t.Fatalf("gitHubHostBindings: %v", err)
+	}
+	apex, ok := bindings.Match("github.com")
+	if !ok {
+		t.Fatal("no binding matched github.com")
+	}
+	if apex.EmitMechanism != binding.EmitMechanismA {
+		t.Errorf("github.com EmitMechanism = %q, want A", apex.EmitMechanism)
+	}
+	if apex.SentinelValue != "" || apex.SentinelEnv != "" {
+		t.Errorf("github.com carries a sentinel (%q,%q), want none for mechanism A", apex.SentinelValue, apex.SentinelEnv)
 	}
 }
 

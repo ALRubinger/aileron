@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -37,6 +38,35 @@ import (
 //     never 0600.
 //   - An unexpected daemon error aborts (it is not silently swallowed).
 
+// githubMechBBindings returns the GitHub mechanism-B binding set the
+// launcher passes to the planter. It is the canonical GitHub binding
+// carrying the GH_TOKEN sentinel, so a planter test exercises the
+// byte-for-byte GitHub plant path (#1247).
+func githubMechBBindings(t *testing.T) []binding.HostBinding {
+	t.Helper()
+	hb, err := binding.NewHostBinding("api.github.com", "user/github", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(sentinel.GitHubTokenSentinel, "GH_TOKEN"))
+	if err != nil {
+		t.Fatalf("NewHostBinding: %v", err)
+	}
+	return []binding.HostBinding{hb}
+}
+
+// fakeMultiServiceDaemon serves per-service secrets so a planter test can
+// exercise a second, distinct mechanism-B binding alongside GitHub. A
+// service with no entry returns ErrUserCredentialsNotFound.
+type fakeMultiServiceDaemon struct {
+	secrets map[string]vault.Secret
+}
+
+func (f *fakeMultiServiceDaemon) GetUserCredentials(_ context.Context, service string) (vault.Secret, error) {
+	s, ok := f.secrets[service]
+	if !ok {
+		return vault.Secret{}, ErrUserCredentialsNotFound
+	}
+	return s, nil
+}
+
 // fakeUserCredsDaemon is a one-method fake implementing userCredsDaemon.
 type fakeUserCredsDaemon struct {
 	secret vault.Secret
@@ -52,6 +82,108 @@ func (f *fakeUserCredsDaemon) GetUserCredentials(_ context.Context, service stri
 	return f.secret, f.err
 }
 
+func TestPrepareGitHubInject_SecondMechanismBBindingPlantedIndependently(t *testing.T) {
+	// A second, distinct mechanism-B binding with its own value+env is
+	// planted into its own env var, independently of GitHub (#1247), when
+	// its credential resolves to a usable token.
+	const otherSentinel = "sk_AILERONSENTINELOTHER"
+	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
+	if err != nil {
+		t.Fatalf("NewHostBinding(other): %v", err)
+	}
+	gh := githubMechBBindings(t)[0]
+
+	daemon := &fakeMultiServiceDaemon{secrets: map[string]vault.Secret{
+		"github": {Value: []byte("ghp_real")},
+		"other":  {Value: []byte("sk_realother")},
+	}}
+	prep, err := prepareGitHubInject(context.Background(), daemon, []binding.HostBinding{gh, other}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareGitHubInject: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if got := prep.EnvAdditions["GH_TOKEN"]; got != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN = %q, want the GitHub sentinel %q", got, sentinel.GitHubTokenSentinel)
+	}
+	if got := prep.EnvAdditions["OTHER_TOKEN"]; got != otherSentinel {
+		t.Errorf("OTHER_TOKEN = %q, want the second binding's sentinel %q", got, otherSentinel)
+	}
+	// Neither real token bytes appear in the env.
+	for k, v := range prep.EnvAdditions {
+		if v == "ghp_real" || v == "sk_realother" {
+			t.Errorf("EnvAdditions[%q] holds a real token; the agent must never see the secret", k)
+		}
+	}
+}
+
+func TestPrepareGitHubInject_SecondBindingWithoutCredentialPlantsNothing(t *testing.T) {
+	// A mechanism-B binding whose credential ref has no usable vault entry
+	// plants nothing (the swap would have nothing to swap to), while the
+	// GitHub binding with a usable token still plants its sentinel.
+	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel("sk_AILERONSENTINELOTHER", "OTHER_TOKEN"))
+	if err != nil {
+		t.Fatalf("NewHostBinding(other): %v", err)
+	}
+	gh := githubMechBBindings(t)[0]
+
+	// Only github resolves; "other" has no entry.
+	daemon := &fakeMultiServiceDaemon{secrets: map[string]vault.Secret{
+		"github": {Value: []byte("ghp_real")},
+	}}
+	prep, err := prepareGitHubInject(context.Background(), daemon, []binding.HostBinding{gh, other}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareGitHubInject: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if _, ok := prep.EnvAdditions["OTHER_TOKEN"]; ok {
+		t.Errorf("OTHER_TOKEN planted with no usable credential; want absent")
+	}
+	if got := prep.EnvAdditions["GH_TOKEN"]; got != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN = %q, want the GitHub sentinel (github still resolves)", got)
+	}
+}
+
+func TestPrepareGitHubInject_SkipsNonBAndSentinellessBindings(t *testing.T) {
+	// plantSentinels defensively skips a non-mechanism-B binding and a B
+	// binding with no sentinel shape (the constructor normally rejects the
+	// latter, so this is the fail-safe path). Neither plants any env.
+	mechA, err := binding.NewHostBinding("api.a.test", "user/a", binding.SchemeBearer)
+	if err != nil {
+		t.Fatalf("NewHostBinding(mechA): %v", err)
+	}
+	sentinelless := binding.HostBinding{
+		HostPattern:   "api.b.test",
+		CredentialRef: "user/b",
+		Scheme:        binding.SchemeBearer,
+		EmitMechanism: binding.EmitMechanismB,
+		// No SentinelValue/SentinelEnv: the defensive skip path.
+	}
+
+	daemon := &fakeMultiServiceDaemon{secrets: map[string]vault.Secret{
+		"github": {Value: []byte("ghp_real")},
+		"a":      {Value: []byte("a_real")},
+		"b":      {Value: []byte("b_real")},
+	}}
+	prep, err := prepareGitHubInject(context.Background(), daemon,
+		[]binding.HostBinding{githubMechBBindings(t)[0], mechA, sentinelless}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareGitHubInject: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// Only the GitHub B binding with a sentinel plants anything.
+	if got := prep.EnvAdditions["GH_TOKEN"]; got != sentinel.GitHubTokenSentinel {
+		t.Errorf("GH_TOKEN = %q, want the GitHub sentinel", got)
+	}
+	if len(prep.EnvAdditions) != 1 {
+		t.Errorf("EnvAdditions = %v, want only GH_TOKEN (non-B and sentinelless bindings plant nothing)", prep.EnvAdditions)
+	}
+}
+
 func TestPrepareGitHubInject_TokenPresent(t *testing.T) {
 	// Sealed model (#1195/#1196): a usable token mounts a secret-free
 	// gitconfig and sets GH_TOKEN to the NON-SECRET sentinel (so `gh`
@@ -60,7 +192,7 @@ func TestPrepareGitHubInject_TokenPresent(t *testing.T) {
 	// real credential at egress.
 	const tokenValue = "ghp_realtoken"
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte(tokenValue)}}
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -73,10 +205,7 @@ func TestPrepareGitHubInject_TokenPresent(t *testing.T) {
 		t.Fatalf("GH_TOKEN absent from EnvAdditions; emit-mechanism B must plant the sentinel so gh does not short-circuit")
 	}
 	if ghToken != sentinel.GitHubTokenSentinel {
-		t.Errorf("GH_TOKEN = %q, want the sentinel %q", ghToken, sentinel.GitHubTokenSentinel)
-	}
-	if !sentinel.IsGitHubTokenSentinel(ghToken) {
-		t.Errorf("GH_TOKEN %q is not recognized by IsGitHubTokenSentinel; launch and proxy would drift", ghToken)
+		t.Errorf("GH_TOKEN = %q, want the GitHub sentinel %q; the binding's SentinelValue is the single source of truth the proxy recognizer also reads", ghToken, sentinel.GitHubTokenSentinel)
 	}
 	// The real token bytes must never appear anywhere in the env. This is
 	// the ADR-0019 regression guard: before this fix the real token was
@@ -128,12 +257,12 @@ func TestPrepareGitHubInject_GitconfigIsSecretFreeRegardlessOfToken(t *testing.T
 	a := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("ghp_alpha")}}
 	b := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("ghp_bravo\n")}}
 
-	prepA, err := prepareGitHubInject(context.Background(), a, nil, nil, nil)
+	prepA, err := prepareGitHubInject(context.Background(), a, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject(a): %v", err)
 	}
 	defer prepA.Cleanup()
-	prepB, err := prepareGitHubInject(context.Background(), b, nil, nil, nil)
+	prepB, err := prepareGitHubInject(context.Background(), b, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject(b): %v", err)
 	}
@@ -157,7 +286,7 @@ func TestPrepareGitHubInject_NotFoundIsCleanSkip(t *testing.T) {
 	// sets no GH_TOKEN (the sentinel-swap needs a real daemon-side
 	// credential).
 	daemon := &fakeUserCredsDaemon{err: ErrUserCredentialsNotFound}
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -192,7 +321,7 @@ func TestPrepareGitHubInject_LockedVaultIsCleanSkip(t *testing.T) {
 	// warning, but sets no GH_TOKEN.
 	var stderr bytes.Buffer
 	daemon := &fakeUserCredsDaemon{err: vault.ErrCredentialUnavailable}
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, &stderr, nil)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, &stderr, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v, want clean skip on locked vault", err)
 	}
@@ -218,7 +347,7 @@ func TestPrepareGitHubInject_EmptyTokenIsCleanSkip(t *testing.T) {
 	// Key Decision 4 (#1195): an empty-after-trim token still mounts the
 	// static secret-free no-op gitconfig, but sets no GH_TOKEN.
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("   \n")}}
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -239,7 +368,7 @@ func TestPrepareGitHubInject_EmptyTokenIsCleanSkip(t *testing.T) {
 
 func TestPrepareGitHubInject_UnexpectedDaemonErrorAborts(t *testing.T) {
 	daemon := &fakeUserCredsDaemon{err: errors.New("daemon down")}
-	_, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	_, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on unexpected daemon failure")
 	}
@@ -259,7 +388,7 @@ func TestPrepareGitHubInject_ChownHookInvokedOnceWithTransientDir(t *testing.T) 
 		return nil
 	}
 
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, hook)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, hook)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -292,7 +421,7 @@ func TestPrepareGitHubInject_ChownHookFailureIsNonFatal(t *testing.T) {
 	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("ghp_x")}}
 	hook := func(string) error { return errors.New("chown boom") }
 
-	prep, err := prepareGitHubInject(context.Background(), daemon, nil, &stderr, hook)
+	prep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, &stderr, hook)
 	if err != nil {
 		t.Fatalf("chown failure must be non-fatal, got: %v", err)
 	}

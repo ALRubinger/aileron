@@ -14,8 +14,11 @@ import (
 //     `ghp_` prefix, a 40-char total length, and an alphanumeric body.
 //   - It is non-secret and self-identifying: it carries a human-readable
 //     marker so it is recognizable as the deliberate Aileron placeholder.
-//   - IsGitHubTokenSentinel matches only the exact reserved value and
-//     rejects every foreign token (real-looking ghp_…, empty, padded).
+//
+// Recognition is no longer a function here (#1247): the proxy seam matches
+// the inbound carrier against the matched binding's SentinelValue. The
+// value-shape assertions below stay so a future change cannot silently
+// alter the canonical GitHub sentinel out of gh's accepted format.
 
 func TestGitHubTokenSentinel_FormatMimicsGitHubPAT(t *testing.T) {
 	s := sentinel.GitHubTokenSentinel
@@ -46,33 +49,5 @@ func TestGitHubTokenSentinel_IsSelfIdentifyingAndNonSecret(t *testing.T) {
 	// secret. The marker is the non-secret signal.
 	if !strings.Contains(sentinel.GitHubTokenSentinel, "AILERONSENTINEL") {
 		t.Errorf("sentinel %q lacks the self-identifying AILERONSENTINEL marker", sentinel.GitHubTokenSentinel)
-	}
-}
-
-func TestIsGitHubTokenSentinel_MatchesExactReservedValue(t *testing.T) {
-	if !sentinel.IsGitHubTokenSentinel(sentinel.GitHubTokenSentinel) {
-		t.Error("IsGitHubTokenSentinel returned false for the exact reserved value")
-	}
-}
-
-func TestIsGitHubTokenSentinel_RejectsForeignTokens(t *testing.T) {
-	foreign := []struct {
-		name  string
-		token string
-	}{
-		{"real-looking ghp_ token", "ghp_1234567890abcdefghijklmnopqrstuvwx"},
-		{"empty", ""},
-		{"whitespace only", "   "},
-		{"leading whitespace padding", " " + sentinel.GitHubTokenSentinel},
-		{"trailing whitespace padding", sentinel.GitHubTokenSentinel + " "},
-		{"newline padding", sentinel.GitHubTokenSentinel + "\n"},
-		{"truncated sentinel", strings.TrimSuffix(sentinel.GitHubTokenSentinel, "A")},
-		{"different prefix", strings.Replace(sentinel.GitHubTokenSentinel, "ghp_", "ghs_", 1)},
-		{"lowercased", strings.ToLower(sentinel.GitHubTokenSentinel)},
-	}
-	for _, tc := range foreign {
-		if sentinel.IsGitHubTokenSentinel(tc.token) {
-			t.Errorf("%s: IsGitHubTokenSentinel(%q) = true, want false (foreign tokens must not be recognized)", tc.name, tc.token)
-		}
 	}
 }

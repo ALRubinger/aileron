@@ -553,7 +553,17 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// before mounting. See #1149.
 		ghChownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
-		ghPrep, err := prepareGitHubInject(ctx, client, sessionLog, os.Stderr, ghChownHook)
+		// Assemble the same host-binding table the daemon recognizer reads
+		// (GitHub Go bindings + descriptor bindings) and pass the
+		// mechanism-B subset to the planter, so the launch-side plant and
+		// the proxy-side swap share one source of truth (#1247). A
+		// malformed descriptor fails the launch loudly rather than silently
+		// shipping no sentinel.
+		mechBBindings, err := mechanismBHostBindings()
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("assemble mechanism-B host bindings: %w", err)
+		}
+		ghPrep, err := prepareGitHubInject(ctx, client, mechBBindings, sessionLog, os.Stderr, ghChownHook)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare github inject: %w", err)
 		}
