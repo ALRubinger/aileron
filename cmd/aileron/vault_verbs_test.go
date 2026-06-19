@@ -197,6 +197,19 @@ func TestRunVaultDelete_RejectsBarePathShapedName(t *testing.T) {
 	}
 }
 
+// Guard the namespace lock for the full-path form: a value that carries
+// the agents/ prefix and /oauth suffix but extracts to an empty or
+// slash-bearing <name> (e.g. `agents//oauth`, `agents/a/b/oauth`) must
+// still be rejected, so no nested or empty key can slip through the path
+// form (ADR-0025).
+func TestAgentOAuthPathName_RejectsMalformedFullPath(t *testing.T) {
+	for _, arg := range []string{"agents//oauth", "agents/a/b/oauth"} {
+		if name, err := agentOAuthPathName(arg); err == nil {
+			t.Errorf("agentOAuthPathName(%q) = (%q, nil), want error", arg, name)
+		}
+	}
+}
+
 func TestRunVaultDelete_InteractiveCancelMakesNoCall(t *testing.T) {
 	for _, answer := range []string{"n\n", "\n"} {
 		called := false
