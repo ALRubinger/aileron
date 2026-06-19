@@ -89,6 +89,23 @@ type codexDeviceServerState struct {
 	// advertises. 0 means the launcher's default applies.
 	userCodeInterval int
 
+	// usercodeRawBody, when non-empty, is written verbatim as the
+	// usercode 200 response (used to exercise malformed/empty-field
+	// parsing).
+	usercodeRawBody string
+
+	// pollRawBody, when non-empty, is written verbatim as the poll
+	// success 200 response (used to exercise malformed/empty-field
+	// parsing).
+	pollRawBody string
+
+	// noAccessToken makes the token exchange return a 200 body without an
+	// access_token field.
+	noAccessToken bool
+
+	// missingIDToken makes the token exchange omit the id_token entirely.
+	missingIDToken bool
+
 	mu        sync.Mutex
 	pollCount int
 }
@@ -121,6 +138,10 @@ func fakeDeviceAuthServer(t *testing.T, st *codexDeviceServerState) *httptest.Se
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/deviceauth/usercode"):
 			w.Header().Set("Content-Type", "application/json")
+			if st.usercodeRawBody != "" {
+				_, _ = io.WriteString(w, st.usercodeRawBody)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"device_auth_id": "dev-1",
 				"user_code":      "WXYZ-1234",
@@ -153,6 +174,10 @@ func fakeDeviceAuthServer(t *testing.T, st *codexDeviceServerState) *httptest.Se
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			if st.pollRawBody != "" {
+				_, _ = io.WriteString(w, st.pollRawBody)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"authorization_code": "auth-code-1",
 				"code_challenge":     "chal",
@@ -176,14 +201,21 @@ func fakeDeviceAuthServer(t *testing.T, st *codexDeviceServerState) *httptest.Se
 			case "-":
 				refresh = ""
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"access_token":  "acc-tok",
+			access := "acc-tok"
+			if st.noAccessToken {
+				access = ""
+			}
+			body := map[string]any{
+				"access_token":  access,
 				"refresh_token": refresh,
-				"id_token":      idToken,
 				"token_type":    "Bearer",
 				"expires_in":    3600,
-			})
+			}
+			if !st.missingIDToken {
+				body["id_token"] = idToken
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(body)
 
 		default:
 			t.Errorf("unexpected request path: %s", r.URL.Path)
@@ -548,6 +580,112 @@ func TestCodexHostAcquire_MalformedIDTokenLeavesAccountIDEmpty(t *testing.T) {
 	}
 }
 
+// TestCodexHostAcquire_MalformedProviderResponses covers the
+// API-boundary error branches: a usercode/poll/token response that is
+// well-formed HTTP but malformed or missing required fields must surface
+// a clean acquire error (the launcher falls back) rather than seeding a
+// broken credential. These are the failure modes a misbehaving provider
+// would actually produce.
+func TestCodexHostAcquire_MalformedProviderResponses(t *testing.T) {
+	restore := agents.SetCodexDeviceSleepForTest(func(context.Context, time.Duration) error { return nil })
+	defer restore()
+
+	cases := []struct {
+		name string
+		st   *codexDeviceServerState
+	}{
+		{"usercode body not JSON", &codexDeviceServerState{usercodeRawBody: "not json"}},
+		{"usercode missing fields", &codexDeviceServerState{usercodeRawBody: `{"interval":1}`}},
+		{"poll body not JSON", &codexDeviceServerState{pollRawBody: "not json"}},
+		{"poll missing authorization_code", &codexDeviceServerState{pollRawBody: `{"code_verifier":"v"}`}},
+		{"token response missing access_token", &codexDeviceServerState{noAccessToken: true}},
+		{"token error without parseable code", &codexDeviceServerState{tokenStatus: http.StatusBadGateway, tokenErrorBody: "upstream is down"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := fakeDeviceAuthServer(t, tc.st)
+			defer srv.Close()
+			fb := codexHostAcquireBinding(t)
+			secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+				Ctx:        context.Background(),
+				HTTPClient: codexTestHTTPClient(srv.URL),
+				Browser:    &recordingOpener{},
+				Out:        &bytes.Buffer{},
+			})
+			if err == nil {
+				t.Fatalf("expected an acquire error for %q so the launcher falls back", tc.name)
+			}
+			if len(secret.Value) != 0 {
+				t.Errorf("Secret must be empty for %q", tc.name)
+			}
+		})
+	}
+}
+
+// TestCodexHostAcquire_TokenErrorBareStatus exercises the redaction
+// fallback: a non-2xx token response whose body carries no RFC 6749
+// `error` field surfaces the bare HTTP status with no body leak.
+func TestCodexHostAcquire_TokenErrorBareStatus(t *testing.T) {
+	const leak = "bare-status-secret-DO-NOT-LEAK"
+	st := &codexDeviceServerState{tokenStatus: http.StatusInternalServerError, tokenErrorBody: leak}
+	srv := fakeDeviceAuthServer(t, st)
+	defer srv.Close()
+	restore := agents.SetCodexDeviceSleepForTest(func(context.Context, time.Duration) error { return nil })
+	defer restore()
+
+	fb := codexHostAcquireBinding(t)
+	_, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:        context.Background(),
+		HTTPClient: codexTestHTTPClient(srv.URL),
+		Browser:    &recordingOpener{},
+		Out:        &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected an error on a 500 token exchange")
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("raw token error body leaked: %v", err)
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("err = %v, want the bare HTTP status surfaced", err)
+	}
+}
+
+// TestCodexHostAcquire_MissingIDTokenLeavesAccountIDEmpty proves an
+// absent id_token is non-fatal: the envelope is produced with empty
+// id_token + account_id (the in-container CLI can re-auth if needed)
+// rather than aborting the seed.
+func TestCodexHostAcquire_MissingIDTokenLeavesAccountIDEmpty(t *testing.T) {
+	st := &codexDeviceServerState{missingIDToken: true}
+	srv := fakeDeviceAuthServer(t, st)
+	defer srv.Close()
+	restore := agents.SetCodexDeviceSleepForTest(func(context.Context, time.Duration) error { return nil })
+	defer restore()
+
+	fb := codexHostAcquireBinding(t)
+	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:        context.Background(),
+		HTTPClient: codexTestHTTPClient(srv.URL),
+		Browser:    &recordingOpener{},
+		Out:        &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("HostAcquire: %v (a missing id_token must not fail the acquire)", err)
+	}
+	var env struct {
+		Tokens struct {
+			IDToken   string `json:"id_token"`
+			AccountID string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(secret.Value, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Tokens.AccountID != "" {
+		t.Errorf("account_id = %q, want empty when id_token is absent", env.Tokens.AccountID)
+	}
+}
+
 // TestCodexAccountID_ParsesAndRejects exercises codexAccountIDFromIDToken
 // (via the exported test shim) on a well-formed JWT and on malformed
 // inputs.
@@ -573,5 +711,13 @@ func TestCodexAccountID_ParsesAndRejects(t *testing.T) {
 	noClaim := header + "." + payload + ".sig"
 	if _, err := agents.CodexAccountIDFromIDTokenForTest(noClaim); err == nil {
 		t.Error("expected error for a JWT missing chatgpt_account_id")
+	}
+
+	// A well-formed three-segment JWT whose payload is valid base64url but
+	// NOT valid JSON must surface a parse error, not a panic.
+	badJSONPayload := base64.RawURLEncoding.EncodeToString([]byte("not json"))
+	badJSON := header + "." + badJSONPayload + ".sig"
+	if _, err := agents.CodexAccountIDFromIDTokenForTest(badJSON); err == nil {
+		t.Error("expected error for a JWT whose payload is not valid JSON")
 	}
 }
