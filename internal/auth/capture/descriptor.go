@@ -88,8 +88,10 @@ type CaptureDescriptor struct {
 	// exec arg vectors from the bespoke flow.
 	ConfigDir string `yaml:"config_dir"`
 
-	// StoreAt is the vault path the captured credential is stored at (e.g.
-	// "user/github"). Required; maps to Driver.StoreAt.
+	// StoreAt is the logical vault key the captured credential is stored
+	// at (e.g. "user/github"), not a full daemon path. Required; maps to
+	// Driver.StoreAt. The production StoreFunc expands it to
+	// /vault/<store_at>/credentials.
 	StoreAt string `yaml:"store_at"`
 
 	// Kind is the metadata Type stamped on the stored credential (e.g.

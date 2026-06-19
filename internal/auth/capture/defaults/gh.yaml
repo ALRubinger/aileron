@@ -29,10 +29,12 @@
 #     it; gh does not.
 #
 # image is intentionally left empty: image / base-image resolution stays
-# caller-side, and the binder takes a resolved image string. store_at and
-# kind match the bespoke flow's vault path (user/github) and kind stamp
-# (user), so the daemon resolves the same credential the host-binding's
-# credential-ref (user/github) names.
+# caller-side, and the binder takes a resolved image string. store_at is a
+# logical vault key, not a full daemon path: the production StoreFunc
+# expands it to /vault/<store_at>/credentials. store_at and kind match the
+# bespoke flow's logical key (user/github) and kind stamp (user), so the
+# daemon resolves the same credential the host-binding's credential-ref
+# (user/github) names.
 version: v1
 name: gh
 image: ""
