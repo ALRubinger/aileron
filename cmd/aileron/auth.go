@@ -37,12 +37,16 @@ func runAuth(args []string, registry *launch.Registry, stdout, stderr io.Writer)
 		return 1
 	}
 
-	// `github` is a standalone user-level acquisition verb, not an
-	// <agent>. Intercept it before the host-import path so it is not
-	// parsed as the <agent> positional. It drives gh's OAuth device flow
-	// inside a container and stores the result at user/github.
-	if args[0] == "github" {
-		return runAuthGitHub(args[1:], stdout, stderr)
+	// A descriptor-driven acquisition verb (e.g. `github`) is a standalone
+	// user-level credential acquisition, not an <agent>. It is resolved
+	// through the capture descriptor registry rather than a literal
+	// special-case: the verb maps to a shipped descriptor (the "gh" YAML
+	// for `github`) that supplies the login flow, image, vault path, and
+	// kind. No provider knowledge is compiled into core. Dispatch it before
+	// the host-import path so the verb is not parsed as the <agent>
+	// positional.
+	if descriptor := descriptorForVerb(args[0]); isCaptureDescriptor(descriptor) {
+		return runAuthCapture(descriptor, args[1:], stdout, stderr)
 	}
 
 	// Require <agent> as the first positional so the flag parser does

@@ -1,28 +1,28 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 
+	"github.com/ALRubinger/aileron/internal/auth/capture"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
-
-	"golang.org/x/term"
 )
 
-// userGitHubCredentialKind is the metadata Type stamped on the
-// user/github vault entry. It must equal the first segment of the
-// host-binding credential-ref (`user/github`) so the daemon's
-// VaultResolver kind check passes when a github.com / api.github.com
-// request is sealed at the TLS boundary (ADR-0019, #1195).
-const userGitHubCredentialKind = "user"
+// The metadata Type stamped on the user/github vault entry ("user") is
+// no longer a constant in core: it is the descriptor's `kind` field,
+// supplied to the store closure as the kind argument. It must equal the
+// first segment of the host-binding credential-ref (`user/github`) so the
+// daemon's VaultResolver kind check passes when a github.com /
+// api.github.com request is sealed at the TLS boundary (ADR-0019, #1195).
+// That coupling now lives in the shipped gh descriptor (store_at:
+// user/github, kind: user), not in compiled Go.
 
 // userCredentialsBody is the wire shape the user-credential PUT
 // marshals: the secret bytes plus optional non-secret metadata. It is a
@@ -40,52 +40,13 @@ type userCredentialsMetadata struct {
 	Type string `json:"type,omitempty"`
 }
 
-// stdinIsTerminal reports whether the operator's stdin is a real
-// terminal. It is a package var so tests can drive both branches.
-// gh's interactive device-flow login renders a prompt through a
-// prompt library that requires a pseudo-TTY; the login exec therefore
-// needs `docker exec -t`. We gate on a real stdin so a non-TTY / CI
-// caller does not hit docker's "cannot enable tty mode on non tty
-// input" — they get a plain `exec -i` instead (which will not complete
-// an interactive login, but fails cleanly rather than mis-allocating a
-// PTY).
-var stdinIsTerminal = func() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
-
-// deviceFlowRunner performs gh's OAuth device-authorization flow and
-// returns the captured user-to-server bearer token bytes. It is a seam
-// so tests can substitute a fake without driving a real container or
-// reaching GitHub. The production implementation is containerDeviceFlow.
-type deviceFlowRunner interface {
-	// Capture drives the device flow and returns the raw bearer token
-	// (trailing newline trimmed). It is interactive: the operator reads
-	// the user code + verification URL gh prints, authorizes in a
-	// browser, and gh completes the grant.
-	Capture(ctx context.Context) ([]byte, error)
-}
-
-// newDeviceFlowRunner builds the production runner. It is a package var
-// so runAuthGitHub's tests substitute a fake flow without a container.
-var newDeviceFlowRunner = func(runtime, image string) (deviceFlowRunner, error) {
-	runtimeExe, err := sandboxcontainer.ResolveRuntime(runtime)
-	if err != nil {
-		return nil, err
-	}
-	image = resolveDeviceFlowImage(image)
-	return &containerDeviceFlow{
-		runner:        sandboxcontainer.DefaultRunner(),
-		runtimeExe:    runtimeExe,
-		image:         image,
-		containerName: "aileron-auth-github",
-	}, nil
-}
-
-// resolveDeviceFlowImage returns the container image for the device
+// resolveDeviceFlowImage returns the container image for the capture
 // flow: the caller's --image override when set, otherwise the sandbox
 // base image. The base image ships gh (#1146) and is agent-independent,
 // which matches the user-level (not per-agent) nature of this
-// credential. edge for dev builds, latest for releases (#1141).
+// credential. edge for dev builds, latest for releases (#1141). Image /
+// base-image resolution policy stays caller-side; the capture package
+// takes a fully-resolved image string.
 func resolveDeviceFlowImage(override string) string {
 	if override != "" {
 		return override
@@ -93,13 +54,114 @@ func resolveDeviceFlowImage(override string) string {
 	return sandboxcomposition.BaseImage(version.Version)
 }
 
-// runAuthGitHub implements `aileron auth github`. It drives gh's OAuth
-// device flow inside a container that ships gh, captures the resulting
-// non-expiring bearer token, and PUTs it to the user/github vault path
-// through the daemon. OAuth is acquisition UX only: a single bearer
-// token is stored, no refresh machinery, HTTPS only.
-func runAuthGitHub(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("auth github", flag.ContinueOnError)
+// userCredentialStore returns the production capture.StoreFunc: it
+// marshals the captured bytes plus the descriptor-supplied kind stamp
+// and PUTs them to the daemon vault at /vault/<storeAt>/credentials. The
+// HTTP status → message mapping stays caller-side (internal cannot import
+// the cmd-side vault transport), so the closure translates the daemon's
+// status codes into the sentinel errors runAuthCapture maps to messages.
+//
+// storeAt is the descriptor's logical vault namespace (e.g. "user/github");
+// the full route is derived here, not re-derived inside the driver.
+func userCredentialStore(ctx context.Context, storeAt, kind string, value []byte) error {
+	// Marshaling a struct with a []byte field and a string field cannot
+	// fail, so the error is discarded (matching runAuthImport's precedent).
+	body, _ := json.Marshal(userCredentialsBody{
+		Value:    value,
+		Metadata: &userCredentialsMetadata{Type: kind},
+	})
+	status, respBody, err := vaultDoRequest(http.MethodPut,
+		"/vault/"+storeAt+"/credentials", body)
+	if err != nil {
+		return err
+	}
+	switch status {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusLocked:
+		return errVaultLocked
+	case http.StatusServiceUnavailable:
+		return errNoVault
+	default:
+		return fmt.Errorf("server returned %d: %s", status, string(respBody))
+	}
+}
+
+// errVaultLocked and errNoVault are the sentinel store errors the
+// production StoreFunc returns for the daemon's 423 / 503 statuses so
+// runAuthCapture can map them to the same operator-facing messages the
+// bespoke flow used. Any other non-204 status surfaces verbatim via the
+// store closure's default branch.
+var (
+	errVaultLocked = errors.New("vault is locked; unlock it first")
+	errNoVault     = errors.New("daemon is not configured with a vault")
+)
+
+// captureVerbDescriptor maps a user-facing `aileron auth <verb>` to the
+// capture descriptor name that drives it. The verb is the CLI surface
+// spelling (e.g. "github"); the descriptor is the registry key the shipped
+// YAML declares (e.g. "gh"). This is the only caller-side coupling between
+// a verb and a tool: it is a spelling alias, not provider knowledge — the
+// login/token commands, image, vault path, and kind all live in the
+// descriptor YAML, never here. A verb whose spelling already equals its
+// descriptor name needs no entry.
+var captureVerbDescriptor = map[string]string{
+	"github": "gh",
+}
+
+// descriptorForVerb resolves a `auth <verb>` to its descriptor name. When
+// the verb has no alias entry it is used as the descriptor name directly,
+// so a future tool whose verb equals its descriptor name needs no wiring.
+func descriptorForVerb(verb string) string {
+	if name, ok := captureVerbDescriptor[verb]; ok {
+		return name
+	}
+	return verb
+}
+
+// isCaptureDescriptor reports whether name resolves to a capture
+// descriptor in the embedded + user registry. runAuth uses it to dispatch
+// a descriptor verb (e.g. "github" → the "gh" tool) before falling through
+// to the <agent> --import-from-host path, so no provider knowledge is
+// compiled into core: the set of acquisition verbs is exactly the
+// registered descriptors. A registry load error returns false (and the
+// caller falls through), matching the fail-closed posture — a malformed
+// descriptor must not silently shadow an agent name.
+//
+// It is a package var so tests can exercise the dispatch without depending
+// on the shipped descriptor set.
+var isCaptureDescriptor = func(name string) bool {
+	registry, err := capture.DefaultRegistry()
+	if err != nil {
+		return false
+	}
+	_, ok := registry.Resolve(name)
+	return ok
+}
+
+// newCaptureDriver builds a ready capture.Driver for the named descriptor.
+// It is a package var so tests substitute a fake container runner without
+// driving a real container or reaching the tool's login backend; the
+// production implementation resolves the runtime, the image, and the
+// descriptor from the embedded + user registry, then binds the store seam.
+var newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
+	registry, err := capture.DefaultRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return registry.Bind(descriptorName, runtime, image, store)
+}
+
+// runAuthCapture implements a descriptor-driven acquisition verb such as
+// `aileron auth github`. The descriptor (resolved by name from the
+// capture registry) supplies the container image base, the login and
+// token-read commands, the optional BROWSER shim, the vault path, and the
+// kind stamp; this caller resolves the --runtime / --image flags and the
+// image, wires the daemon vault transport as the store seam, and maps the
+// driver's error back to the operator-facing messages and exit codes the
+// bespoke flow used.
+func runAuthCapture(descriptorName string, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("auth "+descriptorName, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	runtime := flags.String("runtime", sandboxcontainer.DefaultRuntime,
 		"Container runtime: auto or docker")
@@ -109,161 +171,31 @@ func runAuthGitHub(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: aileron auth github [--runtime <auto|docker>] [--image <ref>]")
+		fmt.Fprintf(stderr, "usage: aileron auth %s [--runtime <auto|docker>] [--image <ref>]\n", descriptorName)
 		return 1
 	}
 
-	runner, err := newDeviceFlowRunner(*runtime, *image)
+	driver, err := newCaptureDriver(descriptorName, *runtime, resolveDeviceFlowImage(*image), userCredentialStore)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	token, err := runner.Capture(context.Background())
-	if err != nil {
-		fmt.Fprintf(stderr, "error: GitHub device-flow login failed: %v\n", err)
-		return 1
-	}
-	if len(bytes.TrimSpace(token)) == 0 {
-		fmt.Fprintln(stderr, "error: gh returned an empty token; login did not complete")
-		return 1
-	}
-
-	// Stamp the credential's metadata Type as "user" so the daemon's
-	// host->credential binding resolver (ADR-0019) can validate the kind
-	// it resolves for user/github. The binding's credential-ref is
-	// `user/github`, whose first segment ("user") is the expected kind;
-	// VaultResolver fails closed if the stored Type does not match. Older
-	// entries written before this stamp carry an empty Type and will not
-	// resolve through a binding until re-run, which is the intended
-	// fail-closed posture rather than a silent unauthenticated request.
-	//
-	// Marshaling cannot fail for these field types; the error is
-	// discarded matching runAuthImport's precedent.
-	body, _ := json.Marshal(userCredentialsBody{
-		Value:    token,
-		Metadata: &userCredentialsMetadata{Type: userGitHubCredentialKind},
-	})
-	status, respBody, err := vaultDoRequest(http.MethodPut,
-		"/vault/user/github/credentials", body)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	switch status {
-	case http.StatusNoContent:
-		fmt.Fprintln(stdout, "Stored user/github")
+	switch err := driver.Acquire(context.Background()); {
+	case err == nil:
+		fmt.Fprintln(stdout, "Stored "+driver.StoreAt)
 		return 0
-	case http.StatusLocked:
+	case errors.Is(err, capture.ErrEmptyToken):
+		fmt.Fprintln(stderr, "error: login returned an empty token; login did not complete")
+		return 1
+	case errors.Is(err, errVaultLocked):
 		fmt.Fprintln(stderr, "error: vault is locked; unlock it first")
 		return 1
-	case http.StatusServiceUnavailable:
+	case errors.Is(err, errNoVault):
 		fmt.Fprintln(stderr, "error: daemon is not configured with a vault")
 		return 1
 	default:
-		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-}
-
-// containerDeviceFlow drives gh's device flow inside one persistent
-// container so the token gh auth login writes to ~/.config/gh/hosts.yml
-// survives to the gh auth token read. It runs the SAME named container
-// for both gh calls: an ephemeral second `docker run` would not see the
-// hosts.yml the login wrote, so the shared container is load-bearing.
-type containerDeviceFlow struct {
-	runner        sandboxcontainer.Runner
-	runtimeExe    string // the resolved runtime executable, e.g. "docker"
-	image         string
-	containerName string
-}
-
-// Capture starts the container, runs the interactive gh auth login
-// (device flow), reads the token with gh auth token from that same
-// container, then tears the container down. The teardown is deferred so
-// a mid-flow failure still removes the container.
-func (c *containerDeviceFlow) Capture(ctx context.Context) ([]byte, error) {
-	// Clear any container left behind by a prior run that died before its
-	// teardown (e.g. SIGKILL): the name is deterministic, so a stale
-	// container would make `run --name` fail with "name already in use".
-	// rm -f on a nonexistent name is a harmless no-op, so the error is
-	// ignored.
-	_ = c.runner.Run(ctx, c.runtimeExe,
-		[]string{"rm", "-f", c.containerName}, io.Discard, io.Discard)
-
-	// Start one long-lived container we exec into twice. --rm is not used
-	// because we explicitly `rm -f` in the deferred teardown; sleep keeps
-	// it alive between the login and token execs.
-	var startErr bytes.Buffer
-	runArgs := []string{
-		"run", "-d", "--name", c.containerName,
-		c.image, "sleep", "3600",
-	}
-	if err := c.runner.Run(ctx, c.runtimeExe, runArgs, io.Discard, &startErr); err != nil {
-		return nil, fmt.Errorf("starting container: %w%s", err, stderrSuffix(&startErr))
-	}
-	// Tear the container down regardless of how Capture exits.
-	defer func() {
-		_ = c.runner.Run(context.Background(), c.runtimeExe,
-			[]string{"rm", "-f", c.containerName}, io.Discard, io.Discard)
-	}()
-
-	// Interactive device-flow login. gh prints the user code + the
-	// verification URL to the operator's terminal; its stdin/stdout are
-	// wired to the host terminal by the Runner so the operator can read
-	// the prompt. HTTPS only — never configure SSH (-p https). Output is
-	// surfaced so the operator sees gh's instructions.
-	//
-	// gh's prompt needs a pseudo-TTY, so the exec gets `-t` when stdin
-	// is a real terminal. Without it `gh auth login --web` hangs with no
-	// visible prompt (the prompt library never renders). `-i` and `-t`
-	// are passed as separate args so the Runner's interactiveTTYRun gate
-	// matches `-t` and hands the child the controlling terminal's
-	// foreground process group — required because the Runner isolates
-	// the docker child into its own process group, where docker's
-	// raw-mode tcsetattr would otherwise fail with SIGTTOU/EINTR.
-	loginArgs := []string{"exec", "-i"}
-	if stdinIsTerminal() {
-		loginArgs = append(loginArgs, "-t")
-	}
-	// Point gh's browser-open at a no-op. The container ships no browser,
-	// so gh's default open (xdg-open / x-www-browser / wslview) fails with
-	// a noisy "executable file not found in $PATH" that reads like an
-	// error even though the device flow is fine — the operator just opens
-	// the printed URL on the host. BROWSER=echo turns the open step into a
-	// clean success that reprints the verification URL at the exact moment
-	// the operator needs it. Passed as a single `--env=K=V` token so it
-	// stays a `-`-prefixed exec flag (the arg parsing skips those).
-	loginArgs = append(loginArgs, "--env=BROWSER=echo")
-	loginArgs = append(loginArgs,
-		c.containerName,
-		"gh", "auth", "login",
-		"--hostname", "github.com",
-		"--git-protocol", "https",
-		"--web",
-	)
-	if err := c.runner.Run(ctx, c.runtimeExe, loginArgs, os.Stdout, os.Stderr); err != nil {
-		return nil, fmt.Errorf("gh auth login: %w", err)
-	}
-
-	// Read the token gh auth login wrote to hosts.yml in THIS container.
-	var tokenOut, tokenErr bytes.Buffer
-	tokenArgs := []string{
-		"exec", c.containerName,
-		"gh", "auth", "token", "--hostname", "github.com",
-	}
-	if err := c.runner.Run(ctx, c.runtimeExe, tokenArgs, &tokenOut, &tokenErr); err != nil {
-		return nil, fmt.Errorf("gh auth token: %w%s", err, stderrSuffix(&tokenErr))
-	}
-	return bytes.TrimRight(tokenOut.Bytes(), "\r\n"), nil
-}
-
-// stderrSuffix renders captured stderr as a trailing context fragment
-// for an error message, or "" when there is none.
-func stderrSuffix(b *bytes.Buffer) string {
-	s := bytes.TrimSpace(b.Bytes())
-	if len(s) == 0 {
-		return ""
-	}
-	return ": " + string(s)
 }
