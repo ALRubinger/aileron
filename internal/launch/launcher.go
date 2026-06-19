@@ -71,6 +71,37 @@ type LaunchConfig struct {
 	// "off" disables it, and "auto" (or empty) defers to the default
 	// for the resolved sandbox runtime (on for docker).
 	SandboxProxy string
+	// HostLogin controls whether the launcher runs a binding's host-side
+	// credential acquirer (FileBinding.HostAcquire) on a vault miss.
+	// Tri-state: "on" or "auto" (or empty) enable host acquisition when
+	// a binding declares one; "off" forces the legacy in-container login
+	// path even for bindings that declare an acquirer. Overridable via
+	// the AILERON_LAUNCH_HOST_LOGIN env var.
+	HostLogin string
+}
+
+// hostLoginEnv is the environment variable that overrides the
+// --host-login flag's default. Values follow the same on|off|auto
+// tri-state as the flag.
+const hostLoginEnv = "AILERON_LAUNCH_HOST_LOGIN"
+
+// resolveHostLogin computes whether host-side credential acquisition is
+// enabled for a launch, given the user's flag and env-var inputs. The
+// precedence is flag > env > default, with "auto" (or empty, or an
+// unrecognized value) deferring to the next source. The default is
+// enabled: host acquisition only activates when a binding actually
+// declares a HostAcquire hook, so the safe default is to honor it.
+// Only an explicit "off" (on the flag, or via the env when the flag is
+// auto) forces the legacy in-container path.
+func resolveHostLogin(flagValue, envValue string) bool {
+	mode := normalizeSandboxProxyTriState(flagValue)
+	if mode == "" || mode == "auto" {
+		envMode := normalizeSandboxProxyTriState(envValue)
+		if envMode != "" {
+			mode = envMode
+		}
+	}
+	return mode != "off"
 }
 
 // LaunchResult holds the outcome of a launched agent process.
@@ -513,8 +544,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// rotations are silently dropped on rootful Docker Linux.
 		reclaimHook := newTransientReclaimHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
+		hostLoginEnabled := resolveHostLogin(config.HostLogin, os.Getenv(hostLoginEnv))
 		prep, err := prepareAuthSpec(ctx, config.Agent.Name(), config.Agent.AuthSpec(),
-			client, sessionLog, os.Stderr, chownHook, reclaimHook)
+			client, sessionLog, os.Stderr, chownHook, reclaimHook, hostLoginEnabled)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare agent auth spec: %w", err)
 		}

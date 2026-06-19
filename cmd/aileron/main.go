@@ -87,13 +87,14 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		sandboxRuntime := launchFlags.String("sandbox", "off", "Prepare sandbox image with runtime: off, auto, or docker")
 		sandboxBuild := launchFlags.String("sandbox-build", "auto", "Sandbox build policy during launch: auto, always, or never")
 		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for --sandbox=docker)")
+		hostLogin := launchFlags.String("host-login", "auto", "Host-side credential acquisition on vault miss: auto, on, or off (off forces in-container login)")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] [--host-login=auto|on|off] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
@@ -131,6 +132,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			SandboxRuntime:     *sandboxRuntime,
 			SandboxBuildPolicy: *sandboxBuild,
 			SandboxProxy:       *sandboxProxy,
+			HostLogin:          *hostLogin,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
@@ -457,7 +459,7 @@ var launchFn = launch.Launch
 // `--flag` / `--flag=value` forms.
 func launchFlagTakesValue(name string) bool {
 	switch name {
-	case "log-level", "sandbox", "sandbox-build", "sandbox-proxy":
+	case "log-level", "sandbox", "sandbox-build", "sandbox-proxy", "host-login":
 		return true
 	default:
 		return false

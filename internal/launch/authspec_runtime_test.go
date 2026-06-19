@@ -129,7 +129,7 @@ func newTestLogger() *slog.Logger {
 
 func TestPrepareAuthSpec_EmptySpecIsNoOp(t *testing.T) {
 	prep, err := prepareAuthSpec(context.Background(), "claude", AuthSpec{},
-		newFakeDaemon(), newTestLogger(), nil, nil, nil)
+		newFakeDaemon(), newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestPrepareAuthSpec_FileBindingRendersFromVault(t *testing.T) {
 		}},
 	}
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestPrepareAuthSpec_StaticFileLandsRegardlessOfVault(t *testing.T) {
 		}},
 	}
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestPrepareAuthSpec_RequiredVaultMissingFailsLaunch(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error for required+empty vault")
 	}
@@ -290,7 +290,7 @@ func TestPrepareAuthSpec_EmptyVaultOptionalBindingDoesNotRender(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestPrepareAuthSpec_CaptureOnCleanExitPersistsRotatedFile(t *testing.T) {
 			},
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestPrepareAuthSpec_CaptureSchemaFailureSkipsPut(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{}, errors.New("schema drift") },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestPrepareAuthSpec_PreLaunchRefreshPersistsBeforeRender(t *testing.T) {
 			},
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestPrepareAuthSpec_PreLaunchRefreshErrorAbortsLaunch(t *testing.T) {
 			},
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
+	_, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error when PreLaunchRefresh fails")
 	}
@@ -472,7 +472,7 @@ func TestPrepareAuthSpec_CleanupRemovesTransientDir(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestPrepareAuthSpec_EnvBindingMerges(t *testing.T) {
 			},
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestPrepareAuthSpec_CapturePutFailureSurfacesWarning(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestPrepareAuthSpec_EnvBindingRequiredMissingErrors(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error on required env binding with empty vault")
 	}
@@ -577,7 +577,7 @@ func TestPrepareAuthSpec_EnvBindingOptionalMissingContinues(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestPrepareAuthSpec_EnvBindingGetErrorPropagates(t *testing.T) {
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
+	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error when GET fails with non-NotFound")
 	}
@@ -616,7 +616,7 @@ func TestPrepareAuthSpec_EnvBindingRenderErrorPropagates(t *testing.T) {
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, errors.New("bad shape") },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
+	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error when Render fails")
 	}
@@ -633,7 +633,7 @@ func TestPrepareAuthSpec_FileBindingRenderErrorPropagates(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error when Render fails")
 	}
@@ -650,7 +650,7 @@ func TestPrepareAuthSpec_FileBindingGetErrorPropagates(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected error when GET fails with non-NotFound")
 	}
@@ -669,7 +669,7 @@ func TestPrepareAuthSpec_ValidationErrorReturnsBeforeFS(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected validation error for nil Render")
 	}
@@ -697,7 +697,7 @@ func TestPrepareAuthSpec_EmptyVaultFirstLaunchProducesWritableParentMount(t *tes
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -743,7 +743,7 @@ func TestPrepareAuthSpec_RejectsNonConformingVaultPath(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if !errors.Is(err, ErrAuthSpecBadVaultPath) {
 		t.Fatalf("err = %v, want ErrAuthSpecBadVaultPath", err)
 	}
@@ -767,7 +767,7 @@ func TestPrepareAuthSpec_R30BootstrapLineFiresOnEmptyVault(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil, nil, nil)
+		newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestPrepareAuthSpec_RenderedAnyCredentialIsTrueOnHit(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -819,7 +819,7 @@ func TestPrepareAuthSpec_MountAsFileSkipsParentDirMount(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -866,7 +866,7 @@ func TestPrepareAuthSpec_ChownHookInvokedWithHostRootAfterFilesExist(t *testing.
 	}
 
 	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
-		daemon, newTestLogger(), nil, hook, nil)
+		daemon, newTestLogger(), nil, hook, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -899,7 +899,7 @@ func TestPrepareAuthSpec_NilChownHookLeavesFilesIntact(t *testing.T) {
 	// A nil hook is the non-Linux path: prep must still succeed and the
 	// rendered file must be present and unchanged.
 	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
-		daemon, newTestLogger(), nil, nil, nil)
+		daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -925,7 +925,7 @@ func TestPrepareAuthSpec_ChownHookErrorIsNonFatal(t *testing.T) {
 	hook := func(string) error { return errors.New("resolve agent uid: boom") }
 
 	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
-		daemon, newTestLogger(), stderr, hook, nil)
+		daemon, newTestLogger(), stderr, hook, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec must not fail on chown hook error, got %v", err)
 	}
@@ -952,7 +952,7 @@ func TestPrepareAuthSpec_ReclaimHookRunsBeforeCaptureRead(t *testing.T) {
 	reclaim := func(dir string) error { reclaimedDir = dir; return nil }
 
 	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
-		daemon, newTestLogger(), nil, nil, reclaim)
+		daemon, newTestLogger(), nil, nil, reclaim, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -989,7 +989,7 @@ func TestPrepareAuthSpec_ReclaimHookErrorIsNonFatal(t *testing.T) {
 	reclaim := func(string) error { return errors.New("chown via runtime: boom") }
 
 	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
-		daemon, newTestLogger(), stderr, nil, reclaim)
+		daemon, newTestLogger(), stderr, nil, reclaim, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1041,7 +1041,7 @@ func TestPrepareAuthSpec_FirstLoginSeedWithFresherStillPuts(t *testing.T) {
 	// branch never consults it (there is no prior entry to compare).
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, nil })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1065,7 +1065,7 @@ func TestPrepareAuthSpec_DeliberateDeleteMidSessionSkipsPut(t *testing.T) {
 	daemon.seed("claude", []byte("old")) // present at render
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1089,7 +1089,7 @@ func TestPrepareAuthSpec_StaleCaptureNotFresherSkipsPut(t *testing.T) {
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, nil })
 
 	var stderr bytes.Buffer
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), &stderr, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), &stderr, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1116,7 +1116,7 @@ func TestPrepareAuthSpec_FresherTruePuts(t *testing.T) {
 	daemon.seed("claude", []byte("current"))
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1136,7 +1136,7 @@ func TestPrepareAuthSpec_FresherErrorSkipsPut(t *testing.T) {
 	daemon.seed("claude", []byte("current"))
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, errors.New("malformed envelope") })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1164,7 +1164,7 @@ func TestPrepareAuthSpec_CurrentMalformedOverwritesWithCapture(t *testing.T) {
 		return false, fmt.Errorf("%w: parse current: bad", ErrCurrentEnvelopeMalformed)
 	})
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1192,7 +1192,7 @@ func TestPrepareAuthSpec_CaptureGetCancelledSkipsPut(t *testing.T) {
 	daemon.getSeq["claude"] = []error{nil, context.Canceled}
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}

@@ -120,7 +120,7 @@ func TestAuthSpecInContainerCredentialReadCapture(t *testing.T) {
 		daemon := newFakeDaemon()
 		daemon.seed(claudeVaultName, seeded)
 
-		prep, err := prepareAuthSpec(ctx, claudeVaultName, claudeFixtureAuthSpec(), daemon, newTestLogger(), io.Discard, chownFn, reclaimFn)
+		prep, err := prepareAuthSpec(ctx, claudeVaultName, claudeFixtureAuthSpec(), daemon, newTestLogger(), io.Discard, chownFn, reclaimFn, true)
 		if err != nil {
 			t.Fatalf("prepareAuthSpec: %v", err)
 		}
@@ -163,7 +163,7 @@ func TestAuthSpecInContainerCredentialReadCapture(t *testing.T) {
 		daemon := newFakeDaemon()
 		daemon.seed(claudeVaultName, seeded)
 
-		prep, err := prepareAuthSpec(ctx, claudeVaultName, claudeFixtureAuthSpec(), daemon, newTestLogger(), io.Discard, chownFn, reclaimFn)
+		prep, err := prepareAuthSpec(ctx, claudeVaultName, claudeFixtureAuthSpec(), daemon, newTestLogger(), io.Discard, chownFn, reclaimFn, true)
 		if err != nil {
 			t.Fatalf("prepareAuthSpec: %v", err)
 		}
