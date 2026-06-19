@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/oauth"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -144,6 +145,7 @@ func prepareAuthSpec(
 	stderr io.Writer,
 	chownTransientDir func(dir string) error,
 	reclaimTransientDir func(dir string) error,
+	hostLoginEnabled bool,
 ) (authSpecPrep, error) {
 	prep := authSpecPrep{
 		EnvAdditions: map[string]string{},
@@ -260,6 +262,50 @@ func prepareAuthSpec(
 	// refresh, Render bytes, write to the host-side subdir under the
 	// group dir for the binding's container parent. Track for capture.
 	fileMounts := []sandboxcontainer.Volume{}
+
+	// renderAndMount is the shared "render + write + mount +
+	// captureTarget" tail for a binding whose Secret is present at
+	// render time. It is reached both from the present-vault path and
+	// from the host-acquire success path so the two cannot diverge. On
+	// any error it runs cleanup and returns a launch-aborting error.
+	renderAndMount := func(fb FileBinding, hostDir string, secret vault.Secret) error {
+		rendered, renderErr := fb.Render(secret)
+		if renderErr != nil {
+			cleanup()
+			return fmt.Errorf("auth spec: render file binding %q: %w", fb.VaultPath, renderErr)
+		}
+		hostPath := filepath.Join(hostDir, path.Base(fb.ContainerPath))
+		mode := fb.Mode
+		if mode == 0 {
+			mode = 0o600
+		}
+		if err := os.WriteFile(hostPath, rendered, mode); err != nil {
+			cleanup()
+			return fmt.Errorf("auth spec: write %s: %w", hostPath, err)
+		}
+		prep.RenderedAnyCredential = true
+		captureTargets = append(captureTargets, fileCapture{
+			HostPath:        hostPath,
+			VaultName:       vaultBindingTail(fb.VaultPath),
+			Capture:         fb.Capture,
+			PresentAtRender: true,
+			Fresher:         fb.Fresher,
+		})
+		// MountAsFile bindings get an individual file mount at
+		// ContainerPath. The mount is writable so Capture can read
+		// back any in-container update the agent makes; for v1, no
+		// agent that uses MountAsFile actually rotates in-container,
+		// but writable keeps the API future-proof.
+		if fb.MountAsFile {
+			fileMounts = append(fileMounts, sandboxcontainer.Volume{
+				Source:   hostPath,
+				Target:   fb.ContainerPath,
+				ReadOnly: false,
+			})
+		}
+		return nil
+	}
+
 	for i, fb := range spec.FileBindings {
 		containerParent := path.Dir(fb.ContainerPath)
 		hostDir, err := ensureGroup(containerParent)
@@ -282,12 +328,52 @@ func prepareAuthSpec(
 				return prep, fmt.Errorf("auth spec: file binding %d at %q is required but the vault is empty — seed with `aileron vault put %s`",
 					i, fb.VaultPath, fb.VaultPath)
 			}
-			// Required=false on empty vault: the in-container agent
-			// performs its own login (paste-the-code OAuth fallback
-			// for Claude, device-auth for Codex). Capture on clean
-			// exit seeds the vault. No file written for this binding,
-			// but the group dir still exists for StaticFiles or
-			// other file bindings under the same parent.
+			// Required=false on empty vault. If the binding declares a
+			// host acquirer and host-login is enabled, run the host-side
+			// OAuth flow, PUT the acquired Secret through the daemon
+			// (AE6: vault before render/start), then fall through to the
+			// shared render-and-mount tail so the credential is treated
+			// exactly as a vault-resident one. The status line in
+			// launcher.go is suppressed automatically because the tail
+			// sets RenderedAnyCredential = true.
+			if fb.HostAcquire != nil && hostLoginEnabled {
+				acquired, acqErr := fb.HostAcquire(ctx, HostAcquireDeps{
+					Ctx:        ctx,
+					HTTPClient: preLaunchRefreshHTTPClient(),
+					Browser:    oauth.SystemBrowser{},
+				})
+				switch {
+				case acqErr != nil:
+					// Acquire failed or was cancelled. Non-fatal: warn
+					// and fall back to the legacy in-container path.
+					captureWarn(sessionLog, stderr, agentName, fb.VaultPath,
+						fmt.Errorf("host credential acquisition failed: %w; falling back to in-container login", acqErr))
+				case len(acquired.Value) == 0:
+					// Acquirer returned an empty Secret (e.g. user
+					// declined consent). Treat as fallback, no PUT.
+					sessionLog.Info("host credential acquisition returned empty secret; falling back to in-container login",
+						"agent", agentName, "vault_path", fb.VaultPath)
+				default:
+					// AE6 ordering: persist to the vault before the
+					// container starts. A PUT failure aborts the launch
+					// rather than silently dropping a just-acquired
+					// credential.
+					if err := daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), acquired); err != nil {
+						cleanup()
+						return prep, fmt.Errorf("auth spec: persist host-acquired credential %q: %w", fb.VaultPath, err)
+					}
+					if err := renderAndMount(fb, hostDir, acquired); err != nil {
+						return prep, err
+					}
+					continue
+				}
+			}
+			// Legacy in-container path: the agent performs its own login
+			// (paste-the-code OAuth fallback for Claude, device-auth for
+			// Codex). Capture on clean exit seeds the vault. No file
+			// written for this binding, but the group dir still exists
+			// for StaticFiles or other file bindings under the same
+			// parent.
 			captureTargets = append(captureTargets, fileCapture{
 				HostPath:        filepath.Join(hostDir, path.Base(fb.ContainerPath)),
 				VaultName:       vaultBindingTail(fb.VaultPath),
@@ -319,39 +405,8 @@ func prepareAuthSpec(
 			secret = refreshed
 		}
 
-		rendered, renderErr := fb.Render(secret)
-		if renderErr != nil {
-			cleanup()
-			return prep, fmt.Errorf("auth spec: render file binding %d %q: %w", i, fb.VaultPath, renderErr)
-		}
-		hostPath := filepath.Join(hostDir, path.Base(fb.ContainerPath))
-		mode := fb.Mode
-		if mode == 0 {
-			mode = 0o600
-		}
-		if err := os.WriteFile(hostPath, rendered, mode); err != nil {
-			cleanup()
-			return prep, fmt.Errorf("auth spec: write %s: %w", hostPath, err)
-		}
-		prep.RenderedAnyCredential = true
-		captureTargets = append(captureTargets, fileCapture{
-			HostPath:        hostPath,
-			VaultName:       vaultBindingTail(fb.VaultPath),
-			Capture:         fb.Capture,
-			PresentAtRender: true,
-			Fresher:         fb.Fresher,
-		})
-		// MountAsFile bindings get an individual file mount at
-		// ContainerPath. The mount is writable so Capture can read
-		// back any in-container update the agent makes; for v1, no
-		// agent that uses MountAsFile actually rotates in-container,
-		// but writable keeps the API future-proof.
-		if fb.MountAsFile {
-			fileMounts = append(fileMounts, sandboxcontainer.Volume{
-				Source:   hostPath,
-				Target:   fb.ContainerPath,
-				ReadOnly: false,
-			})
+		if err := renderAndMount(fb, hostDir, secret); err != nil {
+			return prep, err
 		}
 	}
 

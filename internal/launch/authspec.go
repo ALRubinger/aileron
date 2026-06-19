@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/oauth"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -148,6 +149,40 @@ type FileBinding struct {
 	// failed persist aborts the launch.
 	PreLaunchRefresh func(vault.Secret, RefreshDeps) (vault.Secret, error)
 
+	// HostAcquire, when non-nil, is a host-side credential acquirer the
+	// launcher invokes when the vault GET for this binding misses and
+	// the binding is not Required. It runs on the host (browser +
+	// loopback callback + token exchange, all pure Go) and returns the
+	// vault.Secret the launcher then PUTs through the daemon and renders
+	// to the bind-mounted file — exactly as a vault-resident credential
+	// would be. No token is ever placed in the agent's environment; the
+	// acquired Secret follows the same vault-seeded path as every other
+	// credential (ADR-0025).
+	//
+	// Contract:
+	//
+	//   - The returned Secret must satisfy this same binding's Render.
+	//     The launcher renders the acquired Secret immediately, so a
+	//     malformed envelope surfaces as a launch-aborting Render error
+	//     rather than seeding garbage into the vault.
+	//
+	//   - The acquirer must NOT assume the agent CLI is installed on the
+	//     host. Acquisition is pure Go (HTTP + browser open); the
+	//     launcher never shells out to the agent binary.
+	//
+	//   - A returned Secret with an empty Value, or a cancelled/failed
+	//     acquire (non-nil error), is non-fatal: the launcher logs a
+	//     warning and falls back to the legacy in-container login path
+	//     (no file written; capture-on-exit seeds the vault). Only a
+	//     daemon PUT failure or a Render failure of a successfully
+	//     acquired Secret aborts the launch.
+	//
+	// A nil HostAcquire preserves the legacy in-container path. The
+	// per-launch `--host-login` flag (and AILERON_LAUNCH_HOST_LOGIN env)
+	// can force the legacy path even for a binding that declares an
+	// acquirer.
+	HostAcquire func(context.Context, HostAcquireDeps) (vault.Secret, error)
+
 	// MountAsFile selects file-mount vs parent-dir mount strategy.
 	//
 	// When false (default), the launcher bind-mounts the binding's
@@ -201,6 +236,35 @@ type RefreshDeps struct {
 	// daemon client so the hook never opens the vault file itself —
 	// the daemon is the single trust boundary per ADR-0011.
 	PutAgentCredentials func(secret vault.Secret) error
+}
+
+// HostAcquireDeps is the bag of helpers a FileBinding's HostAcquire
+// hook needs to run a host-side OAuth flow: an HTTP client for the
+// token exchange and a browser opener for the consent URL. The
+// launcher fills it in before invoking the hook.
+//
+// Note the absence of a PutAgentCredentials helper: unlike
+// RefreshDeps, the acquirer does not persist the credential itself.
+// The launcher owns the PUT (and the immediate Render that validates
+// the acquired Secret), so the acquirer cannot skip seeding or seed an
+// envelope its own binding's Render would reject. This mirrors how
+// prepareAuthSpec owns the Render write for a vault-resident
+// credential.
+type HostAcquireDeps struct {
+	// Ctx is the launch context, propagated so the host OAuth flow
+	// (browser open, loopback callback wait, token POST) honors
+	// cancellation when the user kills the launch.
+	Ctx context.Context
+
+	// HTTPClient drives the token-exchange POST against the vendor's
+	// token URL. Tests inject httptest-backed clients; production uses
+	// a shared client with a sane timeout.
+	HTTPClient *http.Client
+
+	// Browser opens the provider's consent URL on the host. The default
+	// is oauth.SystemBrowser{}; tests inject a fake Opener so the flow
+	// runs headless.
+	Browser oauth.Opener
 }
 
 // ErrAuthSpecRenderNil is returned by validateAuthSpec when a

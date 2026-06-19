@@ -174,6 +174,49 @@ func TestRun_LaunchPassesSandboxOptions(t *testing.T) {
 	if captured.SandboxProxy != "auto" {
 		t.Errorf("LaunchConfig.SandboxProxy = %q, want auto (default)", captured.SandboxProxy)
 	}
+	// --host-login defaults to "auto" so the launcher's resolver enables
+	// host-side acquisition when a binding declares one.
+	if captured.HostLogin != "auto" {
+		t.Errorf("LaunchConfig.HostLogin = %q, want auto (default)", captured.HostLogin)
+	}
+}
+
+// TestRun_LaunchPropagatesHostLoginFlag verifies the CLI threads the
+// --host-login flag through to LaunchConfig.HostLogin in both the
+// before-agent and trailing forms.
+func TestRun_LaunchPropagatesHostLoginFlag(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"before agent", []string{"launch", "--host-login=off", "claude"}, "off"},
+		{"trailing eq form", []string{"launch", "claude", "--host-login=off"}, "off"},
+		{"trailing space form", []string{"launch", "claude", "--host-login", "on"}, "on"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured launch.LaunchConfig
+			launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+				captured = cfg
+				return launch.LaunchResult{ExitCode: 0}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, newTestRegistry(), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
+			}
+			if captured.HostLogin != tc.want {
+				t.Errorf("LaunchConfig.HostLogin = %q, want %q", captured.HostLogin, tc.want)
+			}
+			if len(captured.Args) != 0 {
+				t.Errorf("host-login flag leaked to agent args: %v", captured.Args)
+			}
+		})
+	}
 }
 
 // TestRun_LaunchPropagatesSandboxProxyFlag verifies the CLI threads
