@@ -66,23 +66,19 @@ LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
 ARG AILERON_VERSION=dev
 LABEL ai.aileron.mcp.version="${AILERON_VERSION}"
 
-# Base substrate packages. github-cli is NOT installed here: gh ships as a
-# composable devcontainer Feature (images/sandbox-features/gh) layered onto this
-# published substrate by the thin compose step in sandbox-base.yml, carrying
-# gh's CLI-capability unit in the devcontainer.metadata label (umbrella #1319).
-# Every package below lives in Alpine's main repo, so no --repository=community
-# flag is needed.
-#
-# Transitional (umbrella #1319): this PUBLISHED recipe drops github-cli; the
-# LOCAL Tier 0 Containerfile still installs it via apk until #1321b moves the
-# local build to the same Feature-compose path. The two lists are intentionally
-# out of sync only on github-cli for now (was: kept in sync per issue #957).
+# github-cli ships only in Alpine's community repo, which alpine:3.24 does not
+# enable by default. Scope the community repo to this single apk invocation via
+# --repository (pinned to v3.24 to match the FROM tag) so the rest of the
+# package set stays main-only. Keep this list in sync with Containerfile (the
+# local Tier 0 recipe; issue #957).
 RUN apk add --no-cache \
+    --repository=https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
     bash \
     ca-certificates \
     coreutils \
     findutils \
     gawk \
+    github-cli \
     grep \
     procps \
     sed \
