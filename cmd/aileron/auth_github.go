@@ -119,6 +119,15 @@ func descriptorForVerb(verb string) string {
 	return verb
 }
 
+// captureRegistry constructs the capture descriptor registry both the
+// dispatch predicate and the driver builder read. It is a package var so a
+// test can force the registry-load-error branch (a malformed embedded
+// default is a build-time programming error, but the fail-closed handling
+// is still a property worth pinning: a bad registry must not crash or
+// mis-dispatch). Production wires the embedded defaults + the standard
+// user layer.
+var captureRegistry = capture.DefaultRegistry
+
 // isCaptureDescriptor reports whether name resolves to a capture
 // descriptor in the embedded + user registry. runAuth uses it to dispatch
 // a descriptor verb (e.g. "github" → the "gh" tool) before falling through
@@ -131,7 +140,7 @@ func descriptorForVerb(verb string) string {
 // It is a package var so tests can exercise the dispatch without depending
 // on the shipped descriptor set.
 var isCaptureDescriptor = func(name string) bool {
-	registry, err := capture.DefaultRegistry()
+	registry, err := captureRegistry()
 	if err != nil {
 		return false
 	}
@@ -145,7 +154,7 @@ var isCaptureDescriptor = func(name string) bool {
 // production implementation resolves the runtime, the image, and the
 // descriptor from the embedded + user registry, then binds the store seam.
 var newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
-	registry, err := capture.DefaultRegistry()
+	registry, err := captureRegistry()
 	if err != nil {
 		return nil, err
 	}

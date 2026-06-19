@@ -406,3 +406,54 @@ func TestIsCaptureDescriptor(t *testing.T) {
 		t.Error("isCaptureDescriptor(claude) = true, want false (an agent, not a capture verb)")
 	}
 }
+
+// withFailingCaptureRegistry forces the shared registry constructor to
+// fail, exercising the fail-closed branch in both isCaptureDescriptor and
+// newCaptureDriver: a registry that cannot load must not crash or
+// mis-dispatch.
+func withFailingCaptureRegistry(t *testing.T) {
+	t.Helper()
+	orig := captureRegistry
+	captureRegistry = func() (*capture.Registry, error) {
+		return nil, errors.New("registry load failed")
+	}
+	t.Cleanup(func() { captureRegistry = orig })
+}
+
+// TestIsCaptureDescriptor_RegistryLoadErrorFailsClosed pins the fail-closed
+// dispatch: when the registry cannot load, isCaptureDescriptor returns
+// false so runAuth falls through to the agent path rather than treating the
+// verb as a (now-unresolvable) capture descriptor.
+func TestIsCaptureDescriptor_RegistryLoadErrorFailsClosed(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	if isCaptureDescriptor("gh") {
+		t.Error("isCaptureDescriptor(gh) = true on a registry load error, want false (fail closed)")
+	}
+}
+
+// TestNewCaptureDriver_RegistryLoadErrorSurfaces pins that a registry load
+// error surfaces from the driver builder rather than panicking on a nil
+// registry.
+func TestNewCaptureDriver_RegistryLoadErrorSurfaces(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	if _, err := newCaptureDriver("gh", "docker", "img", userCredentialStore); err == nil {
+		t.Fatal("expected the registry load error to surface")
+	}
+}
+
+// TestRunAuth_GitHubVerbFallsThroughOnRegistryError confirms the
+// integration of the fail-closed dispatch: with the registry unavailable,
+// `aileron auth github` is not treated as a capture verb and instead hits
+// the agent path, which rejects "github" as unsupported (no PUT, exit 1).
+func TestRunAuth_GitHubVerbFallsThroughOnRegistryError(t *testing.T) {
+	withFailingCaptureRegistry(t)
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"github"}, authTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	// It fell through to the agent path: --import-from-host is required.
+	if !strings.Contains(stderr.String(), "--import-from-host is required") {
+		t.Errorf("stderr = %q, want the agent-path fall-through error", stderr.String())
+	}
+}
