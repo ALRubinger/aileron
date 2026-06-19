@@ -61,8 +61,11 @@ const envVaultPassphrase = "AILERON_VAULT_PASSPHRASE"
 const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/oauth --from-file <path>
-  aileron vault delete agents/<name>/oauth [--yes]
-  aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]`
+  aileron vault delete <name> [--yes]
+  aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]
+
+The <name> delete accepts is exactly what vault list prints (e.g. claude);
+the full agents/<name>/oauth path form is also accepted.`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
@@ -91,26 +94,43 @@ func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-// agentOAuthPathName validates that arg matches the agents-only
-// namespace `agents/<name>/oauth` and returns <name>. The vault
-// put/delete verbs are namespace-locked: they refuse any other path
-// client-side before issuing an HTTP call, so the operator CLI can
-// never reach a non-agent vault key (ADR-0025).
+// agentOAuthPathName validates that arg names an agents-only credential
+// entry and returns the agent <name>. The vault put/delete verbs are
+// namespace-locked: they refuse anything outside the agents namespace
+// client-side before issuing an HTTP call, so the operator CLI can never
+// reach a non-agent vault key (ADR-0025).
+//
+// Two equivalent forms are accepted so the identifier round-trips with
+// `vault list`, which prints the bare agent name (#1302):
+//   - the bare agent name `list` emits, e.g. `claude`
+//   - the full path form, e.g. `agents/claude/oauth`
+//
+// Both resolve to the same <name>; whatever `list` shows can be pasted
+// straight into delete.
 func agentOAuthPathName(arg string) (string, error) {
 	const prefix = "agents/"
 	const suffix = "/oauth"
-	// Guard the length before slicing: "agents/oauth" passes both
-	// HasPrefix and HasSuffix (the prefix and suffix overlap) but would
-	// slice out of range.
-	if len(arg) < len(prefix)+len(suffix) ||
-		!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
-		return "", fmt.Errorf("path must be agents/<name>/oauth (got %q)", arg)
+	// Full path form: agents/<name>/oauth. Guard the length before
+	// slicing — "agents/oauth" passes both HasPrefix and HasSuffix (the
+	// prefix and suffix overlap) but would slice out of range.
+	if strings.HasPrefix(arg, prefix) || strings.HasSuffix(arg, suffix) {
+		if len(arg) < len(prefix)+len(suffix) ||
+			!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
+			return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
+		}
+		name := arg[len(prefix) : len(arg)-len(suffix)]
+		if name == "" || strings.Contains(name, "/") {
+			return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
+		}
+		return name, nil
 	}
-	name := arg[len(prefix) : len(arg)-len(suffix)]
-	if name == "" || strings.Contains(name, "/") {
-		return "", fmt.Errorf("path must be agents/<name>/oauth (got %q)", arg)
+	// Bare-name form: the identifier `vault list` prints. Reject any
+	// path-shaped or empty value so a stray prefix/suffix can't slip a
+	// non-agent key through.
+	if arg == "" || strings.Contains(arg, "/") {
+		return "", fmt.Errorf("name must be an agent name or agents/<name>/oauth (got %q)", arg)
 	}
-	return name, nil
+	return arg, nil
 }
 
 // agentCredentialsBody is the local minimal subset of the
@@ -218,7 +238,7 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	pathArg, flagArgs, ok := splitPathArg(args)
 	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/oauth [--yes]")
+		fmt.Fprintln(stderr, "usage: aileron vault delete <name> [--yes] (name as shown by vault list, or agents/<name>/oauth)")
 		return 1
 	}
 	flags := flag.NewFlagSet("vault delete", flag.ContinueOnError)

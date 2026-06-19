@@ -124,6 +124,79 @@ func TestRunVaultDelete_YesSkipsPromptAndDeletes(t *testing.T) {
 	}
 }
 
+// #1302: the identifier `vault list` prints (the bare agent name) must
+// be deletable as-is — copy a list line, paste it into delete, done. The
+// full agents/<name>/oauth path form keeps working too.
+func TestRunVaultDelete_AcceptsBareNameFromList(t *testing.T) {
+	const listed = "codex" // exactly what `vault list` prints for this entry
+	gotDelete := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/"+listed+"/credentials" {
+			gotDelete = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", listed, "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !gotDelete {
+		t.Errorf("DELETE not issued for bare name %q", listed)
+	}
+	if !strings.Contains(stdout.String(), "Deleted agents/"+listed+"/oauth") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// The list-output == delete-input contract (#1302): every name `vault
+// list` emits must resolve, via the delete validator, back to the same
+// agent the daemon keys the DELETE on. This pins the round-trip directly
+// against the identifier list prints, so the two verbs can't drift apart.
+func TestVaultListNamesRoundTripIntoDelete(t *testing.T) {
+	for _, listed := range []string{"claude", "codex", "my-agent"} {
+		name, err := agentOAuthPathName(listed)
+		if err != nil {
+			t.Errorf("agentOAuthPathName(%q) errored: %v; a name from `vault list` must be deletable", listed, err)
+			continue
+		}
+		if name != listed {
+			t.Errorf("agentOAuthPathName(%q) = %q, want %q (the listed name)", listed, name, listed)
+		}
+		// The full-path form list could equivalently emit must resolve identically.
+		full := "agents/" + listed + "/oauth"
+		if got, err := agentOAuthPathName(full); err != nil || got != listed {
+			t.Errorf("agentOAuthPathName(%q) = (%q, %v), want (%q, nil)", full, got, err, listed)
+		}
+	}
+}
+
+// Guard the namespace lock survives the bare-name acceptance: a bare
+// value that is path-shaped (contains a slash) must still be rejected so
+// no non-agent key can slip through the new form.
+func TestRunVaultDelete_RejectsBarePathShapedName(t *testing.T) {
+	for _, arg := range []string{"user/github", "internal/secret", "a/b/c"} {
+		called := false
+		fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusNoContent)
+		})
+		var stdout, stderr bytes.Buffer
+		code := runVault([]string{"delete", arg, "--yes"},
+			strings.NewReader(""), &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("arg %q: exit = 0, want non-zero", arg)
+		}
+		if called {
+			t.Errorf("arg %q: HTTP issued for rejected name", arg)
+		}
+	}
+}
+
 func TestRunVaultDelete_InteractiveCancelMakesNoCall(t *testing.T) {
 	for _, answer := range []string{"n\n", "\n"} {
 		called := false
