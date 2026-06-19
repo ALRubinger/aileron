@@ -113,6 +113,46 @@ func TestParseCaptureDescriptor_MissingRequiredFields(t *testing.T) {
 	}
 }
 
+func TestParseCaptureDescriptor_EmptyCmdElementRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(string) string
+		wantSub string
+	}{
+		{"empty login_cmd element", func(s string) string {
+			return strings.Replace(s, "login_cmd: [gh, auth, login, --web]", `login_cmd: [gh, "", login]`, 1)
+		}, "login_cmd"},
+		{"empty token_cmd element", func(s string) string {
+			return strings.Replace(s, "token_cmd: [gh, auth, token]", `token_cmd: [gh, ""]`, 1)
+		}, "token_cmd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			y := tc.mutate(validDescriptorYAML)
+			_, err := ParseCaptureDescriptor([]byte(y))
+			if err == nil {
+				t.Fatalf("expected an error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err = %v, want mention of %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestApply_NilStorePanics(t *testing.T) {
+	d, err := ParseCaptureDescriptor([]byte(validDescriptorYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("Apply with a nil store should panic; the store is documented as required")
+		}
+	}()
+	d.Apply(&Driver{}, "img", nil)
+}
+
 // TestApply_MapsEveryFieldOntoDriver proves the descriptor->driver adapter
 // binds each field onto a real *Driver and that an omitted config_dir maps
 // to an empty ConfigDirEnv.

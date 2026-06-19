@@ -140,8 +140,18 @@ func (d *CaptureDescriptor) Validate() error {
 	if len(d.LoginCmd) == 0 {
 		return fmt.Errorf("missing required field: login_cmd (non-empty list)")
 	}
+	for i, arg := range d.LoginCmd {
+		if arg == "" {
+			return fmt.Errorf("login_cmd[%d] is an empty string", i)
+		}
+	}
 	if len(d.TokenCmd) == 0 {
 		return fmt.Errorf("missing required field: token_cmd (non-empty list)")
+	}
+	for i, arg := range d.TokenCmd {
+		if arg == "" {
+			return fmt.Errorf("token_cmd[%d] is an empty string", i)
+		}
 	}
 	if d.StoreAt == "" {
 		return fmt.Errorf("missing required field: store_at")
@@ -165,6 +175,9 @@ func (d *CaptureDescriptor) Validate() error {
 // RuntimeExe untouched so a caller may build the Driver via New (which
 // defaults them) and then Apply the descriptor on top.
 func (d *CaptureDescriptor) Apply(drv *Driver, image string, store StoreFunc) {
+	if store == nil {
+		panic("capture: Apply: store is required")
+	}
 	if image != "" {
 		drv.Image = image
 	} else if d.Image != "" {
