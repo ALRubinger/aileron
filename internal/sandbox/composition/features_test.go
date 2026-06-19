@@ -46,9 +46,18 @@ type featureManifest struct {
 	Description string `json:"description"`
 }
 
+// featureIDs is every Feature published from images/sandbox-features: the npm
+// agent Features (claude, codex) plus the apk-only CLI-capability Feature (gh).
+// The shared manifest-validity and install-presence contracts apply to all of
+// them; the npm-recipe parity and scaffold-reference contracts apply only to
+// the agent Features (see TestFeatureInstallScriptsMatchCanonicalRecipe and
+// TestScaffoldFeatureReferenceMatchesManifestVersion, which keep their own
+// agent-only lists).
+var featureIDs = []string{"claude", "codex", "gh"}
+
 func TestFeatureManifestsAreValid(t *testing.T) {
 	root := featuresContext(t)
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range featureIDs {
 		agent := agent
 		t.Run(agent, func(t *testing.T) {
 			path := filepath.Join(root, agent, "devcontainer-feature.json")
@@ -159,7 +168,7 @@ func sortedKeys(m map[string]bool) []string {
 
 func TestFeatureInstallScriptsArePresentAndExecutable(t *testing.T) {
 	root := featuresContext(t)
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range featureIDs {
 		agent := agent
 		t.Run(agent, func(t *testing.T) {
 			path := filepath.Join(root, agent, "install.sh")
@@ -245,5 +254,50 @@ func TestFeatureInstallScriptsMatchCanonicalRecipe(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGHFeatureInstallScriptMatchesBaseContainerfile is the gh-specific install
+// parity check. gh is not an npm agent recipe (no @vendor/pkg, not in
+// agentRecipes), so it is deliberately excluded from
+// TestFeatureInstallScriptsMatchCanonicalRecipe. Its parity target is instead
+// the base images/sandbox-base/Containerfile `github-cli` line: same package,
+// same v3.24 community-repo scoping, apk-only, and no baked credential.
+func TestGHFeatureInstallScriptMatchesBaseContainerfile(t *testing.T) {
+	root := featuresContext(t)
+	path := filepath.Join(root, "gh", "install.sh")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	body := string(raw)
+
+	// apk-only: the Alpine base has no apt-get, and gh has no npm package.
+	if !strings.Contains(body, "apk add") {
+		t.Fatalf("%s must install via apk (the Alpine base has no apt-get):\n%s", path, body)
+	}
+	if strings.Contains(body, "apt-get") {
+		t.Fatalf("%s uses apt-get; the Alpine base requires apk:\n%s", path, body)
+	}
+	if strings.Contains(body, "npm install") {
+		t.Fatalf("%s installs via npm; gh is an apk-only CLI Feature, not an npm agent recipe:\n%s", path, body)
+	}
+
+	// Installs the github-cli apk package, scoped to the v3.24 community repo,
+	// reproducing the base Containerfile's community-repo line.
+	if !strings.Contains(body, "github-cli") {
+		t.Fatalf("%s must install the github-cli apk package:\n%s", path, body)
+	}
+	const communityRepo = "--repository=https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
+	if !strings.Contains(body, communityRepo) {
+		t.Fatalf("%s must scope the v3.24 community repo with %q (parity with images/sandbox-base/Containerfile):\n%s", path, communityRepo, body)
+	}
+
+	// No credential reads baked into the Feature: the sealing data lives in the
+	// manifest's customizations.aileron.cli block, never in the install script.
+	for _, secret := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("%s references credential env var %q; the gh Feature must not read or bake credentials:\n%s", path, secret, body)
+		}
 	}
 }

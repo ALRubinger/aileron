@@ -159,6 +159,102 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 	}
 }
 
+// TestGHFeatureComposesViaAileron composes the gh CLI-capability Feature plus a
+// trivial probe Feature through Aileron's Discover -> Build path and asserts
+// `gh` resolves on PATH in the built image. It is a sibling of
+// TestSandboxFeaturesComposeViaAileron rather than a third Feature inside it so
+// gh's apk-only install path stays independent of the codex npm path and the
+// two tests do not share a Feature-count assertion.
+//
+// The Feature's customizations.aileron.cli block is inert to @devcontainers/cli
+// (it ignores unknown customization namespaces), so this test proves install
+// correctness only; the unit-parse correctness of that block is covered by the
+// always-run TestGHFeatureUnitParsesAndMatchesDefaults in internal/cli.
+func TestGHFeatureComposesViaAileron(t *testing.T) {
+	rt, err := sandboxcontainer.ResolveRuntime("docker")
+	if err != nil {
+		// Fail-fast: CI provisions Docker; absence is a job failure, not a skip.
+		t.Fatalf("no docker runtime on PATH (required, not skipped): %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	buildSandboxFeaturesBaseImage(ctx, t, rt)
+
+	featuresRoot := sandboxFeaturesContext(t)
+	ghFeatureDir := filepath.Join(featuresRoot, "gh")
+	if _, err := os.Stat(filepath.Join(ghFeatureDir, "devcontainer-feature.json")); err != nil {
+		t.Fatalf("gh feature not found at %s: %v", ghFeatureDir, err)
+	}
+
+	workspace := t.TempDir()
+	devDir := filepath.Join(workspace, ".devcontainer")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		t.Fatalf("mkdir .devcontainer: %v", err)
+	}
+
+	// Copy the gh Feature into .devcontainer/gh: the only path form
+	// @devcontainers/cli accepts for a local Feature is relative to .devcontainer.
+	copyFeatureDir(t, ghFeatureDir, filepath.Join(devDir, "gh"))
+
+	// A trivial second Feature so the plan composes more than one Feature,
+	// matching the codex composition test's shape.
+	const probeTool = "aileron-gh-feature-probe"
+	writeProbeFeature(t, filepath.Join(devDir, "probe"), probeTool)
+
+	dc := map[string]any{
+		"name":  "aileron-gh-feature-composition",
+		"image": sandboxFeaturesBaseImage,
+		"features": map[string]any{
+			"./gh":    map[string]any{},
+			"./probe": map[string]any{},
+		},
+	}
+	raw, err := json.MarshalIndent(dc, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal devcontainer.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(devDir, "devcontainer.json"), raw, 0o644); err != nil {
+		t.Fatalf("write devcontainer.json: %v", err)
+	}
+
+	plan, err := sandboxcomposition.Discover(workspace, "test", "")
+	if err != nil {
+		t.Fatalf("composition.Discover: %v", err)
+	}
+	if plan.Tier != sandboxcomposition.TierDevcontainer {
+		t.Fatalf("plan.Tier = %s, want %s", plan.Tier, sandboxcomposition.TierDevcontainer)
+	}
+	if len(plan.Features) != 2 {
+		t.Fatalf("plan.Features = %#v, want 2 (gh + probe)", plan.Features)
+	}
+
+	builder := sandboxcontainer.Builder{
+		Runtime: rt,
+		Stdout:  testLogWriter{t},
+		Stderr:  testLogWriter{t},
+	}
+	result, err := builder.Build(ctx, sandboxcontainer.BuildOptions{
+		WorkDir: workspace,
+		Plan:    plan,
+		Policy:  sandboxcontainer.BuildPolicyAlways,
+	})
+	if err != nil {
+		t.Fatalf("Builder.Build via @devcontainers/cli: %v", err)
+	}
+	if !result.Built {
+		t.Fatalf("result.Built = false, want true (features require a build)")
+	}
+	if result.Image == "" {
+		t.Fatalf("result.Image is empty")
+	}
+
+	// Both the gh CLI and the probe tool must resolve on PATH.
+	assertCommandOnPath(ctx, t, rt, result.Image, "gh")
+	assertCommandOnPath(ctx, t, rt, result.Image, probeTool)
+}
+
 // writeProbeFeature authors a minimal local devcontainer Feature whose
 // install.sh drops an executable `tool` onto PATH. It exists to prove
 // multi-Feature composition without depending on a published Feature ref.
