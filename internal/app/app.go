@@ -458,21 +458,16 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// egress. With no matching vault entry a binding still matches but
 	// resolution fails closed (no secret, no header), so an
 	// unauthenticated request behaves exactly as today's passthrough.
-	ghBindings, err := gitHubHostBindings()
+	// The GitHub Go bindings and the descriptor bindings are assembled by
+	// proxybinding.AllHostBindings so the daemon recognizer and the
+	// launch-side sentinel planter read one source of truth (#1247). A
+	// construction error (programming bug) or a malformed descriptor
+	// (fail-open we reject) both surface here rather than silently
+	// shipping an empty (passthrough) table.
+	server.hostBindings, err = proxybinding.AllHostBindings(proxybinding.DefaultLoadOptions())
 	if err != nil {
-		// A construction error here is a programming bug (the host
-		// patterns and schemes are constants), not operator input;
-		// surface it rather than silently dropping the seal.
-		return nil, fmt.Errorf("seed github host bindings: %w", err)
+		return nil, fmt.Errorf("assemble host bindings: %w", err)
 	}
-	descriptorBindings, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
-	if err != nil {
-		// A malformed descriptor must fail loudly, not degrade to an empty
-		// (passthrough) table: a typo that silently disables sealing is a
-		// fail-open we explicitly reject.
-		return nil, fmt.Errorf("load binding descriptors: %w", err)
-	}
-	server.hostBindings = append(ghBindings, descriptorBindings...)
 
 	// --- Scope-drift detection (#726) ---
 	// Hook fires after every successful connector install. If the

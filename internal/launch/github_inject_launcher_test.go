@@ -28,7 +28,7 @@ func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
 	var proxyMounts []sandboxcontainer.Volume
 
-	ghPrep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestLauncherMergesGitHubInject_NoEntryStillMountsNoopGitconfig(t *testing.T
 	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
 	var proxyMounts []sandboxcontainer.Volume
 
-	ghPrep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, githubMechBBindings(t), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareGitHubInject: %v", err)
 	}

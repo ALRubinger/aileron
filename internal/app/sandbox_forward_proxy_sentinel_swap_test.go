@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/binding"
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/sentinel"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -25,6 +26,75 @@ import (
 //	(c) the sentinel string never reaches the upstream in any case.
 //	(d) neither the swap nor the no-swap audit event carries any secret,
 //	    sentinel, or foreign-token bytes.
+
+func TestSentinelSwap_SecondDistinctBindingSwapsIndependently(t *testing.T) {
+	// A second, distinct mechanism-B binding swaps its own sentinel for its
+	// own credential through the real proxy path, independently of GitHub
+	// (#1247). The GitHub sentinel on this host is foreign and must not be
+	// swapped, proving recognition is per-binding, not GitHub-special.
+	const otherSentinelVal = "sk_AILERONSENTINELSECONDBINDINGXXXXXXXX"
+	const realOther = "sk_realsecondbinding_secret"
+
+	other, err := binding.NewHostBinding("api.second.test", "user/second", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinelVal, "SECOND_TOKEN"))
+	if err != nil {
+		t.Fatalf("NewHostBinding(second): %v", err)
+	}
+
+	var upstreamAuth string
+	store := audit.NewMemStore()
+	srv := &apiServer{
+		auditStore:    store,
+		auditRecorder: audit.NewRecorder(store, nil, func() string { return "audit-second-binding" }),
+		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
+		vault:         mustVaultWith(t, "user/second", "user", []byte(realOther)),
+		hostBindings:  binding.HostBindings{other},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+	}
+	setup := newHostBindingProxySetup(t, srv)
+
+	// (1) the second binding's own sentinel is swapped for its credential.
+	req, _ := http.NewRequest(http.MethodGet, "https://api.second.test/me", nil)
+	req.Header.Set("Authorization", "Bearer "+otherSentinelVal)
+	resp, err := setup.client.Do(req)
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if upstreamAuth != "Bearer "+realOther {
+		t.Errorf("upstream Authorization = %q, want Bearer %s (second binding must swap its own sentinel)", upstreamAuth, realOther)
+	}
+	if strings.Contains(upstreamAuth, otherSentinelVal) {
+		t.Errorf("upstream leaked the second sentinel: %q", upstreamAuth)
+	}
+
+	// (2) GitHub's sentinel on this host is foreign and must be forwarded
+	// unchanged, never swapped for the second binding's credential.
+	upstreamAuth = ""
+	req2, _ := http.NewRequest(http.MethodGet, "https://api.second.test/me", nil)
+	req2.Header.Set("Authorization", "Bearer "+sentinel.GitHubTokenSentinel)
+	resp2, err := setup.client.Do(req2)
+	if err != nil {
+		t.Fatalf("GET through proxy (foreign): %v", err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if upstreamAuth != "Bearer "+sentinel.GitHubTokenSentinel {
+		t.Errorf("foreign (github) sentinel upstream = %q, want forwarded unchanged", upstreamAuth)
+	}
+	if strings.Contains(upstreamAuth, realOther) {
+		t.Errorf("upstream leaked the second binding's real credential on a foreign carrier: %q", upstreamAuth)
+	}
+	assertNoSecretInAudit(t, store, realOther)
+}
 
 func newGitHubSentinelServer(t *testing.T, v vault.Vault, capture *string) (*apiServer, *audit.MemStore) {
 	t.Helper()

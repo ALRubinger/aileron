@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/binding"
-	"github.com/ALRubinger/aileron/internal/sentinel"
 )
 
 // sentinelSwapDecision is the result of inspecting the inbound credential
@@ -49,11 +48,12 @@ const carrierHeader = "Authorization"
 //   - a foreign, non-empty token -> do not inject; forward unchanged;
 //   - no carrier / empty carrier -> inject per the binding's scheme.
 //
-// Recognition is delegated to the sentinel package (the single source of
-// truth shared with the launcher) so the launch-side plant and the
-// proxy-side recognizer cannot drift. Only the GitHub sentinel exists
-// today; a future mechanism-B host adds its own recognizer here without
-// touching the binding-match wiring.
+// Recognition is binding-driven (#1247): the matched binding carries the
+// sentinel value the launcher planted (HostBinding.SentinelValue), so the
+// launch-side plant and the proxy-side recognizer read one source of
+// truth and cannot drift. There is no GitHub special-casing here. Any
+// mechanism-B host is recognized by its own binding's sentinel value with
+// no change to this decision path.
 func decideSentinelSwap(req *http.Request, hb binding.HostBinding) sentinelSwapDecision {
 	if hb.EmitMechanism != binding.EmitMechanismB {
 		return sentinelSwapInject
@@ -83,14 +83,14 @@ func decideSentinelSwap(req *http.Request, hb binding.HostBinding) sentinelSwapD
 // token alone) or a "Bearer <sentinel>" / "token <sentinel>" form, so
 // the scheme prefix is tolerated before the exact sentinel match.
 //
-// Only the GitHub sentinel is wired today; the credential-ref's GitHub
-// shape selects it. A future mechanism-B host pattern adds its own arm.
+// The match reads the binding's own SentinelValue (#1247): there is no
+// GitHub special-casing. The comparison is exact, case-sensitive, and
+// does no trimming beyond the auth-scheme prefix, preserving the
+// foreign-token-safe property (only our own plant is swapped). A
+// SentinelValue of "" never matches, so an A-or-misconstructed binding
+// can never match an empty or any carrier.
 func bindingSentinelMatches(hb binding.HostBinding, carrier string) bool {
-	value := stripAuthScheme(carrier)
-	if hb.CredentialRef == githubCredentialRef {
-		return sentinel.IsGitHubTokenSentinel(value)
-	}
-	return false
+	return hb.SentinelValue != "" && stripAuthScheme(carrier) == hb.SentinelValue
 }
 
 // stripAuthScheme removes a leading "Bearer " or "token " auth-scheme

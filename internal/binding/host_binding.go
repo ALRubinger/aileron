@@ -131,8 +131,26 @@ type HostBinding struct {
 	// [EmitMechanismA] (plant nothing, inject unconditionally), which
 	// preserves the pre-#1196 behavior. [EmitMechanismB] enables the
 	// sentinel-swap gate at egress for hosts whose client short-circuits
-	// without a planted token. Set via [WithEmitMechanismB].
+	// without a planted token. Set via [WithEmitMechanismB], which also
+	// requires the sentinel shape below.
 	EmitMechanism EmitMechanism
+
+	// SentinelValue is the non-secret, format-mimicking placeholder the
+	// launcher plants so a client that short-circuits locally without a
+	// token still issues its request (e.g. `gh`'s `ghp_…` sentinel). The
+	// egress recognizer compares the inbound carrier against this exact
+	// value to decide whether to swap in the real credential. It carries
+	// no authority and is safe to embed, log, and read in-sandbox (see the
+	// internal/sentinel package doc). Required for [EmitMechanismB],
+	// forbidden for [EmitMechanismA]. Set via [WithSentinel].
+	SentinelValue string
+
+	// SentinelEnv is the environment-variable name the launcher sets to
+	// [HostBinding.SentinelValue] in the sandbox so the client treats
+	// itself as authenticated (e.g. `GH_TOKEN`). It is a non-secret env
+	// name, never the credential bytes. Required for [EmitMechanismB],
+	// forbidden for [EmitMechanismA]. Set via [WithSentinel].
+	SentinelEnv string
 }
 
 // userRefRe matches the user-level credential namespace `user/<service>`
@@ -178,8 +196,28 @@ func WithQueryParam(name string) HostBindingOption {
 // credential only when it recognizes its own plant. Without this option
 // a binding defaults to [EmitMechanismA] (plant nothing, inject
 // unconditionally).
+//
+// A mechanism-B binding also requires the sentinel shape: pair this
+// option with [WithSentinel] so the binding carries the value to plant
+// and the env var to plant it into. The constructor rejects a
+// mechanism-B binding with no sentinel, since it could never be planted
+// or recognized.
 func WithEmitMechanismB() HostBindingOption {
 	return func(hb *HostBinding) { hb.EmitMechanism = EmitMechanismB }
+}
+
+// WithSentinel sets the non-secret [HostBinding.SentinelValue] and
+// [HostBinding.SentinelEnv] the launcher plants for a mechanism-B
+// binding. Both are required for [EmitMechanismB] and must not be set on
+// an [EmitMechanismA] binding (an A binding plants nothing, so a stray
+// sentinel is a configuration error caught at construction). The value
+// is the single source of truth shared by the launch-side planter and
+// the proxy-side recognizer, so the two cannot drift.
+func WithSentinel(value, env string) HostBindingOption {
+	return func(hb *HostBinding) {
+		hb.SentinelValue = value
+		hb.SentinelEnv = env
+	}
 }
 
 // NewHostBinding validates and constructs a HostBinding. It rejects an
@@ -219,6 +257,12 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	}
 	if scheme == SchemeQueryParam && hb.QueryParamName == "" {
 		return HostBinding{}, fmt.Errorf("host binding: query-param scheme requires a param name (WithQueryParam)")
+	}
+	if hb.EmitMechanism == EmitMechanismB && (hb.SentinelValue == "" || hb.SentinelEnv == "") {
+		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism B requires a sentinel value and env (WithSentinel)")
+	}
+	if hb.EmitMechanism == EmitMechanismA && (hb.SentinelValue != "" || hb.SentinelEnv != "") {
+		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism A must not carry a sentinel (WithSentinel)")
 	}
 	return hb, nil
 }

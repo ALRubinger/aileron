@@ -70,12 +70,15 @@ func TestToHostBinding_QueryParamCarriesName(t *testing.T) {
 	}
 }
 
-func TestToHostBinding_EmitMechanismB(t *testing.T) {
+func TestToHostBinding_EmitMechanismBCarriesSentinel(t *testing.T) {
+	// A mechanism-B entry's sentinel value and env adapt onto the binding
+	// (#1247) so the launcher and the proxy read one source of truth.
 	e := Entry{
 		Host:          "api.example.com",
 		CredentialRef: "user/example",
 		Scheme:        binding.SchemeBearer,
 		EmitMechanism: "B",
+		Sentinel:      &Sentinel{Value: "sent_example", Env: "EXAMPLE_TOKEN"},
 	}
 	hb, err := e.ToHostBinding()
 	if err != nil {
@@ -83,6 +86,44 @@ func TestToHostBinding_EmitMechanismB(t *testing.T) {
 	}
 	if hb.EmitMechanism != binding.EmitMechanismB {
 		t.Errorf("emit mechanism = %q, want B", hb.EmitMechanism)
+	}
+	if hb.SentinelValue != "sent_example" {
+		t.Errorf("SentinelValue = %q, want sent_example", hb.SentinelValue)
+	}
+	if hb.SentinelEnv != "EXAMPLE_TOKEN" {
+		t.Errorf("SentinelEnv = %q, want EXAMPLE_TOKEN", hb.SentinelEnv)
+	}
+}
+
+func TestToHostBinding_EmitMechanismBWithoutSentinelErrors(t *testing.T) {
+	// A mechanism-B entry that reached adaptation with no sentinel block is
+	// rejected by the constructor — a B binding that could never be planted
+	// or recognized must fail loudly rather than ship.
+	e := Entry{
+		Host:          "api.example.com",
+		CredentialRef: "user/example",
+		Scheme:        binding.SchemeBearer,
+		EmitMechanism: "B",
+	}
+	if _, err := e.ToHostBinding(); err == nil {
+		t.Fatal("ToHostBinding for mechanism-B entry with no sentinel = nil error, want error")
+	}
+}
+
+func TestToHostBinding_MechanismACarriesNoSentinel(t *testing.T) {
+	// A mechanism-A entry adapts with empty sentinel fields.
+	e := Entry{
+		Host:          "api.example.com",
+		CredentialRef: "user/example",
+		Scheme:        binding.SchemeBearer,
+		EmitMechanism: "A",
+	}
+	hb, err := e.ToHostBinding()
+	if err != nil {
+		t.Fatalf("ToHostBinding: %v", err)
+	}
+	if hb.SentinelValue != "" || hb.SentinelEnv != "" {
+		t.Errorf("mechanism-A binding carries a sentinel (%q,%q), want none", hb.SentinelValue, hb.SentinelEnv)
 	}
 }
 

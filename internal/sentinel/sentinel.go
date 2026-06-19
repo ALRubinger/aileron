@@ -30,20 +30,27 @@
 //
 // # Single source of truth
 //
-// The launch-side injector and the proxy-side recognizer both import
-// this package, so the value they agree on cannot drift. Recognition is
-// an exact match against the reserved value; because the value is
-// non-secret, a plain comparison is sufficient (there is no secret to
-// protect against a timing side-channel).
+// This package supplies the canonical sentinel *value*, but the
+// recognizer no longer lives here (#1247). Recognition is binding-driven
+// at the proxy seam: a mechanism-B host binding carries the value it was
+// planted with, and the egress recognizer compares the inbound carrier
+// against that binding's value. The launch-side planter reads the same
+// value from the same binding, so the plant and the match cannot drift.
+// The match is an exact comparison; because the value is non-secret, a
+// plain comparison is sufficient (there is no secret to protect against a
+// timing side-channel).
 //
 // [ADR-0019]: https://docs.withaileron.ai/adr/0019-v4-https-data-plane
 package sentinel
 
 // GitHubTokenSentinel is the reserved, non-secret placeholder the
 // launcher plants as GH_TOKEN so `gh` treats itself as authenticated and
-// issues its request instead of short-circuiting. The daemon proxy
-// recognizes it at egress (see [IsGitHubTokenSentinel]) and swaps in the
-// real user/github credential before the request leaves the host.
+// issues its request instead of short-circuiting. It is the canonical
+// GitHub sentinel value the GitHub host binding declares via WithSentinel
+// (and later github.yaml, #1248). The daemon proxy recognizes it at
+// egress by comparing the inbound carrier against the matched binding's
+// SentinelValue and swaps in the real user/github credential before the
+// request leaves the host (#1247).
 //
 // Shape: it mimics `gh`'s classic personal-access-token format so `gh`'s
 // own local validation accepts it: the `ghp_` prefix followed by a
@@ -55,19 +62,3 @@ package sentinel
 //
 // It is NOT a secret. Presenting it to GitHub authenticates nothing.
 const GitHubTokenSentinel = "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"
-
-// IsGitHubTokenSentinel reports whether token is exactly the reserved
-// GitHub sentinel. It is the proxy-side recognizer: only a token the
-// launcher itself planted (an exact match) is swapped for the real
-// credential at egress. Any other value (a real-looking `ghp_…` token a
-// user supplied themselves, an empty string, or a whitespace-padded
-// variant) returns false and is left untouched, which is the load-
-// bearing safety property: the proxy seals only tokens it planted and
-// never steal-swaps a foreign token.
-//
-// The comparison is exact and case-sensitive with no trimming: the
-// launcher plants the value verbatim, so a padded or altered variant is
-// by definition not the plant and must not be treated as one.
-func IsGitHubTokenSentinel(token string) bool {
-	return token == GitHubTokenSentinel
-}

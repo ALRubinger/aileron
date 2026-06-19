@@ -15,7 +15,8 @@ import (
 
 func mustHostBindingB(t *testing.T) binding.HostBinding {
 	t.Helper()
-	hb, err := binding.NewHostBinding("api.github.com", githubCredentialRef, binding.SchemeBearer, binding.WithEmitMechanismB())
+	hb, err := binding.NewHostBinding("api.github.com", githubCredentialRef, binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(sentinel.GitHubTokenSentinel, "GH_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
@@ -93,18 +94,66 @@ func TestStripAuthScheme(t *testing.T) {
 	}
 }
 
-func TestBindingSentinelMatches_OnlyGitHubRefRecognized(t *testing.T) {
+func TestBindingSentinelMatches_ReadsBindingSentinelValue(t *testing.T) {
 	gh := mustHostBindingB(t)
 	if !bindingSentinelMatches(gh, "Bearer "+sentinel.GitHubTokenSentinel) {
 		t.Error("github binding did not recognize its own sentinel")
 	}
-	// A mechanism-B binding for a different credential-ref has no wired
-	// recognizer yet, so it never matches (fails safe: no swap).
-	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer, binding.WithEmitMechanismB())
+	if !bindingSentinelMatches(gh, sentinel.GitHubTokenSentinel) {
+		t.Error("github binding did not recognize the bare-carrier form of its sentinel")
+	}
+	if !bindingSentinelMatches(gh, "token "+sentinel.GitHubTokenSentinel) {
+		t.Error("github binding did not recognize the token-prefixed form of its sentinel")
+	}
+}
+
+func TestBindingSentinelMatches_DistinctSentinelsAreIndependent(t *testing.T) {
+	gh := mustHostBindingB(t)
+	const otherSentinel = "sk_AILERONSENTINELOTHER"
+	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
+	if !bindingSentinelMatches(other, "Bearer "+otherSentinel) {
+		t.Error("second binding did not recognize its own sentinel")
+	}
 	if bindingSentinelMatches(other, "Bearer "+sentinel.GitHubTokenSentinel) {
-		t.Error("non-github binding matched the github sentinel; recognizers must be per-binding")
+		t.Error("second binding matched the github sentinel; recognition must be per-binding")
+	}
+	if bindingSentinelMatches(gh, "Bearer "+otherSentinel) {
+		t.Error("github binding matched the second binding's sentinel; recognition must be per-binding")
+	}
+}
+
+func TestBindingSentinelMatches_EmptySentinelNeverMatches(t *testing.T) {
+	hb := binding.HostBinding{EmitMechanism: binding.EmitMechanismB}
+	if bindingSentinelMatches(hb, "") {
+		t.Error("empty-sentinel binding matched an empty carrier")
+	}
+	if bindingSentinelMatches(hb, "Bearer ghp_anything") {
+		t.Error("empty-sentinel binding matched a non-empty carrier")
+	}
+}
+
+func TestDecideSentinelSwap_SecondBindingSwapsIndependently(t *testing.T) {
+	const otherSentinel = "sk_AILERONSENTINELOTHER"
+	other, err := binding.NewHostBinding("api.other.test", "user/other", binding.SchemeBearer,
+		binding.WithEmitMechanismB(), binding.WithSentinel(otherSentinel, "OTHER_TOKEN"))
+	if err != nil {
+		t.Fatalf("NewHostBinding: %v", err)
+	}
+	r, _ := http.NewRequest(http.MethodGet, "https://api.other.test/me", nil)
+	r.Header.Set(carrierHeader, "Bearer "+otherSentinel)
+	if got := decideSentinelSwap(r, other); got != sentinelSwapInject {
+		t.Errorf("second-binding sentinel decision = %v, want inject", got)
+	}
+	if v := r.Header.Get(carrierHeader); v != "" {
+		t.Errorf("carrier after swap = %q, want stripped (empty)", v)
+	}
+	r2, _ := http.NewRequest(http.MethodGet, "https://api.other.test/me", nil)
+	r2.Header.Set(carrierHeader, "Bearer "+sentinel.GitHubTokenSentinel)
+	if got := decideSentinelSwap(r2, other); got != sentinelSwapPassthroughForeign {
+		t.Errorf("foreign (github) sentinel on second host decision = %v, want passthrough-foreign", got)
 	}
 }
