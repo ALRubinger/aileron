@@ -157,10 +157,11 @@ type FileBinding struct {
 	// then a token exchange) and returns the vault.Secret the launcher
 	// then PUTs through the daemon and renders to the bind-mounted
 	// file — exactly as a vault-resident credential would be. The flow
-	// is pure Go HTTP plus an optional opportunistic CLI shortcut (for
-	// example Claude's `claude setup-token`). No token is ever placed
-	// in the agent's environment; the acquired Secret follows the same
-	// vault-seeded path as every other credential (ADR-0025).
+	// is pure Go HTTP; an acquirer may layer on an optional opportunistic
+	// CLI shortcut, but the baseline must not require the agent binary on
+	// the host. No token is ever placed in the agent's environment; the
+	// acquired Secret follows the same vault-seeded path as every other
+	// credential (ADR-0025).
 	//
 	// Contract:
 	//
@@ -172,9 +173,8 @@ type FileBinding struct {
 	//   - The acquirer must NOT require the agent CLI to be installed on
 	//     the host. The baseline path is pure Go (HTTP + browser open).
 	//     An acquirer may opportunistically shell out to the agent
-	//     binary as a shortcut (Claude tries `claude setup-token` when
-	//     it is on PATH), but it must fall back to the pure-Go flow when
-	//     the binary is absent or the shortcut fails.
+	//     binary as a shortcut, but it must fall back to the pure-Go flow
+	//     when the binary is absent or the shortcut fails.
 	//
 	//   - A returned Secret with an empty Value, or a cancelled/failed
 	//     acquire (non-nil error), is non-fatal: the launcher logs a

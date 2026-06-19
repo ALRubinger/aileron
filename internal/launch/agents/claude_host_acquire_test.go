@@ -8,9 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -18,18 +15,16 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
-// Claude host-acquire contract (#1270):
+// Claude host-acquire contract (#1270, #1304):
 //
 //   - Hosted-callback happy path: browser opened with the consent URL,
-//     code pasted on the host, code exchanged → Secret round-trips the
-//     binding's own Render; expiresAt is in milliseconds.
-//   - setup-token shortcut: when `claude` is on PATH and prints a bare
-//     token, the shortcut path seeds an accessToken-only envelope
-//     (no refresh/expiry).
-//   - CLI absent: hosted-callback path taken (browser + prompter
-//     consulted).
-//   - Acquire failure (token 400 / prompter error / state mismatch):
-//     returns an error so the launcher falls back to in-container login.
+//     code pasted on the host, code exchanged, profile fetched → Secret
+//     round-trips the binding's own Render; expiresAt is in
+//     milliseconds; subscriptionType is stamped from the profile so
+//     Claude Code recognizes a Max/Pro session (#1304).
+//   - Acquire failure (token 400 / prompter error / state mismatch /
+//     profile fetch yields no tier): returns an error so the launcher
+//     falls back to in-container login.
 //   - Provider error body is not leaked into the returned error.
 
 // redirectTransport rewrites every outbound request to the test
@@ -60,32 +55,40 @@ func (o *recordingOpener) Open(rawURL string) error {
 	return o.err
 }
 
-// emptyPATH points PATH at a directory with no `claude` binary so the
-// setup-token shortcut's LookPath misses and the hosted-callback path
-// is taken.
-func emptyPATH(t *testing.T) {
-	t.Helper()
-	t.Setenv("PATH", t.TempDir())
+// claudeOAuthCapture records what the two legs of the host flow saw, so
+// tests can assert the acquirer's contract with the provider: the token
+// exchange's POST form and the Authorization header the profile fetch
+// presented.
+type claudeOAuthCapture struct {
+	tokenForm   url.Values
+	profileAuth string
 }
 
-// stubClaudeOnPATH writes a fake `claude` executable that, for
-// `setup-token`, prints stdoutLine and exits 0. Skips on Windows where
-// the shell-script stub is not executable.
-func stubClaudeOnPATH(t *testing.T, stdoutLine string) {
+// claudeOAuthServer is an httptest server that answers both legs of the
+// host flow the redirectTransport rewrites onto it: the token exchange
+// (path /v1/oauth/token) and the profile fetch (path
+// /api/oauth/profile). orgType is echoed back as the profile's
+// organization_type so a test can drive the tier-mapping. A blank
+// orgType yields a profile with no recognizable tier. The returned
+// capture records the token-exchange form and the profile request's
+// Authorization header.
+func claudeOAuthServer(t *testing.T, orgType string) (*httptest.Server, *claudeOAuthCapture) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell-script stub is not executable on windows")
-	}
-	dir := t.TempDir()
-	// Escape single quotes (' -> '\'') so an stdoutLine carrying one
-	// cannot break the single-quoted shell literal.
-	escaped := strings.ReplaceAll(stdoutLine, "'", `'\''`)
-	script := "#!/bin/sh\nif [ \"$1\" = \"setup-token\" ]; then printf '%s\\n' '" + escaped + "'; exit 0; fi\nexit 1\n"
-	bin := filepath.Join(dir, "claude")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
-	t.Setenv("PATH", dir)
+	cap := &claudeOAuthCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/oauth/profile":
+			cap.profileAuth = r.Header.Get("Authorization")
+			_, _ = io.WriteString(w, `{"organization":{"organization_type":"`+orgType+`","rate_limit_tier":"default_claude_max_20x"}}`)
+		default: // token exchange
+			_ = r.ParseForm()
+			cap.tokenForm = r.PostForm
+			_, _ = io.WriteString(w, `{"access_token":"acc-tok","refresh_token":"ref-tok","expires_in":28800,"token_type":"Bearer","scope":"user:inference"}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, cap
 }
 
 func scriptedPrompter(value string, err error) func(context.Context, io.Writer) (string, error) {
@@ -104,16 +107,7 @@ func claudeHostAcquireBinding(t *testing.T) launch.FileBinding {
 }
 
 func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
-	emptyPATH(t)
-
-	var gotForm url.Values
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		gotForm = r.PostForm
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"access_token":"acc-tok","refresh_token":"ref-tok","expires_in":28800,"token_type":"Bearer","scope":"user:inference"}`)
-	}))
-	defer srv.Close()
+	srv, capture := claudeOAuthServer(t, "claude_max")
 
 	opener := &recordingOpener{}
 	var out bytes.Buffer
@@ -149,7 +143,14 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(out.String(), "client_id=9d1c250a") {
 		t.Errorf("Out missing the authorize URL; got %q", out.String())
 	}
+	// The profile fetch must present the freshly-exchanged access token
+	// as a Bearer credential; that is what authorizes reading the
+	// subscription tier (#1304).
+	if capture.profileAuth != "Bearer acc-tok" {
+		t.Errorf("profile Authorization = %q, want %q", capture.profileAuth, "Bearer acc-tok")
+	}
 	// Token exchange used authorization_code + PKCE verifier, no secret.
+	gotForm := capture.tokenForm
 	if gotForm.Get("grant_type") != "authorization_code" {
 		t.Errorf("grant_type = %q, want authorization_code", gotForm.Get("grant_type"))
 	}
@@ -162,11 +163,17 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	if gotForm.Get("client_secret") != "" {
 		t.Error("client_secret sent; Claude Code is a public client (PKCE only)")
 	}
-	// expiresAt in the seeded envelope must be milliseconds.
+	// expiresAt in the seeded envelope must be milliseconds, and the
+	// subscription tier must be stamped from the profile so Claude Code
+	// recognizes a Max/Pro session (#1304). Assert presence + shape
+	// rather than a hardcoded guess: subscriptionType is non-empty and
+	// equals the mapped value for the profile's organization_type.
 	var env struct {
 		ClaudeAiOauth struct {
-			AccessToken string `json:"accessToken"`
-			ExpiresAt   int64  `json:"expiresAt"`
+			AccessToken      string `json:"accessToken"`
+			ExpiresAt        int64  `json:"expiresAt"`
+			SubscriptionType string `json:"subscriptionType"`
+			RateLimitTier    string `json:"rateLimitTier"`
 		} `json:"claudeAiOauth"`
 	}
 	if err := json.Unmarshal(secret.Value, &env); err != nil {
@@ -178,84 +185,42 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	if env.ClaudeAiOauth.ExpiresAt <= 1_000_000_000_000 {
 		t.Errorf("seeded expiresAt = %d, want milliseconds magnitude", env.ClaudeAiOauth.ExpiresAt)
 	}
+	if env.ClaudeAiOauth.SubscriptionType == "" {
+		t.Error("seeded subscriptionType is empty; Claude Code will treat this as a raw API key (#1304)")
+	}
+	if env.ClaudeAiOauth.SubscriptionType != "max" {
+		t.Errorf("seeded subscriptionType = %q, want max (mapped from organization_type=claude_max)",
+			env.ClaudeAiOauth.SubscriptionType)
+	}
+	if env.ClaudeAiOauth.RateLimitTier == "" {
+		t.Error("seeded rateLimitTier is empty; want the profile's rate_limit_tier carried through")
+	}
 }
 
-func TestClaudeHostAcquire_SetupTokenShortcut(t *testing.T) {
-	stubClaudeOnPATH(t, "sk-ant-bare-token")
+// TestClaudeHostAcquire_ProfileTierMissingReturnsError covers a clean
+// token exchange whose profile fetch yields no recognizable
+// subscription tier (#1304): the acquirer must NOT seed a tier-less
+// envelope; it returns an empty Secret + error so the launcher falls
+// back to the in-container login.
+func TestClaudeHostAcquire_ProfileTierMissingReturnsError(t *testing.T) {
+	srv, _ := claudeOAuthServer(t, "claude_unknown")
 
-	opener := &recordingOpener{}
 	fb := claudeHostAcquireBinding(t)
-	// HTTPClient/CodePrompter must NOT be consulted on the shortcut
-	// path; pass a prompter that fails the test if called.
 	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
-		Ctx:     context.Background(),
-		Browser: opener,
-		CodePrompter: func(context.Context, io.Writer) (string, error) {
-			t.Fatal("CodePrompter consulted on the setup-token shortcut path")
-			return "", nil
-		},
+		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
+		Browser:      &recordingOpener{},
+		CodePrompter: scriptedPrompter("the-code", nil),
 	})
-	if err != nil {
-		t.Fatalf("HostAcquire (shortcut): %v", err)
+	if err == nil {
+		t.Fatal("expected error when the profile fetch yields no subscription tier")
 	}
-	if opener.opened != "" {
-		t.Errorf("browser opened on shortcut path: %q", opener.opened)
-	}
-	var env struct {
-		ClaudeAiOauth struct {
-			AccessToken  string `json:"accessToken"`
-			RefreshToken string `json:"refreshToken"`
-			ExpiresAt    int64  `json:"expiresAt"`
-		} `json:"claudeAiOauth"`
-	}
-	if err := json.Unmarshal(secret.Value, &env); err != nil {
-		t.Fatalf("unmarshal shortcut envelope: %v", err)
-	}
-	if env.ClaudeAiOauth.AccessToken != "sk-ant-bare-token" {
-		t.Errorf("accessToken = %q, want sk-ant-bare-token", env.ClaudeAiOauth.AccessToken)
-	}
-	if env.ClaudeAiOauth.RefreshToken != "" {
-		t.Errorf("refreshToken = %q, want empty on setup-token path", env.ClaudeAiOauth.RefreshToken)
-	}
-	if env.ClaudeAiOauth.ExpiresAt != 0 {
-		t.Errorf("expiresAt = %d, want 0 on setup-token path", env.ClaudeAiOauth.ExpiresAt)
-	}
-}
-
-func TestClaudeHostAcquire_CLIAbsentTakesHostedCallback(t *testing.T) {
-	emptyPATH(t)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"access_token":"acc","expires_in":100}`)
-	}))
-	defer srv.Close()
-
-	opener := &recordingOpener{}
-	prompterCalled := false
-	fb := claudeHostAcquireBinding(t)
-	_, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
-		Ctx:        context.Background(),
-		HTTPClient: testHTTPClient(srv.URL),
-		Browser:    opener,
-		CodePrompter: func(context.Context, io.Writer) (string, error) {
-			prompterCalled = true
-			return "bare-code-no-state", nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("HostAcquire: %v", err)
-	}
-	if opener.opened == "" {
-		t.Error("browser not opened on the hosted-callback path")
-	}
-	if !prompterCalled {
-		t.Error("code prompter not consulted on the hosted-callback path")
+	if len(secret.Value) != 0 {
+		t.Error("Secret must be empty when no subscription tier could be obtained")
 	}
 }
 
 func TestClaudeHostAcquire_TokenEndpoint400ReturnsError(t *testing.T) {
-	emptyPATH(t)
-
 	const secretLeak = "super-secret-token-hint-DO-NOT-LEAK"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -288,8 +253,6 @@ func TestClaudeHostAcquire_TokenEndpoint400ReturnsError(t *testing.T) {
 }
 
 func TestClaudeHostAcquire_PrompterErrorReturnsError(t *testing.T) {
-	emptyPATH(t)
-
 	fb := claudeHostAcquireBinding(t)
 	_, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
 		Ctx:          context.Background(),
@@ -302,8 +265,6 @@ func TestClaudeHostAcquire_PrompterErrorReturnsError(t *testing.T) {
 }
 
 func TestClaudeHostAcquire_StateMismatchReturnsError(t *testing.T) {
-	emptyPATH(t)
-
 	// A token server that would succeed, to prove the abort happens
 	// BEFORE the exchange when the pasted state does not match.
 	exchangeHit := false
@@ -329,8 +290,6 @@ func TestClaudeHostAcquire_StateMismatchReturnsError(t *testing.T) {
 }
 
 func TestClaudeHostAcquire_BrowserOpenFailureIsNonFatal(t *testing.T) {
-	emptyPATH(t)
-
 	fb := claudeHostAcquireBinding(t)
 	prompterCalled := false
 	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
@@ -355,8 +314,6 @@ func TestClaudeHostAcquire_BrowserOpenFailureIsNonFatal(t *testing.T) {
 }
 
 func TestClaudeHostAcquire_NilPrompterIsNonFatal(t *testing.T) {
-	emptyPATH(t)
-
 	fb := claudeHostAcquireBinding(t)
 	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
 		Ctx:     context.Background(),
