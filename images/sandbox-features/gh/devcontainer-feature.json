@@ -1,0 +1,42 @@
+{
+  "id": "gh",
+  "version": "0.0.1",
+  "name": "GitHub CLI",
+  "description": "Installs the GitHub CLI (github-cli) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user, and carries gh's full CLI-capability unit (acquisition + credential sealing) under customizations.aileron.cli.",
+  "documentationURL": "https://docs.withaileron.ai/development/sandbox-agent-images/",
+  "customizations": {
+    "aileron": {
+      "cli": {
+        "name": "gh",
+        "key": "user/github",
+        "presence": {
+          "builtin": "base"
+        },
+        "acquisition": {
+          "mode": "device-flow",
+          "container_name": "aileron-auth-github",
+          "login_cmd": ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"],
+          "token_cmd": ["gh", "auth", "token", "--hostname", "github.com"],
+          "browser_shim": "echo"
+        },
+        "sealing": [
+          {
+            "host": "github.com",
+            "scheme": "basic",
+            "emit_mechanism": "inject",
+            "username": "x-access-token"
+          },
+          {
+            "host": "api.github.com",
+            "scheme": "bearer",
+            "emit_mechanism": "sentinel-swap",
+            "sentinel": {
+              "value": "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA",
+              "env": "GH_TOKEN"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
