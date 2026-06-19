@@ -70,6 +70,17 @@ aileron launch --sandbox=docker "$AGENT"
 
 The launcher resolves and pulls the base image, bind-mounts `aileron-mcp` into the container, rewrites `AILERON_URL` to `host.docker.internal:<port>`, registers `aileron-mcp` with the agent (the mechanism differs per agent, see the table in [Step 5](#step-5-verify-the-agent-sees-aileron--draft_email)), validates the container can run `aileron-mcp`, and starts the agent. If the agent has no vaulted credential, it runs its normal in-container login on first launch; see [Sandbox Agent Auth](/development/sandbox-agent-auth/) for seeding credentials ahead of time.
 
+### Cold first-launch acceptance (host-side acquirer)
+
+Run this variant on each OS with a host-login-capable agent (Claude or Codex) and an **empty vault** for that agent. Delete any existing entry first with `aileron vault delete agents/$AGENT/oauth`. Launch as above. The launcher detects the vault miss and runs the host-side acquirer before the container starts.
+
+- Claude opens its consent page in the host browser and prompts on the host terminal for the code the page renders. Paste the code at the host prompt.
+- Codex prints a verification URL and a one-time user code on the host terminal, opens the verification page in the host browser, and polls. Enter the code in the browser.
+
+The acceptance pass: the prompt and the browser open on the **host**, never inside the container TTY, and once the host login completes the container starts silent with no in-container login wizard. A subsequent launch also starts silent, proving the acquired credential was seeded to the vault.
+
+This is the manual Windows acceptance step for the no-container-TTY guarantee. The `cmd /c start "" <url>` browser invocation is unit-tested for argv shape on every platform, but a real Windows run is the only way to confirm the browser actually opens on the host and the paste lands on the host terminal rather than the container TTY. Record a pass or fail for this cell per OS. The Linux runner additionally exercises the silent-render launcher path in automated tests.
+
 ## Step 5: Verify the agent sees `aileron` + `draft_email`
 
 This is the acceptance check. How you list tools depends on the agent:

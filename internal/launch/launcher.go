@@ -85,6 +85,17 @@ type LaunchConfig struct {
 // tri-state as the flag.
 const hostLoginEnv = "AILERON_LAUNCH_HOST_LOGIN"
 
+// NoVaultCredentialMsgFormat is the R30 bootstrap line the launcher
+// prints when an AuthSpec declares file bindings but every one was a
+// vault miss, so the agent will run its in-container login on first
+// launch. It carries a single %s for the agent name. A successful
+// host-side acquire renders the credential and suppresses this line,
+// so the message is the observable signal that the silent host-seed
+// path did NOT run. Tests assert against this constant rather than a
+// re-typed literal so the launcher and its coverage cannot drift, and
+// ADR-0025 quotes this exact text.
+const NoVaultCredentialMsgFormat = "[launcher] no credentials in vault for %s; agent will prompt for login\n"
+
 // resolveHostLogin computes whether host-side credential acquisition is
 // enabled for a launch, given the user's flag and env-var inputs. The
 // precedence is flag > env > default, with "auto" (or empty, or an
@@ -563,8 +574,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			// agent is about to prompt for login. A static-file
 			// mount (Claude's onboarding stub) does not count as a
 			// rendered credential.
-			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s; agent will prompt for login\n",
-				config.Agent.Name())
+			fmt.Fprintf(os.Stderr, NoVaultCredentialMsgFormat, config.Agent.Name())
 		}
 
 		// User-level GitHub injection runs on every sandbox launch,

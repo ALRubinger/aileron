@@ -152,13 +152,15 @@ type FileBinding struct {
 
 	// HostAcquire, when non-nil, is a host-side credential acquirer the
 	// launcher invokes when the vault GET for this binding misses and
-	// the binding is not Required. It runs on the host (browser +
-	// loopback callback + token exchange, all pure Go) and returns the
-	// vault.Secret the launcher then PUTs through the daemon and renders
-	// to the bind-mounted file — exactly as a vault-resident credential
-	// would be. No token is ever placed in the agent's environment; the
-	// acquired Secret follows the same vault-seeded path as every other
-	// credential (ADR-0025).
+	// the binding is not Required. It runs on the host (browser open
+	// plus a host-terminal code paste or device-authorization poll,
+	// then a token exchange) and returns the vault.Secret the launcher
+	// then PUTs through the daemon and renders to the bind-mounted
+	// file — exactly as a vault-resident credential would be. The flow
+	// is pure Go HTTP plus an optional opportunistic CLI shortcut (for
+	// example Claude's `claude setup-token`). No token is ever placed
+	// in the agent's environment; the acquired Secret follows the same
+	// vault-seeded path as every other credential (ADR-0025).
 	//
 	// Contract:
 	//
@@ -167,9 +169,12 @@ type FileBinding struct {
 	//     malformed envelope surfaces as a launch-aborting Render error
 	//     rather than seeding garbage into the vault.
 	//
-	//   - The acquirer must NOT assume the agent CLI is installed on the
-	//     host. Acquisition is pure Go (HTTP + browser open); the
-	//     launcher never shells out to the agent binary.
+	//   - The acquirer must NOT require the agent CLI to be installed on
+	//     the host. The baseline path is pure Go (HTTP + browser open).
+	//     An acquirer may opportunistically shell out to the agent
+	//     binary as a shortcut (Claude tries `claude setup-token` when
+	//     it is on PATH), but it must fall back to the pure-Go flow when
+	//     the binary is absent or the shortcut fails.
 	//
 	//   - A returned Secret with an empty Value, or a cancelled/failed
 	//     acquire (non-nil error), is non-fatal: the launcher logs a
@@ -253,8 +258,9 @@ type RefreshDeps struct {
 // credential.
 type HostAcquireDeps struct {
 	// Ctx is the launch context, propagated so the host OAuth flow
-	// (browser open, loopback callback wait, token POST) honors
-	// cancellation when the user kills the launch.
+	// (browser open, host-terminal code paste or device-authorization
+	// poll, token POST) honors cancellation when the user kills the
+	// launch.
 	Ctx context.Context
 
 	// HTTPClient drives the token-exchange POST against the vendor's
