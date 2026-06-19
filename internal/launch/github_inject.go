@@ -298,14 +298,16 @@ func hasUsableCredential(ctx context.Context, daemon userCredsDaemon, credential
 }
 
 // mechanismBHostBindings assembles the canonical host-binding table the
-// daemon recognizer reads (proxybinding.AllHostBindings: GitHub Go
-// bindings plus descriptor bindings) and returns only the mechanism-B
-// subset the planter plants sentinels for. Sharing the assembly keeps the
-// launch-side plant and the proxy-side match reading one source of truth
-// across the process boundary (#1247). A malformed descriptor surfaces an
-// error rather than degrading to an empty plant set.
+// daemon recognizer reads (proxybinding.LoadHostBindings: every binding
+// flows from the descriptor layers, including the trusted GitHub built-in
+// shipped as defaults/github.yaml since #1248) and returns only the
+// mechanism-B subset the planter plants sentinels for. Sharing the
+// assembly keeps the launch-side plant and the proxy-side match reading
+// one source of truth across the process boundary (#1247). A malformed
+// descriptor surfaces an error rather than degrading to an empty plant
+// set.
 func mechanismBHostBindings() ([]binding.HostBinding, error) {
-	all, err := proxybinding.AllHostBindings(proxybinding.DefaultLoadOptions())
+	all, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
 	if err != nil {
 		return nil, err
 	}

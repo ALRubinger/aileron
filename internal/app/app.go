@@ -441,30 +441,28 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// --- Host->credential binding table (#1193) ---
 	// The user-level host-binding table is consulted at the TLS
 	// forward-proxy boundary when no connector spec matches a decrypted
-	// request (ADR-0019 launch passthrough). It is seeded from two
-	// sources, in order:
+	// request (ADR-0019 launch passthrough). Every binding is loaded from
+	// the declarative descriptors (#1197) through the generic two-layer
+	// loader (built-in profiles -> user). This is the "config, not code"
+	// path: a third-party CLI (e.g. Linear, api.linear.app via
+	// header-template) is sealed by shipping a descriptor, with zero
+	// per-CLI proxy code.
 	//
-	//   1. The built-in GitHub pair (#1195): github.com -> basic and
-	//      api.github.com -> bearer, both resolving user/github
-	//      daemon-side, kept as Go code because their schemes differ per
-	//      host and one needs sentinel-swap (#1196).
-	//   2. The declarative binding descriptors (#1197), loaded through the
-	//      generic two-layer loader (built-in profiles -> user). This is
-	//      the "config, not code" path: a third-party CLI
-	//      (e.g. Linear, api.linear.app via header-template) is sealed by
-	//      shipping a descriptor, with zero per-CLI proxy code.
+	// GitHub is no longer special-cased in Go (#1248). Its two bindings
+	// (github.com -> basic, mechanism A; api.github.com -> bearer,
+	// mechanism B with a sentinel-swap) now ship as a trusted built-in
+	// descriptor (internal/proxybinding/defaults/github.yaml) alongside
+	// Linear, picked up by the same embedded defaults glob. A user
+	// descriptor can override either host, so GitHub is a normal default
+	// layer in the built-in < user precedence, not privileged Go.
 	//
 	// The agent never holds these secrets; the daemon injects them at
 	// egress. With no matching vault entry a binding still matches but
 	// resolution fails closed (no secret, no header), so an
-	// unauthenticated request behaves exactly as today's passthrough.
-	// The GitHub Go bindings and the descriptor bindings are assembled by
-	// proxybinding.AllHostBindings so the daemon recognizer and the
-	// launch-side sentinel planter read one source of truth (#1247). A
-	// construction error (programming bug) or a malformed descriptor
-	// (fail-open we reject) both surface here rather than silently
-	// shipping an empty (passthrough) table.
-	server.hostBindings, err = proxybinding.AllHostBindings(proxybinding.DefaultLoadOptions())
+	// unauthenticated request behaves exactly as today's passthrough. A
+	// malformed descriptor (fail-open we reject) surfaces here rather than
+	// silently shipping an empty (passthrough) table.
+	server.hostBindings, err = proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
 	if err != nil {
 		return nil, fmt.Errorf("assemble host bindings: %w", err)
 	}

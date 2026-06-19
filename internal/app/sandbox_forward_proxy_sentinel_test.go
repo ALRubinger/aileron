@@ -15,7 +15,7 @@ import (
 
 func mustHostBindingB(t *testing.T) binding.HostBinding {
 	t.Helper()
-	hb, err := binding.NewHostBinding("api.github.com", githubCredentialRef, binding.SchemeBearer,
+	hb, err := binding.NewHostBinding("api.github.com", "user/github", binding.SchemeBearer,
 		binding.WithEmitMechanismB(), binding.WithSentinel(sentinel.GitHubTokenSentinel, "GH_TOKEN"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
@@ -32,7 +32,7 @@ func reqWithAuth(value string) *http.Request {
 }
 
 func TestDecideSentinelSwap_MechanismAAlwaysInjects(t *testing.T) {
-	hb, err := binding.NewHostBinding("github.com", githubCredentialRef, binding.SchemeBasic, binding.WithBasicUsername("x-access-token"))
+	hb, err := binding.NewHostBinding("github.com", "user/github", binding.SchemeBasic, binding.WithBasicUsername("x-access-token"))
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
