@@ -43,7 +43,7 @@ func (c Codex) BinaryNames() []string { return []string{"codex"} }
 // `[projects."/home/agent/workspace"]` block pre-accepts the
 // folder-trust prompt. The sandbox container is the trust boundary
 // (ADR-0015), so auto-approving inside it is safe.
-func (c Codex) Args() []string { return nil }
+func (c Codex) Args(_ launch.Mode) []string { return nil }
 
 func (c Codex) Env() map[string]string { return nil }
 

@@ -21,8 +21,8 @@ func TestOpenCode_Identity(t *testing.T) {
 	if o.LLMEndpointEnv() != "" {
 		t.Errorf("LLMEndpointEnv() = %q, want empty (provider URL per-provider)", o.LLMEndpointEnv())
 	}
-	if o.Args() != nil {
-		t.Errorf("Args() = %v, want nil", o.Args())
+	if o.Args(launch.ModeHost) != nil {
+		t.Errorf("Args(ModeHost) = %v, want nil", o.Args(launch.ModeHost))
 	}
 	if o.Env() != nil {
 		t.Errorf("Env() = %v, want nil", o.Env())

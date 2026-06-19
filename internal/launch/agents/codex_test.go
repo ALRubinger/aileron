@@ -21,8 +21,11 @@ func TestCodex_Identity(t *testing.T) {
 	if c.LLMEndpointEnv() != "OPENAI_BASE_URL" {
 		t.Errorf("LLMEndpointEnv() = %q, want OPENAI_BASE_URL", c.LLMEndpointEnv())
 	}
-	if c.Args() != nil {
-		t.Errorf("Args() = %v, want nil", c.Args())
+	if c.Args(launch.ModeHost) != nil {
+		t.Errorf("Args(ModeHost) = %v, want nil", c.Args(launch.ModeHost))
+	}
+	if c.Args(launch.ModeSandbox) != nil {
+		t.Errorf("Args(ModeSandbox) = %v, want nil", c.Args(launch.ModeSandbox))
 	}
 	if c.Env() != nil {
 		t.Errorf("Env() = %v, want nil", c.Env())

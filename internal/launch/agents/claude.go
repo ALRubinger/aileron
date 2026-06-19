@@ -13,7 +13,20 @@ type Claude struct{}
 func (c Claude) Name() string          { return "claude" }
 func (c Claude) BinaryNames() []string { return []string{"claude"} }
 
-// Args tells Claude Code to auto-approve:
+// Args tells Claude Code how aggressively to auto-approve, branching on
+// the launch trust boundary.
+//
+// Under ModeSandbox the container is the trust boundary (ADR-0015): the
+// agent runs inside Aileron's sandbox, so we pass
+// --dangerously-skip-permissions alone to give Claude full YOLO
+// autonomy. This mirrors Codex's container posture
+// (approval_policy="never" + sandbox_mode="danger-full-access" in
+// mergeCodexSandboxConfig). The flag is passed alone, not alongside
+// --allowedTools, because --dangerously-skip-permissions subsumes all
+// per-tool gating; combining them would be redundant.
+//
+// Under ModeHost the agent runs directly on the host, so we keep the
+// narrower --allowedTools posture that auto-approves only:
 //   - Bash, so Claude Code's per-command prompt is suppressed. Per
 //     ADR-0015, Aileron is no longer the trust surface for the agent's
 //     local shell commands; Claude Code's own approval suppression
@@ -26,7 +39,10 @@ func (c Claude) BinaryNames() []string { return []string{"claude"} }
 // `--allowedTools` accepts a single value with space-separated
 // patterns; the bare `mcp__<server>` form whitelists every tool from
 // that server (including ones registered later in the session).
-func (c Claude) Args() []string {
+func (c Claude) Args(mode launch.Mode) []string {
+	if mode == launch.ModeSandbox {
+		return []string{"--dangerously-skip-permissions"}
+	}
 	return []string{"--allowedTools", "Bash(*) mcp__" + launch.MCPServerName}
 }
 

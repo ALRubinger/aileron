@@ -292,9 +292,9 @@ type fakeAuthAgent struct {
 	spec launch.AuthSpec
 }
 
-func (f fakeAuthAgent) Name() string          { return f.name }
-func (f fakeAuthAgent) BinaryNames() []string { return []string{f.name} }
-func (f fakeAuthAgent) Args() []string        { return nil }
+func (f fakeAuthAgent) Name() string                { return f.name }
+func (f fakeAuthAgent) BinaryNames() []string       { return []string{f.name} }
+func (f fakeAuthAgent) Args(_ launch.Mode) []string { return nil }
 func (f fakeAuthAgent) Env() map[string]string {
 	return nil
 }
