@@ -18,9 +18,8 @@ import (
 //     challenge + method, the hosted-callback redirect, the state, and
 //     the requested scopes.
 //   - claudeEnvelopeFromTokenResponse emits an envelope that passes
-//     validateClaudeEnvelope and whose expiresAt is in MILLISECONDS.
-//   - claudeEnvelopeFromBareToken populates accessToken only; refresh,
-//     expiry, and scopes are absent.
+//     validateClaudeEnvelope and whose expiresAt is in MILLISECONDS,
+//     stamping the subscriptionType / rateLimitTier it is given.
 
 func TestBuildClaudeAuthorizeURL_CarriesPKCEStateScopesAndCallback(t *testing.T) {
 	pkce := oauth.PKCEPair{Verifier: "ver", Challenge: "chal-xyz", Method: "S256"}
@@ -58,7 +57,7 @@ func TestBuildClaudeAuthorizeURL_CarriesPKCEStateScopesAndCallback(t *testing.T)
 
 func TestClaudeEnvelopeFromTokenResponse_ExpiresAtIsMilliseconds(t *testing.T) {
 	scopes := []string{"user:inference"}
-	b, err := claudeEnvelopeFromTokenResponse("access-tok", "refresh-tok", 28800, scopes)
+	b, err := claudeEnvelopeFromTokenResponse("access-tok", "refresh-tok", 28800, scopes, "max", "default_claude_max_20x")
 	if err != nil {
 		t.Fatalf("claudeEnvelopeFromTokenResponse: %v", err)
 	}
@@ -85,10 +84,18 @@ func TestClaudeEnvelopeFromTokenResponse_ExpiresAtIsMilliseconds(t *testing.T) {
 	if len(env.ClaudeAiOauth.Scopes) != 1 || env.ClaudeAiOauth.Scopes[0] != "user:inference" {
 		t.Errorf("scopes = %v, want [user:inference]", env.ClaudeAiOauth.Scopes)
 	}
+	// The subscription tier / rate-limit tier must be stamped so Claude
+	// Code recognizes the credential as a Max/Pro session (#1304).
+	if env.ClaudeAiOauth.SubscriptionType != "max" {
+		t.Errorf("subscriptionType = %q, want max", env.ClaudeAiOauth.SubscriptionType)
+	}
+	if env.ClaudeAiOauth.RateLimitTier != "default_claude_max_20x" {
+		t.Errorf("rateLimitTier = %q, want default_claude_max_20x", env.ClaudeAiOauth.RateLimitTier)
+	}
 }
 
 func TestClaudeEnvelopeFromTokenResponse_NoExpiryWhenZero(t *testing.T) {
-	b, err := claudeEnvelopeFromTokenResponse("a", "r", 0, nil)
+	b, err := claudeEnvelopeFromTokenResponse("a", "r", 0, nil, "pro", "")
 	if err != nil {
 		t.Fatalf("claudeEnvelopeFromTokenResponse: %v", err)
 	}
@@ -101,29 +108,106 @@ func TestClaudeEnvelopeFromTokenResponse_NoExpiryWhenZero(t *testing.T) {
 	}
 }
 
-func TestClaudeEnvelopeFromBareToken_AccessTokenOnly(t *testing.T) {
-	b, err := claudeEnvelopeFromBareToken("bare-long-lived-token")
+// TestClaudeEnvelopeFromTokenResponse_OmitsEmptyTierFields proves the
+// tier fields are absent (not present-but-empty) when no tier is
+// supplied, so an envelope rendered from a vault entry that never
+// carried a tier round-trips unchanged.
+func TestClaudeEnvelopeFromTokenResponse_OmitsEmptyTierFields(t *testing.T) {
+	b, err := claudeEnvelopeFromTokenResponse("a", "r", 0, nil, "", "")
 	if err != nil {
-		t.Fatalf("claudeEnvelopeFromBareToken: %v", err)
+		t.Fatalf("claudeEnvelopeFromTokenResponse: %v", err)
 	}
-	if err := validateClaudeEnvelope(b); err != nil {
-		t.Fatalf("bare-token envelope failed validation: %v", err)
+	if strings.Contains(string(b), "subscriptionType") {
+		t.Errorf("envelope %q should omit subscriptionType when empty", b)
 	}
-	var env claudeCredentialEnvelope
-	if err := json.Unmarshal(b, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if strings.Contains(string(b), "rateLimitTier") {
+		t.Errorf("envelope %q should omit rateLimitTier when empty", b)
 	}
-	if env.ClaudeAiOauth.AccessToken != "bare-long-lived-token" {
-		t.Errorf("accessToken = %q, want bare-long-lived-token", env.ClaudeAiOauth.AccessToken)
+}
+
+// TestMapClaudeOrganizationType maps the profile endpoint's
+// organization_type to the subscriptionType Claude Code recognizes;
+// an unknown type maps to "" so the acquirer treats it as a missing
+// tier rather than stamping an unrecognized value.
+func TestMapClaudeOrganizationType(t *testing.T) {
+	tests := map[string]string{
+		"claude_max":        "max",
+		"claude_pro":        "pro",
+		"claude_enterprise": "enterprise",
+		"claude_team":       "team",
+		"":                  "",
+		"something_else":    "",
 	}
-	if env.ClaudeAiOauth.RefreshToken != "" {
-		t.Errorf("refreshToken = %q, want empty (setup-token has no refresh)", env.ClaudeAiOauth.RefreshToken)
+	for in, want := range tests {
+		if got := mapClaudeOrganizationType(in); got != want {
+			t.Errorf("mapClaudeOrganizationType(%q) = %q, want %q", in, got, want)
+		}
 	}
-	if env.ClaudeAiOauth.ExpiresAt != 0 {
-		t.Errorf("expiresAt = %d, want 0 (setup-token has no expiry)", env.ClaudeAiOauth.ExpiresAt)
+}
+
+// TestClaudeFetchProfile_MapsOrganizationType drives the profile fetch
+// against a canned 200 body and asserts the mapped tier + rate-limit
+// tier, and that the access token is sent as a Bearer credential.
+func TestClaudeFetchProfile_MapsOrganizationType(t *testing.T) {
+	client := cannedTokenClient(http.StatusOK,
+		`{"organization":{"organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}`)
+
+	sub, rate, err := claudeFetchProfile(context.Background(), client, "acc-tok")
+	if err != nil {
+		t.Fatalf("claudeFetchProfile: %v", err)
 	}
-	if len(env.ClaudeAiOauth.Scopes) != 0 {
-		t.Errorf("scopes = %v, want empty (setup-token has no scope list)", env.ClaudeAiOauth.Scopes)
+	if sub != "max" {
+		t.Errorf("subscriptionType = %q, want max", sub)
+	}
+	if rate != "default_claude_max_20x" {
+		t.Errorf("rateLimitTier = %q, want default_claude_max_20x", rate)
+	}
+}
+
+// TestClaudeFetchProfile_NonOKRedactsBody asserts a non-2xx profile
+// response surfaces only the status, never the raw body (mirroring the
+// token-exchange posture).
+func TestClaudeFetchProfile_NonOKRedactsBody(t *testing.T) {
+	const leak = "profile-body-DO-NOT-LEAK"
+	client := cannedTokenClient(http.StatusUnauthorized, leak)
+
+	_, _, err := claudeFetchProfile(context.Background(), client, "acc-tok")
+	if err == nil {
+		t.Fatal("expected error on non-2xx profile response")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("err = %v, want the bare status 401 surfaced", err)
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("profile body leaked into error: %v", err)
+	}
+}
+
+// TestClaudeFetchProfile_UnknownTypeYieldsEmpty covers a clean 200 whose
+// organization_type is unrecognized: subscriptionType is "" so the
+// acquirer turns it into a non-fatal acquire failure rather than seeding
+// a tier-less envelope.
+func TestClaudeFetchProfile_UnknownTypeYieldsEmpty(t *testing.T) {
+	client := cannedTokenClient(http.StatusOK,
+		`{"organization":{"organization_type":"claude_unknown"}}`)
+
+	sub, _, err := claudeFetchProfile(context.Background(), client, "acc-tok")
+	if err != nil {
+		t.Fatalf("claudeFetchProfile: %v", err)
+	}
+	if sub != "" {
+		t.Errorf("subscriptionType = %q, want empty for an unknown organization_type", sub)
+	}
+}
+
+// TestClaudeFetchProfile_MalformedJSON covers a 2xx body that is not
+// valid JSON.
+func TestClaudeFetchProfile_MalformedJSON(t *testing.T) {
+	client := cannedTokenClient(http.StatusOK, `{not valid json`)
+
+	_, _, err := claudeFetchProfile(context.Background(), client, "acc-tok")
+	if err == nil || !strings.Contains(err.Error(), "parse profile response") {
+		t.Fatalf("expected parse error, got %v", err)
 	}
 }
 

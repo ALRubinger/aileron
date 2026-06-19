@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -42,6 +41,12 @@ const (
 	claudeAuthorizeURL      = "https://claude.ai/oauth/authorize"
 	claudeTokenURL          = "https://platform.claude.com/v1/oauth/token"
 	claudeHostedCallbackURL = "https://platform.claude.com/oauth/code/callback"
+	// claudeProfileURL is the OAuth profile endpoint Claude Code reads to
+	// learn the signed-in organization's subscription tier. It is fetched
+	// host-side with the freshly-exchanged access token (the
+	// `user:profile` scope, requested in claudeOAuthScopes, authorizes
+	// it) so the seeded envelope can carry a subscriptionType.
+	claudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
 )
 
 // claudeOAuthScopes are the scopes Claude Code requests for a
@@ -87,12 +92,14 @@ func buildClaudeAuthorizeURL(pkce oauth.PKCEPair, state string) string {
 // an absolute ms timestamp. A non-positive expiresInSec leaves
 // expiresAt at 0 (omitted), matching envelopes that ship without an
 // expiry.
-func claudeEnvelopeFromTokenResponse(access, refresh string, expiresInSec int, scopes []string) ([]byte, error) {
+func claudeEnvelopeFromTokenResponse(access, refresh string, expiresInSec int, scopes []string, subscriptionType, rateLimitTier string) ([]byte, error) {
 	env := claudeCredentialEnvelope{
 		ClaudeAiOauth: claudeAiOauth{
-			AccessToken:  access,
-			RefreshToken: refresh,
-			Scopes:       scopes,
+			AccessToken:      access,
+			RefreshToken:     refresh,
+			Scopes:           scopes,
+			SubscriptionType: subscriptionType,
+			RateLimitTier:    rateLimitTier,
 		},
 	}
 	if expiresInSec > 0 {
@@ -105,25 +112,6 @@ func claudeEnvelopeFromTokenResponse(access, refresh string, expiresInSec int, s
 		// error. Wrap rather than panic so a caller in the acquire path
 		// degrades to the in-container fallback instead of crashing.
 		return nil, fmt.Errorf("claude: marshal acquired envelope: %w", err)
-	}
-	return b, nil
-}
-
-// claudeEnvelopeFromBareToken builds an envelope from the single bare
-// token `claude setup-token` prints on stdout. Unlike the
-// hosted-callback exchange, setup-token yields no refresh token, no
-// expiry, and no scope list — it is a long-lived token. We populate
-// `accessToken` only and leave `refreshToken`/`expiresAt`/`scopes`
-// empty (omitted). This is a deliberate divergence from the
-// hosted-callback envelope, documented so a reader does not mistake the
-// missing fields for a bug.
-func claudeEnvelopeFromBareToken(token string) ([]byte, error) {
-	env := claudeCredentialEnvelope{
-		ClaudeAiOauth: claudeAiOauth{AccessToken: token},
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("claude: marshal setup-token envelope: %w", err)
 	}
 	return b, nil
 }
@@ -165,6 +153,20 @@ type claudeAiOauth struct {
 	RefreshToken string   `json:"refreshToken,omitempty"`
 	ExpiresAt    int64    `json:"expiresAt,omitempty"`
 	Scopes       []string `json:"scopes,omitempty"`
+	// SubscriptionType is the Max/Pro tier Claude Code uses to decide
+	// whether a seeded credential is a subscription session (Max/Pro/
+	// Enterprise/Team) rather than a raw "Claude API" key. Without it the
+	// CLI reports not-logged-in even with a valid access token
+	// (anthropics/claude-code#34262). The host acquirer fetches the tier
+	// from the profile endpoint after the token exchange and stamps it
+	// here; "omitempty" keeps it absent on envelopes that never carried
+	// a tier (e.g. those rendered verbatim from a vault entry).
+	SubscriptionType string `json:"subscriptionType,omitempty"`
+	// RateLimitTier mirrors the organization's rate-limit tier from the
+	// profile endpoint. Claude Code surfaces it alongside the
+	// subscription type; it is informational and absent when the profile
+	// did not report one.
+	RateLimitTier string `json:"rateLimitTier,omitempty"`
 }
 
 // errClaudeEnvelopeMalformed is returned by claudeCapture when the
@@ -342,56 +344,23 @@ func validateClaudeEnvelope(b []byte) error {
 //     in-container login. So a cancel / unavailable-CLI / failed
 //     exchange must surface as one of those, never as a partial seed.
 //
-// Two acquisition mechanisms, tried in order:
+// Acquisition mechanism: the hosted-callback PASTE flow (the real
+// OAuth, with PKCE). Open the consent URL in the host browser, have the
+// user paste the `<code>#<state>` string from the hosted callback page
+// on the HOST terminal, verify state, exchange the code for tokens
+// (PKCE, no client_secret), fetch the subscription tier from the
+// profile endpoint, and build a ms-expiry envelope stamped with that
+// tier.
 //
-//  1. `claude setup-token` SHORTCUT (opportunistic). When the `claude`
-//     CLI is on PATH we run it first; it prints a single long-lived
-//     bare token on stdout (NOT a full claudeAiOauth JSON envelope). We
-//     wrap that bare token into an envelope with accessToken only
-//     (refreshToken/expiresAt/scopes empty — see
-//     claudeEnvelopeFromBareToken). The CLI may be absent; that is
-//     expected, not an error.
-//
-//  2. Hosted-callback PASTE flow (the real OAuth, with PKCE). Open the
-//     consent URL in the host browser, have the user paste the
-//     `<code>#<state>` string from the hosted callback page on the HOST
-//     terminal, verify state, exchange the code for tokens (PKCE, no
-//     client_secret), and build a ms-expiry envelope.
+// The `claude setup-token` shortcut was deliberately removed (#1304):
+// setup-token returns a long-lived API-key-style token with no
+// subscription metadata, so Claude Code treated the seeded credential
+// as a raw "Claude API" key and reported not-logged-in for Max/Pro
+// users (anthropics/claude-code#34262). Subscription launches must
+// always run the PKCE flow so the envelope carries a subscriptionType;
+// this also drops the implicit dependency on a host `claude` binary.
 func claudeHostAcquire(ctx context.Context, deps launch.HostAcquireDeps) (vault.Secret, error) {
-	// 1. setup-token shortcut.
-	if secret, ok := claudeSetupTokenShortcut(ctx); ok {
-		return secret, nil
-	}
-	// 2. Hosted-callback paste flow.
 	return claudeHostedCallbackAcquire(ctx, deps)
-}
-
-// claudeSetupTokenShortcut tries `claude setup-token`. It returns
-// (secret, true) only on a clean run that yields a usable bare token;
-// any failure (CLI absent, non-zero exit, empty/garbled output,
-// envelope build error) returns (_, false) so the caller falls through
-// to the hosted-callback flow. It never returns an error: a failed
-// shortcut is not itself a fatal acquire failure.
-func claudeSetupTokenShortcut(ctx context.Context) (vault.Secret, bool) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return vault.Secret{}, false
-	}
-	out, err := exec.CommandContext(ctx, "claude", "setup-token").Output()
-	if err != nil {
-		return vault.Secret{}, false
-	}
-	token := strings.TrimSpace(string(out))
-	if token == "" {
-		return vault.Secret{}, false
-	}
-	envelope, err := claudeEnvelopeFromBareToken(token)
-	if err != nil {
-		return vault.Secret{}, false
-	}
-	return vault.Secret{
-		Value:    envelope,
-		Metadata: vault.Metadata{Type: "oauth_refresh_token"},
-	}, true
 }
 
 // claudeHostedCallbackAcquire runs the PKCE authorization-code flow
@@ -451,7 +420,20 @@ func claudeHostedCallbackAcquire(ctx context.Context, deps launch.HostAcquireDep
 	if err != nil {
 		return vault.Secret{}, err
 	}
-	envelope, err := claudeEnvelopeFromTokenResponse(access, refresh, expiresIn, scopes)
+	// Fetch the subscription tier host-side. A token exchange that
+	// succeeds but yields no subscriptionType reproduces #1304: the
+	// rendered envelope would look like a raw Claude API key and Claude
+	// Code reports not-logged-in. Treat a missing tier as a non-fatal
+	// acquire failure (empty Secret / error) per the HostAcquire
+	// contract — never seed a tier-less envelope silently.
+	subscriptionType, rateLimitTier, err := claudeFetchProfile(ctx, deps.HTTPClient, access)
+	if err != nil {
+		return vault.Secret{}, err
+	}
+	if subscriptionType == "" {
+		return vault.Secret{}, errors.New("claude: profile fetch returned no subscription tier; cannot seed a recognizable Max/Pro session (re-login)")
+	}
+	envelope, err := claudeEnvelopeFromTokenResponse(access, refresh, expiresIn, scopes, subscriptionType, rateLimitTier)
 	if err != nil {
 		return vault.Secret{}, err
 	}
@@ -537,6 +519,78 @@ func claudeExchangeCode(ctx context.Context, client *http.Client, code, verifier
 		granted = append([]string(nil), claudeOAuthScopes...)
 	}
 	return parsed.AccessToken, parsed.RefreshToken, parsed.ExpiresIn, granted, nil
+}
+
+// claudeFetchProfile GETs Claude's OAuth profile endpoint with the
+// freshly-exchanged access token and maps the organization's
+// `organization_type` to the subscriptionType Claude Code recognizes
+// (claude_max -> max, claude_pro -> pro, claude_enterprise ->
+// enterprise, claude_team -> team) and surfaces the organization's
+// `rate_limit_tier` verbatim as rateLimitTier.
+//
+// Claude Code derives the tier from this profile endpoint, not from a
+// token claim, so this host-side fetch is what lets the seeded envelope
+// carry a non-null subscriptionType (#1304). An empty subscriptionType
+// return (unknown/absent organization_type) is a non-fatal signal the
+// caller turns into an acquire failure rather than seeding a tier-less
+// envelope.
+//
+// Mirroring claudeExchangeCode's posture, a non-2xx response surfaces
+// only the HTTP status; the raw body is redacted so a verbose or
+// hostile provider response cannot leak into the user-facing launch
+// error.
+func claudeFetchProfile(ctx context.Context, client *http.Client, accessToken string) (subscriptionType, rateLimitTier string, err error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeProfileURL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("claude: build profile request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("claude: profile fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		// Redact the raw body; surface only the status.
+		return "", "", fmt.Errorf("claude: profile fetch failed: provider returned %d", resp.StatusCode)
+	}
+
+	var parsed struct {
+		Organization struct {
+			OrganizationType string `json:"organization_type"`
+			RateLimitTier    string `json:"rate_limit_tier"`
+		} `json:"organization"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", "", fmt.Errorf("claude: parse profile response: %w", err)
+	}
+	return mapClaudeOrganizationType(parsed.Organization.OrganizationType), parsed.Organization.RateLimitTier, nil
+}
+
+// mapClaudeOrganizationType maps the profile endpoint's
+// `organization.organization_type` to the subscriptionType string
+// Claude Code recognizes. An unknown or absent type maps to "" so the
+// caller treats it as a missing tier (non-fatal acquire failure) rather
+// than stamping an unrecognized value into the envelope.
+func mapClaudeOrganizationType(orgType string) string {
+	switch orgType {
+	case "claude_max":
+		return "max"
+	case "claude_pro":
+		return "pro"
+	case "claude_enterprise":
+		return "enterprise"
+	case "claude_team":
+		return "team"
+	default:
+		return ""
+	}
 }
 
 // parseClaudeTokenErrorCode extracts the RFC 6749 §5.2 `error` field

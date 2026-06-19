@@ -433,10 +433,10 @@ type codexDeviceTokenResponse struct {
 // and host-login is enabled; it returns a vault.Secret the launcher PUTs
 // to agents/codex/oauth and renders before the container starts.
 //
-// Unlike Claude (which has a setup-token CLI shortcut and a paste-back
-// hosted-callback fallback), Codex has a single mechanism: the
-// OpenAI device-authorization flow. It needs no localhost callback and
-// no host CLI, so it is pure Go end-to-end:
+// Unlike Claude (which uses a paste-back hosted-callback PKCE flow),
+// Codex has a single mechanism: the OpenAI device-authorization flow.
+// It needs no localhost callback and no host CLI, so it is pure Go
+// end-to-end:
 //
 //  1. Request a device code (codexRequestDeviceCode).
 //  2. Surface the verification URL + user_code on deps.Out and open the
