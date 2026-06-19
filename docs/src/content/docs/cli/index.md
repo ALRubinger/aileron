@@ -14,7 +14,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 
 | Command | Purpose | Ratified by |
 |---|---|---|
-| `aileron launch [--sandbox=off\|auto\|docker] [--sandbox-build=auto\|always\|never]` | Launch an AI coding agent connected to the Aileron daemon. `--sandbox` prepares the project sandbox image and runs the agent command inside it; `off` preserves direct host launch. | [ADR-0011](/adr/0011-local-credential-vault), [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron launch [--local] [--sandbox=auto\|docker] [--sandbox-build=auto\|always\|never]` | Launch an AI coding agent connected to the Aileron daemon. The Docker sandbox is the default; the agent command runs inside the prepared project sandbox image. `--local` runs the agent directly on the host instead, and conflicts with an explicit `--sandbox`. | [ADR-0011](/adr/0011-local-credential-vault), [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron status` | Report the running runtime: version, listen address, action count, connector count, binding count, vault state. Read-only; safe to run frequently. | — |
 
 ## Sandbox composition

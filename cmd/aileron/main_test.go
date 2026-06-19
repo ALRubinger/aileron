@@ -270,8 +270,10 @@ func TestRun_LaunchFlagsAfterAgentName(t *testing.T) {
 		{"before agent still works", []string{"launch", "--sandbox=docker", "claude"}, "docker", "auto", ""},
 		{"split before and after", []string{"launch", "--sandbox=docker", "claude", "--sandbox-build=never"}, "docker", "never", ""},
 		{"unknown agent args forward", []string{"launch", "claude", "--model", "opus", "--sandbox=docker"}, "docker", "auto", "--model opus"},
-		{"double dash forwards through", []string{"launch", "claude", "--", "--sandbox=docker"}, "off", "auto", "--sandbox=docker"},
-		{"bare dash forwards to agent", []string{"launch", "claude", "-"}, "off", "auto", "-"},
+		// After "--" the --sandbox=docker forwards to the agent, so aileron
+		// never sees it; the default Docker sandbox runtime still applies.
+		{"double dash forwards through", []string{"launch", "claude", "--", "--sandbox=docker"}, "docker", "auto", "--sandbox=docker"},
+		{"bare dash forwards to agent", []string{"launch", "claude", "-"}, "docker", "auto", "-"},
 	}
 
 	for _, tc := range cases {
@@ -316,6 +318,95 @@ func TestRun_LaunchTrailingFlagMissingValue(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "needs a value") {
 		t.Errorf("stderr = %q, want it to mention the missing value", stderr.String())
+	}
+}
+
+// TestRun_LaunchDefaultsToDockerSandbox locks the contract that omitting
+// every sandbox flag selects the Docker sandbox runtime. This is the flip
+// from the old host-by-default behavior.
+func TestRun_LaunchDefaultsToDockerSandbox(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+
+	var captured launch.LaunchConfig
+	launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+		captured = cfg
+		return launch.LaunchResult{ExitCode: 0}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"launch", "claude"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
+	}
+	if captured.SandboxRuntime != "docker" {
+		t.Errorf("SandboxRuntime = %q, want docker (default)", captured.SandboxRuntime)
+	}
+}
+
+// TestRun_LaunchLocalForcesHostLaunch verifies --local maps to the "off"
+// runtime (host launch) in both the before-agent and trailing forms, and
+// that the bool flag is never leaked to the agent.
+func TestRun_LaunchLocalForcesHostLaunch(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"before agent", []string{"launch", "--local", "claude"}},
+		{"trailing bare form", []string{"launch", "claude", "--local"}},
+		{"trailing inline form", []string{"launch", "claude", "--local=true"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured launch.LaunchConfig
+			launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+				captured = cfg
+				return launch.LaunchResult{ExitCode: 0}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, newTestRegistry(), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
+			}
+			if captured.SandboxRuntime != "off" {
+				t.Errorf("SandboxRuntime = %q, want off (host launch)", captured.SandboxRuntime)
+			}
+			if len(captured.Args) != 0 {
+				t.Errorf("--local leaked to agent args: %v", captured.Args)
+			}
+		})
+	}
+}
+
+// TestRun_LaunchLocalSandboxConflict verifies that combining --local with
+// an explicit --sandbox fails fast rather than silently picking one. The
+// conflict holds whether the flags appear before or after the agent name.
+func TestRun_LaunchLocalSandboxConflict(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+	launchFn = func(_ context.Context, _ launch.LaunchConfig) (launch.LaunchResult, error) {
+		t.Fatal("launch should not run when --local conflicts with --sandbox")
+		return launch.LaunchResult{}, nil
+	}
+
+	cases := [][]string{
+		{"launch", "--local", "--sandbox=docker", "claude"},
+		{"launch", "--sandbox=auto", "--local", "claude"},
+		{"launch", "claude", "--local", "--sandbox=docker"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, newTestRegistry(), &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1", code)
+			}
+			if !strings.Contains(stderr.String(), "--local conflicts with --sandbox") {
+				t.Errorf("stderr = %q, want it to mention the --local/--sandbox conflict", stderr.String())
+			}
+		})
 	}
 }
 

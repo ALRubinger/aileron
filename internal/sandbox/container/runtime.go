@@ -620,7 +620,7 @@ fi
 rm -f "$probe"
 if ! command -v "$1" >/dev/null 2>&1; then
   echo "agent command not found in sandbox image: $1" >&2
-  echo "install the agent CLI in the sandbox image or launch with --sandbox=off" >&2
+  echo "install the agent CLI in the sandbox image or launch with --local" >&2
   echo "agent image recipes: ` + AgentImagesDocsURL + `" >&2
   exit 127
 fi
