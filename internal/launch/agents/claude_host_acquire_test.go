@@ -55,28 +55,40 @@ func (o *recordingOpener) Open(rawURL string) error {
 	return o.err
 }
 
+// claudeOAuthCapture records what the two legs of the host flow saw, so
+// tests can assert the acquirer's contract with the provider: the token
+// exchange's POST form and the Authorization header the profile fetch
+// presented.
+type claudeOAuthCapture struct {
+	tokenForm   url.Values
+	profileAuth string
+}
+
 // claudeOAuthServer is an httptest server that answers both legs of the
 // host flow the redirectTransport rewrites onto it: the token exchange
 // (path /v1/oauth/token) and the profile fetch (path
 // /api/oauth/profile). orgType is echoed back as the profile's
 // organization_type so a test can drive the tier-mapping. A blank
-// orgType yields a profile with no recognizable tier.
-func claudeOAuthServer(t *testing.T, orgType string) (*httptest.Server, *url.Values) {
+// orgType yields a profile with no recognizable tier. The returned
+// capture records the token-exchange form and the profile request's
+// Authorization header.
+func claudeOAuthServer(t *testing.T, orgType string) (*httptest.Server, *claudeOAuthCapture) {
 	t.Helper()
-	var gotForm url.Values
+	cap := &claudeOAuthCapture{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/oauth/profile":
+			cap.profileAuth = r.Header.Get("Authorization")
 			_, _ = io.WriteString(w, `{"organization":{"organization_type":"`+orgType+`","rate_limit_tier":"default_claude_max_20x"}}`)
 		default: // token exchange
 			_ = r.ParseForm()
-			gotForm = r.PostForm
+			cap.tokenForm = r.PostForm
 			_, _ = io.WriteString(w, `{"access_token":"acc-tok","refresh_token":"ref-tok","expires_in":28800,"token_type":"Bearer","scope":"user:inference"}`)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &gotForm
+	return srv, cap
 }
 
 func scriptedPrompter(value string, err error) func(context.Context, io.Writer) (string, error) {
@@ -95,7 +107,7 @@ func claudeHostAcquireBinding(t *testing.T) launch.FileBinding {
 }
 
 func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
-	srv, gotFormP := claudeOAuthServer(t, "claude_max")
+	srv, capture := claudeOAuthServer(t, "claude_max")
 
 	opener := &recordingOpener{}
 	var out bytes.Buffer
@@ -131,8 +143,14 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(out.String(), "client_id=9d1c250a") {
 		t.Errorf("Out missing the authorize URL; got %q", out.String())
 	}
+	// The profile fetch must present the freshly-exchanged access token
+	// as a Bearer credential; that is what authorizes reading the
+	// subscription tier (#1304).
+	if capture.profileAuth != "Bearer acc-tok" {
+		t.Errorf("profile Authorization = %q, want %q", capture.profileAuth, "Bearer acc-tok")
+	}
 	// Token exchange used authorization_code + PKCE verifier, no secret.
-	gotForm := *gotFormP
+	gotForm := capture.tokenForm
 	if gotForm.Get("grant_type") != "authorization_code" {
 		t.Errorf("grant_type = %q, want authorization_code", gotForm.Get("grant_type"))
 	}
