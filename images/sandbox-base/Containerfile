@@ -20,6 +20,11 @@ LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
 # --repository (pinned to v3.24 to match the FROM tag) so the rest of the
 # package set stays main-only. Keep this list in sync with
 # Containerfile.published's final stage (issue #957).
+#
+# Transitional (umbrella #1319): the PUBLISHED recipe drops github-cli and
+# composes the gh Feature on top instead. This LOCAL recipe keeps the apk line
+# until #1321b moves the local Tier 0 build to the same Feature-compose path; so
+# the two package lists are intentionally out of sync only on github-cli for now.
 RUN apk add --no-cache \
     --repository=https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
     bash \
