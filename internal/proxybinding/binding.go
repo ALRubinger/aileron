@@ -51,7 +51,7 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 }
 
 // LoadHostBindings is the convenience the apiServer wiring calls: it loads
-// the three merged descriptor layers and adapts them to the canonical
+// the two merged descriptor layers (built-in -> user) and adapts them to the canonical
 // binding table in one step. A load or adaptation error is surfaced rather
 // than swallowed so a malformed descriptor fails construction loudly
 // instead of silently shipping an empty (passthrough) table.
