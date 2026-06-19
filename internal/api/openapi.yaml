@@ -632,9 +632,11 @@ paths:
           type: string
         description: |
           Agent identifier (e.g. "claude", "codex"). The daemon scopes
-          the underlying vault path to `agents/<name>/oauth` — the path
-          is namespace-locked at the routing layer, so arbitrary vault
-          paths are unreachable through this endpoint per ADR-0025.
+          the underlying vault path to `agents/<name>/<purpose>` — the
+          path is namespace-locked at the routing layer, so arbitrary
+          vault paths are unreachable through this endpoint per ADR-0025.
+          The `<purpose>` segment defaults to `oauth` and is selected by
+          the optional `purpose` query parameter.
     get:
       tags: [Vault]
       summary: Read the per-agent credential envelope from the local vault
@@ -645,14 +647,39 @@ paths:
         for Claude Code). The daemon owns the unlocked vault per
         ADR-0011/0012; the launcher must not open the vault file itself.
 
+        The `purpose` query parameter selects the third path segment
+        (`agents/<name>/<purpose>`), defaulting to `oauth`.
+
         Error codes are surfaced in the response body so the launcher
         discriminates by code rather than status alone:
-          - `vault_not_found` (404) — no entry at `agents/<name>/oauth`;
+          - `vault_not_found` (404) — no entry at `agents/<name>/<purpose>`;
             the launcher proceeds with the in-container-login bootstrap
             path per ADR-0025.
           - `vault_locked` (423) — the local vault is locked; the
             launcher surfaces a clear unlock instruction to the user.
+          - `invalid_request` (400) — the `purpose` value is malformed
+            (must match `^[a-z0-9][a-z0-9_-]*$`).
       operationId: getAgentCredentials
+      parameters:
+        - name: purpose
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]*$"
+            default: oauth
+          description: |
+            Credential purpose, forming the third segment of the vault
+            path `agents/<name>/<purpose>` (e.g. `oauth`, `apikey`).
+            Defaults to `oauth` when omitted, so a request with no
+            `purpose` is indistinguishable from the pre-purpose behavior.
+
+            Because `<purpose>` flows straight into the raw vault map key,
+            the daemon validates it against `^[a-z0-9][a-z0-9_-]*$` before
+            constructing the path. A value containing `/`, `..`, or
+            percent-encoded separators is rejected with `400`
+            (`invalid_request`) so it cannot escape the `agents/<name>/`
+            namespace.
       security: []
       responses:
         "200":
@@ -692,7 +719,9 @@ paths:
       summary: Write the per-agent credential envelope to the local vault
       description: |
         Writes the credential envelope to the local vault at
-        `agents/<name>/oauth`. Called by the launcher in two places:
+        `agents/<name>/<purpose>` (the `purpose` query parameter selects
+        the third segment, defaulting to `oauth`). Called by the launcher
+        in two places:
 
           - On clean container exit, Capture reads the in-container
             credential file and PUTs the bytes back so the next launch
@@ -708,6 +737,26 @@ paths:
         locked, so the launcher discriminates by code rather than
         status alone.
       operationId: putAgentCredentials
+      parameters:
+        - name: purpose
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]*$"
+            default: oauth
+          description: |
+            Credential purpose, forming the third segment of the vault
+            path `agents/<name>/<purpose>` (e.g. `oauth`, `apikey`).
+            Defaults to `oauth` when omitted, so a request with no
+            `purpose` is indistinguishable from the pre-purpose behavior.
+
+            Because `<purpose>` flows straight into the raw vault map key,
+            the daemon validates it against `^[a-z0-9][a-z0-9_-]*$` before
+            constructing the path. A value containing `/`, `..`, or
+            percent-encoded separators is rejected with `400`
+            (`invalid_request`) so it cannot escape the `agents/<name>/`
+            namespace.
       security: []
       requestBody:
         required: true
@@ -742,17 +791,41 @@ paths:
       tags: [Vault]
       summary: Delete the per-agent credential envelope from the local vault
       description: |
-        Removes the credential envelope stored at `agents/<name>/oauth`.
-        This is the recovery path documented in ADR-0025: deleting the
-        entry makes the next launch fall through to the in-container
-        login bootstrap, re-seeding a fresh credential on clean exit.
+        Removes the credential envelope stored at
+        `agents/<name>/<purpose>` (the `purpose` query parameter selects
+        the third segment, defaulting to `oauth`). This is the recovery
+        path documented in ADR-0025: deleting the entry makes the next
+        launch fall through to the in-container login bootstrap, re-seeding
+        a fresh credential on clean exit.
 
         Error codes are surfaced in the response body so the operator CLI
         discriminates by code rather than status alone:
-          - `vault_not_found` (404) — no entry at `agents/<name>/oauth`.
+          - `vault_not_found` (404) — no entry at `agents/<name>/<purpose>`.
           - `vault_locked` (423) — the local vault is locked; unlock it
             before deleting agent credentials.
+          - `invalid_request` (400) — the `purpose` value is malformed
+            (must match `^[a-z0-9][a-z0-9_-]*$`).
       operationId: deleteAgentCredentials
+      parameters:
+        - name: purpose
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: "^[a-z0-9][a-z0-9_-]*$"
+            default: oauth
+          description: |
+            Credential purpose, forming the third segment of the vault
+            path `agents/<name>/<purpose>` (e.g. `oauth`, `apikey`).
+            Defaults to `oauth` when omitted, so a request with no
+            `purpose` is indistinguishable from the pre-purpose behavior.
+
+            Because `<purpose>` flows straight into the raw vault map key,
+            the daemon validates it against `^[a-z0-9][a-z0-9_-]*$` before
+            constructing the path. A value containing `/`, `..`, or
+            percent-encoded separators is rejected with `400`
+            (`invalid_request`) so it cannot escape the `agents/<name>/`
+            namespace.
       security: []
       responses:
         "204":
@@ -7598,8 +7671,9 @@ components:
       type: object
       required: [value]
       description: |
-        Per-agent credential envelope persisted under `agents/<name>/oauth`
-        in the local vault. The launcher renders `value` into a file the
+        Per-agent credential envelope persisted under
+        `agents/<name>/<purpose>` in the local vault (the `purpose` segment
+        defaults to `oauth`). The launcher renders `value` into a file the
         in-container agent reads (e.g. Claude's `.credentials.json`,
         Codex's `auth.json`) and captures the file bytes back through
         the same envelope on clean exit. See ADR-0025.

@@ -52,12 +52,12 @@ func TestPutAndGetAgentCredentials_RoundTrip(t *testing.T) {
 		bytes.NewReader(raw))
 	putReq.Header.Set("Content-Type", "application/json")
 	putRec := httptest.NewRecorder()
-	s.PutAgentCredentials(putRec, putReq, "claude")
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, putRec, http.StatusNoContent)
 
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
 	getRec := httptest.NewRecorder()
-	s.GetAgentCredentials(getRec, getReq, "claude")
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, getRec, http.StatusOK)
 
 	var got api.AgentCredentials
@@ -74,7 +74,7 @@ func TestGetAgentCredentials_MissingEntryReturnsNotFound(t *testing.T) {
 	s := newAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(rec, req, "claude")
+	s.GetAgentCredentials(rec, req, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNotFound)
 	assertErrorCode(t, rec, "vault_not_found")
 }
@@ -87,7 +87,7 @@ func TestGetAgentCredentials_LockedVaultReturns423(t *testing.T) {
 	s := newAgentCredentialsServer(t, lv)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/codex/credentials", nil)
-	s.GetAgentCredentials(rec, req, "codex")
+	s.GetAgentCredentials(rec, req, "codex", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 	assertErrorCode(t, rec, "vault_locked")
 }
@@ -100,7 +100,7 @@ func TestPutAgentCredentials_LockedVaultReturns423(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 	assertErrorCode(t, rec, "vault_locked")
 }
@@ -112,7 +112,7 @@ func TestPutAgentCredentials_EmptyValueReturns400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusBadRequest)
 }
 
@@ -121,14 +121,14 @@ func TestAgentCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
 
 	getRec := httptest.NewRecorder()
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(getRec, getReq, "claude")
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, getRec, http.StatusServiceUnavailable)
 
 	putRec := httptest.NewRecorder()
 	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader([]byte(`{"value":"YWJj"}`)))
 	putReq.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(putRec, putReq, "claude")
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, putRec, http.StatusServiceUnavailable)
 }
 
@@ -144,7 +144,7 @@ func TestAgentCredentials_VaultPathIsNamespaceScoped(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 
 	got, err := v.Get(context.Background(), "agents/claude/oauth")
@@ -184,12 +184,12 @@ func TestAgentCredentials_RoundTripPreservesEnvironmentAndLabels(t *testing.T) {
 		bytes.NewReader(raw))
 	putReq.Header.Set("Content-Type", "application/json")
 	putRec := httptest.NewRecorder()
-	s.PutAgentCredentials(putRec, putReq, "claude")
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, putRec, http.StatusNoContent)
 
 	getRec := httptest.NewRecorder()
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(getRec, getReq, "claude")
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, getRec, http.StatusOK)
 
 	var got api.AgentCredentials
@@ -220,7 +220,7 @@ func TestPutAgentCredentials_EmptyAgentNameRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents//credentials",
 		bytes.NewReader([]byte(`{"value":"YWJj"}`)))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "")
+	s.PutAgentCredentials(rec, req, "", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorCode(t, rec, "invalid_request")
 }
@@ -229,7 +229,7 @@ func TestGetAgentCredentials_EmptyAgentNameRejected(t *testing.T) {
 	s := newAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents//credentials", nil)
-	s.GetAgentCredentials(rec, req, "")
+	s.GetAgentCredentials(rec, req, "", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorCode(t, rec, "invalid_request")
 }
@@ -240,7 +240,7 @@ func TestPutAgentCredentials_MalformedJSONRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader([]byte(`{not json`)))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorCode(t, rec, "invalid_request")
 }
@@ -265,17 +265,17 @@ func TestDeleteAgentCredentials_RoundTrip(t *testing.T) {
 		bytes.NewReader([]byte(`{"value":"YWJj"}`)))
 	putReq.Header.Set("Content-Type", "application/json")
 	putRec := httptest.NewRecorder()
-	s.PutAgentCredentials(putRec, putReq, "claude")
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, putRec, http.StatusNoContent)
 
 	delRec := httptest.NewRecorder()
 	delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(delRec, delReq, "claude")
+	s.DeleteAgentCredentials(delRec, delReq, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, delRec, http.StatusNoContent)
 
 	getRec := httptest.NewRecorder()
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(getRec, getReq, "claude")
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, getRec, http.StatusNotFound)
 }
 
@@ -286,7 +286,7 @@ func TestDeleteAgentCredentials_MissingEntryReturnsNotFound(t *testing.T) {
 	s := newAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNotFound)
 	assertErrorCode(t, rec, "vault_not_found")
 }
@@ -296,7 +296,7 @@ func TestDeleteAgentCredentials_LockedVaultReturns423(t *testing.T) {
 	s := newAgentCredentialsServer(t, lv)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/codex/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "codex")
+	s.DeleteAgentCredentials(rec, req, "codex", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 	assertErrorCode(t, rec, "vault_locked")
 }
@@ -305,7 +305,7 @@ func TestDeleteAgentCredentials_EmptyAgentNameRejected(t *testing.T) {
 	s := newAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents//credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "")
+	s.DeleteAgentCredentials(rec, req, "", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorCode(t, rec, "invalid_request")
 }
@@ -314,7 +314,7 @@ func TestDeleteAgentCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
 	s := &apiServer{log: slog.Default()}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusServiceUnavailable)
 }
 
@@ -335,7 +335,7 @@ func TestListAgentCredentials_RoundTripMetadataOnly(t *testing.T) {
 			bytes.NewReader(raw))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		s.PutAgentCredentials(rec, req, name)
+		s.PutAgentCredentials(rec, req, name, api.PutAgentCredentialsParams{})
 		assertStatus(t, rec, http.StatusNoContent)
 	}
 
@@ -473,7 +473,7 @@ func TestDeleteAgentCredentials_GetErrorReturns500(t *testing.T) {
 	s := newAgentCredentialsServer(t, getErrVault{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 	assertErrorCode(t, rec, "vault_get_failed")
 }
@@ -482,7 +482,7 @@ func TestDeleteAgentCredentials_DeleteErrorReturns500(t *testing.T) {
 	s := newAgentCredentialsServer(t, deleteErrVault{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 	assertErrorCode(t, rec, "vault_delete_failed")
 }
@@ -592,7 +592,7 @@ func putAuditableCredential(t *testing.T, s *apiServer, name string) {
 		bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	s.PutAgentCredentials(rec, req, name)
+	s.PutAgentCredentials(rec, req, name, api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 }
 
@@ -611,7 +611,7 @@ func TestGetAgentCredentials_SuccessEmitsReadEvent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(rec, req, "claude")
+	s.GetAgentCredentials(rec, req, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusOK)
 
 	events := listVaultCredentialEvents(t, store)
@@ -645,7 +645,7 @@ func TestDeleteAgentCredentials_SuccessEmitsDeleteEvent(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 
 	events := listVaultCredentialEvents(t, store)
@@ -660,7 +660,7 @@ func TestGetAgentCredentials_MissingEntryEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(rec, req, "claude")
+	s.GetAgentCredentials(rec, req, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNotFound)
 
 	events := listVaultCredentialEvents(t, store)
@@ -673,7 +673,7 @@ func TestGetAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewLockableVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/codex/credentials", nil)
-	s.GetAgentCredentials(rec, req, "codex")
+	s.GetAgentCredentials(rec, req, "codex", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 
 	events := listVaultCredentialEvents(t, store)
@@ -693,7 +693,7 @@ func TestPutAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 
 	events := listVaultCredentialEvents(t, store)
@@ -707,7 +707,7 @@ func TestDeleteAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewLockableVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/codex/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "codex")
+	s.DeleteAgentCredentials(rec, req, "codex", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusLocked)
 
 	events := listVaultCredentialEvents(t, store)
@@ -720,7 +720,7 @@ func TestDeleteAgentCredentials_MissingEntryEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNotFound)
 
 	events := listVaultCredentialEvents(t, store)
@@ -741,12 +741,12 @@ func TestVaultCredentials_NilRecorderDoesNotPanic(t *testing.T) {
 
 	getRec := httptest.NewRecorder()
 	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(getRec, getReq, "claude")
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, getRec, http.StatusOK)
 
 	delRec := httptest.NewRecorder()
 	delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(delRec, delReq, "claude")
+	s.DeleteAgentCredentials(delRec, delReq, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, delRec, http.StatusNoContent)
 
 	// The slog line fired even with no recorder, and never leaked.
@@ -769,7 +769,7 @@ func TestVaultCredentials_SessionHeaderAttributesActor(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Aileron-Session-Id", "sess-123")
 	rec := httptest.NewRecorder()
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 
 	events := listVaultCredentialEvents(t, store)
@@ -831,7 +831,7 @@ func TestPutAgentCredentials_PutErrorEmitsFailureEvent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
 		bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	s.PutAgentCredentials(rec, req, "claude")
+	s.PutAgentCredentials(rec, req, "claude", api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 
 	events := listVaultCredentialEvents(t, store)
@@ -867,7 +867,7 @@ func putWithSessionHeader(t *testing.T, s *apiServer, name, header string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Aileron-Session-Id", header)
 	rec := httptest.NewRecorder()
-	s.PutAgentCredentials(rec, req, name)
+	s.PutAgentCredentials(rec, req, name, api.PutAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 }
 
@@ -968,7 +968,7 @@ func TestDeleteAgentCredentials_LoadedSecretNeverLogged(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusNoContent)
 
 	events := listVaultCredentialEvents(t, store)
@@ -986,7 +986,7 @@ func TestDeleteAgentCredentials_GetErrorEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, getErrVault{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 
 	events := listVaultCredentialEvents(t, store)
@@ -1003,7 +1003,7 @@ func TestGetAgentCredentials_GetErrorEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, getErrVault{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
-	s.GetAgentCredentials(rec, req, "claude")
+	s.GetAgentCredentials(rec, req, "claude", api.GetAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 
 	events := listVaultCredentialEvents(t, store)
@@ -1019,11 +1019,230 @@ func TestDeleteAgentCredentials_DeleteErrorEmitsFailureEvent(t *testing.T) {
 	s, store, logBuf := newAuditingAgentCredentialsServer(t, deleteErrVault{})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
-	s.DeleteAgentCredentials(rec, req, "claude")
+	s.DeleteAgentCredentials(rec, req, "claude", api.DeleteAgentCredentialsParams{})
 	assertStatus(t, rec, http.StatusInternalServerError)
 
 	events := listVaultCredentialEvents(t, store)
 	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
 	assertFailureClass(t, ev, "vault_delete_failed")
 	assertNoCredentialLeak(t, events, logBuf)
+}
+
+// purposeParams is a tiny helper building a *string-backed purpose for
+// the generated *Params structs used by the per-agent credential verbs.
+func purposeParam(p string) *string { return &p }
+
+// TestAgentCredentials_PurposeRoundTrip verifies a non-oauth purpose
+// round-trips: a PUT with purpose=apikey is readable by a GET with the
+// same purpose, returning the written bytes (acceptance: GET/PUT
+// round-trip for a non-oauth purpose).
+func TestAgentCredentials_PurposeRoundTrip(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	body := api.AgentCredentials{
+		Value:    []byte(`{"apiKey":"sk-test"}`),
+		Metadata: &api.AgentCredentialsMetadata{Type: strPtr("api_key")},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(raw))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	s.PutAgentCredentials(putRec, putReq, "claude",
+		api.PutAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, putRec, http.StatusNoContent)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	getRec := httptest.NewRecorder()
+	s.GetAgentCredentials(getRec, getReq, "claude",
+		api.GetAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, getRec, http.StatusOK)
+
+	var got api.AgentCredentials
+	mustDecode(t, getRec.Body, &got)
+	if string(got.Value) != string(body.Value) {
+		t.Errorf("Value = %q, want %q", got.Value, body.Value)
+	}
+}
+
+// TestAgentCredentials_OmittedPurposeRoutesToOauth verifies an absent
+// purpose routes identically to the pre-purpose oauth behavior: a PUT
+// with no purpose is readable at agents/<name>/oauth (acceptance:
+// omitted purpose routes identically).
+func TestAgentCredentials_OmittedPurposeRoutesToOauth(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	body := []byte(`{"value":"YWJj"}`) // base64("abc")
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(body))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	// Omitted purpose: nil Purpose pointer.
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
+	assertStatus(t, putRec, http.StatusNoContent)
+
+	// The bytes must be readable at the canonical oauth path directly,
+	// proving the default maps to agents/claude/oauth.
+	secret, err := v.Get(context.Background(), "agents/claude/oauth")
+	if err != nil {
+		t.Fatalf("expected entry at agents/claude/oauth: %v", err)
+	}
+	if string(secret.Value) != "abc" {
+		t.Errorf("stored value = %q, want abc", secret.Value)
+	}
+
+	// And a GET with omitted purpose returns it.
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	getRec := httptest.NewRecorder()
+	s.GetAgentCredentials(getRec, getReq, "claude", api.GetAgentCredentialsParams{})
+	assertStatus(t, getRec, http.StatusOK)
+}
+
+// TestAgentCredentials_TwoPurposesIndependent verifies oauth and apikey
+// for the same agent are stored independently with no collision: each
+// GET returns the value written for that purpose (acceptance: two
+// purposes for one agent independently readable).
+func TestAgentCredentials_TwoPurposesIndependent(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	put := func(purpose string, value []byte) {
+		t.Helper()
+		raw, _ := json.Marshal(api.AgentCredentials{Value: value})
+		req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+			bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.PutAgentCredentials(rec, req, "claude",
+			api.PutAgentCredentialsParams{Purpose: purposeParam(purpose)})
+		assertStatus(t, rec, http.StatusNoContent)
+	}
+	get := func(purpose string) []byte {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+		rec := httptest.NewRecorder()
+		s.GetAgentCredentials(rec, req, "claude",
+			api.GetAgentCredentialsParams{Purpose: purposeParam(purpose)})
+		assertStatus(t, rec, http.StatusOK)
+		var got api.AgentCredentials
+		mustDecode(t, rec.Body, &got)
+		return got.Value
+	}
+
+	oauthVal := []byte(`{"oauth":"o"}`)
+	apikeyVal := []byte(`{"apikey":"a"}`)
+	put("oauth", oauthVal)
+	put("apikey", apikeyVal)
+
+	if got := get("oauth"); string(got) != string(oauthVal) {
+		t.Errorf("oauth value = %q, want %q", got, oauthVal)
+	}
+	if got := get("apikey"); string(got) != string(apikeyVal) {
+		t.Errorf("apikey value = %q, want %q", got, apikeyVal)
+	}
+}
+
+// TestAgentCredentials_MalformedPurposeReturns400 verifies a purpose
+// that escapes the agents/<name>/ namespace is rejected with
+// 400 invalid_request, mirroring the {service} validation on the user
+// endpoint (acceptance: malformed purpose rejected with 400).
+func TestAgentCredentials_MalformedPurposeReturns400(t *testing.T) {
+	bad := []string{"../x", "a/b", "OAUTH", "-leading", "with space", ""}
+	for _, p := range bad {
+		// Empty string defaults to oauth (valid), so only assert 400 for
+		// genuinely malformed non-empty values.
+		if p == "" {
+			continue
+		}
+		t.Run(p, func(t *testing.T) {
+			s := newAgentCredentialsServer(t, vault.NewMemVault())
+
+			getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+			getRec := httptest.NewRecorder()
+			s.GetAgentCredentials(getRec, getReq, "claude",
+				api.GetAgentCredentialsParams{Purpose: purposeParam(p)})
+			assertStatus(t, getRec, http.StatusBadRequest)
+			assertErrorCode(t, getRec, "invalid_request")
+
+			body := []byte(`{"value":"YWJj"}`)
+			putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+				bytes.NewReader(body))
+			putReq.Header.Set("Content-Type", "application/json")
+			putRec := httptest.NewRecorder()
+			s.PutAgentCredentials(putRec, putReq, "claude",
+				api.PutAgentCredentialsParams{Purpose: purposeParam(p)})
+			assertStatus(t, putRec, http.StatusBadRequest)
+			assertErrorCode(t, putRec, "invalid_request")
+
+			delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+			delRec := httptest.NewRecorder()
+			s.DeleteAgentCredentials(delRec, delReq, "claude",
+				api.DeleteAgentCredentialsParams{Purpose: purposeParam(p)})
+			assertStatus(t, delRec, http.StatusBadRequest)
+			assertErrorCode(t, delRec, "invalid_request")
+		})
+	}
+}
+
+// TestAgentCredentials_PurposeMissingEntryNotFound verifies the
+// not-found contract holds for a non-oauth purpose: a GET on an unseeded
+// purpose returns 404 vault_not_found even when the oauth purpose is
+// populated (no cross-purpose leakage).
+func TestAgentCredentials_PurposeMissingEntryNotFound(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	// Seed only oauth.
+	raw, _ := json.Marshal(api.AgentCredentials{Value: []byte("oauth-bytes")})
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(raw))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	s.PutAgentCredentials(putRec, putReq, "claude", api.PutAgentCredentialsParams{})
+	assertStatus(t, putRec, http.StatusNoContent)
+
+	// GET apikey must still be 404.
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	getRec := httptest.NewRecorder()
+	s.GetAgentCredentials(getRec, getReq, "claude",
+		api.GetAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, getRec, http.StatusNotFound)
+	assertErrorCode(t, getRec, "vault_not_found")
+}
+
+// TestAgentCredentials_PurposeLockedVault verifies the locked-vault
+// contract holds for a non-oauth purpose on every verb.
+func TestAgentCredentials_PurposeLockedVault(t *testing.T) {
+	lv := vault.NewLockableVault()
+	s := newAgentCredentialsServer(t, lv)
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	getRec := httptest.NewRecorder()
+	s.GetAgentCredentials(getRec, getReq, "claude",
+		api.GetAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, getRec, http.StatusLocked)
+	assertErrorCode(t, getRec, "vault_locked")
+
+	body := []byte(`{"value":"YWJj"}`)
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(body))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	s.PutAgentCredentials(putRec, putReq, "claude",
+		api.PutAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, putRec, http.StatusLocked)
+	assertErrorCode(t, putRec, "vault_locked")
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	delRec := httptest.NewRecorder()
+	s.DeleteAgentCredentials(delRec, delReq, "claude",
+		api.DeleteAgentCredentialsParams{Purpose: purposeParam("apikey")})
+	assertStatus(t, delRec, http.StatusLocked)
+	assertErrorCode(t, delRec, "vault_locked")
 }

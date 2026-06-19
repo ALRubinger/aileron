@@ -267,7 +267,7 @@ func buildSalvageCaptureFn(daemon authSpecDaemon, hostPath, vaultName string, or
 			return
 		}
 		*order = append(*order, "read")
-		_ = daemon.PutAgentCredentials(ctx, vaultName, vault.Secret{
+		_ = daemon.PutAgentCredentials(ctx, vaultName, defaultAgentCredentialPurpose, vault.Secret{
 			Value:    b,
 			Metadata: vault.Metadata{Type: "oauth_refresh_token"},
 		})
