@@ -84,6 +84,38 @@ func TestRegistry_BindUnknownNameErrors(t *testing.T) {
 	}
 }
 
+func TestRegistry_BindGhProducesConfiguredDriver(t *testing.T) {
+	r, err := NewRegistry(CaptureLoadOptions{})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	store := (&recordingStore{}).fn()
+	drv, err := r.Bind("gh", "auto", "ghcr.io/example/gh:latest", store)
+	if err != nil {
+		// New resolves a real runtime; skip where none is available rather
+		// than asserting on the environment.
+		t.Skipf("no container runtime resolvable in this environment: %v", err)
+	}
+	if drv.Runner == nil {
+		t.Error("Bind left Runner unset; New should have defaulted it")
+	}
+	if drv.RuntimeExe == "" {
+		t.Error("Bind left RuntimeExe unresolved")
+	}
+	if drv.Image != "ghcr.io/example/gh:latest" {
+		t.Errorf("Image = %q, want the caller-resolved image", drv.Image)
+	}
+	if drv.ContainerName != "aileron-auth-github" {
+		t.Errorf("ContainerName = %q", drv.ContainerName)
+	}
+	if drv.StoreAt != "user/github" || drv.Kind != "user" {
+		t.Errorf("store_at/kind = %q/%q", drv.StoreAt, drv.Kind)
+	}
+	if drv.Store == nil {
+		t.Error("Bind left Store unset")
+	}
+}
+
 func TestDefaultRegistry_LoadsGh(t *testing.T) {
 	// DefaultRegistry reads ~/.aileron/capture-descriptors.yaml (absent in
 	// the test env), so it must still load the built-in gh.
