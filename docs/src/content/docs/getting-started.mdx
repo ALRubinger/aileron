@@ -157,6 +157,12 @@ If you'd rather drive each step yourself, the single-action form `aileron action
 aileron launch claude
 ```
 
+`aileron launch` runs the agent in the Docker sandbox by default. To launch the agent directly on the host instead, add `--local`:
+
+```sh
+aileron launch --local claude
+```
+
 You'll see a banner like:
 
 ```

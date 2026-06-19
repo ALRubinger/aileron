@@ -103,7 +103,7 @@ The v4 binary set is two cooperating binaries. `aileron` is the product boundary
 
 One binary, multiple modes:
 
-- `aileron launch <agent>`: starts a session. Prepares the sandbox, registers the session, wires `aileron-mcp` into the agent, and runs the agent in the container. Holds the master key briefly during launch, then the daemon owns the session.
+- `aileron launch <agent>`: starts a session. Prepares the sandbox, registers the session, wires `aileron-mcp` into the agent, and runs the agent in the container. The Docker sandbox is the default; `--local` launches the agent directly on the host instead. Holds the master key briefly during launch, then the daemon owns the session.
 - The local daemon (auto-spawned, long-lived): hosts the management plane (sessions, audit, policy, approvals, the connector and action stores) and the data plane (HTTPS proxy plus credential mediation) as logical components. Single-user v4 colocates them all in one process; v4.x and v5 split them.
 - `aileron status`, `aileron approval`, `aileron audit`, `aileron actions`, `aileron vault`, `aileron sessions`: user-facing CLI subcommands. Talk to the daemon over HTTPS with the session token.
 

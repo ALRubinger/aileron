@@ -84,9 +84,10 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		launchFlags := flag.NewFlagSet("launch", flag.ContinueOnError)
 		launchFlags.SetOutput(stderr)
 		logLevel := launchFlags.String("log-level", "info", "Log level: trace, debug, info, warn, error")
-		sandboxRuntime := launchFlags.String("sandbox", "off", "Prepare sandbox image with runtime: off, auto, or docker")
+		sandboxRuntime := launchFlags.String("sandbox", "docker", "Prepare sandbox image with runtime: auto or docker (default; use --local for host launch)")
+		local := launchFlags.Bool("local", false, "Launch the agent directly on the host instead of in the Docker sandbox")
 		sandboxBuild := launchFlags.String("sandbox-build", "auto", "Sandbox build policy during launch: auto, always, or never")
-		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for --sandbox=docker)")
+		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for the Docker sandbox)")
 		hostLogin := launchFlags.String("host-login", "auto", "Host-side credential acquisition on vault miss: auto, on, or off (off forces in-container login)")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
@@ -94,7 +95,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] [--host-login=auto|on|off] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--local] [--sandbox=auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] [--host-login=auto|on|off] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
@@ -116,6 +117,24 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
+		}
+
+		// `aileron launch` defaults to the Docker sandbox; --local forces a
+		// host launch. Combining --local with an explicit --sandbox is a
+		// fail-fast contradiction. --sandbox stays reserved for selecting a
+		// future container runtime, so it never means "host".
+		sandboxExplicit := false
+		launchFlags.Visit(func(f *flag.Flag) {
+			if f.Name == "sandbox" {
+				sandboxExplicit = true
+			}
+		})
+		if *local {
+			if sandboxExplicit {
+				fmt.Fprintln(stderr, "error: --local conflicts with --sandbox; --local launches on the host, --sandbox selects a container runtime")
+				return 1
+			}
+			*sandboxRuntime = "off"
 		}
 
 		// Capture cwd so the daemon's session record carries working_dir
@@ -188,8 +207,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "aileron — the execution layer for AI coding agents")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  aileron launch [--sandbox=<runtime>] [--sandbox-build=<policy>] <agent> [args...]")
-	fmt.Fprintln(w, "                                      Launch an AI coding agent connected to the Aileron daemon")
+	fmt.Fprintln(w, "  aileron launch [--local] [--sandbox=<runtime>] [--sandbox-build=<policy>] <agent> [args...]")
+	fmt.Fprintln(w, "                                      Launch an AI coding agent in the Docker sandbox (default) or on the host with --local")
 	fmt.Fprintln(w, "  aileron vault init                 Create the local encrypted vault with a passphrase")
 	fmt.Fprintln(w, "  aileron auth <agent> --import-from-host  Seed the vault from an authenticated host install (claude|codex)")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
@@ -466,6 +485,20 @@ func launchFlagTakesValue(name string) bool {
 	}
 }
 
+// launchFlagIsBool reports whether name is an aileron launch flag that
+// takes no value (a boolean toggle). Trailing bool flags must be
+// consumed too, so `aileron launch claude --local` behaves identically
+// to `aileron launch --local claude`; otherwise the token would fall
+// through to agentArgs and leak to the agent.
+func launchFlagIsBool(name string) bool {
+	switch name {
+	case "local":
+		return true
+	default:
+		return false
+	}
+}
+
 // parseLaunchFlagToken extracts a flag name and optional inline value
 // from a single- or double-dash token. It returns name == "" for any
 // non-flag token, including a bare "-" or "--".
@@ -510,6 +543,17 @@ func applyTrailingLaunchFlags(fs *flag.FlagSet, tail []string) ([]string, error)
 				}
 				value = tail[i+1]
 				i++
+			}
+			if err := fs.Set(name, value); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if name != "" && launchFlagIsBool(name) {
+			// A bool flag may still carry an inline value (--local=true).
+			// Default to "true" for the bare form.
+			if !hasValue {
+				value = "true"
 			}
 			if err := fs.Set(name, value); err != nil {
 				return nil, err
