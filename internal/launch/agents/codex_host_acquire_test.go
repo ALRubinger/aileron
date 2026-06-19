@@ -224,6 +224,72 @@ func fakeDeviceAuthServer(t *testing.T, st *codexDeviceServerState) *httptest.Se
 	}))
 }
 
+// codexErrTransport fails requests, modeling a host that loses network
+// connectivity to auth.openai.com. failPath, when set, restricts the
+// failure to requests whose path ends with that suffix and proxies all
+// others to base (so a later-stage transport error can be exercised).
+type codexErrTransport struct {
+	base     http.RoundTripper
+	failPath string
+}
+
+func (rt codexErrTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.failPath == "" || strings.HasSuffix(req.URL.Path, rt.failPath) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return rt.base.RoundTrip(req)
+}
+
+func TestCodexHostAcquire_TransportErrorIsNonFatal(t *testing.T) {
+	restore := agents.SetCodexDeviceSleepForTest(func(context.Context, time.Duration) error { return nil })
+	defer restore()
+
+	fb := codexHostAcquireBinding(t)
+	secret, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:        context.Background(),
+		HTTPClient: &http.Client{Transport: codexErrTransport{}},
+		Browser:    &recordingOpener{},
+		Out:        &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("expected an acquire error when the host cannot reach auth.openai.com")
+	}
+	if len(secret.Value) != 0 {
+		t.Error("Secret must be empty on a transport failure")
+	}
+}
+
+// TestCodexHostAcquire_LateStageTransportErrors covers the poll and
+// token-exchange transport-error paths: connectivity that survives the
+// initial device-code request but drops before the poll or the exchange
+// must still surface a clean, non-fatal acquire error.
+func TestCodexHostAcquire_LateStageTransportErrors(t *testing.T) {
+	restore := agents.SetCodexDeviceSleepForTest(func(context.Context, time.Duration) error { return nil })
+	defer restore()
+
+	for _, failPath := range []string{"/deviceauth/token", "/oauth/token"} {
+		t.Run(failPath, func(t *testing.T) {
+			srv := fakeDeviceAuthServer(t, &codexDeviceServerState{})
+			defer srv.Close()
+			u, _ := url.Parse(srv.URL)
+			client := &http.Client{Transport: codexErrTransport{
+				base:     codexRedirectTransport{base: u},
+				failPath: failPath,
+			}}
+			fb := codexHostAcquireBinding(t)
+			_, err := fb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+				Ctx:        context.Background(),
+				HTTPClient: client,
+				Browser:    &recordingOpener{},
+				Out:        &bytes.Buffer{},
+			})
+			if err == nil {
+				t.Fatalf("expected an acquire error when the transport fails at %s", failPath)
+			}
+		})
+	}
+}
+
 func codexHostAcquireBinding(t *testing.T) launch.FileBinding {
 	t.Helper()
 	fb := agents.Codex{}.AuthSpec().FileBindings[0]
@@ -683,6 +749,24 @@ func TestCodexHostAcquire_MissingIDTokenLeavesAccountIDEmpty(t *testing.T) {
 	}
 	if env.Tokens.AccountID != "" {
 		t.Errorf("account_id = %q, want empty when id_token is absent", env.Tokens.AccountID)
+	}
+}
+
+// TestCodexDeviceSleep exercises the production poll-loop sleep seam:
+// it returns nil when the timer elapses and the context error when the
+// wait is cancelled (the path a user killing the launch mid-poll takes).
+func TestCodexDeviceSleep(t *testing.T) {
+	// Timer-completes path: a tiny duration returns nil promptly.
+	if err := agents.CodexDeviceSleepForTest(context.Background(), time.Millisecond); err != nil {
+		t.Errorf("sleep returned %v, want nil when the timer elapses", err)
+	}
+
+	// Cancellation path: an already-cancelled context returns its error
+	// before the (long) timer could fire.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := agents.CodexDeviceSleepForTest(ctx, time.Hour); err == nil {
+		t.Error("sleep returned nil, want the context error when cancelled")
 	}
 }
 

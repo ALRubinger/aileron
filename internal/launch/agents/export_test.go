@@ -27,3 +27,12 @@ func SetCodexDeviceSleepForTest(fn func(context.Context, time.Duration) error) (
 func CodexAccountIDFromIDTokenForTest(idToken string) (string, error) {
 	return codexAccountIDFromIDToken(idToken)
 }
+
+// CodexDeviceSleepForTest invokes the PRODUCTION sleep seam (not a test
+// override) so the real timer/context-cancellation behavior is exercised
+// directly. Tests that drive the poll loop swap the seam out via
+// SetCodexDeviceSleepForTest; this shim lets a separate test cover the
+// default implementation itself.
+func CodexDeviceSleepForTest(ctx context.Context, d time.Duration) error {
+	return codexDeviceSleep(ctx, d)
+}
