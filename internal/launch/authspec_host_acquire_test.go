@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,7 +85,12 @@ func TestPrepareAuthSpec_HostAcquireSeedsVaultAndRenders(t *testing.T) {
 		}},
 	}
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	// Pass a real stderr writer so the launcher's default wiring of the
+	// acquirer's Out (Out: stderr in prepareAuthSpec) is exercised, not
+	// just defaulted to nil. A write-only host flow (Codex device-auth)
+	// surfaces its user_code via this writer.
+	stderr := &bytes.Buffer{}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -101,6 +107,9 @@ func TestPrepareAuthSpec_HostAcquireSeedsVaultAndRenders(t *testing.T) {
 	}
 	if spy.gotDeps.HTTPClient == nil {
 		t.Errorf("acquirer deps HTTPClient is nil; launcher should supply a timed client")
+	}
+	if spy.gotDeps.Out != stderr {
+		t.Errorf("acquirer deps Out = %v, want the launcher's stderr writer (Out: stderr default wiring)", spy.gotDeps.Out)
 	}
 
 	if len(daemon.puts) != 1 {
