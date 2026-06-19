@@ -115,9 +115,9 @@ The `put`, `delete`, and `list` verbs talk to the running daemon and operate onl
 | Command | Purpose | Ratified by |
 |---|---|---|
 | `aileron auth <agent> --import-from-host` | Seed the vault from an already-authenticated host install of claude or codex. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
-| `aileron auth github [--runtime <auto\|docker>] [--image <ref>]` | Run gh's OAuth device-authorization flow inside a gh-bearing container and store the captured bearer token at `user/github`. HTTPS only; no refresh machinery. | — |
+| `aileron auth github [--runtime <auto\|docker>] [--image <ref>]` | Run gh's OAuth device-authorization flow inside a gh-bearing container and store the captured bearer token at `user/github`. HTTPS only; no refresh machinery. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
 
-`aileron auth github` is a one-time acquisition flow: it drives `gh auth login` and `gh auth token` in the same container, then PUTs the token to the user-level `user/github` vault namespace through the daemon.
+`aileron auth github` is a one-time acquisition flow. The `github` verb resolves the shipped `gh` capture descriptor by name and drives the generic capture flow. That flow runs `gh auth login` and `gh auth token` in the same container, then PUTs the token to the user-level `user/github` vault namespace through the daemon. The provider knowledge ships as a trusted YAML descriptor in the auth domain, so adding another tool is a new descriptor rather than new code.
 
 ## Utility
 
