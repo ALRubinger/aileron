@@ -414,6 +414,14 @@ func claudeHostedCallbackAcquire(ctx context.Context, deps launch.HostAcquireDep
 	}
 
 	authURL := buildClaudeAuthorizeURL(pkce, state)
+	// Surface the authorize URL BEFORE opening the browser, so a headless
+	// host (or a failed browser open) still gives the user a copyable
+	// record of what was launched. Mirrors the Codex device flow.
+	if deps.Out != nil {
+		fmt.Fprintf(deps.Out,
+			"To authorize Claude, open %s in your browser and paste back the code shown.\n",
+			authURL)
+	}
 	if deps.Browser != nil {
 		if err := deps.Browser.Open(authURL); err != nil {
 			// Opening the browser failed (headless host, no opener).
