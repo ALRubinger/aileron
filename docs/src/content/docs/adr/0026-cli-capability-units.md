@@ -100,7 +100,7 @@ Both central files were removed under [#1323](https://github.com/ALRubinger/aile
 
 The following are explicitly forward-declared and not done in this umbrella.
 
-- `aileron auth <cli>` capture-image convergence, so the standalone user-level acquisition command resolves a CLI's acquisition from the same unit the launcher reads.
+- `aileron auth <cli>` capture-image convergence for a Feature-installed non-base CLI. The standalone `aileron auth github` command already resolves gh's acquisition from the same image unit layer the launcher reads, because gh installs in the base image that `aileron auth` inspects. A CLI installed by a non-base Feature is not yet reachable by `aileron auth`, so its acquisition cannot converge on its unit this way.
 - The acquisition `direct-token` mode, for tools that supply a token directly rather than acquiring one through an interactive login (the `linear-pp-cli` case).
 - The `state` and cross-sandbox cache plane, absorbing the cache-persistence ask tracked in [#1190](https://github.com/ALRubinger/aileron/issues/1190).
 - Third-party untrusted units and the trust tiers that gate them, so a unit from an untrusted Feature is held to a different bar than a trusted in-house one.
