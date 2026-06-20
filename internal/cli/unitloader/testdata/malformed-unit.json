@@ -1,0 +1,18 @@
+[
+  {
+    "id": "broken",
+    "customizations": {
+      "aileron": {
+        "cli": {
+          "name": "broken",
+          "key": "user/github",
+          "store_at": "user/github",
+          "acquisition": {
+            "mode": "device-flow",
+            "container_name": "aileron-auth-broken"
+          }
+        }
+      }
+    }
+  }
+]

@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/ALRubinger/aileron/internal/auth/capture"
+	"github.com/ALRubinger/aileron/internal/cli/unitloader"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -148,13 +149,45 @@ var isCaptureDescriptor = func(name string) bool {
 	return ok
 }
 
+// imageCaptureLayers resolves the image-derived CLI-unit capture layer
+// (#1322) for the resolved acquisition image. Each CLI Feature in the image
+// carries its acquisition as data in the image's devcontainer.metadata label;
+// this fans those units into a capture-descriptor layer additive to the
+// embedded defaults (built-in < unit-derived < user). An image whose label
+// cannot be read (absent locally, no label) is a clean no-op returning a nil
+// layer, preserving the embedded-defaults-only registry. A present-but-
+// malformed unit is a loud error so a broken Feature fails the command rather
+// than silently shipping nothing. It is a package var so a test substitutes a
+// fake without a container runtime.
+var imageCaptureLayers = func(runtime, image string) ([]capture.CaptureDescriptor, error) {
+	captureLayer, _, err := unitloader.LayersFromImage(
+		context.Background(), sandboxcontainer.DefaultRunner(), runtime, image)
+	return captureLayer, err
+}
+
+// imageCaptureRegistry builds a capture registry that additively includes the
+// image-derived unit layer for the resolved acquisition image, on top of the
+// embedded defaults and the standard user layer. It is the production driver
+// constructor's registry: the unit layer is read for the same image the
+// driver will run against. It is a package var so tests substitute a fake.
+var imageCaptureRegistry = func(runtime, image string) (*capture.Registry, error) {
+	extra, err := imageCaptureLayers(runtime, image)
+	if err != nil {
+		return nil, err
+	}
+	opts := capture.DefaultCaptureLoadOptions()
+	opts.ExtraDescriptors = extra
+	return capture.NewRegistry(opts)
+}
+
 // newCaptureDriver builds a ready capture.Driver for the named descriptor.
 // It is a package var so tests substitute a fake container runner without
 // driving a real container or reaching the tool's login backend; the
 // production implementation resolves the runtime, the image, and the
-// descriptor from the embedded + user registry, then binds the store seam.
+// descriptor from the embedded + user registry plus the image-derived unit
+// layer (#1322) for the resolved image, then binds the store seam.
 var newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
-	registry, err := captureRegistry()
+	registry, err := imageCaptureRegistry(runtime, image)
 	if err != nil {
 		return nil, err
 	}

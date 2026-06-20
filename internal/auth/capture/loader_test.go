@@ -3,6 +3,7 @@ package capture
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -110,4 +111,91 @@ func names(ds []CaptureDescriptor) []string {
 		out[i] = d.Name
 	}
 	return out
+}
+
+// validDescriptor builds a minimal valid CaptureDescriptor for the named
+// tool, used to assemble in-memory extra and user layers in precedence tests.
+func validDescriptor(name, container string) CaptureDescriptor {
+	return CaptureDescriptor{
+		Version:       CaptureSchemaVersion,
+		Name:          name,
+		ContainerName: container,
+		LoginCmd:      []string{name, "auth", "login"},
+		TokenCmd:      []string{name, "auth", "token"},
+		StoreAt:       "user/" + name,
+		Kind:          "user",
+	}
+}
+
+// TestLoadCaptureDescriptors_ExtraLayerPrecedence pins the
+// built-in < unit-derived < user ordering for the in-memory extra layer
+// (#1322). An extra descriptor overrides a built-in of the same name, a user
+// descriptor overrides the extra layer, and an unset extra layer reproduces
+// the built-in-only result exactly.
+func TestLoadCaptureDescriptors_ExtraLayerPrecedence(t *testing.T) {
+	t.Run("extra overrides built-in of same name", func(t *testing.T) {
+		extra := []CaptureDescriptor{validDescriptor("gh", "unit-derived-container")}
+		byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{ExtraDescriptors: extra})
+		if err != nil {
+			t.Fatalf("LoadCaptureDescriptors: %v", err)
+		}
+		if byName["gh"].ContainerName != "unit-derived-container" {
+			t.Errorf("gh ContainerName = %q, want the unit-derived override", byName["gh"].ContainerName)
+		}
+	})
+
+	t.Run("user overrides extra of same name", func(t *testing.T) {
+		dir := t.TempDir()
+		userPath := filepath.Join(dir, "capture-descriptors.yaml")
+		user := `version: v1
+name: gh
+container_name: user-container
+login_cmd: [gh, auth, login]
+token_cmd: [gh, auth, token]
+store_at: user/github
+kind: user
+`
+		if err := os.WriteFile(userPath, []byte(user), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		extra := []CaptureDescriptor{validDescriptor("gh", "unit-derived-container")}
+		byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{
+			ExtraDescriptors: extra,
+			UserPath:         userPath,
+		})
+		if err != nil {
+			t.Fatalf("LoadCaptureDescriptors: %v", err)
+		}
+		if byName["gh"].ContainerName != "user-container" {
+			t.Errorf("gh ContainerName = %q, want the user override (highest precedence)", byName["gh"].ContainerName)
+		}
+	})
+
+	t.Run("extra adds a new tool alongside built-in", func(t *testing.T) {
+		extra := []CaptureDescriptor{validDescriptor("linear", "aileron-auth-linear")}
+		byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{ExtraDescriptors: extra})
+		if err != nil {
+			t.Fatalf("LoadCaptureDescriptors: %v", err)
+		}
+		if _, ok := byName["gh"]; !ok {
+			t.Error("built-in gh must remain present alongside the unit-derived layer")
+		}
+		if _, ok := byName["linear"]; !ok {
+			t.Error("unit-derived linear must be added")
+		}
+	})
+
+	t.Run("nil extra layer reproduces built-in-only set", func(t *testing.T) {
+		base, _, err := LoadCaptureDescriptors(CaptureLoadOptions{})
+		if err != nil {
+			t.Fatalf("baseline load: %v", err)
+		}
+		withNil, _, err := LoadCaptureDescriptors(CaptureLoadOptions{ExtraDescriptors: nil})
+		if err != nil {
+			t.Fatalf("nil-extra load: %v", err)
+		}
+		if !reflect.DeepEqual(base, withNil) {
+			t.Errorf("nil ExtraDescriptors changed the set:\nbase=%#v\nwithNil=%#v", base, withNil)
+		}
+	})
 }

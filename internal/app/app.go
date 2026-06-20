@@ -18,9 +18,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/auth"
+	"github.com/ALRubinger/aileron/internal/auth/capture"
 	githubauth "github.com/ALRubinger/aileron/internal/auth/github"
 	googleauth "github.com/ALRubinger/aileron/internal/auth/google"
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/cli/unitloader"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/connector"
@@ -32,6 +34,8 @@ import (
 	"github.com/ALRubinger/aileron/internal/policy"
 	"github.com/ALRubinger/aileron/internal/proxybinding"
 	"github.com/ALRubinger/aileron/internal/sandbox"
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
@@ -41,6 +45,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/store/postgres"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -224,6 +229,49 @@ func newVaultUnlockedCh(startVaultLocked bool) chan struct{} {
 		close(ch)
 	}
 	return ch
+}
+
+// daemonUnitLayers resolves the image-derived CLI-unit layers (#1322) for the
+// daemon's default sandbox image. It reads the image's devcontainer.metadata
+// label and projects each Feature's customizations.aileron.cli unit into a
+// capture-descriptor layer and a proxybinding-entry layer, additive to the
+// embedded defaults.
+//
+// The daemon binding table is built once at startup and is image-independent
+// today, so the layer is resolved for the daemon's default sandbox base image.
+// When the image is not present locally or carries no label the read returns
+// "" and the layer is empty, a clean no-op preserving today's passthrough. A
+// present-but-malformed unit is a loud error so a broken Feature fails startup
+// rather than silently shipping nothing.
+//
+// It is a package var so a test can substitute a fake without driving a real
+// container runtime; the production implementation resolves the default base
+// image and the default runner.
+var daemonUnitLayers = func(ctx context.Context) ([]capture.CaptureDescriptor, []proxybinding.Entry, error) {
+	image := sandboxcomposition.BaseImage(version.Version)
+	return unitloader.LayersFromImage(ctx, sandboxcontainer.DefaultRunner(), sandboxcontainer.DefaultRuntime, image)
+}
+
+// assembleHostBindings builds the daemon's host->credential binding table:
+// the embedded built-in defaults, the image-derived unit layer (#1322), and
+// the user override layer, merged at built-in < unit-derived < user
+// precedence and adapted to the canonical binding table. The unit layer is
+// purely additive; an image whose label cannot be read contributes nothing
+// and preserves today's defaults-only table. A present-but-malformed unit, or
+// a malformed descriptor in any layer, fails construction loudly rather than
+// silently shipping an empty (passthrough) table.
+func assembleHostBindings(ctx context.Context) (binding.HostBindings, error) {
+	_, sealingLayer, err := daemonUnitLayers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("assemble host bindings: load image unit layer: %w", err)
+	}
+	opts := proxybinding.DefaultLoadOptions()
+	opts.ExtraEntries = sealingLayer
+	table, err := proxybinding.LoadHostBindings(opts)
+	if err != nil {
+		return nil, fmt.Errorf("assemble host bindings: %w", err)
+	}
+	return table, nil
 }
 
 // NewHandlerWithConfig is the configurable entry point. The launcher
@@ -462,9 +510,20 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// unauthenticated request behaves exactly as today's passthrough. A
 	// malformed descriptor (fail-open we reject) surfaces here rather than
 	// silently shipping an empty (passthrough) table.
-	server.hostBindings, err = proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
+	//
+	// The image-derived unit layer (#1322) is additive: each CLI Feature in
+	// the daemon's default sandbox image carries its sealing as data in the
+	// image's devcontainer.metadata label, fanned out here between the
+	// built-in defaults and the user layer (built-in < unit-derived < user).
+	// An image whose label cannot be read (absent locally, no label) is a
+	// clean no-op that preserves today's defaults-only table. A
+	// present-but-malformed unit fails construction loudly, matching the
+	// malformed-descriptor posture above. gh's unit is byte-equivalent to the
+	// embedded github.yaml default it duplicates, so the merged table is
+	// identical until #1323 removes the central file.
+	server.hostBindings, err = assembleHostBindings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("assemble host bindings: %w", err)
+		return nil, err
 	}
 
 	// --- Scope-drift detection (#726) ---

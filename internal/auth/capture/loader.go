@@ -17,15 +17,28 @@ type CaptureLoadOptions struct {
 	// the highest-precedence layer. It overrides built-in descriptors with
 	// the same name. Empty or absent contributes nothing.
 	UserPath string
+
+	// ExtraDescriptors is the in-memory unit-derived layer applied between
+	// the built-in defaults and the user layer (built-in < unit-derived <
+	// user). It carries descriptors projected from a sandbox image's
+	// devcontainer.metadata CLI units (#1322). A descriptor here overrides a
+	// built-in of the same name and is overridden by a user descriptor of the
+	// same name. Nil or empty contributes nothing, so a caller that sets it to
+	// nil reproduces today's two-layer behavior exactly.
+	ExtraDescriptors []CaptureDescriptor
 }
 
-// LoadCaptureDescriptors merges the two configuration layers (built-in
-// defaults, then user) into a single validated set of descriptors keyed on
-// name. This mirrors the layered config convention used elsewhere: the
-// later layer overrides the earlier one per name, so a user descriptor can
-// replace a shipped tool descriptor for the same name without editing it.
+// LoadCaptureDescriptors merges the configuration layers (built-in
+// defaults, then the optional in-memory unit-derived layer, then user) into
+// a single validated set of descriptors keyed on name. This mirrors the
+// layered config convention used elsewhere: the later layer overrides the
+// earlier one per name, so a user descriptor can replace a shipped tool
+// descriptor for the same name without editing it.
 //
-// Precedence is strictly built-in < user. The returned map is keyed on
+// Precedence is strictly built-in < unit-derived < user. The unit-derived
+// layer (opts.ExtraDescriptors) is the image-projected layer; an unset
+// (nil) extra layer is a no-op that reproduces the two-layer result. The
+// returned map is keyed on
 // descriptor name. The returned slice is the same set ordered
 // deterministically by name so callers that need a stable order (help
 // output, tests) get a reproducible result.
@@ -46,6 +59,11 @@ func LoadCaptureDescriptors(opts CaptureLoadOptions) (map[string]CaptureDescript
 		return nil, nil, fmt.Errorf("capture: load built-in defaults: %w", err)
 	}
 	applyCaptureLayer(merged, builtin)
+
+	// The unit-derived layer sits between built-in and user. It is already
+	// validated (each descriptor is projected from a parsed, validated unit),
+	// so it is applied directly without re-parsing.
+	applyCaptureLayer(merged, opts.ExtraDescriptors)
 
 	if opts.UserPath != "" {
 		user, err := parseCaptureLayerFile(opts.UserPath)

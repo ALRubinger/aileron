@@ -464,6 +464,44 @@ func BakedMCPVersion(ctx context.Context, runner Runner, runtimeName, image stri
 	return out
 }
 
+// DevcontainerMetadataLabel is the OCI image label the devcontainer CLI
+// stamps on a built image to carry the merged per-Feature metadata array
+// (umbrella #1319). Each element of that JSON array may carry a
+// customizations.aileron.cli unit declaring one CLI tool's credential
+// acquisition and sealing. The host unit loader reads this label to fan
+// those units out to the capture registry and the proxybinding table. The
+// label name is the devcontainer CLI's own convention; keep this string in
+// sync with the published sandbox image (verified in PR #1350).
+const DevcontainerMetadataLabel = "devcontainer.metadata"
+
+// ImageMetadataLabel reports the raw devcontainer.metadata OCI label value
+// for image, read via `<runtime> image inspect`. It returns the trimmed
+// label value, or "" when the image carries no such label, is not present
+// locally, or the inspect fails. Callers treat "" as "no unit to load" and
+// degrade to the embedded defaults only, so an inspect error is deliberately
+// not propagated as fatal: "cannot determine" degrades to "no unit-derived
+// layer", never a broken startup. This mirrors BakedMCPVersion's fail-soft
+// posture and inspect plumbing.
+func ImageMetadataLabel(ctx context.Context, runner Runner, runtimeName, image string) string {
+	if runner == nil {
+		runner = execRunner{}
+	}
+	var stdout bytes.Buffer
+	format := "{{ index .Config.Labels \"" + DevcontainerMetadataLabel + "\" }}"
+	args := []string{"image", "inspect", "--format", format, image}
+	if err := runner.Run(ctx, runtimeName, args, &stdout, io.Discard); err != nil {
+		return ""
+	}
+	out := strings.TrimSpace(stdout.String())
+	// An image with no labels at all renders the missing key as the Go
+	// template "<no value>" sentinel rather than an empty string; treat it
+	// as "no metadata".
+	if out == "<no value>" {
+		return ""
+	}
+	return out
+}
+
 // Run starts a one-shot sandbox container for an agent command.
 func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if opts.Image == "" {
