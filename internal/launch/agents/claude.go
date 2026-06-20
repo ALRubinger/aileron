@@ -39,6 +39,27 @@ func NewClaude(mode ClaudeAuthMode) Claude { return Claude{authMode: mode} }
 func (c Claude) Name() string          { return "claude" }
 func (c Claude) BinaryNames() []string { return []string{"claude"} }
 
+// AuthMode returns the configured Claude auth mode. This is a display-only
+// read-back of the value passed to NewClaude (the zero value is
+// ClaudeAuthModeSubscription). It exists so the CLI can confirm which mode
+// it threaded onto the launched Claude and so the launcher can surface a
+// per-mode banner; it does NOT participate in AuthSpec selection (that
+// branching lives in AuthSpec on the unexported authMode field).
+func (c Claude) AuthMode() ClaudeAuthMode { return c.authMode }
+
+// AuthModeDisplay maps Claude's auth mode onto the launch package's
+// agent-agnostic display enum. The launch package cannot import this
+// package (agents already imports launch), so the launcher reads the mode
+// back through a launch-local interface that returns launch.AuthModeDisplay
+// rather than the agents-defined ClaudeAuthMode. This is display-only and
+// never feeds AuthSpec selection.
+func (c Claude) AuthModeDisplay() launch.AuthModeDisplay {
+	if c.authMode == ClaudeAuthModeAPIKey {
+		return launch.AuthModeDisplayAPIKey
+	}
+	return launch.AuthModeDisplaySubscription
+}
+
 // Args tells Claude Code how aggressively to auto-approve, branching on
 // the launch trust boundary.
 //

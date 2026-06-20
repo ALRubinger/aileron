@@ -56,6 +56,31 @@ For a quick manual check after changing a binding's container path, mount strate
 3. Confirm the agent starts **without** prompting for login. A login prompt means the in-container read failed (wrong path, mount mode, or envelope).
 4. Trigger or wait for an in-container credential rotation, exit the container cleanly, and re-run the launch. The second launch should also start silently, proving Capture round-tripped the rotation back to the vault.
 
+## Claude auth mode selection
+
+Claude Code supports two credential shapes: a Pro/Max OAuth subscription (`agents/claude/oauth`, a FileBinding) and a raw Anthropic API key (`agents/claude/apikey`, an EnvBinding rendering `ANTHROPIC_API_KEY`). The `--claude-auth` launch flag selects which one a Claude launch uses:
+
+```
+aileron launch --claude-auth=subscription claude   # Pro/Max OAuth
+aileron launch --claude-auth=api-key claude         # ANTHROPIC_API_KEY
+```
+
+The flag is position-independent like the other `aileron launch` flags (`aileron launch claude --claude-auth=api-key` is equivalent). Only `subscription` and `api-key` are valid; any other non-empty value fails the launch with a usage error.
+
+Unlike the tri-state launch flags, `--claude-auth` defaults to the empty string, which means **unresolved**:
+
+- On an interactive terminal, an empty flag triggers a one-line first-run prompt asking which mode to use (Enter selects subscription).
+- With no TTY (a pipe or CI), an empty flag defaults to subscription **without reading stdin**, so a piped stdin destined for the agent is never consumed.
+
+On a sandbox launch the launcher prints exactly one active-mode banner line to stderr so the selected mode is visible at a glance:
+
+```
+Claude auth mode: subscription (Pro/Max)
+Claude auth mode: API key
+```
+
+The banner is suppressed on host launch (`--local`), where the AuthSpec is not materialized and the mode is inert. The flag only affects the `claude` agent; every other agent ignores it and never prompts.
+
 ## First launch: in-container login seeds the vault
 
 When the vault has no entry for an agent, the launcher prints
