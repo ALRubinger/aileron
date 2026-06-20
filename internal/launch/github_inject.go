@@ -336,6 +336,33 @@ func hasUsableCredential(ctx context.Context, daemon userCredsDaemon, credential
 // the central defaults-only table (every other community profile still ships
 // as a default). A malformed descriptor surfaces an error rather than
 // degrading to an empty plant set.
+// resolveGitHubSentinelSwapBindings reads gh's image-derived sealing layer
+// and returns the sentinel-swap subset the planter plants sentinels for. It
+// is the launch-side mirror of the daemon's assembleHostBindings: it resolves
+// the unit layer off the image's devcontainer.metadata label (#1323), applies
+// it as the unit-derived proxybinding layer, and filters to sentinel-swap.
+//
+// An empty plan runtime maps to sandboxcontainer.DefaultRuntime, matching the
+// daemon's DefaultRuntime-driven resolution (P0-B). A missing or unreadable
+// image label yields a nil layer (clean no-op preserving the central defaults
+// table). A present-but-malformed unit, or a malformed sealing entry, fails
+// loudly rather than silently shipping no sentinel.
+func resolveGitHubSentinelSwapBindings(ctx context.Context, planRuntime, image string) ([]binding.HostBinding, error) {
+	runtime := planRuntime
+	if runtime == "" {
+		runtime = sandboxcontainer.DefaultRuntime
+	}
+	_, sealingLayer, err := launchUnitLayers(ctx, runtime, image)
+	if err != nil {
+		return nil, fmt.Errorf("resolve image gh unit layer: %w", err)
+	}
+	bindings, err := sentinelSwapHostBindings(sealingLayer)
+	if err != nil {
+		return nil, fmt.Errorf("assemble sentinel-swap host bindings: %w", err)
+	}
+	return bindings, nil
+}
+
 func sentinelSwapHostBindings(sealingLayer []proxybinding.Entry) ([]binding.HostBinding, error) {
 	opts := proxybinding.DefaultLoadOptions()
 	opts.ExtraEntries = sealingLayer
