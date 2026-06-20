@@ -481,7 +481,7 @@ func claudeHostedCallbackAcquire(ctx context.Context, deps launch.HostAcquireDep
 	// record of what was launched. Mirrors the Codex device flow.
 	if deps.Out != nil {
 		fmt.Fprintf(deps.Out,
-			"To authorize Claude, open %s in your browser and paste back the code shown.\n",
+			"To authorize Claude, open this link\n\n%s\n\nin your browser and paste back the code shown.\n",
 			authURL)
 	}
 	if deps.Browser != nil {
