@@ -143,6 +143,32 @@ func TestClaudeHostAcquire_HostedCallbackHappyPath(t *testing.T) {
 	if !strings.Contains(out.String(), "client_id=9d1c250a") {
 		t.Errorf("Out missing the authorize URL; got %q", out.String())
 	}
+	// The URL must sit alone on its own line, fenced by blank lines above
+	// and below, so a user can select/copy it without dragging surrounding
+	// prose (#1385). Find the line carrying the URL and assert it is exactly
+	// the URL, with a blank line immediately before and after.
+	{
+		lines := strings.Split(out.String(), "\n")
+		urlLine := -1
+		for i, ln := range lines {
+			if strings.Contains(ln, "client_id=9d1c250a") {
+				urlLine = i
+				break
+			}
+		}
+		if urlLine < 0 {
+			t.Fatalf("Out missing the authorize URL line; got %q", out.String())
+		}
+		if strings.TrimSpace(lines[urlLine]) != lines[urlLine] || strings.Contains(lines[urlLine], " ") {
+			t.Errorf("URL line carries prose; want bare URL, got %q", lines[urlLine])
+		}
+		if urlLine == 0 || strings.TrimSpace(lines[urlLine-1]) != "" {
+			t.Errorf("URL line not fenced by a blank line above; got %q", out.String())
+		}
+		if urlLine+1 >= len(lines) || strings.TrimSpace(lines[urlLine+1]) != "" {
+			t.Errorf("URL line not fenced by a blank line below; got %q", out.String())
+		}
+	}
 	// The profile fetch must present the freshly-exchanged access token
 	// as a Bearer credential; that is what authorizes reading the
 	// subscription tier (#1304).
