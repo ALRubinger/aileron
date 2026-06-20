@@ -67,10 +67,19 @@ aileron launch --claude-auth=api-key claude         # ANTHROPIC_API_KEY
 
 The flag is position-independent like the other `aileron launch` flags (`aileron launch claude --claude-auth=api-key` is equivalent). Only `subscription` and `api-key` are valid; any other non-empty value fails the launch with a usage error.
 
-Unlike the tri-state launch flags, `--claude-auth` defaults to the empty string, which means **unresolved**:
+Unlike the tri-state launch flags, `--claude-auth` defaults to the empty string, which means **unresolved**. An explicit flag always wins and is resolved before anything else. On an empty flag the launcher first consults the vault so it does not re-ask a question a stored credential already answers:
+
+- If only the subscription slot (`agents/claude/oauth`) is populated, the launch resolves to subscription.
+- If only the api-key slot (`agents/claude/apikey`) is populated, the launch resolves to api-key. This holds with no TTY too, so a stored key on a CI box launches in api-key mode without re-asking.
+- If both slots are populated, the launch resolves to subscription (the documented default tie-break).
+- A populated slot never prompts and never reads stdin, even on an interactive terminal.
+
+Only when **neither** slot is populated does the launcher fall back to the prior first-run behavior:
 
 - On an interactive terminal, an empty flag triggers a one-line first-run prompt asking which mode to use (Enter selects subscription).
 - With no TTY (a pipe or CI), an empty flag defaults to subscription **without reading stdin**, so a piped stdin destined for the agent is never consumed.
+
+The vault probe runs against the already-unlocked daemon and is best-effort. If the daemon is unreachable the launch falls back to the prompt-or-default behavior above rather than failing.
 
 On a sandbox launch the launcher prints exactly one active-mode banner line to stderr so the selected mode is visible at a glance:
 

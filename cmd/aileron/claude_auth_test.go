@@ -4,12 +4,40 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
+
+// stubClaudeVaultPresence installs a fixed vault-presence probe result for
+// the duration of a test and restores the original on cleanup. It lets the
+// resolveClaudeAuthMode tests exercise every slot state without a running
+// daemon.
+func stubClaudeVaultPresence(t *testing.T, p claudeVaultPresence) {
+	t.Helper()
+	orig := claudeVaultPresenceFn
+	t.Cleanup(func() { claudeVaultPresenceFn = orig })
+	claudeVaultPresenceFn = func(context.Context) claudeVaultPresence { return p }
+}
+
+// failClaudeVaultPresence installs a probe that fails the test if it is ever
+// invoked. It guards the explicit-flag short-circuit: an explicit
+// --claude-auth value must resolve before any vault probe runs.
+func failClaudeVaultPresence(t *testing.T) {
+	t.Helper()
+	orig := claudeVaultPresenceFn
+	t.Cleanup(func() { claudeVaultPresenceFn = orig })
+	claudeVaultPresenceFn = func(context.Context) claudeVaultPresence {
+		t.Helper()
+		t.Fatal("vault presence probe ran despite an explicit --claude-auth value")
+		return claudeVaultPresence{}
+	}
+}
 
 // failingReader fails the test if Read is ever called. It guards the P2
 // stdin contract: the non-interactive resolution path must never touch
@@ -168,7 +196,9 @@ func TestResolveClaudeAuthMode_ExplicitValues(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
 			// isTTY true + a failing reader proves an explicit value bypasses
-			// the prompt entirely (no stdin read even on a TTY).
+			// the prompt entirely (no stdin read even on a TTY); a failing
+			// probe proves it also bypasses the vault entirely.
+			failClaudeVaultPresence(t)
 			got, err := resolveClaudeAuthMode(tc.in, true, failingReader{t}, io.Discard)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -181,6 +211,7 @@ func TestResolveClaudeAuthMode_ExplicitValues(t *testing.T) {
 }
 
 func TestResolveClaudeAuthMode_InvalidExplicit(t *testing.T) {
+	failClaudeVaultPresence(t)
 	_, err := resolveClaudeAuthMode("nonsense", false, failingReader{t}, io.Discard)
 	if err == nil {
 		t.Fatal("expected an error for an invalid explicit value")
@@ -191,8 +222,10 @@ func TestResolveClaudeAuthMode_InvalidExplicit(t *testing.T) {
 }
 
 // TestResolveClaudeAuthMode_NonInteractiveDefault is the P2 stdin contract:
-// empty flag + no TTY must return subscription WITHOUT reading stdin.
+// empty flag + no TTY + empty vault must return subscription WITHOUT reading
+// stdin.
 func TestResolveClaudeAuthMode_NonInteractiveDefault(t *testing.T) {
+	stubClaudeVaultPresence(t, claudeVaultPresence{})
 	var stdout bytes.Buffer
 	got, err := resolveClaudeAuthMode("", false, failingReader{t}, &stdout)
 	if err != nil {
@@ -223,6 +256,7 @@ func TestResolveClaudeAuthMode_InteractivePrompt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			stubClaudeVaultPresence(t, claudeVaultPresence{})
 			var stdout bytes.Buffer
 			got, err := resolveClaudeAuthMode("", true, strings.NewReader(tc.stdin), &stdout)
 			if err != nil {
@@ -241,6 +275,7 @@ func TestResolveClaudeAuthMode_InteractivePrompt(t *testing.T) {
 // TestResolveClaudeAuthMode_PromptReasksOnInvalid asserts the re-ask line is
 // printed when the first answer is unrecognized.
 func TestResolveClaudeAuthMode_PromptReasksOnInvalid(t *testing.T) {
+	stubClaudeVaultPresence(t, claudeVaultPresence{})
 	var stdout bytes.Buffer
 	got, err := resolveClaudeAuthMode("", true, strings.NewReader("xyz\nsubscription\n"), &stdout)
 	if err != nil {
@@ -251,5 +286,222 @@ func TestResolveClaudeAuthMode_PromptReasksOnInvalid(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "unrecognized choice") {
 		t.Errorf("expected re-ask message, got %q", stdout.String())
+	}
+}
+
+// --- vault-aware resolution (#1381) ---
+
+// TestResolveClaudeAuthMode_VaultPresence is the #1381 matrix: with an empty
+// --claude-auth flag, the four vault slot states resolve deterministically on
+// BOTH the TTY and non-TTY paths. A populated slot must resolve without
+// prompting and without reading stdin (failingReader guards the latter); only
+// the neither-populated state falls back to prompt (TTY) or subscription
+// default (non-TTY).
+func TestResolveClaudeAuthMode_VaultPresence(t *testing.T) {
+	cases := []struct {
+		name     string
+		presence claudeVaultPresence
+		want     agents.ClaudeAuthMode
+	}{
+		{"subscription only", claudeVaultPresence{subscription: true}, agents.ClaudeAuthModeSubscription},
+		{"api-key only", claudeVaultPresence{apiKey: true}, agents.ClaudeAuthModeAPIKey},
+		{"both -> subscription tie-break", claudeVaultPresence{subscription: true, apiKey: true}, agents.ClaudeAuthModeSubscription},
+	}
+	for _, tc := range cases {
+		for _, tty := range []bool{true, false} {
+			name := tc.name
+			if tty {
+				name += " (tty)"
+			} else {
+				name += " (non-tty)"
+			}
+			t.Run(name, func(t *testing.T) {
+				stubClaudeVaultPresence(t, tc.presence)
+				var stdout bytes.Buffer
+				// failingReader proves the populated-slot path never reads
+				// stdin, even on a TTY where a prompt would otherwise read it.
+				got, err := resolveClaudeAuthMode("", tty, failingReader{t}, &stdout)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got != tc.want {
+					t.Errorf("mode = %v, want %v", got, tc.want)
+				}
+				if stdout.Len() != 0 {
+					t.Errorf("populated-slot path wrote output (should not prompt): %q", stdout.String())
+				}
+			})
+		}
+	}
+}
+
+// TestResolveClaudeAuthMode_PopulatedSlotDoesNotPrompt is the #1381
+// regression: an empty flag on a TTY with a populated slot must NOT enter
+// the interactive prompt. Before the fix the resolver always prompted on a
+// TTY regardless of stored credentials. We force a TTY and supply scripted
+// stdin that, if the prompt ran, would select the WRONG mode — proving the
+// vault answer (not the stdin) drives the result.
+func TestResolveClaudeAuthMode_PopulatedSlotDoesNotPrompt(t *testing.T) {
+	t.Run("subscription slot, stdin would pick api-key", func(t *testing.T) {
+		stubClaudeVaultPresence(t, claudeVaultPresence{subscription: true})
+		var stdout bytes.Buffer
+		// "2" / "api-key" is what the prompt would consume; if the prompt
+		// ran, the result would be api-key. We assert subscription.
+		got, err := resolveClaudeAuthMode("", true, strings.NewReader("api-key\n"), &stdout)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != agents.ClaudeAuthModeSubscription {
+			t.Errorf("mode = %v, want subscription (vault should win, prompt must not run)", got)
+		}
+		if strings.Contains(stdout.String(), "How should Claude authenticate?") {
+			t.Errorf("prompt ran despite a populated subscription slot: %q", stdout.String())
+		}
+	})
+	t.Run("api-key slot, stdin would pick subscription", func(t *testing.T) {
+		stubClaudeVaultPresence(t, claudeVaultPresence{apiKey: true})
+		var stdout bytes.Buffer
+		got, err := resolveClaudeAuthMode("", true, strings.NewReader("subscription\n"), &stdout)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != agents.ClaudeAuthModeAPIKey {
+			t.Errorf("mode = %v, want api-key (vault should win, prompt must not run)", got)
+		}
+		if strings.Contains(stdout.String(), "How should Claude authenticate?") {
+			t.Errorf("prompt ran despite a populated api-key slot: %q", stdout.String())
+		}
+	})
+}
+
+// TestResolveClaudeAuthMode_ExplicitWinsOverVault locks flag precedence: an
+// explicit flag short-circuits before the vault probe, so a stored
+// subscription credential does not override an explicit --claude-auth=api-key
+// (and vice versa). The probe is stubbed to the OPPOSITE slot to prove the
+// flag, not the vault, decides.
+func TestResolveClaudeAuthMode_ExplicitWinsOverVault(t *testing.T) {
+	cases := []struct {
+		name     string
+		flag     string
+		presence claudeVaultPresence
+		want     agents.ClaudeAuthMode
+	}{
+		{"flag api-key beats stored subscription", "api-key", claudeVaultPresence{subscription: true}, agents.ClaudeAuthModeAPIKey},
+		{"flag subscription beats stored api-key", "subscription", claudeVaultPresence{apiKey: true}, agents.ClaudeAuthModeSubscription},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// An explicit value must resolve before the probe, so installing a
+			// failing probe (not tc.presence) proves the short-circuit.
+			failClaudeVaultPresence(t)
+			got, err := resolveClaudeAuthMode(tc.flag, true, failingReader{t}, io.Discard)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("mode = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- probeClaudeVaultPresence (daemon-access path) ---
+
+// TestProbeClaudeVaultPresence_Wiring exercises the real probe against a
+// fake daemon: it must GET the per-agent credential endpoint once per
+// purpose, send the bearer token, omit the query for the default (oauth)
+// purpose and append `?purpose=apikey` for the api-key slot, and map 200 ->
+// present / 404 -> absent. The seams over defaultStateDirFn and
+// discoveryReadFn let it run without a real ~/.aileron or daemon.json.
+func TestProbeClaudeVaultPresence_Wiring(t *testing.T) {
+	cases := []struct {
+		name         string
+		oauthStatus  int
+		apikeyStatus int
+		wantSub      bool
+		wantAPIKey   bool
+	}{
+		{"both present", http.StatusOK, http.StatusOK, true, true},
+		{"subscription only", http.StatusOK, http.StatusNotFound, true, false},
+		{"api-key only", http.StatusNotFound, http.StatusOK, false, true},
+		{"neither", http.StatusNotFound, http.StatusNotFound, false, false},
+		{"locked vault counts as absent", http.StatusLocked, http.StatusLocked, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotOAuthReq, gotAPIKeyReq, gotToken bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/vault/agents/claude/credentials" {
+					t.Errorf("unexpected path %q", r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				if r.Header.Get("Authorization") == "Bearer tok-123" {
+					gotToken = true
+				}
+				switch r.URL.Query().Get("purpose") {
+				case "":
+					// Default (oauth) purpose omits the query parameter.
+					gotOAuthReq = true
+					w.WriteHeader(tc.oauthStatus)
+				case "apikey":
+					gotAPIKeyReq = true
+					w.WriteHeader(tc.apikeyStatus)
+				default:
+					t.Errorf("unexpected purpose %q", r.URL.Query().Get("purpose"))
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			origState := defaultStateDirFn
+			origDisc := discoveryReadFn
+			t.Cleanup(func() {
+				defaultStateDirFn = origState
+				discoveryReadFn = origDisc
+			})
+			defaultStateDirFn = func() (string, error) { return t.TempDir(), nil }
+			discoveryReadFn = func(string) (discovery.Info, error) {
+				return discovery.Info{URL: srv.URL, Token: "tok-123"}, nil
+			}
+
+			got := probeClaudeVaultPresence(context.Background())
+			if got.subscription != tc.wantSub {
+				t.Errorf("subscription = %v, want %v", got.subscription, tc.wantSub)
+			}
+			if got.apiKey != tc.wantAPIKey {
+				t.Errorf("apiKey = %v, want %v", got.apiKey, tc.wantAPIKey)
+			}
+			if !gotOAuthReq {
+				t.Error("probe did not request the oauth slot")
+			}
+			if !gotAPIKeyReq {
+				t.Error("probe did not request the apikey slot")
+			}
+			if !gotToken {
+				t.Error("probe did not send the daemon bearer token")
+			}
+		})
+	}
+}
+
+// TestProbeClaudeVaultPresence_NoDaemon proves the probe degrades to
+// "both slots absent" when the daemon is unreachable (discovery miss), so a
+// probe failure never escalates into a launch failure — resolution falls
+// back to its prior prompt/default behavior.
+func TestProbeClaudeVaultPresence_NoDaemon(t *testing.T) {
+	origState := defaultStateDirFn
+	origDisc := discoveryReadFn
+	t.Cleanup(func() {
+		defaultStateDirFn = origState
+		discoveryReadFn = origDisc
+	})
+	defaultStateDirFn = func() (string, error) { return t.TempDir(), nil }
+	discoveryReadFn = func(string) (discovery.Info, error) {
+		return discovery.Info{}, discovery.ErrNotRunning
+	}
+	got := probeClaudeVaultPresence(context.Background())
+	if got.subscription || got.apiKey {
+		t.Errorf("probe with no daemon = %+v, want both absent", got)
 	}
 }
