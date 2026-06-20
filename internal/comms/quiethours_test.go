@@ -119,15 +119,53 @@ func TestIsQuietHours_InvalidTimezone(t *testing.T) {
 }
 
 func TestIsQuietHours_NilNowFunc(t *testing.T) {
-	// When nowFunc is nil, IsQuietHours should use time.Now and not panic.
-	// We use a wide window (00:00–23:59) to guarantee the result is true
-	// regardless of when the test runs.
+	// Contract: when nowFunc is nil, IsQuietHours falls back to time.Now and
+	// must complete without panicking. The boolean result is clock-dependent
+	// (it depends on the wall-clock minute relative to the window), so this
+	// test only exercises the nil-fallback path and does not assert on the
+	// outcome. Boundary semantics are pinned deterministically in
+	// TestIsQuietHours_AllDayWindowBoundaries.
 	cfg := &config.QuietHoursConfig{
 		Start: "00:00",
 		End:   "23:59",
 	}
-	if !comms.IsQuietHours(cfg, nil) {
-		t.Error("expected true for all-day window with nil nowFunc")
+	// Must not panic; either result is acceptable here.
+	_ = comms.IsQuietHours(cfg, nil)
+}
+
+func TestIsQuietHours_AllDayWindowBoundaries(t *testing.T) {
+	// An "all-day" 00:00–23:59 window is a same-day, end-exclusive window:
+	// in-window iff nowMin >= 0 && nowMin < 1439 (23:59). The final minute
+	// (23:59) is the exclusive end and is therefore NOT quiet, matching the
+	// documented end-exclusive semantics also asserted by the "at end" cases
+	// in TestIsQuietHours_SameDayWindow and TestIsQuietHours_OvernightWindow.
+	cfg := &config.QuietHoursConfig{
+		Start: "00:00",
+		End:   "23:59",
+	}
+
+	tests := []struct {
+		name string
+		hour int
+		min  int
+		want bool
+	}{
+		{"at start (midnight)", 0, 0, true},
+		{"one minute past start", 0, 1, true},
+		{"midday", 12, 0, true},
+		{"one minute before end", 23, 58, true},
+		{"at end (exclusive)", 23, 59, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := func() time.Time {
+				return time.Date(2026, 1, 15, tt.hour, tt.min, 0, 0, time.Local)
+			}
+			if got := comms.IsQuietHours(cfg, now); got != tt.want {
+				t.Errorf("IsQuietHours at %02d:%02d = %v, want %v", tt.hour, tt.min, got, tt.want)
+			}
+		})
 	}
 }
 
