@@ -43,7 +43,7 @@ jobs:
     # reverted in #1348). The service is idle on tag/dispatch publish builds.
     services:
       registry:
-        image: registry:2
+        image: registry:3
         ports:
           - 5000:5000
     steps:
