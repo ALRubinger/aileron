@@ -94,7 +94,7 @@ func TestRunVaultPut_RejectsNonAgentPathBeforeHTTP(t *testing.T) {
 	if called {
 		t.Errorf("HTTP request issued for a rejected path")
 	}
-	if !strings.Contains(stderr.String(), "agents/<name>/oauth") {
+	if !strings.Contains(stderr.String(), "agents/<name>/<purpose>") {
 		t.Errorf("stderr = %q; want agents-only constraint message", stderr.String())
 	}
 }
@@ -181,17 +181,20 @@ func TestVaultListNamesRoundTripIntoDelete(t *testing.T) {
 	for _, agent := range []string{"claude", "codex", "my-agent"} {
 		// The fully-qualified line list prints is the sole accepted form.
 		listed := "agents/" + agent + "/oauth"
-		name, err := agentOAuthPathName(listed)
+		name, purpose, err := agentPathNameAndPurpose(listed)
 		if err != nil {
-			t.Errorf("agentOAuthPathName(%q) errored: %v; a line from `vault list` must be deletable", listed, err)
+			t.Errorf("agentPathNameAndPurpose(%q) errored: %v; a line from `vault list` must be deletable", listed, err)
 			continue
 		}
 		if name != agent {
-			t.Errorf("agentOAuthPathName(%q) = %q, want %q", listed, name, agent)
+			t.Errorf("agentPathNameAndPurpose(%q) name = %q, want %q", listed, name, agent)
+		}
+		if purpose != "oauth" {
+			t.Errorf("agentPathNameAndPurpose(%q) purpose = %q, want oauth", listed, purpose)
 		}
 		// The bare name is no longer a valid delete input.
-		if got, err := agentOAuthPathName(agent); err == nil {
-			t.Errorf("agentOAuthPathName(%q) = (%q, nil), want error (bare form no longer accepted)", agent, got)
+		if gotName, gotPurpose, err := agentPathNameAndPurpose(agent); err == nil {
+			t.Errorf("agentPathNameAndPurpose(%q) = (%q, %q, nil), want error (bare form no longer accepted)", agent, gotName, gotPurpose)
 		}
 	}
 }
@@ -223,11 +226,34 @@ func TestRunVaultDelete_RejectsBarePathShapedName(t *testing.T) {
 // slash-bearing <name> (e.g. `agents//oauth`, `agents/a/b/oauth`) must
 // still be rejected, so no nested or empty key can slip through the path
 // form (ADR-0025).
-func TestAgentOAuthPathName_RejectsMalformedFullPath(t *testing.T) {
-	for _, arg := range []string{"agents//oauth", "agents/a/b/oauth"} {
-		if name, err := agentOAuthPathName(arg); err == nil {
-			t.Errorf("agentOAuthPathName(%q) = (%q, nil), want error", arg, name)
+func TestAgentPathNameAndPurpose_RejectsMalformedFullPath(t *testing.T) {
+	for _, arg := range []string{"agents//oauth", "agents/a/b/oauth", "agents/claude/", "agents/claude"} {
+		if name, purpose, err := agentPathNameAndPurpose(arg); err == nil {
+			t.Errorf("agentPathNameAndPurpose(%q) = (%q, %q, nil), want error", arg, name, purpose)
 		}
+	}
+}
+
+// The purpose segment is constrained to the daemon's allow-list
+// (^[a-z0-9][a-z0-9_-]*$). A path whose purpose violates it must be
+// rejected client-side, before any HTTP call.
+func TestAgentPathNameAndPurpose_RejectsInvalidPurpose(t *testing.T) {
+	for _, arg := range []string{"agents/claude/OAUTH", "agents/claude/-bad", "agents/claude/has space", "agents/claude/api.key"} {
+		if name, purpose, err := agentPathNameAndPurpose(arg); err == nil {
+			t.Errorf("agentPathNameAndPurpose(%q) = (%q, %q, nil), want error (invalid purpose)", arg, name, purpose)
+		}
+	}
+}
+
+// The apikey purpose (the case #1361 made addressable) parses to its
+// name and purpose so it can be put/deleted just like oauth.
+func TestAgentPathNameAndPurpose_AcceptsApikey(t *testing.T) {
+	name, purpose, err := agentPathNameAndPurpose("agents/claude/apikey")
+	if err != nil {
+		t.Fatalf("agentPathNameAndPurpose(agents/claude/apikey) errored: %v", err)
+	}
+	if name != "claude" || purpose != "apikey" {
+		t.Errorf("got (%q, %q), want (claude, apikey)", name, purpose)
 	}
 }
 
@@ -283,7 +309,7 @@ func TestRunVaultDelete_NotFoundMessage(t *testing.T) {
 	if code == 0 {
 		t.Errorf("exit = 0, want non-zero for 404")
 	}
-	if !strings.Contains(stderr.String(), "no credential entry for agent claude") {
+	if !strings.Contains(stderr.String(), "no credential entry for agents/claude/oauth") {
 		t.Errorf("stderr = %q", stderr.String())
 	}
 }
@@ -322,6 +348,208 @@ func TestRunVaultList_DefaultAndJSON(t *testing.T) {
 	}
 	if first.Name != "claude" {
 		t.Errorf("first NDJSON name = %q, want claude", first.Name)
+	}
+}
+
+// #1361: the daemon is purpose-aware and emits one AgentCredentialSummary
+// per (name, purpose). An apikey-only agent must surface in `vault list`
+// with its real purpose, not be collapsed to /oauth or dropped.
+func TestRunVaultList_ApikeyOnlyAgentSurfaces(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"agents":[{"name":"claude","purpose":"apikey","metadata":{"type":"api_key"}}]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "agents/claude/apikey" {
+		t.Errorf("stdout = %q, want agents/claude/apikey (apikey-only agent must not be mislabeled oauth)", got)
+	}
+}
+
+// #1361: an agent that holds both oauth and apikey yields two distinct
+// list lines (no duplicate, no collapse) and two NDJSON entries that each
+// carry their purpose.
+func TestRunVaultList_BothPurposesYieldTwoDistinctEntries(t *testing.T) {
+	const body = `{"agents":[{"name":"claude","purpose":"oauth"},{"name":"claude","purpose":"apikey"}]}`
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Fields(stdout.String())
+	if len(lines) != 2 || lines[0] != "agents/claude/oauth" || lines[1] != "agents/claude/apikey" {
+		t.Errorf("text output = %q, want two distinct lines agents/claude/oauth and agents/claude/apikey", stdout.String())
+	}
+
+	var jout, jerr bytes.Buffer
+	code = runVault([]string{"list", "--json"}, strings.NewReader(""), &jout, &jerr)
+	if code != 0 {
+		t.Fatalf("json exit = %d, want 0; stderr=%s", code, jerr.String())
+	}
+	jsonLines := strings.Split(strings.TrimSpace(jout.String()), "\n")
+	if len(jsonLines) != 2 {
+		t.Fatalf("json output = %q, want 2 NDJSON lines", jout.String())
+	}
+	gotPurposes := map[string]bool{}
+	for _, line := range jsonLines {
+		var s agentSummary
+		if err := json.Unmarshal([]byte(line), &s); err != nil {
+			t.Fatalf("NDJSON line not valid: %v (%q)", err, line)
+		}
+		if s.Name != "claude" {
+			t.Errorf("NDJSON name = %q, want claude", s.Name)
+		}
+		if s.Purpose == nil {
+			t.Fatalf("NDJSON entry %q dropped purpose; --json must carry it", line)
+		}
+		gotPurposes[*s.Purpose] = true
+	}
+	if !gotPurposes["oauth"] || !gotPurposes["apikey"] {
+		t.Errorf("NDJSON purposes = %v, want both oauth and apikey", gotPurposes)
+	}
+}
+
+// #1361: `vault delete agents/<name>/apikey` must issue the DELETE with
+// ?purpose=apikey so the daemon removes the apikey envelope, not oauth.
+func TestRunVaultDelete_ThreadsApikeyPurpose(t *testing.T) {
+	var gotPurpose string
+	gotDelete := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/claude/credentials" {
+			gotDelete = true
+			gotPurpose = r.URL.Query().Get("purpose")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "agents/claude/apikey", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !gotDelete {
+		t.Fatalf("DELETE not issued")
+	}
+	if gotPurpose != "apikey" {
+		t.Errorf("DELETE ?purpose = %q, want apikey", gotPurpose)
+	}
+	if !strings.Contains(stdout.String(), "Deleted agents/claude/apikey") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// #1361: the oauth path keeps threading ?purpose=oauth — backward-compat
+// for the historical form (the daemon defaults to oauth, the CLI is
+// explicit).
+func TestRunVaultDelete_ThreadsOauthPurpose(t *testing.T) {
+	var gotPurpose string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/claude/credentials" {
+			gotPurpose = r.URL.Query().Get("purpose")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "agents/claude/oauth", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPurpose != "oauth" {
+		t.Errorf("DELETE ?purpose = %q, want oauth", gotPurpose)
+	}
+}
+
+// #1361: put threads the purpose into ?purpose= as well, so storing
+// agents/<name>/apikey writes the apikey envelope.
+func TestRunVaultPut_ThreadsApikeyPurpose(t *testing.T) {
+	var gotPurpose string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && r.URL.Path == "/vault/agents/claude/credentials" {
+			gotPurpose = r.URL.Query().Get("purpose")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+	})
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "creds")
+	if err := os.WriteFile(credFile, []byte("sk-xxx"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"put", "agents/claude/apikey", "--from-file", credFile},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPurpose != "apikey" {
+		t.Errorf("PUT ?purpose = %q, want apikey", gotPurpose)
+	}
+	if !strings.Contains(stdout.String(), "Stored agents/claude/apikey") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// #1361 end-to-end: the apikey line `vault list` prints feeds straight
+// back into `vault delete`, issuing the DELETE the daemon keys on the
+// same (name, purpose).
+func TestRunVaultList_ApikeyLineRoundTripsIntoDelete(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"agents":[{"name":"claude","purpose":"apikey"}]}`)
+	})
+	var lout, lerr bytes.Buffer
+	if code := runVault([]string{"list"}, strings.NewReader(""), &lout, &lerr); code != 0 {
+		t.Fatalf("list exit = %d, want 0; stderr=%s", code, lerr.String())
+	}
+	listed := strings.TrimSpace(lout.String())
+	if listed != "agents/claude/apikey" {
+		t.Fatalf("listed = %q, want agents/claude/apikey", listed)
+	}
+
+	var gotPurpose string
+	gotDelete := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/vault/agents/claude/credentials" {
+			gotDelete = true
+			gotPurpose = r.URL.Query().Get("purpose")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+	})
+	var dout, derr bytes.Buffer
+	if code := runVault([]string{"delete", listed, "--yes"}, strings.NewReader(""), &dout, &derr); code != 0 {
+		t.Fatalf("delete exit = %d, want 0; stderr=%s", code, derr.String())
+	}
+	if !gotDelete || gotPurpose != "apikey" {
+		t.Errorf("round-trip delete: gotDelete=%v purpose=%q, want true/apikey", gotDelete, gotPurpose)
+	}
+}
+
+// #1361 backward-compat: an older daemon that omits `purpose` (entries
+// predating per-purpose listing) must still render as agents/<name>/oauth.
+func TestRunVaultList_NilPurposeRendersOauth(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"agents":[{"name":"codex"}]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	if code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "agents/codex/oauth" {
+		t.Errorf("stdout = %q, want agents/codex/oauth (nil purpose -> oauth)", got)
 	}
 }
 

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -60,18 +62,19 @@ const envVaultPassphrase = "AILERON_VAULT_PASSPHRASE"
 
 const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
-  aileron vault put agents/<name>/oauth --from-file <path>
-  aileron vault delete agents/<name>/oauth [--yes]
+  aileron vault put agents/<name>/<purpose> --from-file <path>
+  aileron vault delete agents/<name>/<purpose> [--yes]
   aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]
 
-vault delete takes the fully-qualified agents/<name>/oauth path, exactly
-what vault list prints for an agent entry.`
+vault delete takes the fully-qualified agents/<name>/<purpose> path
+(e.g. agents/claude/oauth, agents/claude/apikey), exactly what vault
+list prints for an agent entry.`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
 // init opens the local vault file directly (first-run flow); the
 // put/delete/list verbs are thin daemon-backed HTTP clients scoped to
-// the `agents/<name>/oauth` namespace per ADR-0025 — they never open
+// the `agents/<name>/<purpose>` namespace per ADR-0025 — they never open
 // the vault file themselves and reject any non-agent path client-side.
 func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -94,32 +97,49 @@ func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-// agentOAuthPathName validates that arg names an agents-only credential
-// entry and returns the agent <name>. The vault put/delete verbs are
-// namespace-locked: they refuse anything outside the agents namespace
-// client-side before issuing an HTTP call, so the operator CLI can never
-// reach a non-agent vault key (ADR-0025).
+// agentCredentialPurposeRe constrains the `<purpose>` path segment the
+// CLI accepts. It mirrors the server's allow-list
+// (validateAgentCredentialPurpose in handlers_local_vault_secrets.go) so
+// the CLI rejects exactly what the daemon would reject, client-side,
+// before any HTTP call.
+var agentCredentialPurposeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// agentPathNameAndPurpose validates that arg names an agents-only
+// credential entry and returns the agent <name> and credential
+// <purpose>. The vault put/delete verbs are namespace-locked: they refuse
+// anything outside the agents namespace client-side before issuing an
+// HTTP call, so the operator CLI can never reach a non-agent vault key
+// (ADR-0025).
 //
 // Only the fully-qualified path form is accepted, exactly what `vault
-// list` prints for an agent entry (#1317):
-//   - agents/<name>/oauth, e.g. `agents/claude/oauth`
+// list` prints for an agent entry (#1317), now generalized to any
+// purpose (#1361):
+//   - agents/<name>/<purpose>, e.g. `agents/claude/oauth`,
+//     `agents/claude/apikey`
 //
-// Whatever `list` shows for an agent can be pasted straight into delete.
-func agentOAuthPathName(arg string) (string, error) {
+// The <purpose> segment is constrained to the same allow-list the daemon
+// enforces. Whatever `list` shows for an agent can be pasted straight
+// into delete/put.
+func agentPathNameAndPurpose(arg string) (name, purpose string, err error) {
 	const prefix = "agents/"
-	const suffix = "/oauth"
-	// Fully-qualified form only: agents/<name>/oauth. Guard the length
-	// before slicing — "agents/oauth" passes both HasPrefix and HasSuffix
-	// (the prefix and suffix overlap) but would slice out of range.
-	if len(arg) < len(prefix)+len(suffix) ||
-		!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
-		return "", fmt.Errorf("name must be agents/<name>/oauth (got %q)", arg)
+	if !strings.HasPrefix(arg, prefix) {
+		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
 	}
-	name := arg[len(prefix) : len(arg)-len(suffix)]
-	if name == "" || strings.Contains(name, "/") {
-		return "", fmt.Errorf("name must be agents/<name>/oauth (got %q)", arg)
+	rest := arg[len(prefix):]
+	// Exactly two remaining segments: <name>/<purpose>. A name or purpose
+	// that itself contains a slash (a nested key) is rejected.
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
 	}
-	return name, nil
+	name, purpose = parts[0], parts[1]
+	if name == "" || purpose == "" {
+		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
+	}
+	if !agentCredentialPurposeRe.MatchString(purpose) {
+		return "", "", fmt.Errorf("purpose must match %s (got %q)", agentCredentialPurposeRe.String(), purpose)
+	}
+	return name, purpose, nil
 }
 
 // agentCredentialsBody is the local minimal subset of the
@@ -142,9 +162,30 @@ type vaultSummaryMetadata struct {
 // agentSummary is the local subset of api.AgentCredentialSummary the
 // list verb decodes. Notably it has no Value field — the daemon never
 // returns credential bytes from the list endpoint (ADR-0011).
+//
+// Purpose is the `<purpose>` segment of the agents/<name>/<purpose>
+// vault path. It is a pointer because the daemon omits it for entries
+// that predate per-purpose listing; a nil Purpose is rendered as the
+// default `oauth` so older daemons keep producing the historical lines.
 type agentSummary struct {
 	Name     string                `json:"name"`
+	Purpose  *string               `json:"purpose,omitempty"`
 	Metadata *vaultSummaryMetadata `json:"metadata,omitempty"`
+}
+
+// defaultAgentCredentialPurpose is the `<purpose>` segment used when the
+// daemon omits it (entries predating per-purpose listing). Kept `oauth`
+// so a nil purpose renders byte-for-byte like the pre-#1361 list output.
+const defaultAgentCredentialPurpose = "oauth"
+
+// purposeOrDefault resolves a summary's optional Purpose to its display
+// value, falling back to oauth for entries an older daemon returned
+// without one.
+func (a agentSummary) purposeOrDefault() string {
+	if a.Purpose != nil && *a.Purpose != "" {
+		return *a.Purpose
+	}
+	return defaultAgentCredentialPurpose
 }
 
 // userSummary is the local subset of api.UserCredentialSummary the list
@@ -157,14 +198,14 @@ type userSummary struct {
 }
 
 // runVaultPut stores a credential envelope read verbatim from a file
-// at agents/<name>/oauth via the daemon. The file bytes are stored
+// at agents/<name>/<purpose> via the daemon. The file bytes are stored
 // as-is (whole-file read, no trailing-newline munging) since agent
 // credential files (Claude's .credentials.json, Codex's auth.json) are
 // exact-byte artifacts.
 func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	pathArg, flagArgs, ok := splitPathArg(args)
 	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault put agents/<name>/oauth --from-file <path>")
+		fmt.Fprintln(stderr, "usage: aileron vault put agents/<name>/<purpose> --from-file <path>")
 		return 1
 	}
 	flags := flag.NewFlagSet("vault put", flag.ContinueOnError)
@@ -174,7 +215,7 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return 1
 	}
-	name, err := agentOAuthPathName(pathArg)
+	name, purpose, err := agentPathNameAndPurpose(pathArg)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -199,14 +240,14 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	status, respBody, err := vaultDoRequest(http.MethodPut,
-		"/vault/agents/"+name+"/credentials", body)
+		agentCredentialPath(name, purpose), body)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	switch status {
 	case http.StatusNoContent:
-		fmt.Fprintf(stdout, "Stored agents/%s/oauth\n", name)
+		fmt.Fprintf(stdout, "Stored agents/%s/%s\n", name, purpose)
 		return 0
 	case http.StatusLocked:
 		fmt.Fprintln(stderr, "error: vault is locked; unlock it first")
@@ -220,14 +261,15 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// runVaultDelete removes the credential envelope at agents/<name>/oauth
-// via the daemon. Unless --yes is passed it confirms interactively;
-// this CLI prompt is the only human gate (the daemon applies no
-// approval block for operator vault management per the plan).
+// runVaultDelete removes the credential envelope at
+// agents/<name>/<purpose> via the daemon. Unless --yes is passed it
+// confirms interactively; this CLI prompt is the only human gate (the
+// daemon applies no approval block for operator vault management per the
+// plan).
 func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	pathArg, flagArgs, ok := splitPathArg(args)
 	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/oauth [--yes] (exactly what vault list prints)")
+		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/<purpose> [--yes] (exactly what vault list prints)")
 		return 1
 	}
 	flags := flag.NewFlagSet("vault delete", flag.ContinueOnError)
@@ -236,14 +278,14 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if err := flags.Parse(flagArgs); err != nil {
 		return 1
 	}
-	name, err := agentOAuthPathName(pathArg)
+	name, purpose, err := agentPathNameAndPurpose(pathArg)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
 	if !*yes {
-		answer := promptLine(stdin, stdout, fmt.Sprintf("Delete agents/%s/oauth? [y/N]: ", name))
+		answer := promptLine(stdin, stdout, fmt.Sprintf("Delete agents/%s/%s? [y/N]: ", name, purpose))
 		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
 			fmt.Fprintln(stdout, "cancelled")
 			return 0
@@ -251,17 +293,17 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 
 	status, respBody, err := vaultDoRequest(http.MethodDelete,
-		"/vault/agents/"+name+"/credentials", nil)
+		agentCredentialPath(name, purpose), nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	switch status {
 	case http.StatusNoContent:
-		fmt.Fprintf(stdout, "Deleted agents/%s/oauth\n", name)
+		fmt.Fprintf(stdout, "Deleted agents/%s/%s\n", name, purpose)
 		return 0
 	case http.StatusNotFound:
-		fmt.Fprintf(stderr, "error: no credential entry for agent %s\n", name)
+		fmt.Fprintf(stderr, "error: no credential entry for agents/%s/%s\n", name, purpose)
 		return 1
 	case http.StatusLocked:
 		fmt.Fprintln(stderr, "error: vault is locked; unlock it first")
@@ -280,8 +322,9 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 // NDJSON (one entry per line) with --json.
 //
 // The --scope flag selects which namespace(s) to surface:
-//   - agent (default): per-agent OAuth envelopes at agents/<name>/oauth,
-//     keyed by agent name. Preserves the historical behavior.
+//   - agent (default): per-agent credential envelopes at
+//     agents/<name>/<purpose>, one line per (name, purpose). Each
+//     purpose the daemon holds for an agent surfaces as its own entry.
 //   - user: user-level credentials at user/<service> (e.g. the entry
 //     `aileron auth github` stores), keyed by service name.
 //   - all: both, agents first then user.
@@ -353,7 +396,7 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 				}
 				emitted++
 			} else {
-				lines = append(lines, "agents/"+a.Name+"/oauth")
+				lines = append(lines, "agents/"+a.Name+"/"+a.purposeOrDefault())
 			}
 		}
 	}
@@ -436,6 +479,19 @@ func vaultListFetch(path string, stderr io.Writer) ([]byte, int) {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
 		return nil, 1
 	}
+}
+
+// agentCredentialPath builds the daemon path for an agent credential,
+// threading the purpose through the `?purpose=` query parameter the
+// GET/PUT/DELETE endpoints accept. The HTTP path always uses the stable
+// URL word `credentials`; the purpose selects which credential the agent
+// addresses (server-side default is oauth, but the CLI is explicit so
+// the request is unambiguous). Both segments are url-escaped defensively
+// (path-escape the name, query-escape the purpose); callers pass values
+// already constrained by agentPathNameAndPurpose, but escaping keeps a
+// stray special character from corrupting the request.
+func agentCredentialPath(name, purpose string) string {
+	return "/vault/agents/" + url.PathEscape(name) + "/credentials?purpose=" + url.QueryEscape(purpose)
 }
 
 // vaultDoRequest is a thin daemon-backed HTTP-client helper mirroring
