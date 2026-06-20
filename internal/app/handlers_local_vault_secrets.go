@@ -177,25 +177,37 @@ func agentCredentialVaultPath(name, purpose string) string {
 	return "agents/" + name + "/" + purpose
 }
 
-// agentNameFromVaultPath is the inverse of agentCredentialVaultPath:
-// it extracts the agent name from an `agents/<name>/oauth` vault path.
-// It returns false for any path that does not match the scheme so the
-// list filter ignores non-agent entries (secrets, bindings, etc.).
-func agentNameFromVaultPath(path string) (string, bool) {
+// agentNameAndPurposeFromVaultPath is the inverse of
+// agentCredentialVaultPath: it splits an `agents/<name>/<purpose>` vault
+// path into its name and purpose segments. It accepts any conforming
+// path (any purpose, not just `oauth`) so the list surfaces apikey-only
+// agents that the old `/oauth`-suffix match made invisible. It returns
+// false for any path that does not match the scheme so the list filter
+// ignores non-agent entries (user credentials, bindings, etc.).
+//
+// The purpose segment is re-validated through the same allow-list the
+// write path uses (validateAgentCredentialPurpose) so a malformed stored
+// path can never surface a junk purpose in the list response.
+func agentNameAndPurposeFromVaultPath(path string) (name, purpose string, ok bool) {
 	const prefix = "agents/"
-	const suffix = "/oauth"
-	// Guard the length before slicing: "agents/oauth" passes both
-	// HasPrefix and HasSuffix but the prefix and suffix overlap, so
-	// path[len(prefix):len(path)-len(suffix)] would slice out of range.
-	if len(path) < len(prefix)+len(suffix) ||
-		!strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return "", false
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
 	}
-	name := path[len(prefix) : len(path)-len(suffix)]
-	if name == "" || strings.Contains(name, "/") {
-		return "", false
+	rest := path[len(prefix):]
+	// Exactly two remaining segments: <name>/<purpose>. A name or purpose
+	// containing a slash (extra segments) is rejected.
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 {
+		return "", "", false
 	}
-	return name, true
+	name, purpose = parts[0], parts[1]
+	if name == "" || purpose == "" {
+		return "", "", false
+	}
+	if !validateAgentCredentialPurpose(purpose) {
+		return "", "", false
+	}
+	return name, purpose, true
 }
 
 // GetAgentCredentials returns the per-agent credential envelope for
@@ -403,12 +415,17 @@ func (s *apiServer) ListAgentCredentials(w http.ResponseWriter, r *http.Request)
 
 	list := api.AgentCredentialsList{Agents: []api.AgentCredentialSummary{}}
 	for _, e := range entries {
-		name, ok := agentNameFromVaultPath(e.Path)
+		name, purpose, ok := agentNameAndPurposeFromVaultPath(e.Path)
 		if !ok {
 			continue
 		}
+		// One summary per stored (name, purpose) entry so an agent with
+		// only an apikey credential (and no oauth) still appears, and the
+		// caller can tell the two purposes apart.
+		p := purpose
 		list.Agents = append(list.Agents, api.AgentCredentialSummary{
 			Name:     name,
+			Purpose:  &p,
 			Metadata: agentMetadataToWire(e.Metadata),
 		})
 	}

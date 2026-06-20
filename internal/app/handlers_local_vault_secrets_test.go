@@ -426,6 +426,84 @@ func TestListAgentCredentials_FiltersNonAgentPaths(t *testing.T) {
 	if len(got.Agents) != 1 || got.Agents[0].Name != "claude" {
 		t.Errorf("agents = %v, want only claude", got.Agents)
 	}
+	if got.Agents[0].Purpose == nil || *got.Agents[0].Purpose != "oauth" {
+		t.Errorf("agent purpose = %v, want oauth", got.Agents[0].Purpose)
+	}
+}
+
+// TestListAgentCredentials_SurfacesApiKeyPurpose pins the #1347 fix: an
+// agent with both an oauth and an apikey credential yields two summaries,
+// one per purpose. The old `/oauth`-suffix match dropped the apikey
+// entry entirely.
+func TestListAgentCredentials_SurfacesApiKeyPurpose(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+	if err := v.Put(context.Background(), "agents/claude/oauth", []byte("o"), vault.Metadata{Type: "oauth_refresh_token"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put(context.Background(), "agents/claude/apikey", []byte("k"), vault.Metadata{Type: "api_key"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if len(got.Agents) != 2 {
+		t.Fatalf("agents = %v, want 2 (oauth + apikey)", got.Agents)
+	}
+	purposes := map[string]string{} // purpose -> metadata type
+	for _, a := range got.Agents {
+		if a.Name != "claude" {
+			t.Errorf("agent name = %q, want claude", a.Name)
+		}
+		if a.Purpose == nil {
+			t.Fatalf("summary missing purpose: %+v", a)
+		}
+		typ := ""
+		if a.Metadata != nil && a.Metadata.Type != nil {
+			typ = *a.Metadata.Type
+		}
+		purposes[*a.Purpose] = typ
+	}
+	if purposes["oauth"] != "oauth_refresh_token" {
+		t.Errorf("oauth summary type = %q, want oauth_refresh_token", purposes["oauth"])
+	}
+	if purposes["apikey"] != "api_key" {
+		t.Errorf("apikey summary type = %q, want api_key", purposes["apikey"])
+	}
+}
+
+// TestListAgentCredentials_ApiKeyOnlyAgentIsVisible is the direct
+// regression for the bug: an agent that has ONLY an apikey credential
+// (no oauth) was previously invisible because the list matched the
+// `/oauth` suffix. It must now appear with purpose "apikey".
+func TestListAgentCredentials_ApiKeyOnlyAgentIsVisible(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+	if err := v.Put(context.Background(), "agents/claude/apikey", []byte("k"), vault.Metadata{Type: "api_key"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if len(got.Agents) != 1 {
+		t.Fatalf("agents = %v, want 1 (apikey-only)", got.Agents)
+	}
+	if got.Agents[0].Name != "claude" {
+		t.Errorf("name = %q, want claude", got.Agents[0].Name)
+	}
+	if got.Agents[0].Purpose == nil || *got.Agents[0].Purpose != "apikey" {
+		t.Errorf("purpose = %v, want apikey", got.Agents[0].Purpose)
+	}
 }
 
 func TestListAgentCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
@@ -496,26 +574,30 @@ func TestListAgentCredentials_ListErrorReturns500(t *testing.T) {
 	assertErrorCode(t, rec, "vault_list_failed")
 }
 
-func TestAgentNameFromVaultPath(t *testing.T) {
+func TestAgentNameAndPurposeFromVaultPath(t *testing.T) {
 	cases := []struct {
-		path     string
-		wantName string
-		wantOK   bool
+		path        string
+		wantName    string
+		wantPurpose string
+		wantOK      bool
 	}{
-		{"agents/claude/oauth", "claude", true},
-		{"agents/codex/oauth", "codex", true},
-		{"agents//oauth", "", false},         // empty name
-		{"agents/oauth", "", false},          // prefix+suffix overlap; must not panic
-		{"agents/a/b/oauth", "", false},      // nested name not allowed
-		{"some/other/path", "", false},       // wrong prefix
-		{"agents/claude/refresh", "", false}, // wrong suffix
-		{"agents/claude/oauth/extra", "", false},
+		{"agents/claude/oauth", "claude", "oauth", true},
+		{"agents/codex/oauth", "codex", "oauth", true},
+		{"agents/claude/apikey", "claude", "apikey", true}, // apikey now conforms
+		{"agents//apikey", "", "", false},                  // empty name
+		{"agents/claude", "", "", false},                   // missing purpose segment
+		{"agents/oauth", "", "", false},                    // only two segments
+		{"agents/a/b/oauth", "", "", false},                // nested name / extra segment
+		{"some/other/path", "", "", false},                 // wrong prefix
+		{"user/github", "", "", false},                     // user namespace, not agent
+		{"agents/claude/oauth/extra", "", "", false},       // extra segment
+		{"agents/claude/OAUTH", "", "", false},             // purpose fails the allow-list
 	}
 	for _, c := range cases {
-		gotName, gotOK := agentNameFromVaultPath(c.path)
-		if gotOK != c.wantOK || gotName != c.wantName {
-			t.Errorf("agentNameFromVaultPath(%q) = (%q,%v), want (%q,%v)",
-				c.path, gotName, gotOK, c.wantName, c.wantOK)
+		gotName, gotPurpose, gotOK := agentNameAndPurposeFromVaultPath(c.path)
+		if gotOK != c.wantOK || gotName != c.wantName || gotPurpose != c.wantPurpose {
+			t.Errorf("agentNameAndPurposeFromVaultPath(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				c.path, gotName, gotPurpose, gotOK, c.wantName, c.wantPurpose, c.wantOK)
 		}
 	}
 }

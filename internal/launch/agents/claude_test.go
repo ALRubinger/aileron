@@ -63,6 +63,81 @@ func TestClaude_Args_SandboxSkipsPermissions(t *testing.T) {
 	}
 }
 
+// TestClaude_AuthSpec_SubscriptionMode pins that NewClaude with the
+// subscription mode (and the zero-value Claude{}) returns today's exact
+// oauth shape: one FileBinding at agents/claude/oauth, the onboarding
+// StaticFile, and zero EnvBindings. The zero-value check is the
+// regression guard for the unchanged registry registration in
+// cmd/aileron/main.go (#1340 swaps that line; this sub-issue must not
+// change its behavior).
+func TestClaude_AuthSpec_SubscriptionMode(t *testing.T) {
+	specs := map[string]launch.AuthSpec{
+		"zero value":        agents.Claude{}.AuthSpec(),
+		"NewClaude(subscr)": agents.NewClaude(agents.ClaudeAuthModeSubscription).AuthSpec(),
+	}
+	for name, spec := range specs {
+		t.Run(name, func(t *testing.T) {
+			if len(spec.FileBindings) != 1 {
+				t.Fatalf("FileBindings = %d, want 1", len(spec.FileBindings))
+			}
+			if spec.FileBindings[0].VaultPath != "agents/claude/oauth" {
+				t.Errorf("FileBinding VaultPath = %q, want agents/claude/oauth", spec.FileBindings[0].VaultPath)
+			}
+			if len(spec.EnvBindings) != 0 {
+				t.Errorf("EnvBindings = %d, want 0 in subscription mode", len(spec.EnvBindings))
+			}
+			if len(spec.StaticFiles) != 1 {
+				t.Errorf("StaticFiles = %d, want 1 (onboarding stub)", len(spec.StaticFiles))
+			}
+			// Disjoint-slot: subscription references neither the apikey
+			// slot nor any EnvBinding.
+			for _, fb := range spec.FileBindings {
+				if fb.VaultPath == "agents/claude/apikey" {
+					t.Errorf("subscription FileBinding references the apikey slot %q", fb.VaultPath)
+				}
+			}
+		})
+	}
+}
+
+// TestClaude_AuthSpec_APIKeyMode pins the api-key binding set: one
+// EnvBinding at agents/claude/apikey, Required==false, non-nil Render +
+// HostAcquire, zero FileBindings, and the shared onboarding StaticFile.
+// Disjoint-slot assertions enforce the acceptance criterion that
+// selecting api-key never touches the oauth slot.
+func TestClaude_AuthSpec_APIKeyMode(t *testing.T) {
+	spec := agents.NewClaude(agents.ClaudeAuthModeAPIKey).AuthSpec()
+	if len(spec.EnvBindings) != 1 {
+		t.Fatalf("EnvBindings = %d, want 1", len(spec.EnvBindings))
+	}
+	eb := spec.EnvBindings[0]
+	if eb.VaultPath != "agents/claude/apikey" {
+		t.Errorf("EnvBinding VaultPath = %q, want agents/claude/apikey", eb.VaultPath)
+	}
+	if eb.Required {
+		t.Errorf("Required = true; empty vault must trigger host-paste / in-container fallback")
+	}
+	if eb.Render == nil {
+		t.Errorf("Render must be set")
+	}
+	if eb.HostAcquire == nil {
+		t.Errorf("HostAcquire must be set")
+	}
+	if len(spec.FileBindings) != 0 {
+		t.Errorf("FileBindings = %d, want 0 in api-key mode", len(spec.FileBindings))
+	}
+	// Disjoint-slot: api-key references neither the oauth slot nor any
+	// FileBinding.
+	if spec.EnvBindings[0].VaultPath == "agents/claude/oauth" {
+		t.Errorf("api-key EnvBinding references the oauth slot")
+	}
+	// The onboarding StaticFile is shared so an api-key launch is silent
+	// first-run too.
+	if len(spec.StaticFiles) != 1 {
+		t.Errorf("StaticFiles = %d, want 1 (shared onboarding stub)", len(spec.StaticFiles))
+	}
+}
+
 func TestClaude_ConfigureMCP_EmitsMCPConfigFlag(t *testing.T) {
 	mcpEnv := map[string]string{
 		"AILERON_URL":        "http://127.0.0.1:7000",

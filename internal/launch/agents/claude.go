@@ -7,8 +7,34 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch"
 )
 
+// ClaudeAuthMode selects which credential-binding set Claude's AuthSpec
+// renders. The zero value is subscription mode so a bare Claude{} (e.g.
+// the registry registration in cmd/aileron/main.go) keeps its existing
+// behavior; #1340 swaps that registration to NewClaude(selectedMode).
+type ClaudeAuthMode int
+
+const (
+	// ClaudeAuthModeSubscription is the Pro/Max OAuth flow: a FileBinding
+	// at agents/claude/oauth renders .credentials.json. This is the zero
+	// value so Claude{} behaves identically to the pre-api-key agent.
+	ClaudeAuthModeSubscription ClaudeAuthMode = iota
+	// ClaudeAuthModeAPIKey is the raw-key flow: an EnvBinding at
+	// agents/claude/apikey renders ANTHROPIC_API_KEY. Selecting this mode
+	// never references the oauth slot.
+	ClaudeAuthModeAPIKey
+)
+
 // Claude is the agent definition for Claude Code.
-type Claude struct{}
+type Claude struct {
+	// authMode selects the credential-binding set AuthSpec returns. The
+	// zero value (ClaudeAuthModeSubscription) keeps a bare Claude{} in
+	// subscription mode.
+	authMode ClaudeAuthMode
+}
+
+// NewClaude returns a Claude configured for the given auth mode.
+// NewClaude(ClaudeAuthModeSubscription) is equivalent to Claude{}.
+func NewClaude(mode ClaudeAuthMode) Claude { return Claude{authMode: mode} }
 
 func (c Claude) Name() string          { return "claude" }
 func (c Claude) BinaryNames() []string { return []string{"claude"} }
@@ -97,7 +123,41 @@ func (c Claude) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, 
 // scope (#747) lists env-var credential injection as out of scope;
 // the file path delivers equivalent silent-first-launch UX without
 // breaching the scope boundary.
+//
+// AuthSpec is mode-aware: ClaudeAuthModeAPIKey returns a single
+// EnvBinding at agents/claude/apikey (ANTHROPIC_API_KEY) instead of the
+// oauth FileBinding. The two modes route to physically distinct vault
+// slots, so a single launch never references both: api-key never
+// touches the oauth slot and subscription never touches the apikey
+// slot. The onboarding StaticFile is vault-independent and shared by
+// both modes so an api-key launch is silent first-run too (it suppresses
+// the theme picker / trust dialog regardless of which credential the
+// agent ends up using).
 func (c Claude) AuthSpec() launch.AuthSpec {
+	if c.authMode == ClaudeAuthModeAPIKey {
+		return launch.AuthSpec{
+			EnvBindings: []launch.EnvBinding{{
+				VaultPath: claudeAPIKeyVaultPath,
+				// Required=false so an empty vault triggers the host-paste
+				// acquirer (and, failing that, the in-container login)
+				// rather than failing the launch.
+				Required: false,
+				Render:   claudeAPIKeyRender,
+				// HostAcquire runs a host-terminal paste of the raw
+				// ANTHROPIC_API_KEY when the apikey slot is empty and
+				// host-login is enabled. The launcher owns the vault PUT
+				// (to agents/claude/apikey) and the validating Render; a
+				// cancel/empty paste is non-fatal and falls back to the
+				// in-container login.
+				HostAcquire: claudeAPIKeyHostAcquire,
+			}},
+			StaticFiles: []launch.StaticFile{{
+				ContainerPath: claudeOnboardingContainerPath,
+				Mode:          0o644,
+				Content:       claudeOnboardingStub,
+			}},
+		}
+	}
 	return launch.AuthSpec{
 		FileBindings: []launch.FileBinding{{
 			VaultPath:     claudeVaultPath,
