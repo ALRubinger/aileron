@@ -26,6 +26,24 @@ const daemonHTTPTimeout = 5 * time.Second
 // pre-purpose wire shape.
 const defaultAgentCredentialPurpose = "oauth"
 
+// apikeyAgentCredentialPurpose is the second known credential purpose:
+// a long-lived API key bound at `agents/<name>/apikey`, distinct from the
+// rotating OAuth bundle at `agents/<name>/oauth`. The daemon routes it via
+// the `purpose` query parameter (see agentCredentialsEndpoint); the launcher
+// keeps the vocabulary closed so a typo (`oath`, `api-key`) cannot silently
+// open a brand-new vault slot.
+const apikeyAgentCredentialPurpose = "apikey"
+
+// isKnownAgentCredentialPurpose reports whether p is a purpose the launcher
+// knows how to route. The set is intentionally closed: validateAuthSpec uses
+// it as the third-segment gate for `agents/<name>/<purpose>` vault paths so an
+// unrecognized purpose is rejected up front rather than routed to an unintended
+// destination. Extend this set (and the daemon's accepted purposes) together
+// when a new purpose is introduced.
+func isKnownAgentCredentialPurpose(p string) bool {
+	return p == defaultAgentCredentialPurpose || p == apikeyAgentCredentialPurpose
+}
+
 // daemonClient is a thin HTTP client over the daemon's /v1 surface,
 // used by Launch to register and end the agent's session and to peek
 // at the vault state for the startup banner. Production code creates

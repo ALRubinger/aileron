@@ -67,6 +67,41 @@ type EnvBinding struct {
 	// Render maps a resolved vault secret to one or more env vars.
 	// Returning an error aborts the launch.
 	Render func(vault.Secret) (map[string]string, error)
+
+	// HostAcquire, when non-nil, is a host-side credential acquirer the
+	// launcher invokes when the vault GET for this binding misses and
+	// the binding is not Required. It mirrors FileBinding.HostAcquire
+	// exactly, save that an EnvBinding has no bind-mounted file: on
+	// success the launcher PUTs the acquired Secret through the daemon
+	// (vault before render) and then runs Render into the agent's env
+	// additions rather than writing a file.
+	//
+	// Contract:
+	//
+	//   - The returned Secret must satisfy this same binding's Render.
+	//     The launcher renders the acquired Secret immediately, so a
+	//     malformed envelope surfaces as a launch-aborting Render error
+	//     rather than seeding garbage into the vault.
+	//
+	//   - The acquirer must NOT require the agent CLI to be installed on
+	//     the host. The baseline path is pure Go (HTTP + browser open).
+	//     An acquirer may opportunistically shell out to the agent
+	//     binary as a shortcut, but it must fall back to the pure-Go flow
+	//     when the binary is absent or the shortcut fails.
+	//
+	//   - A returned Secret with an empty Value, or a cancelled/failed
+	//     acquire (non-nil error), is non-fatal: the launcher logs a
+	//     warning and falls back to the legacy in-container login path
+	//     (no env addition; the agent logs in inside the container and
+	//     capture-on-exit seeds the vault). Only a daemon PUT failure or
+	//     a Render failure of a successfully acquired Secret aborts the
+	//     launch.
+	//
+	// A nil HostAcquire preserves the legacy in-container path. The
+	// per-launch `--host-login` flag (and AILERON_LAUNCH_HOST_LOGIN env)
+	// can force the legacy path even for a binding that declares an
+	// acquirer.
+	HostAcquire func(context.Context, HostAcquireDeps) (vault.Secret, error)
 }
 
 // FileBinding declares one file-shaped binding: a host-side file
@@ -327,18 +362,22 @@ var ErrAuthSpecEmptyPath = errors.New("authspec: binding has empty path")
 
 // ErrAuthSpecBadVaultPath is returned when a binding's VaultPath
 // does not follow the documented `agents/<name>/<purpose>` scheme.
-// The daemon endpoint scopes by name and stores at the canonical
-// `agents/<name>/oauth` path; bindings that use a different shape
-// would silently misroute today, so validation rejects them up
-// front.
+// The daemon endpoint scopes by name and routes the third segment
+// via the `purpose` query parameter, but only for a known purpose
+// (`oauth` or `apikey`). A binding whose third segment is an
+// unrecognized purpose would silently route to an unintended vault
+// slot (a typo like `oath` would open a brand-new destination), so
+// validation rejects it up front.
 var ErrAuthSpecBadVaultPath = errors.New("authspec: vault path does not match agents/<name>/<purpose>")
 
 // vaultPathConforms reports whether a binding's VaultPath follows
-// the ADR-0025 namespace scheme. The daemon's per-agent endpoint
-// translates `{name}` to `agents/<name>/oauth`; until v1 ships a
-// way for the launcher to read arbitrary purposes from the daemon,
-// every binding must use that exact suffix or the round-trip
-// through the daemon would silently misroute.
+// the ADR-0025 namespace scheme. A conforming path is exactly
+// `agents/<name>/<purpose>` where <name> is non-empty and <purpose>
+// is a known credential purpose (see isKnownAgentCredentialPurpose:
+// `oauth` or `apikey`). The daemon routes the purpose via the
+// `purpose` query parameter, so any known purpose round-trips
+// correctly; the gate stays a closed set so a typo cannot silently
+// route to a brand-new vault slot.
 func vaultPathConforms(p string) bool {
 	p = strings.TrimLeft(p, "/")
 	parts := strings.Split(p, "/")
@@ -348,7 +387,7 @@ func vaultPathConforms(p string) bool {
 	if parts[0] != "agents" {
 		return false
 	}
-	if parts[1] == "" || parts[2] != "oauth" {
+	if parts[1] == "" || !isKnownAgentCredentialPurpose(parts[2]) {
 		return false
 	}
 	return true

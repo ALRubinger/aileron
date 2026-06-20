@@ -161,17 +161,94 @@ func prepareAuthSpec(
 	}
 	prep.HasBindings = true
 
+	// hostAcquireDeps builds the dependency bag handed to a binding's
+	// HostAcquire hook. Both the EnvBinding loop below and the
+	// FileBinding loop further down build identical deps, so the wiring
+	// lives in one place: HTTPClient is the timed pre-launch client,
+	// Browser defaults to the system browser, the paste prompt reads
+	// from the HOST terminal (not the container TTY), and Out surfaces a
+	// write-only flow's instructions on stderr.
+	hostAcquireDeps := func() HostAcquireDeps {
+		return HostAcquireDeps{
+			Ctx:        ctx,
+			HTTPClient: preLaunchRefreshHTTPClient(),
+			Browser:    oauth.SystemBrowser{},
+			CodePrompter: func(ctx context.Context, promptW io.Writer) (string, error) {
+				if promptW == nil {
+					promptW = stderr
+				}
+				return defaultHostCodePrompter(ctx, promptW)
+			},
+			Out: stderr,
+		}
+	}
+
 	// Render env bindings first. They don't touch the host FS and
 	// don't need the transient dir, so a Required-but-missing env
 	// binding fails fast before any mount setup.
+	//
+	// P2 no-cleanup invariant: this loop runs BEFORE the os.MkdirTemp
+	// that creates the transient host directory below, so an abort/return
+	// from inside this loop (a PUT or Render failure on the host-acquire
+	// branch) has no host-side transient state to clean up. This depends
+	// on the env loop staying ahead of the MkdirTemp call.
 	for i, eb := range spec.EnvBindings {
 		ebName, ebPurpose := vaultBindingNameAndPurpose(eb.VaultPath)
 		secret, err := daemon.GetAgentCredentials(ctx, ebName, ebPurpose)
 		switch {
 		case errors.Is(err, ErrAgentCredentialsNotFound):
+			// Required-but-empty fails fast. The required check runs
+			// before any host-acquire attempt, so a required binding
+			// never consults the acquirer.
 			if eb.Required {
 				return prep, fmt.Errorf("auth spec: env binding %d at %q is required but the vault is empty — seed with `aileron vault put %s`",
 					i, eb.VaultPath, eb.VaultPath)
+			}
+			// Required=false on empty vault. If the binding declares a
+			// host acquirer and host-login is enabled, run the host-side
+			// OAuth flow, PUT the acquired Secret through the daemon
+			// (vault before render), then Render into the env additions
+			// so the credential is treated exactly as a vault-resident
+			// one. Mirrors the FileBinding host-acquire branch; the only
+			// difference is there is no file to write/mount.
+			if eb.HostAcquire != nil && hostLoginEnabled {
+				acquired, acqErr := eb.HostAcquire(ctx, hostAcquireDeps())
+				switch {
+				case acqErr != nil:
+					// Acquire failed or was cancelled. Non-fatal: warn and
+					// fall back to the legacy in-container path (no env
+					// addition).
+					captureWarn(sessionLog, stderr, agentName, eb.VaultPath,
+						fmt.Errorf("host credential acquisition failed: %w; falling back to in-container login", acqErr))
+					continue
+				case len(acquired.Value) == 0:
+					// Acquirer returned an empty Secret (e.g. user declined
+					// consent). Treat as fallback, no PUT, no env addition.
+					sessionLog.Info("host credential acquisition returned empty secret; falling back to in-container login",
+						"agent", agentName, "vault_path", eb.VaultPath)
+					continue
+				default:
+					// Vault-before-render ordering: persist the acquired
+					// Secret before rendering it into the env. A PUT failure
+					// aborts the launch rather than silently dropping a
+					// just-acquired credential. The env loop precedes
+					// os.MkdirTemp, so there is no transient dir to clean up.
+					if err := daemon.PutAgentCredentials(ctx, ebName, ebPurpose, acquired); err != nil {
+						return prep, fmt.Errorf("auth spec: persist host-acquired credential %q: %w", eb.VaultPath, err)
+					}
+					rendered, err := eb.Render(acquired)
+					if err != nil {
+						// A malformed acquired Secret surfaces as a launch-
+						// aborting Render error rather than seeding garbage
+						// into the env. No transient dir exists yet.
+						return prep, fmt.Errorf("auth spec: render host-acquired env binding %d %q: %w", i, eb.VaultPath, err)
+					}
+					for k, v := range rendered {
+						prep.EnvAdditions[k] = v
+					}
+					prep.RenderedAnyCredential = true
+					continue
+				}
 			}
 			continue
 		case err != nil:
@@ -342,26 +419,7 @@ func prepareAuthSpec(
 			// launcher.go is suppressed automatically because the tail
 			// sets RenderedAnyCredential = true.
 			if fb.HostAcquire != nil && hostLoginEnabled {
-				acquired, acqErr := fb.HostAcquire(ctx, HostAcquireDeps{
-					Ctx:        ctx,
-					HTTPClient: preLaunchRefreshHTTPClient(),
-					Browser:    oauth.SystemBrowser{},
-					// Default the paste prompt to a controlling-terminal
-					// line reader writing to the launcher's stderr, so the
-					// code is pasted on the HOST terminal (not the
-					// container TTY). Tests inject a scripted prompter.
-					CodePrompter: func(ctx context.Context, promptW io.Writer) (string, error) {
-						if promptW == nil {
-							promptW = stderr
-						}
-						return defaultHostCodePrompter(ctx, promptW)
-					},
-					// Out is the launcher's stderr so a write-only host
-					// flow (Codex device-authorization) can surface the
-					// verification URL + user_code on the HOST terminal,
-					// even on a headless host where the browser cannot open.
-					Out: stderr,
-				})
+				acquired, acqErr := fb.HostAcquire(ctx, hostAcquireDeps())
 				switch {
 				case acqErr != nil:
 					// Acquire failed or was cancelled. Non-fatal: warn

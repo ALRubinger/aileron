@@ -42,19 +42,38 @@ import (
 // fake records calls so assertions can pin "did we PUT?" / "did we
 // GET the right name?" — the real daemon HTTP server is exercised
 // in daemon_client_agent_credentials_test.go.
+//
+// The store and per-name error/sequence maps are keyed by the FULL
+// destination (name, purpose), not by name alone. Keying by name only
+// would let a purpose misroute go GREEN: two bindings on the same agent
+// (oauth + apikey) would collapse onto one store key, so a PUT that
+// targeted the wrong purpose would still appear to land. With the
+// composite key a misroute reads/writes a different slot and the
+// assertion fails, which is the whole point of the distinct-destination
+// test. The seed/deleteEntry/getErrors/putErrors helpers default the
+// purpose to oauth so existing single-purpose tests keep compiling.
 type fakeDaemon struct {
 	mu        sync.Mutex
-	store     map[string]vault.Secret
-	getErrors map[string]error
-	putErrors map[string]error
-	// getSeq, when populated for a name, supplies a per-call error
-	// sequence consumed in order. A nil entry means "no error, use the
-	// store" for that call. This lets a scenario make the render GET
+	store     map[daemonKey]vault.Secret
+	getErrors map[daemonKey]error
+	putErrors map[daemonKey]error
+	// getSeq, when populated for a destination, supplies a per-call
+	// error sequence consumed in order. A nil entry means "no error, use
+	// the store" for that call. This lets a scenario make the render GET
 	// succeed and the capture GET cancel/fail without affecting the
-	// other. getSeq takes precedence over getErrors for that name.
-	getSeq map[string][]error
+	// other. getSeq takes precedence over getErrors for that
+	// destination.
+	getSeq map[daemonKey][]error
 	puts   []putRecord
 	gets   []getRecord
+}
+
+// daemonKey is the composite (name, purpose) destination key the fake
+// daemon routes by, mirroring the daemon's real per-(name, purpose)
+// vault slots.
+type daemonKey struct {
+	Name    string
+	Purpose string
 }
 
 type putRecord struct {
@@ -70,48 +89,96 @@ type getRecord struct {
 
 func newFakeDaemon() *fakeDaemon {
 	return &fakeDaemon{
-		store:     map[string]vault.Secret{},
-		getErrors: map[string]error{},
-		putErrors: map[string]error{},
-		getSeq:    map[string][]error{},
+		store:     map[daemonKey]vault.Secret{},
+		getErrors: map[daemonKey]error{},
+		putErrors: map[daemonKey]error{},
+		getSeq:    map[daemonKey][]error{},
 	}
 }
 
-func (f *fakeDaemon) seed(name string, value []byte) {
+// seedPurpose seeds the vault slot at the full (name, purpose)
+// destination. Use this when a test exercises a non-oauth purpose.
+func (f *fakeDaemon) seedPurpose(name, purpose string, value []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.store[name] = vault.Secret{Value: value, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}
+	f.store[daemonKey{Name: name, Purpose: purpose}] = vault.Secret{Value: value, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}
 }
 
-// deleteEntry simulates an operator running `aileron vault delete`
-// mid-session: the entry vanishes from the store so a subsequent GET
-// returns ErrAgentCredentialsNotFound.
-func (f *fakeDaemon) deleteEntry(name string) {
+// seed is the thin oauth-defaulting shim over seedPurpose so the
+// existing single-purpose tests keep compiling unchanged.
+func (f *fakeDaemon) seed(name string, value []byte) {
+	f.seedPurpose(name, defaultAgentCredentialPurpose, value)
+}
+
+// deleteEntryPurpose simulates an operator running `aileron vault
+// delete` mid-session against a specific (name, purpose) destination.
+func (f *fakeDaemon) deleteEntryPurpose(name, purpose string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.store, name)
+	delete(f.store, daemonKey{Name: name, Purpose: purpose})
+}
+
+// deleteEntry is the oauth-defaulting shim over deleteEntryPurpose: the
+// entry vanishes from the store so a subsequent GET returns
+// ErrAgentCredentialsNotFound.
+func (f *fakeDaemon) deleteEntry(name string) {
+	f.deleteEntryPurpose(name, defaultAgentCredentialPurpose)
+}
+
+// setGetError installs a GET error for the (name, purpose) destination.
+func (f *fakeDaemon) setGetError(name, purpose string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getErrors[daemonKey{Name: name, Purpose: purpose}] = err
+}
+
+// setGetErrorOAuth installs a GET error for the oauth slot — the
+// oauth-defaulting shim existing single-purpose tests use.
+func (f *fakeDaemon) setGetErrorOAuth(name string, err error) {
+	f.setGetError(name, defaultAgentCredentialPurpose, err)
+}
+
+// setPutError installs a PUT error for the (name, purpose) destination.
+func (f *fakeDaemon) setPutError(name, purpose string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.putErrors[daemonKey{Name: name, Purpose: purpose}] = err
+}
+
+// setPutErrorOAuth installs a PUT error for the oauth slot.
+func (f *fakeDaemon) setPutErrorOAuth(name string, err error) {
+	f.setPutError(name, defaultAgentCredentialPurpose, err)
+}
+
+// setGetSeqOAuth installs a per-call GET error sequence for the oauth
+// slot, consumed in order.
+func (f *fakeDaemon) setGetSeqOAuth(name string, seq []error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getSeq[daemonKey{Name: name, Purpose: defaultAgentCredentialPurpose}] = seq
 }
 
 func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name, purpose string) (vault.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	key := daemonKey{Name: name, Purpose: purpose}
 	f.gets = append(f.gets, getRecord{Name: name, Purpose: purpose})
-	if seq, ok := f.getSeq[name]; ok && len(seq) > 0 {
+	if seq, ok := f.getSeq[key]; ok && len(seq) > 0 {
 		err := seq[0]
-		f.getSeq[name] = seq[1:]
+		f.getSeq[key] = seq[1:]
 		if err != nil {
 			return vault.Secret{}, err
 		}
-		s, ok := f.store[name]
+		s, ok := f.store[key]
 		if !ok {
 			return vault.Secret{}, ErrAgentCredentialsNotFound
 		}
 		return s, nil
 	}
-	if err, ok := f.getErrors[name]; ok {
+	if err, ok := f.getErrors[key]; ok {
 		return vault.Secret{}, err
 	}
-	s, ok := f.store[name]
+	s, ok := f.store[key]
 	if !ok {
 		return vault.Secret{}, ErrAgentCredentialsNotFound
 	}
@@ -121,11 +188,12 @@ func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name, purpose string
 func (f *fakeDaemon) PutAgentCredentials(_ context.Context, name, purpose string, secret vault.Secret) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err, ok := f.putErrors[name]; ok {
+	key := daemonKey{Name: name, Purpose: purpose}
+	if err, ok := f.putErrors[key]; ok {
 		return err
 	}
 	f.puts = append(f.puts, putRecord{Name: name, Purpose: purpose, Secret: secret})
-	f.store[name] = secret
+	f.store[key] = secret
 	return nil
 }
 
@@ -530,7 +598,7 @@ func TestPrepareAuthSpec_EnvBindingMerges(t *testing.T) {
 func TestPrepareAuthSpec_CapturePutFailureSurfacesWarning(t *testing.T) {
 	daemon := newFakeDaemon()
 	daemon.seed("claude", []byte(`{"x":1}`))
-	daemon.putErrors["claude"] = errors.New("daemon offline")
+	daemon.setPutErrorOAuth("claude", errors.New("daemon offline"))
 
 	stderr := &bytes.Buffer{}
 	spec := AuthSpec{
@@ -606,7 +674,7 @@ func TestPrepareAuthSpec_EnvBindingOptionalMissingContinues(t *testing.T) {
 
 func TestPrepareAuthSpec_EnvBindingGetErrorPropagates(t *testing.T) {
 	daemon := newFakeDaemon()
-	daemon.getErrors["example"] = errors.New("network down")
+	daemon.setGetErrorOAuth("example", errors.New("network down"))
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
 			VaultPath: "agents/example/oauth",
@@ -658,7 +726,7 @@ func TestPrepareAuthSpec_FileBindingRenderErrorPropagates(t *testing.T) {
 
 func TestPrepareAuthSpec_FileBindingGetErrorPropagates(t *testing.T) {
 	daemon := newFakeDaemon()
-	daemon.getErrors["claude"] = errors.New("daemon offline")
+	daemon.setGetErrorOAuth("claude", errors.New("daemon offline"))
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{
 			VaultPath:     "agents/claude/oauth",
@@ -763,6 +831,96 @@ func TestPrepareAuthSpec_RejectsNonConformingVaultPath(t *testing.T) {
 		newTestLogger(), nil, nil, nil, true)
 	if !errors.Is(err, ErrAuthSpecBadVaultPath) {
 		t.Fatalf("err = %v, want ErrAuthSpecBadVaultPath", err)
+	}
+}
+
+// TestPrepareAuthSpec_TwoBindingsDistinctPurposesRouteSeparately is the
+// residual #1344 regression: two bindings on the SAME agent name but
+// distinct purposes (apikey + oauth) must route to distinct vault
+// destinations. The EnvBinding at agents/foo/apikey is host-acquire
+// seeded; the FileBinding at agents/foo/oauth is vault-resident. The
+// apikey PUT must land at (foo, apikey) and the oauth read at
+// (foo, oauth) — a routing bug that collapses both onto name `foo`
+// would overwrite the oauth slot with the apikey value (or vice-versa)
+// and fail these assertions. The re-keyed fakeDaemon is what makes the
+// misroute observable rather than silently green.
+func TestPrepareAuthSpec_TwoBindingsDistinctPurposesRouteSeparately(t *testing.T) {
+	daemon := newFakeDaemon()
+	// Seed only the oauth slot (vault-resident FileBinding). The apikey
+	// slot is empty so the EnvBinding takes the host-acquire path.
+	oauthEnvelope := []byte(`{"claudeAiOauth":{"accessToken":"oauth-tok"}}`)
+	daemon.seedPurpose("foo", "oauth", oauthEnvelope)
+
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("sk-apikey")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath: "agents/foo/apikey",
+			Render: func(s vault.Secret) (map[string]string, error) {
+				return map[string]string{"FOO_KEY": string(s.Value)}, nil
+			},
+			HostAcquire: spy.acquire,
+		}},
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/foo/oauth",
+			ContainerPath: "/home/agent/.foo/.credentials.json",
+			Mode:          0o600,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "foo", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// The apikey EnvBinding host-acquired and PUT exactly one entry, at
+	// (foo, apikey) — NOT (foo, oauth).
+	if len(daemon.puts) != 1 {
+		t.Fatalf("PUTs = %d, want 1 (the apikey host-acquire seed)", len(daemon.puts))
+	}
+	if daemon.puts[0].Name != "foo" || daemon.puts[0].Purpose != "apikey" {
+		t.Errorf("PUT destination = (%q,%q), want (foo,apikey)", daemon.puts[0].Name, daemon.puts[0].Purpose)
+	}
+
+	// The oauth read landed at (foo, oauth): assert a GET recorded that
+	// destination.
+	var sawOAuthGet bool
+	for _, g := range daemon.gets {
+		if g.Name == "foo" && g.Purpose == "oauth" {
+			sawOAuthGet = true
+		}
+	}
+	if !sawOAuthGet {
+		t.Errorf("no GET at (foo,oauth) recorded; gets=%v", daemon.gets)
+	}
+
+	// The apikey seed did NOT overwrite the oauth slot: the oauth slot
+	// still holds the original envelope, and the apikey slot holds the
+	// acquired key.
+	gotOAuth, err := daemon.GetAgentCredentials(context.Background(), "foo", "oauth")
+	if err != nil {
+		t.Fatalf("GET (foo,oauth): %v", err)
+	}
+	if string(gotOAuth.Value) != string(oauthEnvelope) {
+		t.Errorf("oauth slot = %q, want the original envelope %q (apikey PUT must not clobber it)", gotOAuth.Value, oauthEnvelope)
+	}
+	gotApikey, err := daemon.GetAgentCredentials(context.Background(), "foo", "apikey")
+	if err != nil {
+		t.Fatalf("GET (foo,apikey): %v", err)
+	}
+	if string(gotApikey.Value) != "sk-apikey" {
+		t.Errorf("apikey slot = %q, want sk-apikey", gotApikey.Value)
+	}
+
+	// The rendered env var carries the apikey, and the oauth credential
+	// rendered into a mounted file.
+	if got := prep.EnvAdditions["FOO_KEY"]; got != "sk-apikey" {
+		t.Errorf("EnvAdditions[FOO_KEY] = %q, want sk-apikey", got)
+	}
+	if !prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = false; both bindings rendered")
 	}
 }
 
@@ -1206,7 +1364,7 @@ func TestPrepareAuthSpec_CaptureGetCancelledSkipsPut(t *testing.T) {
 	daemon := newFakeDaemon()
 	daemon.seed("claude", []byte("current"))
 	// Render GET succeeds (store hit); capture GET returns context.Canceled.
-	daemon.getSeq["claude"] = []error{nil, context.Canceled}
+	daemon.setGetSeqOAuth("claude", []error{nil, context.Canceled})
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
 
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
