@@ -89,13 +89,21 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		sandboxBuild := launchFlags.String("sandbox-build", "auto", "Sandbox build policy during launch: auto, always, or never")
 		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for the Docker sandbox)")
 		hostLogin := launchFlags.String("host-login", "auto", "Host-side credential acquisition on vault miss: auto, on, or off (off forces in-container login)")
+		// --claude-auth selects Claude's auth mode (subscription|api-key).
+		// DIVERGENCE FROM SIBLING LAUNCH FLAGS (do not "fix" to a non-empty
+		// default): this defaults to "" (empty), not a tri-state like "auto".
+		// Empty means "unresolved": on a TTY it triggers the first-run
+		// selection prompt, off a TTY it defaults to subscription. A non-empty
+		// default would destroy empty-means-prompt. Only "subscription" and
+		// "api-key" are valid; any other non-empty value fails fast.
+		claudeAuth := launchFlags.String("claude-auth", "", "Claude auth mode: subscription or api-key (empty = prompt on a TTY, else subscription)")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--local] [--sandbox=auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] [--host-login=auto|on|off] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--local] [--sandbox=auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] [--host-login=auto|on|off] [--claude-auth=subscription|api-key] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
@@ -135,6 +143,20 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 				return 1
 			}
 			*sandboxRuntime = "off"
+		}
+
+		// Claude auth-mode selection (#1340). Only the claude agent has an
+		// auth mode; every other agent passes through unchanged and never
+		// prompts. Resolve after trailing-flag application so a
+		// post-agent-name --claude-auth is honored, then swap the registered
+		// (zero-value subscription) Claude for one carrying the selected mode.
+		if agent.Name() == "claude" {
+			mode, err := resolveClaudeAuthMode(*claudeAuth, isTTYFn(), os.Stdin, stdout)
+			if err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			agent = agents.NewClaude(mode)
 		}
 
 		// Capture cwd so the daemon's session record carries working_dir
@@ -478,7 +500,7 @@ var launchFn = launch.Launch
 // `--flag` / `--flag=value` forms.
 func launchFlagTakesValue(name string) bool {
 	switch name {
-	case "log-level", "sandbox", "sandbox-build", "sandbox-proxy", "host-login":
+	case "log-level", "sandbox", "sandbox-build", "sandbox-proxy", "host-login", "claude-auth":
 		return true
 	default:
 		return false

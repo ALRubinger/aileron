@@ -34,11 +34,16 @@ import (
 // override doesn't suppress them.
 func init() {
 	ensureVaultUnlockedFn = func(string, io.Writer) error { return nil }
+	// Force the non-interactive path by default so launch tests that don't
+	// pass --claude-auth never block on the first-run prompt. Tests that
+	// exercise the prompt override isTTYFn locally.
+	isTTYFn = func() bool { return false }
 }
 
 func newTestRegistry() *launch.Registry {
 	r := launch.NewRegistry()
 	r.Register(agents.Claude{})
+	r.Register(agents.Pi{})
 	return r
 }
 

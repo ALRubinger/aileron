@@ -577,6 +577,12 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			fmt.Fprintf(os.Stderr, NoVaultCredentialMsgFormat, config.Agent.Name())
 		}
 
+		// Claude active-mode banner (#1340). Gated on the sandbox path
+		// because the auth mode is inert on host launch (AuthSpec is only
+		// materialized under sandbox), so emitting it there would be a false
+		// signal (P0). Non-claude agents are a no-op.
+		printClaudeAuthBanner(os.Stderr, config.Agent, sandboxEnabled)
+
 		// User-level GitHub injection runs on every sandbox launch,
 		// independent of the per-agent AuthSpec: it probes the
 		// agent-independent `user/github` token in the vault and, when
