@@ -67,18 +67,22 @@ func TestClaude_AuthSpec_Shape(t *testing.T) {
 	assertOnboardingStub(t, sf.Content)
 }
 
-// assertOnboardingStub verifies the three contractual flags the stub
-// must carry to make a sandbox launch silent: onboarding completed,
-// installMethod matching the devcontainer's npm-global install (so
-// `/doctor` is clean), and the workspace pre-trusted (so the folder
-// trust dialog does not fire). Parsed semantically rather than matched
-// as a string so field ordering or additive fields do not break it.
+// assertOnboardingStub verifies the contractual flags the stub must
+// carry to make a sandbox launch silent: onboarding completed, the
+// bypass-permissions disclaimer pre-accepted (so the first
+// --dangerously-skip-permissions launch does not block on the
+// confirmation prompt, #1379), installMethod matching the devcontainer's
+// npm-global install (so `/doctor` is clean), and the workspace
+// pre-trusted (so the folder trust dialog does not fire). Parsed
+// semantically rather than matched as a string so field ordering or
+// additive fields do not break it.
 func assertOnboardingStub(t *testing.T, content []byte) {
 	t.Helper()
 	var stub struct {
-		HasCompletedOnboarding bool   `json:"hasCompletedOnboarding"`
-		InstallMethod          string `json:"installMethod"`
-		Projects               map[string]struct {
+		HasCompletedOnboarding        bool   `json:"hasCompletedOnboarding"`
+		BypassPermissionsModeAccepted bool   `json:"bypassPermissionsModeAccepted"`
+		InstallMethod                 string `json:"installMethod"`
+		Projects                      map[string]struct {
 			HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
 		} `json:"projects"`
 	}
@@ -87,6 +91,9 @@ func assertOnboardingStub(t *testing.T, content []byte) {
 	}
 	if !stub.HasCompletedOnboarding {
 		t.Errorf("hasCompletedOnboarding = false; the theme picker will paint on every launch")
+	}
+	if !stub.BypassPermissionsModeAccepted {
+		t.Errorf("bypassPermissionsModeAccepted = false; the first --dangerously-skip-permissions launch will block on the \"do you want to dangerously skip permissions?\" confirmation")
 	}
 	if stub.InstallMethod != "global" {
 		t.Errorf("installMethod = %q, want \"global\" to match the devcontainer's `npm install -g`; a mismatch makes /doctor report the CLI missing", stub.InstallMethod)
