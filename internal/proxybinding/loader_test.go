@@ -3,6 +3,7 @@ package proxybinding
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -164,4 +165,81 @@ func TestLoadHostBindings_MatchesLinear(t *testing.T) {
 	if hb.CredentialRef != "user/linear" {
 		t.Errorf("matched credential_ref = %q, want user/linear", hb.CredentialRef)
 	}
+}
+
+// TestLoad_ExtraLayerPrecedence pins the built-in < unit-derived < user
+// ordering for the in-memory extra layer (#1322). An extra entry overrides a
+// built-in for the same host, a user entry overrides the extra layer, and an
+// unset extra layer reproduces the built-in-only table exactly.
+func TestLoad_ExtraLayerPrecedence(t *testing.T) {
+	t.Run("extra overrides built-in for same host", func(t *testing.T) {
+		extra := []Entry{{
+			Host:          "api.linear.app",
+			CredentialRef: "user/from-unit",
+			Scheme:        binding.SchemeBearer,
+		}}
+		entries, err := Load(LoadOptions{ExtraEntries: extra})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		e, ok := findEntry(entries, "api.linear.app")
+		if !ok {
+			t.Fatal("missing api.linear.app")
+		}
+		if e.CredentialRef != "user/from-unit" {
+			t.Errorf("credential_ref = %q, want user/from-unit (unit-derived override)", e.CredentialRef)
+		}
+	})
+
+	t.Run("user overrides extra for same host", func(t *testing.T) {
+		dir := t.TempDir()
+		userPath := writeDescriptor(t, dir, "user.yaml",
+			"version: v1\nbindings:\n  - host: api.linear.app\n    credential_ref: user/from-user\n    scheme: bearer\n")
+		extra := []Entry{{
+			Host:          "api.linear.app",
+			CredentialRef: "user/from-unit",
+			Scheme:        binding.SchemeBearer,
+		}}
+		entries, err := Load(LoadOptions{ExtraEntries: extra, UserPath: userPath})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		e, _ := findEntry(entries, "api.linear.app")
+		if e.CredentialRef != "user/from-user" {
+			t.Errorf("credential_ref = %q, want user/from-user (user is highest precedence)", e.CredentialRef)
+		}
+	})
+
+	t.Run("extra adds a new host alongside built-in", func(t *testing.T) {
+		extra := []Entry{{
+			Host:          "github.com",
+			CredentialRef: "user/github",
+			Scheme:        binding.SchemeBasic,
+			Username:      "x-access-token",
+		}}
+		entries, err := Load(LoadOptions{ExtraEntries: extra})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if _, ok := findEntry(entries, "api.linear.app"); !ok {
+			t.Error("built-in linear must remain present alongside the unit-derived layer")
+		}
+		if _, ok := findEntry(entries, "github.com"); !ok {
+			t.Error("unit-derived github.com must be added")
+		}
+	})
+
+	t.Run("nil extra layer reproduces built-in-only table", func(t *testing.T) {
+		base, err := Load(LoadOptions{})
+		if err != nil {
+			t.Fatalf("baseline load: %v", err)
+		}
+		withNil, err := Load(LoadOptions{ExtraEntries: nil})
+		if err != nil {
+			t.Fatalf("nil-extra load: %v", err)
+		}
+		if !reflect.DeepEqual(base, withNil) {
+			t.Errorf("nil ExtraEntries changed the table:\nbase=%#v\nwithNil=%#v", base, withNil)
+		}
+	})
 }

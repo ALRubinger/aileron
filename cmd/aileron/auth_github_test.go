@@ -433,9 +433,15 @@ func TestIsCaptureDescriptor_RegistryLoadErrorFailsClosed(t *testing.T) {
 
 // TestNewCaptureDriver_RegistryLoadErrorSurfaces pins that a registry load
 // error surfaces from the driver builder rather than panicking on a nil
-// registry.
+// registry. newCaptureDriver builds its registry through imageCaptureRegistry
+// (which additively includes the image-derived unit layer, #1322), so the
+// fail-closed property is exercised by forcing that constructor to fail.
 func TestNewCaptureDriver_RegistryLoadErrorSurfaces(t *testing.T) {
-	withFailingCaptureRegistry(t)
+	orig := imageCaptureRegistry
+	imageCaptureRegistry = func(string, string) (*capture.Registry, error) {
+		return nil, errors.New("registry load failed")
+	}
+	t.Cleanup(func() { imageCaptureRegistry = orig })
 	if _, err := newCaptureDriver("gh", "docker", "img", userCredentialStore); err == nil {
 		t.Fatal("expected the registry load error to surface")
 	}
@@ -455,5 +461,71 @@ func TestRunAuth_GitHubVerbFallsThroughOnRegistryError(t *testing.T) {
 	// It fell through to the agent path: --import-from-host is required.
 	if !strings.Contains(stderr.String(), "--import-from-host is required") {
 		t.Errorf("stderr = %q, want the agent-path fall-through error", stderr.String())
+	}
+}
+
+// swapImageCaptureLayers substitutes the image-derived capture-layer seam for
+// the duration of a test, restoring the production resolver afterward.
+func swapImageCaptureLayers(t *testing.T, fn func(runtime, image string) ([]capture.CaptureDescriptor, error)) {
+	t.Helper()
+	orig := imageCaptureLayers
+	imageCaptureLayers = fn
+	t.Cleanup(func() { imageCaptureLayers = orig })
+}
+
+// TestImageCaptureRegistry_NoUnitLayerKeepsDefaults proves the auth-path
+// registry still resolves the embedded gh descriptor when the image read
+// contributes nothing (#1322 clean no-op).
+func TestImageCaptureRegistry_NoUnitLayerKeepsDefaults(t *testing.T) {
+	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
+		return nil, nil
+	})
+	reg, err := imageCaptureRegistry("docker", "img:test")
+	if err != nil {
+		t.Fatalf("imageCaptureRegistry: %v", err)
+	}
+	if _, ok := reg.Resolve("gh"); !ok {
+		t.Error("embedded gh descriptor must remain resolvable with no unit layer")
+	}
+}
+
+// TestImageCaptureRegistry_UnitLayerIsAdditive proves a unit-derived capture
+// descriptor is additively merged into the auth-path registry on top of the
+// embedded defaults: the built-in gh survives and the unit-derived tool is
+// resolvable.
+func TestImageCaptureRegistry_UnitLayerIsAdditive(t *testing.T) {
+	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
+		return []capture.CaptureDescriptor{{
+			Version:       capture.CaptureSchemaVersion,
+			Name:          "linear",
+			ContainerName: "aileron-auth-linear",
+			LoginCmd:      []string{"linear", "auth", "login"},
+			TokenCmd:      []string{"linear", "auth", "token"},
+			StoreAt:       "user/linear",
+			Kind:          "user",
+		}}, nil
+	})
+	reg, err := imageCaptureRegistry("docker", "img:test")
+	if err != nil {
+		t.Fatalf("imageCaptureRegistry: %v", err)
+	}
+	if _, ok := reg.Resolve("gh"); !ok {
+		t.Error("embedded gh must remain alongside the unit-derived layer")
+	}
+	if _, ok := reg.Resolve("linear"); !ok {
+		t.Error("unit-derived linear must be resolvable")
+	}
+}
+
+// TestImageCaptureRegistry_MalformedUnitFailsLoudly proves a present-but-broken
+// unit (a seam error) fails registry construction loudly rather than degrading
+// to a defaults-only registry.
+func TestImageCaptureRegistry_MalformedUnitFailsLoudly(t *testing.T) {
+	wantErr := errors.New("unitloader: parse cli unit at element 0: boom")
+	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
+		return nil, wantErr
+	})
+	if _, err := imageCaptureRegistry("docker", "img:test"); !errors.Is(err, wantErr) {
+		t.Errorf("imageCaptureRegistry err = %v, want it to wrap %v", err, wantErr)
 	}
 }

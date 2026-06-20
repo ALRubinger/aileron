@@ -17,16 +17,28 @@ type LoadOptions struct {
 	// the highest-precedence layer. It overrides built-in entries for the
 	// same host. Empty or absent contributes nothing.
 	UserPath string
+
+	// ExtraEntries is the in-memory unit-derived layer applied between the
+	// built-in defaults and the user layer (built-in < unit-derived < user).
+	// It carries entries projected from a sandbox image's
+	// devcontainer.metadata CLI units (#1322). An entry here overrides a
+	// built-in for the same host and is overridden by a user entry for the
+	// same host. Nil or empty contributes nothing, so a caller that sets it to
+	// nil reproduces today's two-layer table exactly.
+	ExtraEntries []Entry
 }
 
-// Load merges the two configuration layers (built-in defaults, then user)
-// into a single validated, ordered set of entries keyed on host. This
-// mirrors the layered policy/config convention used elsewhere in the
-// codebase: the later layer overrides the earlier one per host key, so a
-// user descriptor can replace a shipped community profile for the same host
-// without editing it.
+// Load merges the configuration layers (built-in defaults, then the optional
+// in-memory unit-derived layer, then user) into a single validated, ordered
+// set of entries keyed on host. This mirrors the layered policy/config
+// convention used elsewhere in the codebase: the later layer overrides the
+// earlier one per host key, so a user descriptor can replace a shipped
+// community profile for the same host without editing it.
 //
-// Precedence is strictly built-in < user. Within the merged result, entries
+// Precedence is strictly built-in < unit-derived < user. The unit-derived
+// layer (opts.ExtraEntries) is the image-projected layer; an unset (nil)
+// extra layer is a no-op that reproduces the two-layer table. Within the
+// merged result, entries
 // are ordered deterministically by host so the binding table is
 // reproducible across loads.
 //
@@ -44,6 +56,11 @@ func Load(opts LoadOptions) ([]Entry, error) {
 		return nil, fmt.Errorf("proxybinding: load built-in defaults: %w", err)
 	}
 	applyLayer(merged, builtin)
+
+	// The unit-derived layer sits between built-in and user. It is already
+	// validated (each entry is projected from a parsed, validated unit), so it
+	// is applied directly without re-parsing.
+	applyLayer(merged, opts.ExtraEntries)
 
 	if opts.UserPath != "" {
 		user, err := parseLayerFile(opts.UserPath)

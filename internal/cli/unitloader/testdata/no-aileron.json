@@ -1,0 +1,15 @@
+[
+  {
+    "id": "ghcr.io/devcontainers/features/common-utils",
+    "version": "2.0.0"
+  },
+  {
+    "id": "ghcr.io/devcontainers/features/git",
+    "version": "1.0.0",
+    "customizations": {
+      "vscode": {
+        "extensions": ["eamodio.gitlens"]
+      }
+    }
+  }
+]

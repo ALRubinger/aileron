@@ -1561,3 +1561,71 @@ func TestBakedMCPVersion_InspectArgs(t *testing.T) {
 		t.Fatalf("inspect args = %v, want %v", gotArgs, want)
 	}
 }
+
+// --- ImageMetadataLabel devcontainer.metadata detection (#1322) ---
+
+func TestImageMetadataLabel(t *testing.T) {
+	const metadataJSON = `[{"id":"gh","customizations":{"aileron":{"cli":{"name":"gh"}}}}]`
+	cases := []struct {
+		name   string
+		stdout string
+		runErr error
+		want   string
+	}{
+		{name: "metadata present", stdout: metadataJSON + "\n", want: metadataJSON},
+		{name: "trailing and leading whitespace", stdout: "  " + metadataJSON + "  \n", want: metadataJSON},
+		{name: "unlabeled empty", stdout: "\n", want: ""},
+		{name: "no labels sentinel", stdout: "<no value>\n", want: ""},
+		{name: "inspect error no metadata", stdout: "", runErr: errors.New("no such image"), want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := runnerFunc(func(_ context.Context, _ string, _ []string, stdout, _ io.Writer) error {
+				if tc.runErr != nil {
+					return tc.runErr
+				}
+				_, _ = io.WriteString(stdout, tc.stdout)
+				return nil
+			})
+			got := ImageMetadataLabel(context.Background(), runner, "docker", "img:test")
+			if got != tc.want {
+				t.Fatalf("ImageMetadataLabel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestImageMetadataLabel_InspectArgs(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	runner := runnerFunc(func(_ context.Context, name string, args []string, stdout, _ io.Writer) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		_, _ = io.WriteString(stdout, "[]\n")
+		return nil
+	})
+	ImageMetadataLabel(context.Background(), runner, "docker", "ghcr.io/acme/base:latest")
+	if gotName != "docker" {
+		t.Fatalf("runtime name = %q, want docker", gotName)
+	}
+	want := []string{
+		"image", "inspect",
+		"--format", `{{ index .Config.Labels "devcontainer.metadata" }}`,
+		"ghcr.io/acme/base:latest",
+	}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("inspect args = %v, want %v", gotArgs, want)
+	}
+}
+
+// TestImageMetadataLabel_NilRunnerDefaults proves a nil Runner degrades to
+// the production exec runner rather than panicking. The inspect targets a
+// guaranteed-absent image so the exec path returns an error and the function
+// fail-softs to "".
+func TestImageMetadataLabel_NilRunnerDefaults(t *testing.T) {
+	got := ImageMetadataLabel(context.Background(), nil, DefaultRuntime,
+		"aileron-nonexistent-image-for-test:doesnotexist")
+	if got != "" {
+		t.Fatalf("ImageMetadataLabel(nil runner, absent image) = %q, want \"\"", got)
+	}
+}
