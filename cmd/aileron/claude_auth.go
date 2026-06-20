@@ -191,7 +191,7 @@ func promptClaudeAuthMode(stdin io.Reader, stdout io.Writer) (agents.ClaudeAuthM
 	fmt.Fprintln(stdout, "  [1] subscription  Claude Pro/Max via OAuth login (default)")
 	fmt.Fprintln(stdout, "  [2] api-key       Anthropic API key (ANTHROPIC_API_KEY)")
 	for {
-		fmt.Fprint(stdout, "Choose [subscription/api-key] (default subscription): ")
+		fmt.Fprint(stdout, "Choose [1/2] (default 1: subscription): ")
 		line, err := br.ReadString('\n')
 		choice := strings.TrimSpace(line)
 		if choice == "" {
@@ -212,7 +212,7 @@ func promptClaudeAuthMode(stdin io.Reader, stdout io.Writer) (agents.ClaudeAuthM
 		if mode, ok := parseClaudeAuthMode(choice); ok {
 			return mode, nil
 		}
-		fmt.Fprintf(stdout, "  unrecognized choice %q; please answer subscription or api-key\n", choice)
+		fmt.Fprintf(stdout, "  unrecognized choice %q; please answer 1 (subscription) or 2 (api-key)\n", choice)
 		if err != nil {
 			// Stream closed mid-prompt with no valid choice; fall back to the
 			// documented default rather than erroring the whole launch.

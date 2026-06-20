@@ -505,3 +505,31 @@ func TestProbeClaudeVaultPresence_NoDaemon(t *testing.T) {
 		t.Errorf("probe with no daemon = %+v, want both absent", got)
 	}
 }
+
+// TestResolveClaudeAuthMode_ChooseLineMatchesNumberedOptions is the regression
+// test for #1380: the "Choose" line must speak in the same numeric terms as the
+// "[1]"/"[2]" options it lists, and the default hint must tie the number to the
+// mode name, so a reader can map the digit they type to the auth mode it picks.
+func TestResolveClaudeAuthMode_ChooseLineMatchesNumberedOptions(t *testing.T) {
+	// An empty vault forces the interactive prompt to run on the TTY path.
+	stubClaudeVaultPresence(t, claudeVaultPresence{})
+	var stdout bytes.Buffer
+	// Bare Enter takes the default after emitting the full prompt once.
+	if _, err := resolveClaudeAuthMode("", true, strings.NewReader("\n"), &stdout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+
+	// The choose line offers the same digits as the numbered options.
+	if !strings.Contains(out, "Choose [1/2]") {
+		t.Errorf("choose line does not offer numeric [1/2]: %q", out)
+	}
+	// The default hint ties the number to the mode name.
+	if !strings.Contains(out, "default 1: subscription") {
+		t.Errorf("default hint does not tie number to name: %q", out)
+	}
+	// The old name-only phrasing must be gone so the two referents line up.
+	if strings.Contains(out, "[subscription/api-key]") {
+		t.Errorf("choose line still uses name-only phrasing: %q", out)
+	}
+}
