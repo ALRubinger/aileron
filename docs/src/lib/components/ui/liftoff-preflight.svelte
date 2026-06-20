@@ -28,23 +28,33 @@
 -->
 <AccordionPrimitive.Root type="multiple" class="cn-preflight my-6 w-full">
 
-	<AccordionPrimitive.Item value="claude-code" class={itemClass}>
+	<AccordionPrimitive.Item value="agent-credential" class={itemClass}>
 		<AccordionPrimitive.Header>
 			<AccordionPrimitive.Trigger class={triggerClass}>
-				<span>Claude Code</span>
+				<span>An agent credential</span>
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
 		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
-				Install and configure
-				<a href="https://docs.claude.com/en/docs/claude-code/setup">Claude Code</a>. Claude Code can
-				authenticate two ways. Subscription mode signs in with a Claude Pro/Max account via OAuth
-				login and needs no API key. API-key mode reads an Anthropic API key from
-				<code>ANTHROPIC_API_KEY</code>. You pick the mode at launch with
-				<code>--claude-auth=subscription|api-key</code>, or by answering the first-run prompt where
-				Enter selects subscription. Aileron's launcher routes Claude Code's LLM calls through Aileron
-				locally. It does not supply or replace your credentials.
+				<code>aileron launch</code> runs the agent inside the container, so you do not install the
+				agent CLI on your host. You only need a credential the launcher can seed into the sandbox.
+				Two agents are supported.
+			</p>
+			<p>
+				Claude needs either a Claude Pro/Max subscription or an Anthropic API key. Subscription mode
+				signs in with a Claude account via OAuth login and is the default. API-key mode reads an
+				Anthropic API key from <code>ANTHROPIC_API_KEY</code>. Pick the mode at launch with
+				<code>--claude-auth=subscription|api-key</code>, or answer the first-run prompt where Enter
+				selects subscription.
+			</p>
+			<p>
+				Codex needs either a Codex/OpenAI subscription or an OpenAI API key. Both agents seed the
+				credential the same way. First launch runs an in-container login, or a host-side acquirer
+				stores the credential in the vault before the container starts. The vault then renders it
+				into every later launch silently. See
+				<a href="/development/sandbox-agent-auth/">Sandbox Agent Auth</a> for the full
+				mode-selection and seeding detail.
 			</p>
 		</AccordionPrimitive.Content>
 	</AccordionPrimitive.Item>
