@@ -28,9 +28,9 @@ Two binding shapes appear in the table. A **FileBinding** backs a rotatable on-d
 
 Goose authenticates with a provider API key (resolved from `<PROVIDER>_API_KEY` or its keyring), so its binding is an EnvBinding rendering the stored key into `ANTHROPIC_API_KEY` (Goose's default provider under launch; seed the matching key for a different provider). OpenCode and Pi each persist provider credentials in a standalone `auth.json` (OpenCode under `~/.local/share/opencode/`, Pi under `~/.pi/agent/`), so both use a byte-identity FileBinding. Pi's `auth.json` is the dedicated credential file, distinct from `settings.json`, so the binding never snapshots non-credential session state.
 
-The vault path's third segment is the literal `oauth` for every agent even when the stored secret is an API key, not an OAuth bundle. The daemon's per-agent endpoint and `vaultPathConforms` (in `internal/launch/authspec.go`) require exactly `agents/<name>/oauth`; any other shape fails launch validation.
+The vault path's third segment names a known credential purpose: `oauth` for an OAuth bundle or `apikey` for a provider API key. `vaultPathConforms` (in `internal/launch/authspec.go`) accepts that closed set via `isKnownAgentCredentialPurpose`; an unrecognized purpose fails launch validation.
 
-The daemon's HTTP surface scopes the path at the routing layer. `GET/PUT /v1/vault/agents/{name}/credentials` translates `{name}` internally to `agents/<name>/oauth`. Other vault paths are unreachable through this endpoint.
+The daemon's HTTP surface scopes the path at the routing layer. `GET/PUT /v1/vault/agents/{name}/credentials` routes the third segment via the `purpose` query parameter, which defaults to `oauth` (so `agents/<name>/oauth`) and selects `agents/<name>/<purpose>` for any other known purpose. Other vault paths are unreachable through this endpoint.
 
 ## How a launch resolves credentials
 
