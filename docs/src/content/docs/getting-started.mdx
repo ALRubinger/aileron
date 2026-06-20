@@ -157,13 +157,31 @@ If you'd rather drive each step yourself, the single-action form `aileron action
 aileron launch claude
 ```
 
-`aileron launch` runs the agent in the Docker sandbox by default. To launch the agent directly on the host instead, add `--local`:
+`aileron launch` runs the agent inside a Docker container by default. The container is the sandbox: Claude Code runs in an isolated environment, never on your host. Because that isolation is the trust boundary, the sandboxed launch starts Claude Code with `--dangerously-skip-permissions`, so the agent works without stopping for per-command confirmation. The sandbox is what makes that safe. The agent can move fast inside a box it cannot escape.
+
+To launch the agent directly on the host instead, add `--local`:
 
 ```sh
 aileron launch --local claude
 ```
 
+The host launch keeps a narrower posture. It pre-approves only the agent's shell commands and Aileron's own tools, not blanket skip-permissions.
+
 The first launch resolves how Claude authenticates. Subscription mode signs in with a Claude Pro/Max account via OAuth login and is the default. API-key mode uses an Anthropic API key from `ANTHROPIC_API_KEY`. Pass `--claude-auth=subscription` or `--claude-auth=api-key` to pre-select the mode, or answer the first-run prompt where Enter selects subscription. The launcher prints the active mode as `Claude auth mode: subscription (Pro/Max)` or `Claude auth mode: API key`. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the full mode-selection and seeding detail.
+
+In subscription mode, the first launch walks you through the cloud login right here. Aileron prints the authorize URL and opens it in your browser:
+
+```
+To authorize Claude, open https://claude.ai/oauth/authorize?... in your browser and paste back the code shown.
+```
+
+Sign in with your Claude Pro/Max account in the browser, copy the code the page shows, and paste it back at the prompt:
+
+```
+Paste the code from your browser and press Enter:
+```
+
+The paste stays on your host terminal, never inside the container. Aileron exchanges the code, seeds the credential into your vault, and the credential is reused on later launches. This first-run flow happens once.
 
 You'll see a banner like:
 
