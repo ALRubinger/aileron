@@ -1,6 +1,6 @@
 ---
 title: "Binding Descriptors"
-description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the two-layer loading order, and the shipped Linear and GitHub built-ins."
+description: "A binding descriptor is a small YAML file that seals an arbitrary CLI's credential at the network boundary without writing any per-CLI code. This page covers the descriptor schema, the two-layer loading order, the shipped Linear built-in, and how gh's sealing now arrives as the sealing plane of its CLI-capability unit."
 ---
 
 A command-line tool that talks to a third-party API needs a credential. The usual answer is to hand that credential to the tool, which means the credential lives wherever the tool runs. Aileron's credential-sealing substrate takes a different path. The credential stays in your vault, the agent in the sandbox never holds it, and the daemon injects it at the TLS forward-proxy boundary on the way out. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the data-plane design this builds on.
@@ -49,8 +49,10 @@ Decoding is strict. An unknown YAML key is an error, not a silently ignored fiel
 
 Descriptors load from two layers, in increasing precedence.
 
-1. **Built-in defaults.** Trusted community profiles Aileron ships, embedded at build time. The Linear descriptor above is one. GitHub is a second one (see below). This is the trusted layer, distinct from the user layer below.
+1. **Built-in defaults.** Trusted community profiles Aileron ships, embedded at build time. The Linear descriptor above is one. This is the trusted layer, distinct from the user layer below.
 2. **User layer.** `~/.aileron/binding-descriptors.yaml`.
+
+A `gh` request is sealed too, but `gh`'s bindings no longer arrive as an embedded built-in default. They arrive through a third source: the sealing plane of `gh`'s CLI-capability unit, carried on its devcontainer Feature and projected into the binding table from the sandbox image's `devcontainer.metadata` label (see [the gh sealing plane](#shipped-via-the-gh-cli-capability-unit-sealing) below). Linear remains the embedded built-in worked example.
 
 A later layer overrides an earlier one per `host` key. A user descriptor can replace a shipped community profile for the same host without editing the shipped file. A new host in any layer is added on top of the others rather than replacing them. An absent user file is not an error. It simply contributes nothing.
 
@@ -74,7 +76,7 @@ This is the whole generalization proof. Linear is a tool nobody special-cased in
 
 Some CLIs refuse to issue a request when they hold no token. They validate locally and short-circuit, so the proxy never sees an outbound request to seal. `gh` is the canonical case. The `sentinel-swap` mechanism closes this gap. The launcher plants a non-secret placeholder under an environment variable the CLI reads, the CLI's local check passes, and the CLI issues the request. The proxy recognizes the placeholder at egress and swaps in the real credential.
 
-`sentinel-swap` works for any host that declares a `sentinel` block, not just GitHub. The recognizer is generic: a request is swapped only when its carrier matches that binding's own `sentinel.value`, so a foreign token on a `sentinel-swap` host is left untouched. GitHub is one instance of the pattern.
+`sentinel-swap` works for any host that declares a `sentinel` block. The recognizer is generic: a request is swapped only when its carrier matches that binding's own `sentinel.value`, so a foreign token on a `sentinel-swap` host is left untouched. GitHub is one instance of the pattern.
 
 ```yaml
 version: v1
@@ -88,16 +90,15 @@ bindings:
       env: GH_TOKEN
 ```
 
-This is the exact binding GitHub ships with as a trusted built-in (see below). The launcher plants `sentinel.value` under `GH_TOKEN`, `gh`'s local check passes, and the proxy swaps the placeholder for the real `user/github` credential at egress. The `value` is a placeholder with no authority, so it is safe to commit in a shipped descriptor.
+This is the `gh` unit's sealing entry for `api.github.com` (see [the gh sealing plane](#shipped-via-the-gh-cli-capability-unit-sealing) below). The launcher plants `sentinel.value` under `GH_TOKEN`, `gh`'s local check passes, and the proxy swaps the placeholder for the real `user/github` credential at egress. The `value` is a placeholder with no authority, so it is safe to commit in a shipped descriptor.
 
-## Shipped built-in: GitHub
+## Shipped via the gh CLI-capability unit: sealing
 
-GitHub is the second profile Aileron ships as a trusted built-in, after Linear. It used to be special-cased as Go code in the proxy. It now ships as a trusted default expressed purely as data, flowing the same generic loader every community profile uses. GitHub is no longer special-cased in Go.
+`gh`'s sealing used to be special-cased as Go code in the proxy, then for a time it shipped as a central built-in descriptor named `github.yaml`. It is neither now. `gh`'s sealing is the sealing plane of `gh`'s CLI-capability unit, carried on `gh`'s devcontainer Feature under `customizations.aileron.cli`. The host reads that unit from the resolved sandbox image's `devcontainer.metadata` label and projects its sealing entries into the same binding table the built-in and user layers feed. See [ADR-0026](/adr/0026-cli-capability-units/) for the unit model and the [Add a CLI Capability](/development/sandbox-composition/#add-a-cli-capability) section of the composition guide for how to author one. The central `github.yaml` built-in no longer exists.
 
-GitHub needs two bindings because git-over-HTTPS and `gh` authenticate differently.
+`gh` needs two sealing entries because git-over-HTTPS and `gh` authenticate differently. The unit declares the credential once under its `key: user/github`, and each entry's `credential_ref` is derived from that key rather than re-declared. The projected bindings are:
 
 ```yaml
-version: v1
 bindings:
   - host: github.com
     credential_ref: user/github
@@ -117,7 +118,7 @@ bindings:
 
 `api.github.com` is `bearer`, `sentinel-swap`. `gh` short-circuits locally without a token, so the launcher plants the sentinel as `GH_TOKEN`, `gh` issues the request, and the proxy swaps the sentinel for the real credential at egress. A foreign token the agent supplies itself is left untouched.
 
-Both bindings resolve the same `user/github` reference. Store your token once:
+Both entries resolve the same `user/github` reference. Store your token once:
 
 ```sh
 aileron auth github
@@ -125,7 +126,7 @@ aileron auth github
 
 Only the two exact apexes are sealed. A request to any other `*.github.com` host (`raw.githubusercontent.com` is a different apex entirely) falls through to passthrough rather than being injected with a credential it was never scoped for.
 
-Because GitHub ships in the built-in layer, it is a normal default in the built-in less-than user precedence. A user descriptor that redefines `github.com` or `api.github.com` overrides the shipped default for that host, exactly as it would for Linear. GitHub is a trusted default, not privileged code.
+The projection sits in the binding table between the built-in defaults and the user layer, so a user descriptor that redefines `github.com` or `api.github.com` still overrides `gh`'s shipped sealing for that host, exactly as it would for Linear. `gh`'s sealing is trusted data carried by its Feature, not privileged code.
 
 ## Out of scope: stateful CLI caches
 

@@ -56,6 +56,58 @@ Each Feature manifest stays on the `0.0.1` house version. `devcontainer features
 
 The first publish requires a one-time manual step. CI cannot set the visibility of a GHCR package on its first push, so each new package starts private. `aileron sandbox build` pulls Features anonymously and performs no `docker login`, so each package must be flipped to public in its GHCR package settings after the first publish. This is a one-time operator step per package, not a recurring CI action.
 
+## Add a CLI Capability
+
+A command-line tool that talks to a third-party API needs a credential. Aileron seals that credential at the network boundary so the agent in the sandbox never holds it. A CLI's complete credential story ships as one CLI-capability unit on that tool's devcontainer Feature, under `customizations.aileron.cli`. See [ADR-0026](/adr/0026-cli-capability-units/) for the decision this section documents, and [ADR-0017](/adr/0017-sandbox-composition/) for the Feature composition it builds on.
+
+A unit declares the tool's `name`, its single vault `key`, an optional `presence` tier, an `acquisition` block, and a `sealing` list. The `gh` Feature is the worked example:
+
+```json
+{
+  "customizations": {
+    "aileron": {
+      "cli": {
+        "name": "gh",
+        "key": "user/github",
+        "presence": {
+          "builtin": "base"
+        },
+        "acquisition": {
+          "mode": "device-flow",
+          "container_name": "aileron-auth-github",
+          "login_cmd": ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"],
+          "token_cmd": ["gh", "auth", "token", "--hostname", "github.com"],
+          "browser_shim": "echo"
+        },
+        "sealing": [
+          {
+            "host": "github.com",
+            "scheme": "basic",
+            "emit_mechanism": "inject",
+            "username": "x-access-token"
+          },
+          {
+            "host": "api.github.com",
+            "scheme": "bearer",
+            "emit_mechanism": "sentinel-swap",
+            "sentinel": {
+              "value": "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA",
+              "env": "GH_TOKEN"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The single `key: user/github` is the one source of the tool's credential identity. It derives the acquisition `store_at`, the credential `kind` (the first path segment, here `user`), and the `credential_ref` of every sealing entry. The unit must not re-declare any of those derived fields. Re-declaring one is a load error so the `key` stays the single source.
+
+The `acquisition` block is the device-flow login. It runs the `login_cmd` interactively in a container named `container_name`, then reads the token back out with `token_cmd`. Device flow is the shipped acquisition mode this umbrella. Each `sealing` entry seals one outbound host's credential at the proxy boundary. The `github.com` entry seals git-over-HTTPS with HTTP basic auth and injects unconditionally. The `api.github.com` entry seals `gh` with a bearer token, planting a non-secret sentinel the proxy swaps for the real credential at egress.
+
+The host reads the unit from the resolved image's `devcontainer.metadata` OCI label at launch, then projects it into the same capture and proxybinding schemas the rest of Aileron already uses. You write one unit on one Feature, and no central file in core changes. The `state` plane and any non-base `presence` declaration are reserved and carry no behavior this umbrella.
+
 ## Inspect the Plan
 
 Use `sandbox plan` to see what Aileron currently infers from the project:
