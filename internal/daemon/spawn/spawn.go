@@ -314,8 +314,9 @@ func urlToHostPort(u string) (string, error) {
 // The daemon is detached from the parent via [detachProcAttrs] so its
 // lifetime is independent of the parent: on POSIX, Setsid puts the
 // daemon in its own session so SIGHUP from the parent's terminal does
-// not propagate; on Windows, DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP
-// disconnects from the parent's console and signal group. The returned
+// not propagate; on Windows, CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP
+// runs the daemon with no console window and disconnects it from the
+// parent's signal group. The returned
 // channel is sent on (with the wait error or nil) when the child
 // exits, and waitForDaemon uses that signal to fail fast when the
 // daemon dies before publishing daemon.json.
