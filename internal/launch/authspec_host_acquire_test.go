@@ -247,7 +247,7 @@ func TestPrepareAuthSpec_HostLoginDisabledSkipsAcquirer(t *testing.T) {
 
 func TestPrepareAuthSpec_HostAcquirePutFailureAbortsLaunch(t *testing.T) {
 	daemon := newFakeDaemon()
-	daemon.putErrors["claude"] = errors.New("vault locked")
+	daemon.setPutErrorOAuth("claude", errors.New("vault locked"))
 	spy := &spyAcquirer{secret: vault.Secret{Value: acquireClaudeEnvelope("tok", futureExpiresAtMS)}}
 
 	spec := AuthSpec{
@@ -451,6 +451,262 @@ func TestHostAcquireSilentRender_StatusLineGate(t *testing.T) {
 			t.Errorf("status line = %q, want %q", line, want)
 		}
 	})
+}
+
+// apiKeyEnvRender mirrors an api-key EnvBinding's Render contract: it
+// requires a non-empty Value and surfaces it as a single env var. The
+// var reads the acquired bytes so a render-without-PUT (or a misrouted
+// PUT) would be observable in the resulting EnvAdditions.
+func apiKeyEnvRender(s vault.Secret) (map[string]string, error) {
+	if len(s.Value) == 0 {
+		return nil, errors.New("api-key envelope is empty")
+	}
+	return map[string]string{"AGENT_API_KEY": string(s.Value)}, nil
+}
+
+// TestPrepareAuthSpec_EnvBindingHostAcquireSeedsVaultAndRenders is the
+// EnvBinding mirror of the FileBinding host-acquire happy path: an empty
+// vault plus a declared acquirer plus host-login enabled acquires on the
+// host, PUTs the Secret at the binding's (name, purpose), and renders
+// the var into EnvAdditions with RenderedAnyCredential set. It also
+// pins the deps wiring (Browser, HTTPClient, Out) the launcher supplies.
+func TestPrepareAuthSpec_EnvBindingHostAcquireSeedsVaultAndRenders(t *testing.T) {
+	daemon := newFakeDaemon() // empty vault
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("sk-acquired")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Required:    false,
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	stderr := &bytes.Buffer{}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if spy.calls != 1 {
+		t.Fatalf("acquirer calls = %d, want 1", spy.calls)
+	}
+	if _, ok := spy.gotBrows.(oauth.SystemBrowser); !ok {
+		t.Errorf("acquirer deps Browser = %T, want oauth.SystemBrowser", spy.gotBrows)
+	}
+	if spy.gotDeps.HTTPClient == nil {
+		t.Errorf("acquirer deps HTTPClient is nil; launcher should supply a timed client")
+	}
+	if spy.gotDeps.Out != stderr {
+		t.Errorf("acquirer deps Out = %v, want the launcher's stderr writer", spy.gotDeps.Out)
+	}
+
+	// Exactly one PUT, at the binding's (name, purpose) destination.
+	if len(daemon.puts) != 1 {
+		t.Fatalf("PUTs = %d, want 1", len(daemon.puts))
+	}
+	if daemon.puts[0].Name != "claude" || daemon.puts[0].Purpose != "apikey" {
+		t.Errorf("PUT destination = (%q,%q), want (claude,apikey)", daemon.puts[0].Name, daemon.puts[0].Purpose)
+	}
+	if string(daemon.puts[0].Secret.Value) != "sk-acquired" {
+		t.Errorf("PUT value = %q, want sk-acquired", daemon.puts[0].Secret.Value)
+	}
+
+	// PUT-before-render ordering: the value rendered into the env is the
+	// acquired value, and it landed in the daemon's recorded PUTs. A
+	// render-without-PUT would leave daemon.puts empty.
+	if got := prep.EnvAdditions["AGENT_API_KEY"]; got != "sk-acquired" {
+		t.Errorf("EnvAdditions[AGENT_API_KEY] = %q, want sk-acquired", got)
+	}
+	if !prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = false; a successful env host-acquire must set it")
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingHostAcquireErrorFallsBack pins the
+// non-fatal acquire-error path: no PUT, no env addition, no error, and
+// RenderedAnyCredential stays false.
+func TestPrepareAuthSpec_EnvBindingHostAcquireErrorFallsBack(t *testing.T) {
+	daemon := newFakeDaemon()
+	spy := &spyAcquirer{err: errors.New("user cancelled consent")}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v (env acquire failure must be non-fatal)", err)
+	}
+	defer prep.Cleanup()
+
+	if spy.calls != 1 {
+		t.Fatalf("acquirer calls = %d, want 1", spy.calls)
+	}
+	if len(daemon.puts) != 0 {
+		t.Errorf("PUTs = %d, want 0", len(daemon.puts))
+	}
+	if _, ok := prep.EnvAdditions["AGENT_API_KEY"]; ok {
+		t.Errorf("EnvAdditions seeded on acquire failure: %v", prep.EnvAdditions)
+	}
+	if prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = true; an acquire failure must leave it false")
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingHostAcquireEmptySecretFallsBack pins the
+// empty-Secret non-fatal path.
+func TestPrepareAuthSpec_EnvBindingHostAcquireEmptySecretFallsBack(t *testing.T) {
+	daemon := newFakeDaemon()
+	spy := &spyAcquirer{secret: vault.Secret{}} // empty Value
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if spy.calls != 1 {
+		t.Fatalf("acquirer calls = %d, want 1", spy.calls)
+	}
+	if len(daemon.puts) != 0 {
+		t.Errorf("PUTs = %d, want 0 (empty Secret → fallback)", len(daemon.puts))
+	}
+	if prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = true; an empty acquired Secret must fall back")
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingHostLoginDisabledSkipsAcquirer pins that
+// a disabled host-login never consults the env acquirer even when
+// declared.
+func TestPrepareAuthSpec_EnvBindingHostLoginDisabledSkipsAcquirer(t *testing.T) {
+	daemon := newFakeDaemon()
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("sk-x")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, false)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if spy.calls != 0 {
+		t.Errorf("acquirer calls = %d, want 0 (host-login disabled)", spy.calls)
+	}
+	if len(daemon.puts) != 0 {
+		t.Errorf("PUTs = %d, want 0", len(daemon.puts))
+	}
+	if prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = true; disabled host-login must take the in-container path")
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingHostAcquirePutFailureAborts pins the
+// PUT-failure-aborts-launch contract. The env loop precedes
+// os.MkdirTemp, so there is no transient dir to leak on abort.
+func TestPrepareAuthSpec_EnvBindingHostAcquirePutFailureAborts(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.setPutError("claude", "apikey", errors.New("vault locked"))
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("sk-x")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected error when daemon PUT of the host-acquired env secret fails")
+	}
+	if spy.calls != 1 {
+		t.Errorf("acquirer calls = %d, want 1", spy.calls)
+	}
+	// No transient dir was created (env loop precedes MkdirTemp): Cleanup
+	// is the no-op default and Mounts is empty.
+	prep.Cleanup()
+	if len(prep.Mounts) != 0 {
+		t.Errorf("Mounts = %d on aborted launch, want 0", len(prep.Mounts))
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingRequiredIgnoresAcquirer pins the
+// required-but-empty fast-fail: the required check precedes any acquire,
+// so the acquirer is never consulted.
+func TestPrepareAuthSpec_EnvBindingRequiredIgnoresAcquirer(t *testing.T) {
+	daemon := newFakeDaemon() // empty vault
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("sk-x")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath:   "agents/claude/apikey",
+			Required:    true,
+			Render:      apiKeyEnvRender,
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected required-but-empty error")
+	}
+	if spy.calls != 0 {
+		t.Errorf("acquirer calls = %d, want 0 (required check precedes acquire)", spy.calls)
+	}
+}
+
+// TestPrepareAuthSpec_EnvBindingHostAcquireMalformedSecretAborts pins
+// that a malformed acquired Secret surfaces the Render error (launch
+// aborts) rather than silently seeding garbage into the env. The PUT
+// happens first (vault before render), so the abort is the Render call.
+func TestPrepareAuthSpec_EnvBindingHostAcquireMalformedSecretAborts(t *testing.T) {
+	daemon := newFakeDaemon()
+	// apiKeyEnvRender rejects an empty Value; an acquirer that returns a
+	// non-empty but render-incompatible Secret would also abort. Use a
+	// render that rejects this specific value to model garbage.
+	spy := &spyAcquirer{secret: vault.Secret{Value: []byte("garbage")}}
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath: "agents/claude/apikey",
+			Render: func(s vault.Secret) (map[string]string, error) {
+				if string(s.Value) == "garbage" {
+					return nil, errors.New("malformed api-key envelope")
+				}
+				return map[string]string{"AGENT_API_KEY": string(s.Value)}, nil
+			},
+			HostAcquire: spy.acquire,
+		}},
+	}
+
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected Render error for a malformed acquired env secret")
+	}
+	if spy.calls != 1 {
+		t.Errorf("acquirer calls = %d, want 1", spy.calls)
+	}
+	// The PUT happened before the failing Render (vault before render).
+	if len(daemon.puts) != 1 {
+		t.Errorf("PUTs = %d, want 1 (vault-before-render: the PUT precedes the failing Render)", len(daemon.puts))
+	}
 }
 
 // claudeShapedRender mirrors the Claude credential envelope's Render

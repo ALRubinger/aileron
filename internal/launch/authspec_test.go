@@ -213,6 +213,78 @@ func TestValidateAuthSpec_AcceptsCompleteSpec(t *testing.T) {
 	}
 }
 
+// TestVaultPathConforms_KnownPurposeSet pins the relaxed gate: the
+// third path segment must be a known credential purpose (oauth or
+// apikey), not "any non-empty string". A typo'd purpose (oath,
+// api-key) routes to a brand-new vault slot, so the gate keeps the
+// vocabulary closed. The apikey case is the SUB2 regression: it was
+// rejected before the relaxation and must validate now.
+func TestVaultPathConforms_KnownPurposeSet(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"oauth purpose validates", "agents/claude/oauth", true},
+		{"apikey purpose validates (SUB2 regression)", "agents/claude/apikey", true},
+		{"leading slash tolerated", "/agents/claude/apikey", true},
+		{"unknown purpose api-key rejected", "agents/x/api-key", false},
+		{"typo purpose oath rejected", "agents/x/oath", false},
+		{"empty name rejected", "agents//oauth", false},
+		{"wrong root rejected", "secrets/x/oauth", false},
+		{"too few segments rejected", "agents/claude", false},
+		{"too many segments rejected", "agents/claude/oauth/extra", false},
+		{"empty purpose rejected", "agents/claude/", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vaultPathConforms(tc.path); got != tc.want {
+				t.Fatalf("vaultPathConforms(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateAuthSpec_ApikeyPurposeAccepted is the end-to-end
+// validation regression: an EnvBinding and a FileBinding at
+// `agents/<name>/apikey` pass validateAuthSpec after the SUB2
+// relaxation (both were rejected by the oauth-only gate before).
+func TestValidateAuthSpec_ApikeyPurposeAccepted(t *testing.T) {
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath: "agents/claude/apikey",
+			Render:    func(vault.Secret) (map[string]string, error) { return nil, nil },
+		}},
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/apikey",
+			ContainerPath: "/home/agent/.cfg",
+			Render:        func(vault.Secret) ([]byte, error) { return nil, nil },
+			Capture:       func([]byte) (vault.Secret, error) { return vault.Secret{}, nil },
+		}},
+	}
+	if err := validateAuthSpec(spec); err != nil {
+		t.Fatalf("validateAuthSpec rejected apikey purpose: %v", err)
+	}
+}
+
+// TestValidateAuthSpec_UnknownPurposeRejected pins the closed-set
+// guarantee at the spec level: a binding whose third segment is an
+// unknown purpose still returns ErrAuthSpecBadVaultPath so a typo
+// cannot silently route to a new vault slot.
+func TestValidateAuthSpec_UnknownPurposeRejected(t *testing.T) {
+	for _, vp := range []string{"agents/x/oath", "agents/x/api-key", "agents/x/token"} {
+		spec := AuthSpec{
+			EnvBindings: []EnvBinding{{
+				VaultPath: vp,
+				Render:    func(vault.Secret) (map[string]string, error) { return nil, nil },
+			}},
+		}
+		if err := validateAuthSpec(spec); !errors.Is(err, ErrAuthSpecBadVaultPath) {
+			t.Errorf("validateAuthSpec(%q) = %v, want ErrAuthSpecBadVaultPath", vp, err)
+		}
+	}
+}
+
 // TestAuthSpec_AgentConformance asserts that the launch package's
 // internal Agent fixtures return a non-panicking AuthSpec value,
 // even when the spec is empty. Agents may ship empty specs (Goose,
