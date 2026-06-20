@@ -10,11 +10,33 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/auth/capture"
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/cli/unitloader"
 	"github.com/ALRubinger/aileron/internal/proxybinding"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
+
+// launchUnitLayers resolves the image-derived CLI-unit layers (#1322/#1323)
+// for the launch-side sandbox image, mirroring the daemon's daemonUnitLayers.
+// It reads the resolved image's devcontainer.metadata label and projects each
+// Feature's customizations.aileron.cli unit into a capture-descriptor layer
+// and a proxybinding-entry layer, additive to the central defaults.
+//
+// gh's sealing entries (the api.github.com sentinel-swap binding and the
+// github.com inject binding) flow through here now that gh ships in its
+// Feature unit rather than internal/proxybinding/defaults/github.yaml. An
+// image whose label is absent or unreadable returns "" and yields nil layers,
+// a clean no-op preserving the central defaults-only table. A
+// present-but-malformed unit is a loud error so a broken Feature fails the
+// launch rather than silently planting no sentinel.
+//
+// It is a package var so a test substitutes a fake without driving a real
+// container runtime.
+var launchUnitLayers = func(ctx context.Context, runtimeName, image string) ([]capture.CaptureDescriptor, []proxybinding.Entry, error) {
+	return unitloader.LayersFromImage(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
+}
 
 // githubUserService is the single hardcoded user-level service name the
 // injector reads from the vault (`user/github`). The route shape lives
@@ -299,15 +321,52 @@ func hasUsableCredential(ctx context.Context, daemon userCredsDaemon, credential
 }
 
 // sentinelSwapHostBindings assembles the canonical host-binding table the
-// daemon recognizer reads (proxybinding.LoadHostBindings: every binding
-// flows from the descriptor layers, including the trusted GitHub built-in
-// shipped as defaults/github.yaml since #1248) and returns only the
-// sentinel-swap subset the planter plants sentinels for. Sharing the
-// assembly keeps the launch-side plant and the proxy-side match reading
-// one source of truth across the process boundary. A malformed descriptor
-// surfaces an error rather than degrading to an empty plant set.
-func sentinelSwapHostBindings() ([]binding.HostBinding, error) {
-	all, err := proxybinding.LoadHostBindings(proxybinding.DefaultLoadOptions())
+// daemon recognizer reads (proxybinding.LoadHostBindings) and returns only
+// the sentinel-swap subset the planter plants sentinels for. Sharing the
+// assembly keeps the launch-side plant and the proxy-side match reading one
+// source of truth across the process boundary.
+//
+// GitHub's bindings are no longer a central default. As of #1323 gh ships in
+// its devcontainer Feature CLI unit, and the host resolves its sealing
+// entries by inspecting the sandbox image's devcontainer.metadata label
+// (internal/cli/unitloader). The caller threads those projected entries in
+// as sealingLayer; this function applies them as the unit-derived
+// proxybinding layer (LoadOptions.ExtraEntries), mirroring the daemon's
+// assembleHostBindings. A nil sealingLayer is a clean no-op that preserves
+// the central defaults-only table (every other community profile still ships
+// as a default). A malformed descriptor surfaces an error rather than
+// degrading to an empty plant set.
+// resolveGitHubSentinelSwapBindings reads gh's image-derived sealing layer
+// and returns the sentinel-swap subset the planter plants sentinels for. It
+// is the launch-side mirror of the daemon's assembleHostBindings: it resolves
+// the unit layer off the image's devcontainer.metadata label (#1323), applies
+// it as the unit-derived proxybinding layer, and filters to sentinel-swap.
+//
+// An empty plan runtime maps to sandboxcontainer.DefaultRuntime, matching the
+// daemon's DefaultRuntime-driven resolution (P0-B). A missing or unreadable
+// image label yields a nil layer (clean no-op preserving the central defaults
+// table). A present-but-malformed unit, or a malformed sealing entry, fails
+// loudly rather than silently shipping no sentinel.
+func resolveGitHubSentinelSwapBindings(ctx context.Context, planRuntime, image string) ([]binding.HostBinding, error) {
+	runtime := planRuntime
+	if runtime == "" {
+		runtime = sandboxcontainer.DefaultRuntime
+	}
+	_, sealingLayer, err := launchUnitLayers(ctx, runtime, image)
+	if err != nil {
+		return nil, fmt.Errorf("resolve image gh unit layer: %w", err)
+	}
+	bindings, err := sentinelSwapHostBindings(sealingLayer)
+	if err != nil {
+		return nil, fmt.Errorf("assemble sentinel-swap host bindings: %w", err)
+	}
+	return bindings, nil
+}
+
+func sentinelSwapHostBindings(sealingLayer []proxybinding.Entry) ([]binding.HostBinding, error) {
+	opts := proxybinding.DefaultLoadOptions()
+	opts.ExtraEntries = sealingLayer
+	all, err := proxybinding.LoadHostBindings(opts)
 	if err != nil {
 		return nil, err
 	}

@@ -90,11 +90,47 @@ func (r *fakeCaptureRunner) Run(_ context.Context, _ string, args []string, stdo
 	}
 }
 
+// ghCaptureDescriptorLiteral is the byte-identical gh capture descriptor that
+// used to ship as internal/auth/capture/defaults/gh.yaml. As of #1323 gh comes
+// only from its devcontainer Feature CLI unit (projected from the image's
+// devcontainer.metadata label at runtime), so the cmd-side tests source it
+// through the unit-derived layer (CaptureLoadOptions.ExtraDescriptors). The
+// live Feature manifest is pinned to this literal by internal/app's
+// TestGHUnitDriftGuard.
+func ghCaptureDescriptorLiteral() capture.CaptureDescriptor {
+	return capture.CaptureDescriptor{
+		Version:       capture.CaptureSchemaVersion,
+		Name:          "gh",
+		ContainerName: "aileron-auth-github",
+		LoginCmd:      []string{"gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"},
+		TokenCmd:      []string{"gh", "auth", "token", "--hostname", "github.com"},
+		BrowserShim:   "echo",
+		StoreAt:       "user/github",
+		Kind:          "user",
+	}
+}
+
+// ghUnitRegistry builds a capture registry with gh sourced from the
+// unit-derived layer, the production source after #1323. It is the test-side
+// stand-in for imageCaptureRegistry driven against an image whose label
+// carries gh's unit.
+func ghUnitRegistry(t *testing.T) *capture.Registry {
+	t.Helper()
+	reg, err := capture.NewRegistry(capture.CaptureLoadOptions{
+		ExtraDescriptors: []capture.CaptureDescriptor{ghCaptureDescriptorLiteral()},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return reg
+}
+
 // withFakeCaptureDriver swaps newCaptureDriver for one that binds the gh
 // descriptor onto a Driver backed by the given runner, with runtime/image
 // resolution stubbed out. constructErr, when non-nil, models a
-// runtime-resolution / registry failure before any driver runs. It uses
-// the real registry + descriptor so the route stays exercised end-to-end.
+// runtime-resolution / registry failure before any driver runs. It sources gh
+// from the unit-derived layer (the post-#1323 production source) so the route
+// stays exercised end-to-end.
 func withFakeCaptureDriver(t *testing.T, runner *fakeCaptureRunner, constructErr error) {
 	t.Helper()
 	orig := newCaptureDriver
@@ -102,10 +138,7 @@ func withFakeCaptureDriver(t *testing.T, runner *fakeCaptureRunner, constructErr
 		if constructErr != nil {
 			return nil, constructErr
 		}
-		registry, err := capture.DefaultRegistry()
-		if err != nil {
-			return nil, err
-		}
+		registry := ghUnitRegistry(t)
 		desc, ok := registry.Resolve(descriptorName)
 		if !ok {
 			return nil, errors.New("descriptor not registered: " + descriptorName)
@@ -170,6 +203,12 @@ func TestRunAuth_GitHubVerbRoutesThroughRegistry(t *testing.T) {
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// The dispatch predicate (isCaptureDescriptor) and the driver builder both
+	// source gh from the base image's CLI unit layer (#1323); stub the
+	// image-derived seam to project gh so the verb routes without a container.
+	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
+		return []capture.CaptureDescriptor{ghCaptureDescriptorLiteral()}, nil
+	})
 	withFakeCaptureDriver(t, &fakeCaptureRunner{token: token}, nil)
 
 	var stdout, stderr bytes.Buffer
@@ -216,10 +255,7 @@ func withFailingLoginCaptureDriver(t *testing.T) {
 	t.Helper()
 	orig := newCaptureDriver
 	newCaptureDriver = func(descriptorName, runtime, image string, store capture.StoreFunc) (*capture.Driver, error) {
-		registry, err := capture.DefaultRegistry()
-		if err != nil {
-			return nil, err
-		}
+		registry := ghUnitRegistry(t)
 		desc, ok := registry.Resolve(descriptorName)
 		if !ok {
 			return nil, errors.New("descriptor not registered: " + descriptorName)
@@ -395,12 +431,17 @@ func TestDescriptorForVerb(t *testing.T) {
 	}
 }
 
-// TestIsCaptureDescriptor confirms the dispatch predicate resolves the
-// shipped descriptor and rejects an unknown name, so runAuth dispatches
-// `github` (via its `gh` alias) but falls through for an agent name.
+// TestIsCaptureDescriptor confirms the dispatch predicate resolves the gh
+// descriptor and rejects an unknown name, so runAuth dispatches `github`
+// (via its `gh` alias) but falls through for an agent name. Post-#1323 gh is
+// sourced from the base image's CLI unit layer, so the image-derived seam is
+// stubbed to project gh (the real path inspects the base image).
 func TestIsCaptureDescriptor(t *testing.T) {
+	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
+		return []capture.CaptureDescriptor{ghCaptureDescriptorLiteral()}, nil
+	})
 	if !isCaptureDescriptor("gh") {
-		t.Error("isCaptureDescriptor(gh) = false, want true (shipped descriptor)")
+		t.Error("isCaptureDescriptor(gh) = false, want true (gh unit descriptor)")
 	}
 	if isCaptureDescriptor("claude") {
 		t.Error("isCaptureDescriptor(claude) = true, want false (an agent, not a capture verb)")
@@ -473,10 +514,11 @@ func swapImageCaptureLayers(t *testing.T, fn func(runtime, image string) ([]capt
 	t.Cleanup(func() { imageCaptureLayers = orig })
 }
 
-// TestImageCaptureRegistry_NoUnitLayerKeepsDefaults proves the auth-path
-// registry still resolves the embedded gh descriptor when the image read
-// contributes nothing (#1322 clean no-op).
-func TestImageCaptureRegistry_NoUnitLayerKeepsDefaults(t *testing.T) {
+// TestImageCaptureRegistry_NoUnitLayerHasNoGitHub proves the post-#1323
+// end state: with no central gh default and an image read that contributes
+// nothing (#1322 clean no-op), the auth-path registry resolves no gh
+// descriptor. gh comes only from the image's CLI unit layer now.
+func TestImageCaptureRegistry_NoUnitLayerHasNoGitHub(t *testing.T) {
 	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
 		return nil, nil
 	})
@@ -484,33 +526,35 @@ func TestImageCaptureRegistry_NoUnitLayerKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("imageCaptureRegistry: %v", err)
 	}
-	if _, ok := reg.Resolve("gh"); !ok {
-		t.Error("embedded gh descriptor must remain resolvable with no unit layer")
+	if _, ok := reg.Resolve("gh"); ok {
+		t.Error("gh must not resolve without the unit layer (no central default after #1323)")
 	}
 }
 
-// TestImageCaptureRegistry_UnitLayerIsAdditive proves a unit-derived capture
-// descriptor is additively merged into the auth-path registry on top of the
-// embedded defaults: the built-in gh survives and the unit-derived tool is
-// resolvable.
-func TestImageCaptureRegistry_UnitLayerIsAdditive(t *testing.T) {
+// TestImageCaptureRegistry_UnitLayerSuppliesGitHub proves gh now reaches the
+// auth-path registry through the image-derived unit layer, alongside any other
+// unit-derived tool. The built-in (central) layer no longer carries gh.
+func TestImageCaptureRegistry_UnitLayerSuppliesGitHub(t *testing.T) {
 	swapImageCaptureLayers(t, func(string, string) ([]capture.CaptureDescriptor, error) {
-		return []capture.CaptureDescriptor{{
-			Version:       capture.CaptureSchemaVersion,
-			Name:          "linear",
-			ContainerName: "aileron-auth-linear",
-			LoginCmd:      []string{"linear", "auth", "login"},
-			TokenCmd:      []string{"linear", "auth", "token"},
-			StoreAt:       "user/linear",
-			Kind:          "user",
-		}}, nil
+		return []capture.CaptureDescriptor{
+			ghCaptureDescriptorLiteral(),
+			{
+				Version:       capture.CaptureSchemaVersion,
+				Name:          "linear",
+				ContainerName: "aileron-auth-linear",
+				LoginCmd:      []string{"linear", "auth", "login"},
+				TokenCmd:      []string{"linear", "auth", "token"},
+				StoreAt:       "user/linear",
+				Kind:          "user",
+			},
+		}, nil
 	})
 	reg, err := imageCaptureRegistry("docker", "img:test")
 	if err != nil {
 		t.Fatalf("imageCaptureRegistry: %v", err)
 	}
 	if _, ok := reg.Resolve("gh"); !ok {
-		t.Error("embedded gh must remain alongside the unit-derived layer")
+		t.Error("unit-derived gh must be resolvable")
 	}
 	if _, ok := reg.Resolve("linear"); !ok {
 		t.Error("unit-derived linear must be resolvable")

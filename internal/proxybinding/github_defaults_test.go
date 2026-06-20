@@ -8,24 +8,59 @@ import (
 	"github.com/ALRubinger/aileron/internal/sentinel"
 )
 
-// GitHub ships as a trusted built-in descriptor (defaults/github.yaml,
-// #1248), replacing the bespoke Go bindings. These tests assert the
-// descriptor contract through the public Load/LoadHostBindings output: the
-// two GitHub bindings appear in the built-in layer with no user descriptor
-// configured, github.com is basic/inject with no sentinel, and
+// GitHub used to ship as a trusted central default (defaults/github.yaml,
+// #1248). As of #1323 it moved into gh's devcontainer Feature CLI unit, and
+// the host fans its two bindings into the table through the unit-derived
+// layer (LoadOptions.ExtraEntries). These tests assert the same contract
+// through the public Load/LoadHostBindings output, now sourcing gh through
+// ExtraEntries: github.com is basic/inject with no sentinel, and
 // api.github.com is bearer/sentinel-swap carrying the GitHub sentinel value
-// and GH_TOKEN env. They
-// assert against the loaded table, never the file internals, so they
-// survive a descriptor reformat that preserves the contract.
+// and GH_TOKEN env. They assert against the loaded table, never file
+// internals, so they survive a manifest reformat that preserves the contract.
+//
+// The proxybinding package cannot import internal/cli/unitloader (import
+// cycle), so the gh sealing entries are an in-package literal here; the
+// live gh Feature manifest is pinned to this literal cross-package by
+// internal/app's TestGHUnitDriftGuard.
 
-func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
-	entries, err := Load(LoadOptions{})
+// ghUnitEntries is the byte-identical gh sealing layer the host projects from
+// the image's devcontainer.metadata label and applies as ExtraEntries.
+func ghUnitEntries() []Entry {
+	return []Entry{
+		{
+			Host:          "github.com",
+			CredentialRef: "user/github",
+			Scheme:        "basic",
+			EmitMechanism: "inject",
+			Username:      "x-access-token",
+		},
+		{
+			Host:          "api.github.com",
+			CredentialRef: "user/github",
+			Scheme:        "bearer",
+			EmitMechanism: "sentinel-swap",
+			Sentinel: &Sentinel{
+				Value: sentinel.GitHubTokenSentinel,
+				Env:   "GH_TOKEN",
+			},
+		},
+	}
+}
+
+// ghLoadOptions sources gh through the unit-derived layer, the production path
+// after #1323 (no central github.yaml).
+func ghLoadOptions() LoadOptions {
+	return LoadOptions{ExtraEntries: ghUnitEntries()}
+}
+
+func TestLoad_UnitLayerIncludesGitHub(t *testing.T) {
+	entries, err := Load(ghLoadOptions())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	apex, ok := findEntry(entries, "github.com")
 	if !ok {
-		t.Fatalf("built-in load missing github.com; got %v", entries)
+		t.Fatalf("unit-layer load missing github.com; got %v", entries)
 	}
 	if apex.Scheme != binding.SchemeBasic {
 		t.Errorf("github.com scheme = %q, want basic", apex.Scheme)
@@ -46,7 +81,7 @@ func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
 
 	api, ok := findEntry(entries, "api.github.com")
 	if !ok {
-		t.Fatalf("built-in load missing api.github.com; got %v", entries)
+		t.Fatalf("unit-layer load missing api.github.com; got %v", entries)
 	}
 	if api.Scheme != binding.SchemeBearer {
 		t.Errorf("api.github.com scheme = %q, want bearer", api.Scheme)
@@ -68,12 +103,29 @@ func TestLoad_BuiltinIncludesGitHub(t *testing.T) {
 	}
 }
 
-// The descriptor adapts to a binding table whose Match resolves both
-// GitHub hosts with the right scheme, emit mechanism, and sentinel shape.
-// This is the production path: LoadHostBindings is what the daemon wiring
-// (#1248) calls with no user descriptor configured.
+// TestLoad_GitHubNotInCentralDefaults pins the cutover: with no unit layer and
+// no user descriptor, github.com / api.github.com are absent from the central
+// defaults (they moved to gh's Feature unit, #1323). The remaining central
+// defaults still load.
+func TestLoad_GitHubNotInCentralDefaults(t *testing.T) {
+	entries, err := Load(LoadOptions{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := findEntry(entries, "github.com"); ok {
+		t.Error("github.com still present in central defaults; #1323 should have removed github.yaml")
+	}
+	if _, ok := findEntry(entries, "api.github.com"); ok {
+		t.Error("api.github.com still present in central defaults; #1323 should have removed github.yaml")
+	}
+}
+
+// The descriptor adapts to a binding table whose Match resolves both GitHub
+// hosts with the right scheme, emit mechanism, and sentinel shape. This is the
+// production path: LoadHostBindings is what the daemon wiring calls with gh
+// fanned in through the unit layer.
 func TestLoadHostBindings_MatchesGitHub(t *testing.T) {
-	table, err := LoadHostBindings(LoadOptions{})
+	table, err := LoadHostBindings(ghLoadOptions())
 	if err != nil {
 		t.Fatalf("LoadHostBindings: %v", err)
 	}
@@ -113,12 +165,12 @@ func TestLoadHostBindings_MatchesGitHub(t *testing.T) {
 	}
 }
 
-// Only the two exact apexes are sealed (no wildcard). A different
-// github.com subdomain (raw content, gist, codeload) or a lookalike host
-// must not match, so it falls through to passthrough rather than receiving
-// a credential it was never scoped for.
+// Only the two exact apexes are sealed (no wildcard). A different github.com
+// subdomain (raw content, gist, codeload) or a lookalike host must not match,
+// so it falls through to passthrough rather than receiving a credential it was
+// never scoped for.
 func TestLoadHostBindings_GitHubExactHostsOnly(t *testing.T) {
-	table, err := LoadHostBindings(LoadOptions{})
+	table, err := LoadHostBindings(ghLoadOptions())
 	if err != nil {
 		t.Fatalf("LoadHostBindings: %v", err)
 	}
@@ -135,12 +187,12 @@ func TestLoadHostBindings_GitHubExactHostsOnly(t *testing.T) {
 	}
 }
 
-// The shipped descriptor names a credential-ref, never the credential
-// bytes. No binding field looks like an inlined GitHub token. The sentinel
-// value mimics the ghp_ prefix by design (it is the non-secret placeholder
-// the proxy swaps), so it is exempted from the leak check.
+// The gh unit names a credential-ref, never the credential bytes. No binding
+// field looks like an inlined GitHub token. The sentinel value mimics the
+// ghp_ prefix by design (it is the non-secret placeholder the proxy swaps),
+// so it is exempted from the leak check.
 func TestLoadHostBindings_GitHubNoSecretBytes(t *testing.T) {
-	table, err := LoadHostBindings(LoadOptions{})
+	table, err := LoadHostBindings(ghLoadOptions())
 	if err != nil {
 		t.Fatalf("LoadHostBindings: %v", err)
 	}
@@ -162,17 +214,18 @@ func TestLoadHostBindings_GitHubNoSecretBytes(t *testing.T) {
 	}
 }
 
-// The trusted GitHub default is a normal layer in the built-in < user
-// precedence, not privileged. A user descriptor overriding github.com wins
-// for that host, while api.github.com stays the shipped default. This
-// proves GitHub is overridable exactly like Linear (#1248 acceptance
-// criterion 4).
+// The gh unit layer is a normal layer in the built-in < unit-derived < user
+// precedence, not privileged. A user descriptor overriding github.com wins for
+// that host, while api.github.com stays the unit-supplied binding. This proves
+// gh is overridable exactly like a central default.
 func TestLoad_UserOverridesGitHub(t *testing.T) {
 	dir := t.TempDir()
 	userPath := writeDescriptor(t, dir, "user.yaml",
 		"version: v1\nbindings:\n  - host: github.com\n    credential_ref: user/github-override\n    scheme: bearer\n")
 
-	entries, err := Load(LoadOptions{UserPath: userPath})
+	opts := ghLoadOptions()
+	opts.UserPath = userPath
+	entries, err := Load(opts)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -188,14 +241,14 @@ func TestLoad_UserOverridesGitHub(t *testing.T) {
 		t.Errorf("github.com credential_ref = %q, want user/github-override (user wins)", apex.CredentialRef)
 	}
 
-	// api.github.com is untouched by the override and stays the shipped
-	// default (bearer, sentinel-swap, GitHub sentinel).
+	// api.github.com is untouched by the override and stays the unit-supplied
+	// binding (bearer, sentinel-swap, GitHub sentinel).
 	api, ok := findEntry(entries, "api.github.com")
 	if !ok {
-		t.Fatal("user override of github.com dropped the shipped api.github.com default")
+		t.Fatal("user override of github.com dropped the unit-supplied api.github.com binding")
 	}
 	if api.Scheme != binding.SchemeBearer || api.EmitMechanism != string(binding.EmitMechanismSentinelSwap) {
-		t.Errorf("api.github.com = %q/%q, want bearer/sentinel-swap (default preserved)", api.Scheme, api.EmitMechanism)
+		t.Errorf("api.github.com = %q/%q, want bearer/sentinel-swap (unit binding preserved)", api.Scheme, api.EmitMechanism)
 	}
 	if api.Sentinel == nil || api.Sentinel.Value != sentinel.GitHubTokenSentinel {
 		t.Errorf("api.github.com sentinel changed under a github.com-only override: %+v", api.Sentinel)

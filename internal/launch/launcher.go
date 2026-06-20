@@ -601,15 +601,15 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// before mounting. See #1149.
 		ghChownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
-		// Assemble the same host-binding table the daemon recognizer reads
-		// (every binding flows from the descriptor layers) and pass the
-		// sentinel-swap subset to the planter, so the launch-side plant and
-		// the proxy-side swap share one source of truth. A malformed
-		// descriptor fails the launch loudly rather than silently shipping
-		// no sentinel.
-		sentinelSwapBindings, err := sentinelSwapHostBindings()
+		// gh's sealing bindings ship in its devcontainer Feature CLI unit
+		// (#1323), not a central default. resolveGitHubSentinelSwapBindings reads
+		// the image-derived unit layer the same way the daemon does
+		// (assembleHostBindings) and returns the sentinel-swap subset, so the
+		// launch-side plant and the proxy-side swap read one source of truth
+		// across the process boundary.
+		sentinelSwapBindings, err := resolveGitHubSentinelSwapBindings(ctx, sandboxPlan.Runtime, sandboxPlan.Image)
 		if err != nil {
-			return LaunchResult{}, fmt.Errorf("assemble sentinel-swap host bindings: %w", err)
+			return LaunchResult{}, err
 		}
 		ghPrep, err := prepareGitHubInject(ctx, client, sentinelSwapBindings, sessionLog, os.Stderr, ghChownHook)
 		if err != nil {

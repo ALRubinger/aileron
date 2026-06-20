@@ -8,14 +8,40 @@ import (
 	"testing"
 )
 
-func TestLoadCaptureDescriptors_BuiltinOnlyYieldsGh(t *testing.T) {
+// TestLoadCaptureDescriptors_BuiltinLayerIsEmpty pins the post-#1323
+// end state: gh moved to its devcontainer Feature CLI unit, so the
+// embedded built-in layer is empty by design. Loading with the zero
+// options (no unit-derived layer, no user layer) returns zero descriptors
+// without error against the real defaults/ directory (README.md present, no
+// `.yaml` files). The README must be skipped, not parsed.
+func TestLoadCaptureDescriptors_BuiltinLayerIsEmpty(t *testing.T) {
 	byName, ordered, err := LoadCaptureDescriptors(CaptureLoadOptions{})
+	if err != nil {
+		t.Fatalf("LoadCaptureDescriptors: %v", err)
+	}
+	if len(byName) != 0 {
+		t.Fatalf("built-in load yielded %d descriptors, want 0 (gh moved to its Feature unit); have %v", len(byName), names(ordered))
+	}
+	if len(ordered) != 0 {
+		t.Fatalf("ordered built-in slice = %v, want empty", names(ordered))
+	}
+}
+
+// TestLoadCaptureDescriptors_UnitDerivedGh proves gh now reaches the
+// registry through the unit-derived layer (the host projects it from the
+// image's devcontainer.metadata; the loader applies it via
+// ExtraDescriptors), with the byte-identical acquisition values the bespoke
+// flow and the shipped gh.yaml used before the cutover.
+func TestLoadCaptureDescriptors_UnitDerivedGh(t *testing.T) {
+	byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{
+		ExtraDescriptors: []CaptureDescriptor{ghCaptureLiteral()},
+	})
 	if err != nil {
 		t.Fatalf("LoadCaptureDescriptors: %v", err)
 	}
 	gh, ok := byName["gh"]
 	if !ok {
-		t.Fatalf("built-in load missing gh; have %v", names(ordered))
+		t.Fatalf("unit-derived load missing gh")
 	}
 	if gh.ContainerName != "aileron-auth-github" {
 		t.Errorf("gh ContainerName = %q", gh.ContainerName)
@@ -62,11 +88,8 @@ func TestLoadCaptureDescriptors_MissingUserFileContributesNothing(t *testing.T) 
 	if err != nil {
 		t.Fatalf("missing user file should not error: %v", err)
 	}
-	if _, ok := byName["gh"]; !ok {
-		t.Error("built-in gh should still load when the user file is absent")
-	}
-	if len(byName) != 1 {
-		t.Errorf("descriptor count = %d, want 1 (built-in only)", len(byName))
+	if len(byName) != 0 {
+		t.Errorf("descriptor count = %d, want 0 (empty built-in layer, absent user file)", len(byName))
 	}
 }
 
@@ -129,18 +152,18 @@ func validDescriptor(name, container string) CaptureDescriptor {
 
 // TestLoadCaptureDescriptors_ExtraLayerPrecedence pins the
 // built-in < unit-derived < user ordering for the in-memory extra layer
-// (#1322). An extra descriptor overrides a built-in of the same name, a user
-// descriptor overrides the extra layer, and an unset extra layer reproduces
-// the built-in-only result exactly.
+// (#1322). A user descriptor overrides the extra layer, the extra layer
+// supplies tools (the built-in layer is empty post-#1323), and an unset
+// extra layer reproduces the built-in-only (now empty) result exactly.
 func TestLoadCaptureDescriptors_ExtraLayerPrecedence(t *testing.T) {
-	t.Run("extra overrides built-in of same name", func(t *testing.T) {
+	t.Run("extra layer supplies the tool", func(t *testing.T) {
 		extra := []CaptureDescriptor{validDescriptor("gh", "unit-derived-container")}
 		byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{ExtraDescriptors: extra})
 		if err != nil {
 			t.Fatalf("LoadCaptureDescriptors: %v", err)
 		}
 		if byName["gh"].ContainerName != "unit-derived-container" {
-			t.Errorf("gh ContainerName = %q, want the unit-derived override", byName["gh"].ContainerName)
+			t.Errorf("gh ContainerName = %q, want the unit-derived value", byName["gh"].ContainerName)
 		}
 	})
 
@@ -171,21 +194,27 @@ kind: user
 		}
 	})
 
-	t.Run("extra adds a new tool alongside built-in", func(t *testing.T) {
-		extra := []CaptureDescriptor{validDescriptor("linear", "aileron-auth-linear")}
+	t.Run("extra adds multiple tools to the empty built-in layer", func(t *testing.T) {
+		extra := []CaptureDescriptor{
+			ghCaptureLiteral(),
+			validDescriptor("linear", "aileron-auth-linear"),
+		}
 		byName, _, err := LoadCaptureDescriptors(CaptureLoadOptions{ExtraDescriptors: extra})
 		if err != nil {
 			t.Fatalf("LoadCaptureDescriptors: %v", err)
 		}
 		if _, ok := byName["gh"]; !ok {
-			t.Error("built-in gh must remain present alongside the unit-derived layer")
+			t.Error("unit-derived gh must be present")
 		}
 		if _, ok := byName["linear"]; !ok {
 			t.Error("unit-derived linear must be added")
 		}
+		if len(byName) != 2 {
+			t.Errorf("descriptor count = %d, want 2 (no built-in layer)", len(byName))
+		}
 	})
 
-	t.Run("nil extra layer reproduces built-in-only set", func(t *testing.T) {
+	t.Run("nil extra layer reproduces the empty built-in-only set", func(t *testing.T) {
 		base, _, err := LoadCaptureDescriptors(CaptureLoadOptions{})
 		if err != nil {
 			t.Fatalf("baseline load: %v", err)
@@ -198,4 +227,24 @@ kind: user
 			t.Errorf("nil ExtraDescriptors changed the set:\nbase=%#v\nwithNil=%#v", base, withNil)
 		}
 	})
+}
+
+// ghCaptureLiteral is the byte-identical gh capture descriptor that used to
+// ship as defaults/gh.yaml, now sourced from gh's devcontainer Feature CLI
+// unit at runtime (#1323). The capture package cannot import
+// internal/cli/unitloader (import cycle: unitloader imports internal/cli
+// which... does not import capture, but unitloader imports capture), so the
+// internal tests keep this in-package literal. The cross-package drift guard
+// in internal/app pins this literal to the live Feature manifest projection.
+func ghCaptureLiteral() CaptureDescriptor {
+	return CaptureDescriptor{
+		Version:       CaptureSchemaVersion,
+		Name:          "gh",
+		ContainerName: "aileron-auth-github",
+		LoginCmd:      []string{"gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"},
+		TokenCmd:      []string{"gh", "auth", "token", "--hostname", "github.com"},
+		BrowserShim:   "echo",
+		StoreAt:       "user/github",
+		Kind:          "user",
+	}
 }

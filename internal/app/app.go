@@ -496,13 +496,15 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// header-template) is sealed by shipping a descriptor, with zero
 	// per-CLI proxy code.
 	//
-	// GitHub is no longer special-cased in Go (#1248). Its two bindings
-	// (github.com -> basic, inject; api.github.com -> bearer,
-	// sentinel-swap) now ship as a trusted built-in
-	// descriptor (internal/proxybinding/defaults/github.yaml) alongside
-	// Linear, picked up by the same embedded defaults glob. A user
-	// descriptor can override either host, so GitHub is a normal default
-	// layer in the built-in < user precedence, not privileged Go.
+	// GitHub is no longer special-cased in Go (#1248), and as of #1323 it is
+	// no longer a central default either: its two bindings (github.com ->
+	// basic, inject; api.github.com -> bearer, sentinel-swap) moved out of
+	// internal/proxybinding/defaults/github.yaml into gh's devcontainer
+	// Feature CLI unit, and the host fans them in through the image-derived
+	// unit layer below. The remaining central defaults (e.g. Linear) are
+	// still picked up by the embedded defaults glob; a user descriptor can
+	// override any host, so each is a normal layer in the
+	// built-in < unit-derived < user precedence, not privileged Go.
 	//
 	// The agent never holds these secrets; the daemon injects them at
 	// egress. With no matching vault entry a binding still matches but
@@ -518,9 +520,10 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// An image whose label cannot be read (absent locally, no label) is a
 	// clean no-op that preserves today's defaults-only table. A
 	// present-but-malformed unit fails construction loudly, matching the
-	// malformed-descriptor posture above. gh's unit is byte-equivalent to the
-	// embedded github.yaml default it duplicates, so the merged table is
-	// identical until #1323 removes the central file.
+	// malformed-descriptor posture above. gh's unit is the sole source of its
+	// bindings now that #1323 removed the central github.yaml; its projection
+	// is byte-identical to that former default (pinned by internal/app's
+	// TestGHUnitDriftGuard).
 	server.hostBindings, err = assembleHostBindings(ctx)
 	if err != nil {
 		return nil, err

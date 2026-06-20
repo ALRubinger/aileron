@@ -24,13 +24,23 @@ import (
 // omitting config_dir; if it were set, both vectors would gain an --env=
 // token the bespoke flow never emits.
 
-// bindGhFromRegistry resolves gh from the built-in registry, builds a bare
-// Driver (no runtime resolution needed — the recordingRunner is injected),
-// applies the descriptor, and wires the recording runner + store. It
-// exercises Apply against the real Driver type end-to-end.
+// bindGhFromRegistry resolves gh from the registry, builds a bare Driver
+// (no runtime resolution needed — the recordingRunner is injected), applies
+// the descriptor, and wires the recording runner + store. It exercises Apply
+// against the real Driver type end-to-end.
+//
+// Post-#1323 the built-in capture layer is empty (gh moved to its
+// devcontainer Feature CLI unit), so gh is sourced through the unit-derived
+// layer (CaptureLoadOptions.ExtraDescriptors) using the in-package gh
+// literal — the same path the host uses when it projects gh from the image's
+// devcontainer.metadata. The capture package cannot import unitloader
+// (import cycle), so the literal lives here; internal/app's drift guard pins
+// it to the live Feature manifest.
 func bindGhFromRegistry(t *testing.T, rr *recordingRunner, store StoreFunc) *Driver {
 	t.Helper()
-	r, err := NewRegistry(CaptureLoadOptions{})
+	r, err := NewRegistry(CaptureLoadOptions{
+		ExtraDescriptors: []CaptureDescriptor{ghCaptureLiteral()},
+	})
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
