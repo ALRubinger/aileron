@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 // Opener opens a URL in the user's default browser. The default
@@ -66,8 +67,43 @@ func browserArgv(goos, url string) ([]string, error) {
 	case "windows":
 		// `cmd /c start "" <url>` — the empty title argument prevents
 		// `start` from interpreting a quoted URL as a window title.
-		return []string{"cmd", "/c", "start", "", url}, nil
+		//
+		// cmd.exe parses the command line itself and treats unescaped
+		// metacharacters (notably `&`, which separates commands) as
+		// shell syntax, so an OAuth authorize URL like
+		// `…?code=true&client_id=…&state=…` would be truncated at the
+		// first `&` and the browser would receive only the leading
+		// parameter. Escape the metacharacters with a caret so the full
+		// URL — every query parameter — survives to `start`.
+		return []string{"cmd", "/c", "start", "", escapeURLForWindowsCmd(url)}, nil
 	default:
 		return nil, fmt.Errorf("oauth: no browser-open command for GOOS=%q", goos)
 	}
+}
+
+// escapeURLForWindowsCmd caret-escapes the cmd.exe metacharacters in s
+// so a URL handed to `cmd /c start "" <url>` reaches the browser intact
+// rather than being truncated or mangled by cmd's command-line parser.
+//
+// The load-bearing case is `&` (cmd's command separator): without
+// escaping it, every query parameter after the first is dropped. For
+// safety the full set of cmd metacharacters is escaped — `^` itself
+// (escaped first so the carets we add aren't re-escaped), `&`, `|`,
+// `<`, `>`, `(`, `)`, and `%` (which `start` would otherwise treat as
+// the start of a `%VAR%` expansion). macOS/Linux openers pass the URL
+// as a single argv element with no shell, so this is Windows-only.
+func escapeURLForWindowsCmd(s string) string {
+	// `^` must be replaced first; otherwise the carets introduced for
+	// the other metacharacters would themselves be doubled.
+	replacer := strings.NewReplacer(
+		"^", "^^",
+		"&", "^&",
+		"|", "^|",
+		"<", "^<",
+		">", "^>",
+		"(", "^(",
+		")", "^)",
+		"%", "^%",
+	)
+	return replacer.Replace(s)
 }

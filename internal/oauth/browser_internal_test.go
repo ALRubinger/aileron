@@ -112,6 +112,84 @@ func TestBrowserArgv_PerPlatformContract(t *testing.T) {
 	}
 }
 
+// TestBrowserArgv_WindowsEscapesCmdMetacharacters is the regression
+// test for the host-acquire OAuth bug: the Claude authorize URL is
+// `base?code=true&client_id=…&code_challenge=…&state=…`, and on Windows
+// `cmd /c start "" <url>` truncates it at the first `&` because cmd
+// treats `&` as a command separator. The Windows argv must caret-escape
+// the metacharacters so every parameter survives; the macOS/Linux argv
+// must pass the URL byte-for-byte unchanged (no shell, so no escaping).
+func TestBrowserArgv_WindowsEscapesCmdMetacharacters(t *testing.T) {
+	const url = "https://claude.ai/oauth/authorize?code=true&client_id=abc123&code_challenge=xYz_chal&state=st-987&scope=read%20write"
+
+	// Windows: the final argv element is the escaped URL, and it must
+	// preserve every parameter (the bug dropped everything after the
+	// first `&`).
+	t.Run("windows", func(t *testing.T) {
+		argv, err := browserArgv("windows", url)
+		if err != nil {
+			t.Fatalf("browserArgv(windows): %v", err)
+		}
+		want := []string{"cmd", "/c", "start", "",
+			"https://claude.ai/oauth/authorize?code=true^&client_id=abc123^&code_challenge=xYz_chal^&state=st-987^&scope=read^%20write"}
+		if !equalArgv(argv, want) {
+			t.Fatalf("browserArgv(windows) = %v;\nwant %v", argv, want)
+		}
+		escaped := argv[len(argv)-1]
+		// Every parameter must survive (the bug truncated at the first &).
+		for _, frag := range []string{"client_id=abc123", "code_challenge=xYz_chal", "state=st-987"} {
+			if !strings.Contains(escaped, frag) {
+				t.Errorf("escaped URL %q missing %q", escaped, frag)
+			}
+		}
+		// The `&` separators must be caret-escaped, not raw.
+		if strings.Contains(escaped, "true&client_id") {
+			t.Errorf("escaped URL %q still has an unescaped & before client_id", escaped)
+		}
+		if strings.Count(escaped, "^&") != 4 {
+			t.Errorf("escaped URL %q: want 4 caret-escaped ampersands, got %d", escaped, strings.Count(escaped, "^&"))
+		}
+	})
+
+	// macOS/Linux: single argv element, URL byte-identical to input.
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			argv, err := browserArgv(goos, url)
+			if err != nil {
+				t.Fatalf("browserArgv(%s): %v", goos, err)
+			}
+			if argv[len(argv)-1] != url {
+				t.Errorf("browserArgv(%s) URL = %q; want byte-identical %q", goos, argv[len(argv)-1], url)
+			}
+		})
+	}
+}
+
+// TestEscapeURLForWindowsCmd pins the per-character escaping contract,
+// including the `^`-first ordering (so an existing caret doesn't get the
+// carets we add re-escaped) and the no-op case for URLs with no
+// metacharacters.
+func TestEscapeURLForWindowsCmd(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain URL unchanged", "https://example.test/path", "https://example.test/path"},
+		{"ampersand", "a&b", "a^&b"},
+		{"all metacharacters", `&|<>()%`, `^&^|^<^>^(^)^%`},
+		{"caret escaped first", "a^&b", "a^^^&b"},
+		{"empty", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := escapeURLForWindowsCmd(c.in); got != c.want {
+				t.Errorf("escapeURLForWindowsCmd(%q) = %q; want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func equalArgv(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
