@@ -277,7 +277,7 @@ var errClaudeEnvelopeMalformed = errors.New("claude: credentials envelope is mal
 const claudeWorkspacePath = "/home/agent/workspace"
 
 // claudeOnboardingStub is the payload written to /home/agent/.claude.json
-// on every launch. It short-circuits three first-run interruptions so a
+// on every launch. It short-circuits the first-run interruptions so a
 // vault-rendered sandbox launch is silent end-to-end:
 //
 //   - hasCompletedOnboarding skips the theme picker / first-run wizard.
@@ -293,6 +293,17 @@ const claudeWorkspacePath = "/home/agent/workspace"
 //     workspace, so the agent does not block on it on every launch. The
 //     sandbox container is the trust boundary, so pre-accepting inside
 //     it is safe.
+//   - bypassPermissionsModeAccepted pre-accepts the
+//     "Bypassing Permissions" disclaimer that Claude Code shows the
+//     first time it runs under --dangerously-skip-permissions. The
+//     sandbox launch always passes that flag (Args(ModeSandbox)), so
+//     without this the first launch blocks on an interactive
+//     "do you want to dangerously skip permissions?" confirmation —
+//     defeating the hands-off Cloud startup the flag exists to provide.
+//     The opt-in is already expressed by Aileron passing the flag; the
+//     container is the trust boundary (ADR-0015), so pre-accepting the
+//     disclaimer inside it is consistent with the pre-accepted trust
+//     dialog above. (#1379)
 //
 // Built from a typed value rather than a string literal so the nested
 // shape stays valid as Anthropic adds onboarding fields.
@@ -303,12 +314,14 @@ func mustMarshalOnboardingStub() []byte {
 		HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
 	}
 	stub := struct {
-		HasCompletedOnboarding bool                    `json:"hasCompletedOnboarding"`
-		InstallMethod          string                  `json:"installMethod"`
-		Projects               map[string]projectTrust `json:"projects"`
+		HasCompletedOnboarding        bool                    `json:"hasCompletedOnboarding"`
+		BypassPermissionsModeAccepted bool                    `json:"bypassPermissionsModeAccepted"`
+		InstallMethod                 string                  `json:"installMethod"`
+		Projects                      map[string]projectTrust `json:"projects"`
 	}{
-		HasCompletedOnboarding: true,
-		InstallMethod:          "global",
+		HasCompletedOnboarding:        true,
+		BypassPermissionsModeAccepted: true,
+		InstallMethod:                 "global",
 		Projects: map[string]projectTrust{
 			claudeWorkspacePath: {HasTrustDialogAccepted: true},
 		},
