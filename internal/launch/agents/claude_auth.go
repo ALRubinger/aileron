@@ -203,7 +203,11 @@ func claudeAPIKeyHostAcquire(ctx context.Context, deps launch.HostAcquireDeps) (
 		fmt.Fprintln(deps.Out,
 			"Paste your Anthropic API key to seed Claude's api-key auth, then press Enter.")
 	}
-	pasted, err := deps.CodePrompter(ctx, deps.Out)
+	// This flow prints its own (api-key-specific) paste banner above, so
+	// the prompter is invoked with a nil promptW to suppress the
+	// prompter's generic "Paste the code from your browser..." banner and
+	// avoid a second, wrong-domain prompt. Mirrors claudeHostedCallbackAcquire.
+	pasted, err := deps.CodePrompter(ctx, nil)
 	if err != nil {
 		// Read failed or was cancelled. Non-fatal: empty Secret so the
 		// launcher falls back to the in-container login.

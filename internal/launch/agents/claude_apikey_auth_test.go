@@ -118,6 +118,38 @@ func TestClaudeAPIKey_HostAcquire_ReturnsApiKeySecret(t *testing.T) {
 	}
 }
 
+// Regression (#1356): the api-key flow prints its own Anthropic-specific
+// paste banner to deps.Out, so it must invoke the CodePrompter with a nil
+// promptW. Passing deps.Out would make the production
+// defaultHostCodePrompter print a SECOND, wrong-domain banner ("Paste the
+// code from your browser..."), double-printing a confusing prompt. The
+// contract: the flow that owns the banner must not also hand the prompter
+// a writer to print its own.
+func TestClaudeAPIKey_HostAcquire_PrompterReceivesNilWriter(t *testing.T) {
+	eb := claudeAPIKeyBinding(t)
+	var out bytes.Buffer
+	gotWriter := io.Writer(&out) // sentinel: must be overwritten to nil
+	called := false
+	prompter := func(_ context.Context, promptW io.Writer) (string, error) {
+		called = true
+		gotWriter = promptW
+		return "sk-ant-xyz", nil
+	}
+	if _, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:          context.Background(),
+		Out:          &out,
+		CodePrompter: prompter,
+	}); err != nil {
+		t.Fatalf("HostAcquire: %v", err)
+	}
+	if !called {
+		t.Fatal("CodePrompter was never invoked")
+	}
+	if gotWriter != nil {
+		t.Errorf("CodePrompter promptW = %v, want nil (flow owns its own banner; non-nil double-prints)", gotWriter)
+	}
+}
+
 func TestClaudeAPIKey_HostAcquire_EmptyPasteIsNonFatal(t *testing.T) {
 	eb := claudeAPIKeyBinding(t)
 	for _, paste := range []string{"", "   \n\t"} {
