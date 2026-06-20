@@ -592,6 +592,71 @@ func TestResolveSandboxMCPBinary_PropagatesMissingError(t *testing.T) {
 	}
 }
 
+// TestSiblingCandidates_WindowsTriesExeFirst is the regression test for
+// #1387: on Windows the launcher must probe `aileron-mcp.exe` (the real
+// filename the Windows build produces) before the bare `aileron-mcp`,
+// otherwise resolveSibling's os.Stat misses the binary, falls through,
+// and the launcher writes an unresolvable `command = "aileron-mcp"` into
+// Codex's config.toml — which fails at MCP startup with OS error 2.
+//
+// The suffix is a parameter so this Windows-specific ordering is
+// verifiable from any host (CI runs these on Linux).
+func TestSiblingCandidates_WindowsTriesExeFirst(t *testing.T) {
+	got := siblingCandidates("aileron-mcp", ".exe")
+	want := []string{"aileron-mcp.exe", "aileron-mcp"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("siblingCandidates(\"aileron-mcp\", \".exe\") = %v, want %v", got, want)
+	}
+}
+
+// TestSiblingCandidates_NonWindowsBareNameOnly confirms that off Windows
+// (empty suffix) the lookup is unchanged: a single bare candidate, no
+// spurious `.exe` probe.
+func TestSiblingCandidates_NonWindowsBareNameOnly(t *testing.T) {
+	got := siblingCandidates("aileron-mcp", "")
+	if len(got) != 1 || got[0] != "aileron-mcp" {
+		t.Fatalf("siblingCandidates(\"aileron-mcp\", \"\") = %v, want [aileron-mcp]", got)
+	}
+}
+
+// TestSiblingCandidates_AlreadySuffixed guards against a double suffix
+// when a caller passes a name that already ends in the platform suffix:
+// the bare name is returned as-is rather than producing `foo.exe.exe`.
+func TestSiblingCandidates_AlreadySuffixed(t *testing.T) {
+	got := siblingCandidates("aileron-mcp.exe", ".exe")
+	if len(got) != 1 || got[0] != "aileron-mcp.exe" {
+		t.Fatalf("siblingCandidates(\"aileron-mcp.exe\", \".exe\") = %v, want [aileron-mcp.exe]", got)
+	}
+}
+
+// TestResolveSibling_FindsHostSibling exercises resolveSibling end-to-end
+// on the current host: a bare-named sibling placed next to the running
+// binary resolves to its absolute path. This locks the non-Windows
+// happy path so the #1387 candidate-ordering change does not regress the
+// common Linux/macOS install layout.
+func TestResolveSibling_FindsHostSibling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bare-named sibling is not the Windows on-disk shape; covered by siblingCandidates tests")
+	}
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mcp := filepath.Join(dir, "aileron-mcp")
+	if err := os.WriteFile(mcp, []byte("mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveSibling(selfPath, "aileron-mcp")
+	if err != nil {
+		t.Fatalf("resolveSibling: %v", err)
+	}
+	want, _ := filepath.Abs(mcp)
+	if got != want {
+		t.Fatalf("resolveSibling = %q, want %q", got, want)
+	}
+}
+
 // TestValidateSandboxRuntimeRejectsPodman is the launch-path regression
 // test for #1051: --sandbox=podman must fail validation with the
 // Docker-only message. The runtime seam (the runtimeName parameter)

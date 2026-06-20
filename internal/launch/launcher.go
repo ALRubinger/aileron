@@ -146,13 +146,51 @@ func ResolveBinary(names []string) (string, error) {
 	return "", fmt.Errorf("could not find any of %v on PATH", names)
 }
 
+// exeSuffix is the platform's executable file extension. On Windows the
+// aileron and aileron-mcp binaries are written as `aileron.exe` /
+// `aileron-mcp.exe`, so a bare sibling name like "aileron-mcp" never
+// resolves on disk; everywhere else it is empty.
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// siblingCandidates returns the on-disk filenames to probe for a sibling
+// binary, in priority order. With a non-empty platform suffix (".exe" on
+// Windows) the suffixed filename is tried first because that is the real
+// name the Windows build produces; the bare name is still probed so a
+// manually placed extension-less binary resolves too. Off Windows the
+// suffix is empty and the single bare name is returned. The suffix is
+// passed in (rather than read from runtime.GOOS) so the Windows ordering
+// is unit-testable from any host.
+func siblingCandidates(name, suffix string) []string {
+	if suffix != "" && !strings.HasSuffix(name, suffix) {
+		return []string{name + suffix, name}
+	}
+	return []string{name}
+}
+
 // resolveSibling looks for a binary next to the given executable path,
 // then falls back to searching PATH.
+//
+// On Windows the on-disk sibling carries an `.exe` extension while the
+// caller passes the bare name (e.g. "aileron-mcp"), so the sibling
+// candidate is probed both with and without the platform exeSuffix; a
+// bare-name os.Stat would otherwise miss `aileron-mcp.exe`, fall
+// through, and let the launcher write an unresolvable
+// `command = "aileron-mcp"` into Codex's config.toml — which fails at
+// MCP startup with OS error 2 (issue #1387). exec.LookPath is the final
+// fallback and already applies %PATHEXT% on Windows, so it needs no
+// extra handling.
 func resolveSibling(selfPath, name string) (string, error) {
 	dir := filepath.Dir(selfPath)
-	candidate := filepath.Join(dir, name)
-	if _, err := os.Stat(candidate); err == nil {
-		return filepath.Abs(candidate)
+	for _, c := range siblingCandidates(name, exeSuffix()) {
+		candidate := filepath.Join(dir, c)
+		if _, err := os.Stat(candidate); err == nil {
+			return filepath.Abs(candidate)
+		}
 	}
 	return exec.LookPath(name)
 }
