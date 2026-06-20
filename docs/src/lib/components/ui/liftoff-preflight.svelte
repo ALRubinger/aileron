@@ -38,9 +38,13 @@
 		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
 				Install and configure
-				<a href="https://docs.claude.com/en/docs/claude-code/setup">Claude Code</a> with an
-				Anthropic API key in <code>ANTHROPIC_API_KEY</code>. Aileron's launcher routes Claude
-				Code's LLM calls through Aileron locally. It does not supply or replace your API key.
+				<a href="https://docs.claude.com/en/docs/claude-code/setup">Claude Code</a>. Claude Code can
+				authenticate two ways. Subscription mode signs in with a Claude Pro/Max account via OAuth
+				login and needs no API key. API-key mode reads an Anthropic API key from
+				<code>ANTHROPIC_API_KEY</code>. You pick the mode at launch with
+				<code>--claude-auth=subscription|api-key</code>, or by answering the first-run prompt where
+				Enter selects subscription. Aileron's launcher routes Claude Code's LLM calls through Aileron
+				locally. It does not supply or replace your credentials.
 			</p>
 		</AccordionPrimitive.Content>
 	</AccordionPrimitive.Item>

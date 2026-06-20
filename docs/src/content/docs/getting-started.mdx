@@ -163,6 +163,8 @@ aileron launch claude
 aileron launch --local claude
 ```
 
+The first launch resolves how Claude authenticates. Subscription mode signs in with a Claude Pro/Max account via OAuth login and is the default. API-key mode uses an Anthropic API key from `ANTHROPIC_API_KEY`. Pass `--claude-auth=subscription` or `--claude-auth=api-key` to pre-select the mode, or answer the first-run prompt where Enter selects subscription. The launcher prints the active mode as `Claude auth mode: subscription (Pro/Max)` or `Claude auth mode: API key`. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the full mode-selection and seeding detail.
+
 You'll see a banner like:
 
 ```
