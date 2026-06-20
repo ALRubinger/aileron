@@ -49,6 +49,23 @@
 		</AccordionPrimitive.Content>
 	</AccordionPrimitive.Item>
 
+	<AccordionPrimitive.Item value="docker" class={itemClass}>
+		<AccordionPrimitive.Header>
+			<AccordionPrimitive.Trigger class={triggerClass}>
+				<span>Docker</span>
+				<ChevronDown size={16} class="shrink-0 transition-transform" />
+			</AccordionPrimitive.Trigger>
+		</AccordionPrimitive.Header>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
+			<p>
+				Docker installed and the daemon running.
+				<a href="https://www.docker.com/products/docker-desktop/">Docker Desktop</a> is the easy
+				path on macOS and Windows. <code>aileron launch</code> runs the agent inside a container by
+				default, so the daemon must be reachable before you launch.
+			</p>
+		</AccordionPrimitive.Content>
+	</AccordionPrimitive.Item>
+
 	<AccordionPrimitive.Item value="google" class={itemClass}>
 		<AccordionPrimitive.Header>
 			<AccordionPrimitive.Trigger class={triggerClass}>
