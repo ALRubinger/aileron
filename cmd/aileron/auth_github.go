@@ -120,14 +120,22 @@ func descriptorForVerb(verb string) string {
 	return verb
 }
 
-// captureRegistry constructs the capture descriptor registry both the
-// dispatch predicate and the driver builder read. It is a package var so a
-// test can force the registry-load-error branch (a malformed embedded
-// default is a build-time programming error, but the fail-closed handling
-// is still a property worth pinning: a bad registry must not crash or
-// mis-dispatch). Production wires the embedded defaults + the standard
-// user layer.
-var captureRegistry = capture.DefaultRegistry
+// captureRegistry constructs the capture descriptor registry the dispatch
+// predicate reads. As of #1323 gh no longer ships as a central embedded
+// default; its capture descriptor comes from the sandbox base image's gh CLI
+// Feature unit (the image inspected for acquisition is the base image, which
+// is where `aileron auth github` runs gh). So the dispatch registry is built
+// off the default device-flow image's unit layer additively over the embedded
+// defaults and the user layer, exactly like the driver builder
+// (imageCaptureRegistry). Resolving the default image keeps the dispatch and
+// the driver reading the same descriptor source.
+//
+// It is a package var so a test can force the registry-load-error branch: a
+// registry that cannot load must fail closed (no crash, no mis-dispatch)
+// rather than treating an unresolvable verb as a capture descriptor.
+var captureRegistry = func() (*capture.Registry, error) {
+	return imageCaptureRegistry(sandboxcontainer.DefaultRuntime, resolveDeviceFlowImage(""))
+}
 
 // isCaptureDescriptor reports whether name resolves to a capture
 // descriptor in the embedded + user registry. runAuth uses it to dispatch

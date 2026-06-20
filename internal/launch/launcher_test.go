@@ -22,6 +22,11 @@ import (
 //     (`docker image inspect --format '{{ ... ai.aileron.mcp.version }}'`) the
 //     launcher issues to choose between the host-mount and baked paths (#957);
 //     validateSandbox and launchSandbox each issue one.
+//   - the devcontainer.metadata image-label inspect
+//     (`docker image inspect --format '{{ index .Config.Labels "devcontainer.metadata" }}'`)
+//     the launcher issues to resolve the image's gh CLI-unit sealing layer
+//     (#1323, github_inject.go launchUnitLayers); it fires only on the GitHub
+//     inject path.
 //   - the Linux-only agent-UID resolution inspect
 //     (`docker image inspect --format '{{.Config.User}}'`) the no-op-gitconfig
 //     chown hook issues to decide whether the host-owned bind-mounted dir
@@ -37,6 +42,9 @@ func dropAuxiliaryDockerCalls(calls []string) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {
 		if strings.Contains(c, sandboxcontainer.MCPVersionLabel) {
+			continue
+		}
+		if strings.Contains(c, sandboxcontainer.DevcontainerMetadataLabel) {
 			continue
 		}
 		if strings.Contains(c, "{{.Config.User}}") {
@@ -59,12 +67,13 @@ func dropAuxiliaryDockerCalls(calls []string) []string {
 // calls" assertion (the call is a no-op on darwin, so it only failed in CI).
 func TestDropAuxiliaryDockerCalls(t *testing.T) {
 	mcpInspect := "image\ninspect\n--format\n{{ index .Config.Labels \"" + sandboxcontainer.MCPVersionLabel + "\" }}\nimg:test"
+	metadataInspect := "image\ninspect\n--format\n{{ index .Config.Labels \"" + sandboxcontainer.DevcontainerMetadataLabel + "\" }}\nimg:test"
 	uidInspect := "image\ninspect\n--format\n{{.Config.User}}\nimg:test"
 	chownCall := "run\n--rm\n--user\n0\n--entrypoint\nchown\n--volume\n/host/transient:/mnt\nimg:test\n-R\n1000\n/mnt"
 	validateCall := "run\n--rm\nimg:test\n/bin/sh\n-c\nprobe"
 	runCall := "run\n--rm\n-it\nimg:test"
 
-	got := dropAuxiliaryDockerCalls([]string{mcpInspect, validateCall, uidInspect, chownCall, runCall})
+	got := dropAuxiliaryDockerCalls([]string{mcpInspect, validateCall, metadataInspect, uidInspect, chownCall, runCall})
 	want := []string{validateCall, runCall}
 	if len(got) != len(want) {
 		t.Fatalf("dropAuxiliaryDockerCalls kept %d calls, want %d:\n%v", len(got), len(want), got)

@@ -165,34 +165,56 @@ func parseGHFeatureUnit(t *testing.T) Unit {
 	return unit
 }
 
-// loadCaptureDefault parses the shipped capture default for gh.
+// loadCaptureDefault returns the documented byte-identical gh capture
+// descriptor the Feature unit must reproduce. It used to read the shipped
+// internal/auth/capture/defaults/gh.yaml, but #1323 deleted that central file
+// (gh now ships only in its Feature CLI unit, this very manifest), so the
+// expected value is the in-test literal. The acceptance test below proves the
+// manifest projects to exactly this; internal/app's TestGHUnitDriftGuard pins
+// the same literal cross-package.
 func loadCaptureDefault(t *testing.T) capture.CaptureDescriptor {
 	t.Helper()
-	path := filepath.Join(repoRoot(t), "internal", "auth", "capture", "defaults", "gh.yaml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	return capture.CaptureDescriptor{
+		Version:       capture.CaptureSchemaVersion,
+		Name:          "gh",
+		ContainerName: "aileron-auth-github",
+		LoginCmd:      []string{"gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--web"},
+		TokenCmd:      []string{"gh", "auth", "token", "--hostname", "github.com"},
+		BrowserShim:   "echo",
+		StoreAt:       "user/github",
+		Kind:          "user",
 	}
-	desc, err := capture.ParseCaptureDescriptor(raw)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return desc
 }
 
-// loadProxyBindingDefault parses the shipped proxybinding default for github.
+// loadProxyBindingDefault returns the documented byte-identical gh sealing
+// descriptor the Feature unit must reproduce. It used to read the shipped
+// internal/proxybinding/defaults/github.yaml, deleted by #1323; the expected
+// value is now the in-test literal, pinned to the live manifest by
+// internal/app's TestGHUnitDriftGuard.
 func loadProxyBindingDefault(t *testing.T) proxybinding.Descriptor {
 	t.Helper()
-	path := filepath.Join(repoRoot(t), "internal", "proxybinding", "defaults", "github.yaml")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	return proxybinding.Descriptor{
+		Version: proxybinding.SchemaVersion,
+		Bindings: []proxybinding.Entry{
+			{
+				Host:          "github.com",
+				CredentialRef: "user/github",
+				Scheme:        "basic",
+				EmitMechanism: "inject",
+				Username:      "x-access-token",
+			},
+			{
+				Host:          "api.github.com",
+				CredentialRef: "user/github",
+				Scheme:        "bearer",
+				EmitMechanism: "sentinel-swap",
+				Sentinel: &proxybinding.Sentinel{
+					Value: "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA",
+					Env:   "GH_TOKEN",
+				},
+			},
+		},
 	}
-	desc, err := proxybinding.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return desc
 }
 
 // sandboxFeaturesContext locates the repo-root images/sandbox-features

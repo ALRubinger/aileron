@@ -601,13 +601,27 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// before mounting. See #1149.
 		ghChownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
-		// Assemble the same host-binding table the daemon recognizer reads
-		// (every binding flows from the descriptor layers) and pass the
-		// sentinel-swap subset to the planter, so the launch-side plant and
-		// the proxy-side swap share one source of truth. A malformed
-		// descriptor fails the launch loudly rather than silently shipping
-		// no sentinel.
-		sentinelSwapBindings, err := sentinelSwapHostBindings()
+		// gh's sealing bindings ship in its devcontainer Feature CLI unit
+		// (#1323), not a central default. Resolve the image-derived unit layer
+		// the same way the daemon does (assembleHostBindings) so the launch-side
+		// sentinel plant and the proxy-side swap read one source of truth across
+		// the process boundary. An empty plan runtime maps to the default
+		// runtime, matching the daemon's DefaultRuntime-driven resolution. A
+		// missing or unreadable image label yields a nil layer (clean no-op
+		// preserving the central defaults table); a present-but-malformed unit
+		// fails the launch loudly rather than silently shipping no sentinel.
+		ghRuntime := sandboxPlan.Runtime
+		if ghRuntime == "" {
+			ghRuntime = sandboxcontainer.DefaultRuntime
+		}
+		_, ghSealingLayer, err := launchUnitLayers(ctx, ghRuntime, sandboxPlan.Image)
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("resolve image gh unit layer: %w", err)
+		}
+		// Assemble the daemon-equivalent host-binding table (central defaults
+		// plus the image-derived gh unit layer) and pass the sentinel-swap
+		// subset to the planter.
+		sentinelSwapBindings, err := sentinelSwapHostBindings(ghSealingLayer)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("assemble sentinel-swap host bindings: %w", err)
 		}

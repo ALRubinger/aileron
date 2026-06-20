@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"sort"
+	"strings"
 )
 
 // CaptureLoadOptions selects the user descriptor layer that overrides the
@@ -89,11 +90,14 @@ func applyCaptureLayer(merged map[string]CaptureDescriptor, layer []CaptureDescr
 	}
 }
 
-// parseBuiltinCaptureDefaults parses every embedded descriptor under
-// defaults/. A malformed shipped descriptor fails the load rather than
-// being skipped. A duplicate name across two shipped files is also an
-// error: each built-in tool must have a unique name within the trusted
-// layer.
+// parseBuiltinCaptureDefaults parses every embedded `.yaml` descriptor
+// under defaults/. Non-yaml entries (the README.md placeholder that keeps
+// the directory non-empty after gh moved to its Feature unit, #1323) and
+// subdirectories are skipped, so an empty-of-yaml directory loads cleanly
+// to zero built-in descriptors. A malformed shipped descriptor fails the
+// load rather than being skipped. A duplicate name across two shipped
+// files is also an error: each built-in tool must have a unique name
+// within the trusted layer.
 func parseBuiltinCaptureDefaults() ([]CaptureDescriptor, error) {
 	dirEntries, err := fs.ReadDir(builtinCaptureDefaults, builtinCaptureDefaultsDir)
 	if err != nil {
@@ -104,6 +108,9 @@ func parseBuiltinCaptureDefaults() ([]CaptureDescriptor, error) {
 	names := make([]string, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		if de.IsDir() {
+			continue
+		}
+		if !strings.HasSuffix(de.Name(), ".yaml") {
 			continue
 		}
 		names = append(names, de.Name())

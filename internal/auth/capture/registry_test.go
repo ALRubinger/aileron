@@ -7,13 +7,18 @@ import (
 )
 
 func TestRegistry_ResolveGh(t *testing.T) {
-	r, err := NewRegistry(CaptureLoadOptions{})
+	// Post-#1323 gh ships in its devcontainer Feature CLI unit, not the
+	// embedded built-in layer, so the registry sources it through the
+	// unit-derived layer (ExtraDescriptors) the host projects from the image.
+	r, err := NewRegistry(CaptureLoadOptions{
+		ExtraDescriptors: []CaptureDescriptor{ghCaptureLiteral()},
+	})
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	d, ok := r.Resolve("gh")
 	if !ok {
-		t.Fatal("Resolve(gh) not ok; want the built-in gh descriptor")
+		t.Fatal("Resolve(gh) not ok; want the unit-derived gh descriptor")
 	}
 	if d.Name != "gh" {
 		t.Errorf("Name = %q, want gh", d.Name)
@@ -37,7 +42,19 @@ func TestRegistry_ResolveUnknown(t *testing.T) {
 }
 
 func TestRegistry_Names(t *testing.T) {
-	r, err := NewRegistry(CaptureLoadOptions{})
+	// The empty built-in layer (post-#1323) lists no names; the unit-derived
+	// layer supplies gh.
+	empty, err := NewRegistry(CaptureLoadOptions{})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if got := empty.Names(); len(got) != 0 {
+		t.Errorf("built-in Names = %v, want empty", got)
+	}
+
+	r, err := NewRegistry(CaptureLoadOptions{
+		ExtraDescriptors: []CaptureDescriptor{ghCaptureLiteral()},
+	})
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -85,7 +102,9 @@ func TestRegistry_BindUnknownNameErrors(t *testing.T) {
 }
 
 func TestRegistry_BindGhProducesConfiguredDriver(t *testing.T) {
-	r, err := NewRegistry(CaptureLoadOptions{})
+	r, err := NewRegistry(CaptureLoadOptions{
+		ExtraDescriptors: []CaptureDescriptor{ghCaptureLiteral()},
+	})
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -116,15 +135,23 @@ func TestRegistry_BindGhProducesConfiguredDriver(t *testing.T) {
 	}
 }
 
-func TestDefaultRegistry_LoadsGh(t *testing.T) {
-	// DefaultRegistry reads ~/.aileron/capture-descriptors.yaml (absent in
-	// the test env), so it must still load the built-in gh.
+func TestDefaultRegistry_EmptyWithoutUnitOrUserLayer(t *testing.T) {
+	// DefaultRegistry reads only the embedded built-in layer plus
+	// ~/.aileron/capture-descriptors.yaml (absent in the test env). Post-#1323
+	// the built-in layer is empty (gh moved to its Feature unit and is sourced
+	// from the image at runtime via the unit-derived layer, which DefaultRegistry
+	// does not consult), so with no user file the registry has no descriptors
+	// and gh does not resolve. The host wires gh in through NewRegistry with the
+	// projected ExtraDescriptors (exercised in TestRegistry_ResolveGh).
 	t.Setenv("HOME", t.TempDir())
 	r, err := DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	if _, ok := r.Resolve("gh"); !ok {
-		t.Error("DefaultRegistry missing gh")
+	if names := r.Names(); len(names) != 0 {
+		t.Errorf("DefaultRegistry names = %v, want empty (built-in layer empty, no user file)", names)
+	}
+	if _, ok := r.Resolve("gh"); ok {
+		t.Error("DefaultRegistry resolved gh; gh now comes from the unit-derived layer, not the built-in defaults")
 	}
 }
