@@ -1018,9 +1018,17 @@ paths:
       tags: [Vault]
       summary: List per-agent credential entries in the local vault
       description: |
-        Returns the agent names that have a credential envelope stored at
-        `agents/<name>/oauth`, with their plaintext metadata only. The
-        credential `value` is never included.
+        Returns the per-purpose credential entries stored under
+        `agents/<name>/<purpose>` (e.g. `oauth`, `apikey`), with their
+        plaintext metadata only. The credential `value` is never
+        included.
+
+        One summary is emitted per stored `(name, purpose)` entry, so an
+        agent that has only an `apikey` credential (and no `oauth`) still
+        appears. Each summary carries the agent `name`; this daemon always
+        sets the `purpose` segment too, but the field is optional in the
+        schema, and a consumer should treat an absent `purpose` as
+        `oauth`.
 
         Per ADR-0011 listing works on a locked vault — metadata is stored
         in plaintext and the operation never decrypts a credential — so no
@@ -7726,15 +7734,23 @@ components:
       type: object
       required: [name]
       description: |
-        A single agent credential entry: the agent name plus its
-        plaintext metadata. Mirrors the `vault.Entry` shape with the
-        `agents/<name>/oauth` path reduced to its agent name.
+        A single agent credential entry: the agent name, the credential
+        purpose, plus its plaintext metadata. Mirrors the `vault.Entry`
+        shape with the `agents/<name>/<purpose>` path split into its
+        `name` and `purpose` segments.
       properties:
         name:
           type: string
           description: |
             Agent identifier (e.g. "claude", "codex"), derived from the
-            `agents/<name>/oauth` vault path.
+            `<name>` segment of the `agents/<name>/<purpose>` vault path.
+        purpose:
+          type: string
+          description: |
+            Credential purpose (e.g. "oauth", "apikey"), derived from the
+            `<purpose>` segment of the `agents/<name>/<purpose>` vault
+            path. Omitted (absent) entries predate per-purpose listing and
+            should be treated as `oauth`.
         metadata:
           $ref: "#/components/schemas/AgentCredentialsMetadata"
 

@@ -129,8 +129,97 @@ const claudeCredentialsContainerPath = "/home/agent/.claude/.credentials.json"
 const claudeOnboardingContainerPath = "/home/agent/.claude.json"
 
 // claudeVaultPath is the canonical vault namespace for Claude's
-// credentials per ADR-0025's `agents/<name>/<purpose>` scheme.
+// subscription-OAuth credentials per ADR-0025's `agents/<name>/<purpose>`
+// scheme. Subscription mode (Pro/Max) reads/writes the envelope here.
 const claudeVaultPath = "agents/claude/oauth"
+
+// claudeAPIKeyVaultPath is the vault namespace for Claude's raw
+// `ANTHROPIC_API_KEY` credential, used by api-key auth mode. It is a
+// physically distinct slot from claudeVaultPath: the subscription
+// envelope (oauth) and the raw key (apikey) never share a destination,
+// so selecting api-key never touches the oauth slot and vice versa. The
+// `apikey` purpose is one of the known purposes vaultPathConforms
+// accepts (internal/launch/authspec.go) and the daemon routes via the
+// `purpose` query parameter.
+const claudeAPIKeyVaultPath = "agents/claude/apikey"
+
+// claudeAPIKeyEnv is the environment variable Claude Code reads its raw
+// API key from in api-key auth mode. The launcher renders the vault's
+// stored key into this env var via the EnvBinding.
+const claudeAPIKeyEnv = "ANTHROPIC_API_KEY"
+
+// errClaudeAPIKeyEmpty is returned by claudeAPIKeyRender when the
+// resolved vault entry has no usable key. The launcher surfaces this to
+// stderr with the recovery hint naming claudeAPIKeyVaultPath per R13.
+var errClaudeAPIKeyEmpty = errors.New("claude: vault entry has empty API key")
+
+// claudeAPIKeyRender maps the vault secret to Claude's
+// ANTHROPIC_API_KEY env var for api-key auth mode. The api-key
+// credential is a single opaque key, so the vault Value is the raw key
+// bytes (no JSON envelope). We trim surrounding whitespace (a key
+// copied from another machine can carry a trailing newline) and reject
+// an empty value with a recovery hint naming the apikey slot, mirroring
+// gooseRender. Because the raw key lives at a path distinct from the
+// subscription envelope (claudeVaultPath), it can never be mistaken for
+// or overwrite the OAuth credential (#1304-class ambiguity fix).
+func claudeAPIKeyRender(s vault.Secret) (map[string]string, error) {
+	key := strings.TrimSpace(string(s.Value))
+	if key == "" {
+		return nil, fmt.Errorf("%w (re-login or `aileron vault put %s` with the Anthropic API key)",
+			errClaudeAPIKeyEmpty, claudeAPIKeyVaultPath)
+	}
+	return map[string]string{claudeAPIKeyEnv: key}, nil
+}
+
+// claudeAPIKeyHostAcquire is Claude's host-side acquirer for api-key
+// auth mode, wired to the EnvBinding's HostAcquire hook (see AuthSpec in
+// claude.go). The launcher invokes it only when the vault GET for
+// agents/claude/apikey misses, the binding is not Required, and
+// host-login is enabled; it returns a vault.Secret the launcher PUTs to
+// agents/claude/apikey and renders into ANTHROPIC_API_KEY before the
+// container starts.
+//
+// Unlike claudeHostAcquire's PKCE OAuth flow, this is a static-key
+// paste: there is no browser, no token exchange, no profile fetch. We
+// print a prompt to deps.Out and read the key from the host terminal
+// via deps.CodePrompter so the paste stays on the HOST rather than the
+// container TTY.
+//
+// Contract (per the EnvBinding.HostAcquire contract, enforced by the
+// launcher):
+//   - A returned Secret with a non-empty Value seeds the vault.
+//   - A nil CodePrompter, an empty/whitespace-only paste, or a
+//     cancelled/errored read is NON-FATAL: return an empty Secret (with
+//     or without a benign error) so the launcher logs and falls back to
+//     the legacy in-container login. A cancel must never seed a partial
+//     credential.
+func claudeAPIKeyHostAcquire(ctx context.Context, deps launch.HostAcquireDeps) (vault.Secret, error) {
+	if deps.CodePrompter == nil {
+		// No way to read the pasted key. Non-fatal: let the launcher
+		// fall back to the in-container login.
+		return vault.Secret{}, errors.New("claude: no code prompter available for api-key paste flow")
+	}
+	if deps.Out != nil {
+		fmt.Fprintln(deps.Out,
+			"Paste your Anthropic API key to seed Claude's api-key auth, then press Enter.")
+	}
+	pasted, err := deps.CodePrompter(ctx, deps.Out)
+	if err != nil {
+		// Read failed or was cancelled. Non-fatal: empty Secret so the
+		// launcher falls back to the in-container login.
+		return vault.Secret{}, fmt.Errorf("claude: read pasted api key: %w", err)
+	}
+	key := strings.TrimSpace(pasted)
+	if key == "" {
+		// Empty / whitespace-only paste (user declined). Non-fatal:
+		// empty Secret, no seed, no error.
+		return vault.Secret{}, nil
+	}
+	return vault.Secret{
+		Value:    []byte(key),
+		Metadata: vault.Metadata{Type: "api_key"},
+	}, nil
+}
 
 // claudeCredentialEnvelope mirrors the on-disk shape of Claude's
 // `.credentials.json`. Anthropic's CLI writes a JSON document with
