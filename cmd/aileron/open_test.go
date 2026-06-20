@@ -84,6 +84,48 @@ func TestBuildOpenURL(t *testing.T) {
 	}
 }
 
+// --- escapeURLForWindowsCmd contract ---
+
+// TestEscapeURLForWindowsCmd is the regression test for the `aileron
+// open` opener carrying the same cmd.exe-truncation defect as the OAuth
+// browser opener: a multi-parameter URL handed to `cmd /c start ""
+// <url>` is cut off at the first `&` because cmd treats it as a command
+// separator. The metacharacters must be caret-escaped so the whole URL
+// survives. Today `aileron open`'s URLs carry at most one query param so
+// the bug is latent, but the escaping must still hold every parameter.
+func TestEscapeURLForWindowsCmd(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain URL unchanged", "http://127.0.0.1:50419/approvals", "http://127.0.0.1:50419/approvals"},
+		{"single query param unchanged", "http://127.0.0.1:50419/approvals?focus=act-42", "http://127.0.0.1:50419/approvals?focus=act-42"},
+		{"multi param ampersands escaped", "http://h/approvals?focus=a&tab=b&sort=c", "http://h/approvals?focus=a^&tab=b^&sort=c"},
+		{"all metacharacters", `&|<>()%`, `^&^|^<^>^(^)^%`},
+		{"caret escaped first", "a^&b", "a^^^&b"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := escapeURLForWindowsCmd(c.in)
+			if got != c.want {
+				t.Errorf("escapeURLForWindowsCmd(%q) = %q; want %q", c.in, got, c.want)
+			}
+		})
+	}
+
+	// Spot-check the load-bearing property: every parameter of a
+	// multi-param URL survives the escape (the bug dropped all but the
+	// first).
+	const multi = "http://h/approvals?focus=act-42&tab=open&sort=newest"
+	escaped := escapeURLForWindowsCmd(multi)
+	for _, frag := range []string{"focus=act-42", "tab=open", "sort=newest"} {
+		if !strings.Contains(escaped, frag) {
+			t.Errorf("escaped %q missing %q", escaped, frag)
+		}
+	}
+}
+
 // --- runOpen ---
 
 // stubOpener captures the URL passed to the browser opener and

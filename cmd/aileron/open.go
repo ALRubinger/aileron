@@ -124,9 +124,11 @@ func buildOpenURL(base string, target openTarget, approvalID string) string {
 	}
 }
 
-// openInBrowser shells out to the platform's URL-opener. The argv
-// shape is single-string-URL on every supported platform; we never
-// invoke a shell, so a URL containing meta characters can't inject.
+// openInBrowser shells out to the platform's URL-opener. macOS and
+// Linux pass the URL as a single argv element with no shell. Windows
+// goes through `cmd /c start`, whose command-line parser treats `&` and
+// other metacharacters specially, so the URL is caret-escaped first
+// (see escapeURLForWindowsCmd) to keep every query parameter intact.
 //
 // Platforms not in the switch (e.g. freebsd) return an error rather
 // than silently no-oping — the operator at least learns why the
@@ -142,7 +144,14 @@ func openInBrowser(ctx context.Context, target string) error {
 	case "windows":
 		// `start` is a cmd builtin, not a binary. Empty string is the
 		// window title (a quirk of `start`'s argument grammar).
-		name, args = "cmd", []string{"/c", "start", "", target}
+		//
+		// cmd.exe parses the command line itself and treats `&` as a
+		// command separator, so a URL with multiple query parameters
+		// would be truncated at the first `&`. Caret-escape the cmd
+		// metacharacters so the full URL reaches `start`. Today these
+		// URLs carry at most one query parameter, but the defect is the
+		// same one fixed in internal/oauth's browser opener.
+		name, args = "cmd", []string{"/c", "start", "", escapeURLForWindowsCmd(target)}
 	default:
 		return fmt.Errorf("no browser opener registered for %s", runtime.GOOS)
 	}
@@ -150,6 +159,31 @@ func openInBrowser(ctx context.Context, target string) error {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
+}
+
+// escapeURLForWindowsCmd caret-escapes the cmd.exe metacharacters in s
+// so a URL handed to `cmd /c start "" <url>` reaches the browser intact
+// rather than being truncated or mangled by cmd's command-line parser.
+//
+// The load-bearing case is `&` (cmd's command separator): without
+// escaping it, every query parameter after the first is dropped. The
+// full set of cmd metacharacters is escaped for safety — `^` itself
+// (escaped first so the carets we add aren't re-escaped), `&`, `|`,
+// `<`, `>`, `(`, `)`, and `%` (which `start` would otherwise treat as
+// the start of a `%VAR%` expansion). Only Windows routes through cmd;
+// the macOS/Linux openers pass the URL as a single argv element.
+func escapeURLForWindowsCmd(s string) string {
+	replacer := strings.NewReplacer(
+		"^", "^^",
+		"&", "^&",
+		"|", "^|",
+		"<", "^<",
+		">", "^>",
+		"(", "^(",
+		")", "^)",
+		"%", "^%",
+	)
+	return replacer.Replace(s)
 }
 
 // Test seams. Tests replace these with fakes to avoid touching
