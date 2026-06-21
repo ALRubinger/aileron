@@ -745,6 +745,49 @@ func TestResolveShimTarget_MissingTargetFallsBackToShim(t *testing.T) {
 	}
 }
 
+// TestResolveShimTarget_NoPathKeyReturnsBinUnchanged covers a sidecar
+// that exists but declares no `path` key: parseShimPath yields "" and the
+// original binary path must be returned, never an empty string.
+func TestResolveShimTarget_NoPathKeyReturnsBinUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("args = --foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveShimTarget(stub); got != stub {
+		t.Fatalf("resolveShimTarget = %q, want original stub %q when sidecar has no path key", got, stub)
+	}
+}
+
+// TestResolveShimTarget_RelativeTargetResolvesAgainstBinDir covers the
+// defensive normalization for a sidecar whose `path` is relative: it is
+// resolved against the stub's directory before the existence check, and
+// the absolute real target is returned.
+func TestResolveShimTarget_RelativeTargetResolvesAgainstBinDir(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realName := "real-aileron-mcp" + exeSuffix()
+	if err := os.WriteFile(filepath.Join(dir, realName), []byte("real binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("path = "+realName+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveShimTarget(stub)
+	want, _ := filepath.Abs(filepath.Join(dir, realName))
+	if got != want {
+		t.Fatalf("resolveShimTarget = %q, want %q (relative target resolved against bin dir)", got, want)
+	}
+}
+
 // TestParseShimPath covers the sidecar parser's contract directly: it
 // returns the first `path` value with surrounding quotes stripped, and ""
 // when no `path` key is present.
