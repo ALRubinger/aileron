@@ -105,6 +105,154 @@ func TestEd25519Keyring_DifferentAuthorityIsDifferentTrustDomain(t *testing.T) {
 	}
 }
 
+// TestEd25519Keyring_OwnerLevelGrantAuthorizesEveryRepo pins the core
+// ADR-0013 feature: an owner-level grant (`<scheme>://<owner>`, no repo
+// segment) authorizes a signature for *every* repo under that owner with
+// no per-repo entry. Trust once by identity; all repos are covered.
+func TestEd25519Keyring_OwnerLevelGrantAuthorizesEveryRepo(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://aileron", pub) // owner-level only, no per-repo
+
+	for _, authority := range []string{"github://aileron/repoA", "github://aileron/repoB"} {
+		if err := ring.Verify(authority, binary, manifest, sig); err != nil {
+			t.Errorf("Verify(%q) under owner-level grant err = %v", authority, err)
+		}
+	}
+}
+
+// TestEd25519Keyring_UntrustedOwnerFailsClosed pins fail-closed for the
+// owner dimension: with neither an owner-level grant nor a per-repo
+// grant, Verify must reject with ClassSignatureFailure and the
+// "no signing key" diagnosis.
+func TestEd25519Keyring_UntrustedOwnerFailsClosed(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, _ := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring() // empty: no owner-level, no per-repo
+	err := ring.Verify("github://aileron/slack", binary, manifest, sig)
+	if err == nil {
+		t.Fatal("Verify with no grant of any scope succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassSignatureFailure {
+		t.Fatalf("err class = %v, want ClassSignatureFailure", aerr)
+	}
+	if !strings.Contains(err.Error(), "no signing key") {
+		t.Errorf("err = %q; want it to mention missing key", err.Error())
+	}
+}
+
+// TestEd25519Keyring_PerRepoGrantStillAuthorizes guards the v1 path:
+// a per-repo grant with no owner-level grant present still authorizes
+// exactly its FQN. The owner-level union must not regress per-repo-only
+// behavior.
+func TestEd25519Keyring_PerRepoGrantStillAuthorizes(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring()
+	ring.Add("github://aileron/slack", pub) // per-repo only, no owner-level
+
+	if err := ring.Verify("github://aileron/slack", binary, manifest, sig); err != nil {
+		t.Errorf("Verify under per-repo-only grant err = %v", err)
+	}
+}
+
+// TestEd25519Keyring_UnionAcceptsEitherScope pins the no-deny-list union
+// semantics: when an owner-level grant (key A) and a per-repo grant
+// (key B) both exist for the same authority, a signature under A AND a
+// signature under B each verify. Neither scope shadows the other.
+func TestEd25519Keyring_UnionAcceptsEitherScope(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sigA, pubA := signedManifest(t, binary, manifest) // owner-level key
+	sigB, pubB := signedManifest(t, binary, manifest) // per-repo key
+
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://aileron", pubA)
+	ring.Add("github://aileron/slack", pubB)
+
+	if err := ring.Verify("github://aileron/slack", binary, manifest, sigA); err != nil {
+		t.Errorf("Verify under owner-level key (A) err = %v", err)
+	}
+	if err := ring.Verify("github://aileron/slack", binary, manifest, sigB); err != nil {
+		t.Errorf("Verify under per-repo key (B) err = %v", err)
+	}
+}
+
+// TestEd25519Keyring_OwnerDerivationIsSchemeAgnostic confirms owner
+// derivation uses ParseFQN (not a hardcoded `github`): an owner-level
+// grant under gitlab:// authorizes a gitlab:// repo.
+func TestEd25519Keyring_OwnerDerivationIsSchemeAgnostic(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring()
+	ring.AddOwner("gitlab://acme", pub)
+
+	if err := ring.Verify("gitlab://acme/widgets", binary, manifest, sig); err != nil {
+		t.Errorf("Verify(gitlab://acme/widgets) under gitlab owner grant err = %v", err)
+	}
+}
+
+// TestEd25519Keyring_OwnerGrantDoesNotLeakAcrossOwners pins that the
+// derived owner-level key is owner-scoped: an owner-level grant for
+// github://aileron must NOT authorize github://acme/slack (different
+// owner). The "different authority is a different trust domain"
+// invariant holds for the owner dimension too.
+func TestEd25519Keyring_OwnerGrantDoesNotLeakAcrossOwners(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://aileron", pub)
+
+	err := ring.Verify("github://acme/slack", binary, manifest, sig)
+	if err == nil {
+		t.Fatal("Verify across owners under owner-level grant succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassSignatureFailure {
+		t.Fatalf("err class = %v, want ClassSignatureFailure", aerr)
+	}
+}
+
+// TestEd25519Keyring_MalformedAuthorityStaysFailClosed pins the single
+// behavioral risk: a malformed authority must not widen trust. The
+// ParseFQN error path degrades to per-repo-only resolution; with no
+// matching per-repo entry it fails closed (and never panics), even when
+// the keyring is non-empty.
+func TestEd25519Keyring_MalformedAuthorityStaysFailClosed(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	// Non-empty keyring: an owner-level grant and a per-repo grant under
+	// a well-formed owner exist, but the queried authority is malformed.
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://aileron", pub)
+	ring.Add("github://aileron/slack", pub)
+
+	for _, bad := range []string{"not-a-valid-fqn", "ftp://aileron/slack", "github://other-owner"} {
+		err := ring.Verify(bad, binary, manifest, sig)
+		if err == nil {
+			t.Fatalf("Verify(%q) on malformed/owner-only authority succeeded; want failure", bad)
+		}
+		var aerr *Error
+		if !errors.As(err, &aerr) || aerr.Class != ClassSignatureFailure {
+			t.Fatalf("Verify(%q) err class = %v, want ClassSignatureFailure", bad, aerr)
+		}
+	}
+}
+
 // TestReloadingKeyring_PicksUpFileChangesWithoutDaemonRestart pins the
 // fix for finding #4 of #532: when the user runs `aileron keyring trust
 // <authority> <pubkey>`, the CLI writes to ~/.aileron/keyring.json

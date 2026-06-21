@@ -18,6 +18,14 @@ import (
 // same canonical-hash input from ADR-0004) and the detached signature.
 // `authority` is the FQN's `<scheme>://<owner>/<repo>` triple — Verifier
 // implementations look up authorized keys keyed by this string.
+//
+// Resolution is the union of the owner-level grant
+// (`<scheme>://<owner>`, ADR-0013 per-publisher trust) and the per-repo
+// grant for `authority`: a signature that verifies against any key in
+// either scope is accepted. The union is positive-only — there is no
+// per-repo deny override of an owner-level grant. Fail-closed is
+// preserved: when the union is empty (neither scope trusts a key),
+// Verify fails with ClassSignatureFailure.
 type Verifier interface {
 	Verify(authority string, binary, manifest, signature []byte) error
 }
@@ -30,12 +38,20 @@ type Verifier interface {
 //
 //   - The signed payload is `binary || manifest` (the canonical-hash input
 //     from ADR-0004).
-//   - At least one registered key for the authority must verify the
-//     signature for the call to succeed.
-//   - When the authority has zero registered keys, Verify fails with
+//   - Resolution is the union of the owner-level grant
+//     (`<scheme>://<owner>`, ADR-0013 per-publisher trust) and the
+//     per-repo grant (`<scheme>://<owner>/<repo>`) for the authority. At
+//     least one key in that union must verify the signature for the call
+//     to succeed. The union is positive-only: there is no per-repo deny
+//     override of an owner-level grant, so an owner-level grant authorizes
+//     every repo under that owner.
+//   - When the union is empty (neither the owner-level nor the per-repo
+//     scope has a registered key), Verify fails with
 //     ClassSignatureFailure ("no signing key registered"). This is the
 //     "fail closed" behavior demanded by ADR-0004's failure-modes table —
-//     unsigned binaries are not accepted.
+//     unsigned binaries are not accepted. A malformed authority does not
+//     widen trust: owner derivation is skipped and resolution degrades to
+//     per-repo-only, still fail-closed.
 //
 // Key distribution and rotation are out of scope per ADR-0002 ("signing-
 // keys-and-rotation will be its own implementation note rather than a
@@ -74,10 +90,36 @@ func (k *Ed25519Keyring) AddOwner(ownerAuthority string, pub ed25519.PublicKey) 
 	k.Add(ownerAuthority, pub)
 }
 
-// Verify implements Verifier.
+// Verify implements Verifier. It resolves against the union of the
+// owner-level grant (`<scheme>://<owner>`) and the per-repo grant
+// (`authority`) per ADR-0013; see the Ed25519Keyring "Verification
+// semantics" doc block. A signature matching any key in either scope
+// succeeds; an empty union fails closed with ClassSignatureFailure.
 func (k *Ed25519Keyring) Verify(authority string, binary, manifest, signature []byte) error {
+	// Derive the owner-level authority from the per-repo authority by
+	// reusing fqn.go parsing (not a raw substring split). A malformed
+	// authority must not widen trust: on parse error we leave
+	// ownerAuthority empty so only the per-repo scope contributes,
+	// keeping the fail-closed behavior identical to the v1 path.
+	var ownerAuthority string
+	if parsed, err := ParseFQN(authority); err == nil {
+		ownerAuthority = parsed.OwnerAuthority()
+	}
+
+	// Snapshot both scopes under a single RLock so the union is an
+	// atomic read of the keyring — an owner grant added between the two
+	// lookups cannot produce a torn view. Copy into a local slice and
+	// release the lock before the (CPU-bound) ed25519 verification.
 	k.mu.RLock()
-	keys := append([]ed25519.PublicKey(nil), k.keys[authority]...)
+	perRepo := k.keys[authority]
+	keys := make([]ed25519.PublicKey, 0, len(perRepo)+len(k.keys[ownerAuthority]))
+	keys = append(keys, perRepo...)
+	// ownerAuthority == authority cannot happen for a well-formed FQN
+	// (the owner key has no repo segment), and ownerAuthority == "" maps
+	// to no entry, so this never double-counts the per-repo keys.
+	if ownerAuthority != "" {
+		keys = append(keys, k.keys[ownerAuthority]...)
+	}
 	k.mu.RUnlock()
 
 	if len(keys) == 0 {
