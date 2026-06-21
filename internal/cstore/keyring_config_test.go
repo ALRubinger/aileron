@@ -461,9 +461,19 @@ func TestLoadKeyring_V2FileWithBothMapsLoadsIndependently(t *testing.T) {
 	if err := kr.Verify("github://acme/connector", []byte("r"), []byte("m"), repoSig); err != nil {
 		t.Errorf("repo key did not verify under repo authority: %v", err)
 	}
-	// The owner key must NOT verify under the repo authority (independence).
-	if err := kr.Verify("github://acme/connector", []byte("o"), []byte("m"), ownerSig); err == nil {
-		t.Error("owner key should not verify under a per-repo authority")
+	// The two maps load into independent storage entries: OwnerKeys and
+	// Keys each return only their own scope's key, with no cross-bleed.
+	if got := kr.OwnerKeys("github://acme"); len(got) != 1 || !got[0].Equal(ownerPub) {
+		t.Errorf("OwnerKeys(github://acme) = %v, want only the owner key", got)
+	}
+	if got := kr.Keys("github://acme/connector"); len(got) != 1 || !got[0].Equal(repoPub) {
+		t.Errorf("Keys(github://acme/connector) = %v, want only the repo key", got)
+	}
+	// Under ADR-0013 (#1417) Verify resolves against the union of the
+	// owner-level and per-repo grants, so the owner key DOES verify under
+	// the per-repo authority — an owner grant authorizes every repo.
+	if err := kr.Verify("github://acme/connector", []byte("o"), []byte("m"), ownerSig); err != nil {
+		t.Errorf("owner key should verify under a per-repo authority via the union: %v", err)
 	}
 }
 
