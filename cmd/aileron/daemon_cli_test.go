@@ -439,8 +439,11 @@ func withSignalDaemonStop(t *testing.T, fn func(int) (notRunning, selfCleans boo
 // The CLI must remove the discovery files itself and report success on
 // the FIRST invocation — not spin the wait loop and exit 1.
 func TestRunDaemonStop_WindowsKill_CLICleansUp(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	// setTestHome (not a raw HOME setenv) so the state dir resolves to the
+	// same place on Windows, where runDaemonStop's os.UserHomeDir() reads
+	// USERPROFILE rather than HOME. A bare HOME setenv left the CLI reading a
+	// different dir and reporting "not running". See issue #577.
+	stateDir := filepath.Join(setTestHome(t), ".aileron")
 
 	if err := discovery.Write(stateDir, discovery.Info{
 		URL:       "http://127.0.0.1:1",
@@ -485,8 +488,11 @@ func TestRunDaemonStop_WindowsKill_CLICleansUp(t *testing.T) {
 // path: the daemon self-cleans (selfCleans=true), so the CLI waits for
 // daemon.json to disappear before reporting success.
 func TestRunDaemonStop_UnixSIGTERM_WaitsForSelfClean(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	// setTestHome (not a raw HOME setenv) so the state dir resolves to the
+	// same place on Windows, where runDaemonStop's os.UserHomeDir() reads
+	// USERPROFILE rather than HOME. A bare HOME setenv left the CLI reading a
+	// different dir and reporting "not running". See issue #577.
+	stateDir := filepath.Join(setTestHome(t), ".aileron")
 
 	if err := discovery.Write(stateDir, discovery.Info{
 		URL:       "http://127.0.0.1:1",
