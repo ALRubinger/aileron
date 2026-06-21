@@ -438,12 +438,108 @@ func TestSpawnResolveOnce_PropagatesSpawnError(t *testing.T) {
 // default kernel.pid_max (4194304) being reused, and unlikely to be a
 // live process on a Windows runner.
 func TestSignalDaemonStop_NotRunningPID(t *testing.T) {
-	notRunning, err := signalDaemonStop(9999999)
+	notRunning, _, err := signalDaemonStop(9999999)
 	if err != nil {
 		t.Fatalf("signalDaemonStop(9999999): unexpected err: %v", err)
 	}
 	if !notRunning {
 		t.Fatal("signalDaemonStop(9999999): notRunning = false, want true (PID should not exist)")
+	}
+}
+
+// withSignalDaemonStop substitutes the signalDaemonStopFn seam for the
+// duration of a test, restoring it on cleanup. Lets us drive the stop
+// command down either platform's path (selfCleans true/false) without
+// terminating a real process.
+func withSignalDaemonStop(t *testing.T, fn func(int) (notRunning, selfCleans bool, err error)) {
+	t.Helper()
+	orig := signalDaemonStopFn
+	signalDaemonStopFn = fn
+	t.Cleanup(func() { signalDaemonStopFn = orig })
+}
+
+// TestRunDaemonStop_WindowsKill_CLICleansUp is the regression test for
+// issue #1403: on Windows the kill succeeds but is uncatchable, so the
+// daemon never removes its own daemon.json/daemon.pid (selfCleans=false).
+// The CLI must remove the discovery files itself and report success on
+// the FIRST invocation — not spin the wait loop and exit 1.
+func TestRunDaemonStop_WindowsKill_CLICleansUp(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+
+	if err := discovery.Write(stateDir, discovery.Info{
+		URL:       "http://127.0.0.1:1",
+		PID:       4242,
+		Version:   "win",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the Windows kill: process terminated (notRunning=false),
+	// but the daemon will NOT self-clean (selfCleans=false). Crucially the
+	// fake does NOT remove daemon.json, mirroring the uncatchable kill.
+	var gotPID int
+	withSignalDaemonStop(t, func(pid int) (bool, bool, error) {
+		gotPID = pid
+		return false, false, nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runDaemonStop(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 on first stop; stderr=%s", code, stderr.String())
+	}
+	if gotPID != 4242 {
+		t.Errorf("signalDaemonStop called with pid %d, want 4242", gotPID)
+	}
+	if !strings.Contains(stdout.String(), "stopped (pid 4242)") {
+		t.Errorf("stdout should report success; got %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "did not exit") {
+		t.Errorf("stderr must not report a timeout failure; got %q", stderr.String())
+	}
+	// The CLI must have removed the discovery files itself, since the
+	// daemon could not.
+	if _, err := discovery.Read(stateDir); !errors.Is(err, discovery.ErrNotRunning) {
+		t.Errorf("daemon.json should be removed by the CLI; Read err = %v", err)
+	}
+}
+
+// TestRunDaemonStop_UnixSIGTERM_WaitsForSelfClean covers the graceful
+// path: the daemon self-cleans (selfCleans=true), so the CLI waits for
+// daemon.json to disappear before reporting success.
+func TestRunDaemonStop_UnixSIGTERM_WaitsForSelfClean(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+
+	if err := discovery.Write(stateDir, discovery.Info{
+		URL:       "http://127.0.0.1:1",
+		PID:       4243,
+		Version:   "unix",
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate SIGTERM to a real daemon: the signal succeeds and the
+	// daemon will self-clean. Mimic the shutdown defer by removing the
+	// discovery files asynchronously so the CLI's wait loop observes it.
+	withSignalDaemonStop(t, func(int) (bool, bool, error) {
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_ = discovery.Remove(stateDir)
+		}()
+		return false, true, nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runDaemonStop(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "stopped (pid 4243)") {
+		t.Errorf("stdout should report success; got %q", stdout.String())
 	}
 }
 
