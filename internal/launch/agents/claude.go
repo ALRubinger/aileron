@@ -191,6 +191,14 @@ func (c Claude) AuthSpec() launch.AuthSpec {
 			Render:   claudeRender,
 			Capture:  claudeCapture,
 			Fresher:  claudeFresher,
+			// CaptureValidate probes Claude's profile endpoint host-side
+			// with the captured access token before the vault PUT, so a
+			// bad/expired token an in-container login wrote (fallback,
+			// headless, or in-session rotation) is rejected rather than
+			// persisted for future launches. Runs on the host because the
+			// sandbox's deny-by-default egress (ADR-0005) blocks the probe
+			// in-container.
+			CaptureValidate: claudeCaptureValidate,
 			// HostAcquire runs a host-side OAuth flow (hosted-callback
 			// paste with PKCE, then a profile fetch that stamps the
 			// subscription tier) when the vault is empty and host-login is

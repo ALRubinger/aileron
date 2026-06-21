@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -474,6 +475,110 @@ func TestPrepareAuthSpec_CaptureSchemaFailureSkipsPut(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "capture for claude failed") {
 		t.Errorf("expected stderr warning; got %q", stderr.String())
+	}
+}
+
+// Regression (#1384, sub-req A): a CaptureValidate hook that fails (the
+// captured credential did not authenticate against the vendor) must cause
+// the launcher to SKIP the PUT, retaining the prior vault entry rather
+// than overwriting it with an unusable token. The hook runs after Capture
+// and before the Fresher/presence branch.
+func TestPrepareAuthSpec_CaptureValidateFailureSkipsPut(t *testing.T) {
+	prior := []byte(`{"claudeAiOauth":{"accessToken":"prior"}}`)
+	captured := []byte(`{"claudeAiOauth":{"accessToken":"bad-new"}}`)
+
+	daemon := newFakeDaemon()
+	daemon.seed("claude", prior)
+
+	stderr := &bytes.Buffer{}
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture: func(b []byte) (vault.Secret, error) {
+				return vault.Secret{Value: b, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}, nil
+			},
+			CaptureValidate: func(_ context.Context, _ *http.Client, _ vault.Secret) error {
+				return errors.New("token failed live validation")
+			},
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	hostPath := filepath.Join(prep.Mounts[0].Source, ".credentials.json")
+	if err := os.WriteFile(hostPath, captured, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	beforePuts := len(daemon.puts)
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != beforePuts {
+		t.Errorf("CaptureValidate failure should skip PUT; got %d new puts", len(daemon.puts)-beforePuts)
+	}
+	// Prior vault entry must be retained unchanged.
+	got, getErr := daemon.GetAgentCredentials(context.Background(), "claude", "oauth")
+	if getErr != nil {
+		t.Fatalf("GetAgentCredentials after skipped PUT: %v", getErr)
+	}
+	if !bytes.Equal(got.Value, prior) {
+		t.Errorf("prior entry = %q, want it retained as %q", got.Value, prior)
+	}
+	if !strings.Contains(stderr.String(), "capture for claude failed") {
+		t.Errorf("expected stderr warning; got %q", stderr.String())
+	}
+}
+
+// Regression (#1384, sub-req A): a CaptureValidate hook that PASSES must
+// let the PUT proceed — a valid captured token is persisted as today.
+func TestPrepareAuthSpec_CaptureValidateSuccessPersists(t *testing.T) {
+	prior := []byte(`{"claudeAiOauth":{"accessToken":"prior","expiresAt":1}}`)
+	captured := []byte(`{"claudeAiOauth":{"accessToken":"fresh","expiresAt":2}}`)
+
+	daemon := newFakeDaemon()
+	daemon.seed("claude", prior)
+
+	validated := false
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture: func(b []byte) (vault.Secret, error) {
+				return vault.Secret{Value: b, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}, nil
+			},
+			CaptureValidate: func(_ context.Context, _ *http.Client, _ vault.Secret) error {
+				validated = true
+				return nil
+			},
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	hostPath := filepath.Join(prep.Mounts[0].Source, ".credentials.json")
+	if err := os.WriteFile(hostPath, captured, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	prep.CaptureFn(context.Background())
+
+	if !validated {
+		t.Error("CaptureValidate hook was never invoked")
+	}
+	if len(daemon.puts) != 1 {
+		t.Fatalf("daemon.puts = %d, want 1 (valid token persists)", len(daemon.puts))
+	}
+	if !bytes.Equal(daemon.puts[0].Secret.Value, captured) {
+		t.Errorf("PUT value = %q, want %q", daemon.puts[0].Secret.Value, captured)
 	}
 }
 

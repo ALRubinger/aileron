@@ -96,6 +96,12 @@ func TestClaude_AuthSpec_SubscriptionMode(t *testing.T) {
 					t.Errorf("subscription FileBinding references the apikey slot %q", fb.VaultPath)
 				}
 			}
+			// The oauth binding declares a CaptureValidate hook so a
+			// captured in-container token is liveness-probed host-side
+			// before the vault PUT (#1384).
+			if spec.FileBindings[0].CaptureValidate == nil {
+				t.Errorf("subscription FileBinding must declare CaptureValidate for capture-time liveness validation")
+			}
 		})
 	}
 }

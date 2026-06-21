@@ -13,6 +13,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // Claude host-acquire contract (#1270, #1304):
@@ -351,5 +352,78 @@ func TestClaudeHostAcquire_NilPrompterIsNonFatal(t *testing.T) {
 	}
 	if len(secret.Value) != 0 {
 		t.Error("Secret must be empty when the paste flow cannot run")
+	}
+}
+
+// Claude CaptureValidate contract (#1384, sub-req A): the subscription
+// binding's CaptureValidate hook probes the profile endpoint host-side
+// with the captured access token. A token whose profile fetch returns a
+// recognizable tier passes (nil error → launcher proceeds to PUT); a
+// non-2xx profile fetch, a 2xx with no tier, or a structurally-broken
+// envelope fails (non-nil error → launcher skips the PUT).
+//
+// Exercised through the PUBLIC CaptureValidate field on the binding so the
+// test pins the wired-up behavior, not the unexported helper.
+
+func claudeCaptureValidateHook(t *testing.T) func(context.Context, *http.Client, vault.Secret) error {
+	t.Helper()
+	fb := claudeHostAcquireBinding(t)
+	if fb.CaptureValidate == nil {
+		t.Fatal("Claude binding must declare CaptureValidate for capture-time validation")
+	}
+	return fb.CaptureValidate
+}
+
+func TestClaudeCaptureValidate_ValidTokenPasses(t *testing.T) {
+	srv, capture := claudeOAuthServer(t, "claude_max")
+	validate := claudeCaptureValidateHook(t)
+	envelope := vault.Secret{Value: []byte(`{"claudeAiOauth":{"accessToken":"acc-tok"}}`)}
+	if err := validate(context.Background(), testHTTPClient(srv.URL), envelope); err != nil {
+		t.Fatalf("CaptureValidate rejected a live token: %v", err)
+	}
+	// The probe must present the captured access token as a Bearer (OAuth,
+	// NOT x-api-key).
+	if capture.profileAuth != "Bearer acc-tok" {
+		t.Errorf("profile Authorization = %q, want Bearer acc-tok", capture.profileAuth)
+	}
+}
+
+func TestClaudeCaptureValidate_ProfileNon2xxFails(t *testing.T) {
+	// A profile endpoint that 401s simulates a bad/expired captured token.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	validate := claudeCaptureValidateHook(t)
+	envelope := vault.Secret{Value: []byte(`{"claudeAiOauth":{"accessToken":"bad-tok"}}`)}
+	if err := validate(context.Background(), testHTTPClient(srv.URL), envelope); err == nil {
+		t.Fatal("CaptureValidate must reject a token whose profile fetch is non-2xx")
+	}
+}
+
+func TestClaudeCaptureValidate_NoTierFails(t *testing.T) {
+	// A 2xx profile with an unrecognized organization_type yields an empty
+	// tier; the token authenticated but does not back a usable session.
+	srv, _ := claudeOAuthServer(t, "")
+	validate := claudeCaptureValidateHook(t)
+	envelope := vault.Secret{Value: []byte(`{"claudeAiOauth":{"accessToken":"acc-tok"}}`)}
+	if err := validate(context.Background(), testHTTPClient(srv.URL), envelope); err == nil {
+		t.Fatal("CaptureValidate must reject a token whose profile reports no tier")
+	}
+}
+
+func TestClaudeCaptureValidate_MalformedEnvelopeFails(t *testing.T) {
+	// A captured payload that does not parse / carries no access token is
+	// rejected before any network call.
+	validate := claudeCaptureValidateHook(t)
+	for name, val := range map[string][]byte{
+		"not json":          []byte("garbage"),
+		"empty accessToken": []byte(`{"claudeAiOauth":{"accessToken":""}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate(context.Background(), http.DefaultClient, vault.Secret{Value: val}); err == nil {
+				t.Fatal("CaptureValidate must reject a malformed/tokenless envelope")
+			}
+		})
 	}
 }

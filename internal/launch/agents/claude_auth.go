@@ -47,6 +47,16 @@ const (
 	// `user:profile` scope, requested in claudeOAuthScopes, authorizes
 	// it) so the seeded envelope can carry a subscriptionType.
 	claudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
+	// claudeModelsURL is a cheap authenticated endpoint used to validate
+	// a raw ANTHROPIC_API_KEY host-side before it is seeded into the
+	// vault. Unlike the OAuth profile endpoint (Bearer token), API keys
+	// authenticate with the `x-api-key` header, so this probe cannot
+	// reuse claudeFetchProfile.
+	claudeModelsURL = "https://api.anthropic.com/v1/models"
+	// claudeAnthropicVersion is the stable Anthropic API version header
+	// the api-key validation probe sends. It matches the version pinned
+	// elsewhere in the codebase (internal/app handlers).
+	claudeAnthropicVersion = "2023-06-01"
 )
 
 // claudeOAuthScopes are the scopes Claude Code requests for a
@@ -219,10 +229,60 @@ func claudeAPIKeyHostAcquire(ctx context.Context, deps launch.HostAcquireDeps) (
 		// empty Secret, no seed, no error.
 		return vault.Secret{}, nil
 	}
+	// Validate the pasted key host-side before seeding the vault. A
+	// mistyped or revoked key would otherwise be persisted and the
+	// container would launch with a dead key. On failure return an empty
+	// Secret (the existing non-fatal contract) so the launcher logs and
+	// falls back to the in-container login rather than seeding a dead key.
+	if err := claudeValidateAPIKey(ctx, deps.HTTPClient, key); err != nil {
+		if deps.Out != nil {
+			fmt.Fprintf(deps.Out,
+				"The pasted Anthropic API key did not validate (%v); not seeding it. Falling back to the in-container login.\n", err)
+		}
+		return vault.Secret{}, fmt.Errorf("claude: pasted api key failed validation: %w", err)
+	}
 	return vault.Secret{
 		Value:    []byte(key),
 		Metadata: vault.Metadata{Type: "api_key"},
 	}, nil
+}
+
+// claudeValidateAPIKey confirms a raw ANTHROPIC_API_KEY authenticates by
+// issuing a cheap GET against Claude's models endpoint with the
+// `x-api-key` header. A 2xx confirms the key; a 401/403 (or any other
+// non-2xx) means the key is mistyped or revoked. Network errors are also
+// surfaced as failures so the launcher falls back rather than seeding an
+// unvalidated key.
+//
+// API keys use `x-api-key`, NOT a Bearer token, so this deliberately does
+// NOT reuse claudeFetchProfile. The HTTP client is taken from the caller
+// (HostAcquireDeps.HTTPClient) so an httptest server can stand in.
+// Mirroring claudeFetchProfile's posture, a non-2xx surfaces only the
+// HTTP status; the raw body is redacted so a verbose or hostile provider
+// response cannot leak into the user-facing launch error.
+func claudeValidateAPIKey(ctx context.Context, client *http.Client, key string) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeModelsURL, nil)
+	if err != nil {
+		return fmt.Errorf("claude: build api-key validation request: %w", err)
+	}
+	req.Header.Set("x-api-key", key)
+	req.Header.Set("anthropic-version", claudeAnthropicVersion)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("claude: api-key validation request: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode/100 != 2 {
+		// Redact the raw body; surface only the status.
+		return fmt.Errorf("claude: api-key validation failed: provider returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // claudeCredentialEnvelope mirrors the on-disk shape of Claude's
@@ -417,6 +477,46 @@ func claudeFresher(captured, current vault.Secret) (bool, error) {
 	// Equal timestamps (including both-zero with identical tokens) are
 	// not strictly newer.
 	return false, nil
+}
+
+// claudeCaptureValidate is the FileBinding.CaptureValidate hook for the
+// subscription (OAuth) binding. The launcher calls it on the host after
+// the in-container capture path has read a rotated/first-login
+// .credentials.json and validateClaudeEnvelope confirmed its structure,
+// but before the vault PUT. It parses the captured envelope and probes
+// Claude's profile endpoint with the access token; a non-2xx response or
+// a token whose organization carries no recognizable subscription tier
+// means the credential cannot authenticate, so it returns an error and
+// the launcher skips the PUT (retaining any prior entry).
+//
+// Honest scope: this cannot pre-validate the *running* session — in the
+// default in-container flow the credential does not exist until Claude
+// Code logs in mid-session. The durable harm it prevents is a bad or
+// expired token captured from a fallback/headless login (or an
+// in-session rotation) poisoning the vault for future launches.
+//
+// The probe runs host-side because the sandbox's deny-by-default network
+// policy (ADR-0005) blocks api.anthropic.com from inside the container;
+// we deliberately do NOT widen [capabilities.network] to probe in-
+// container.
+func claudeCaptureValidate(ctx context.Context, client *http.Client, captured vault.Secret) error {
+	var env claudeCredentialEnvelope
+	if err := json.Unmarshal(captured.Value, &env); err != nil {
+		return fmt.Errorf("%w: parse for validation: %v", errClaudeEnvelopeMalformed, err)
+	}
+	if env.ClaudeAiOauth.AccessToken == "" {
+		return fmt.Errorf("%w: claudeAiOauth.accessToken is empty", errClaudeEnvelopeMalformed)
+	}
+	subscriptionType, _, err := claudeFetchProfile(ctx, client, env.ClaudeAiOauth.AccessToken)
+	if err != nil {
+		return fmt.Errorf("claude: captured token failed live validation: %w", err)
+	}
+	if subscriptionType == "" {
+		// A 2xx with no recognizable organization_type: the token
+		// authenticated but does not back a usable subscription session.
+		return errors.New("claude: captured token authenticated but reports no subscription tier (unusable session)")
+	}
+	return nil
 }
 
 // validateClaudeEnvelope checks the JSON parses and carries a
