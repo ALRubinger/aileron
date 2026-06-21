@@ -657,6 +657,163 @@ func TestResolveSibling_FindsHostSibling(t *testing.T) {
 	}
 }
 
+// TestResolveSibling_UnwrapsScoopShim is the regression test for #1405:
+// on a Scoop install the sibling next to `aileron` is the ~133 KB Scoop
+// launcher stub, not the real binary, and an agent that spawns it under a
+// Windows sandbox (Codex) fails with OS error 2. resolveSibling must read
+// the co-located `<name>.shim` sidecar and write the real target into the
+// agent's MCP config instead of the stub path. The lookup is keyed off the
+// sidecar (not GOOS) so it is verifiable from any host.
+func TestResolveSibling_UnwrapsScoopShim(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron"+exeSuffix())
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The Scoop shim stub sits next to aileron; the real binary lives under
+	// apps/.../current. parseShimPath unwraps the stub to the real target.
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("scoop shim stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(dir, "apps", "aileron", "current")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(realDir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(realBin, []byte("the real 14 MB binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("path = \""+realBin+"\"\nargs = \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveSibling(selfPath, "aileron-mcp")
+	if err != nil {
+		t.Fatalf("resolveSibling: %v", err)
+	}
+	want, _ := filepath.Abs(realBin)
+	if got != want {
+		t.Fatalf("resolveSibling = %q, want the real target %q (not the Scoop shim stub)", got, want)
+	}
+}
+
+// TestResolveSibling_NoShimSidecarReturnsSiblingUnchanged confirms the
+// common (non-Scoop) layout is untouched: with no `<name>.shim` sidecar,
+// resolveSibling returns the sibling itself, not an empty or altered path.
+func TestResolveSibling_NoShimSidecarReturnsSiblingUnchanged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bare-named sibling is not the Windows on-disk shape; covered by siblingCandidates tests")
+	}
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mcp := filepath.Join(dir, "aileron-mcp")
+	if err := os.WriteFile(mcp, []byte("real binary, no shim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveSibling(selfPath, "aileron-mcp")
+	if err != nil {
+		t.Fatalf("resolveSibling: %v", err)
+	}
+	want, _ := filepath.Abs(mcp)
+	if got != want {
+		t.Fatalf("resolveSibling = %q, want %q (sibling unchanged when no shim sidecar)", got, want)
+	}
+}
+
+// TestResolveShimTarget_MissingTargetFallsBackToShim guards the
+// best-effort contract: a `.shim` sidecar that names a target which does
+// not exist on disk (stale/broken shim) must leave the original path
+// unchanged rather than returning a dangling path the agent cannot spawn.
+func TestResolveShimTarget_MissingTargetFallsBackToShim(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	missing := filepath.Join(dir, "does-not-exist", "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(sidecar, []byte("path = \""+missing+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveShimTarget(stub); got != stub {
+		t.Fatalf("resolveShimTarget = %q, want original stub %q when target is missing", got, stub)
+	}
+}
+
+// TestResolveShimTarget_NoPathKeyReturnsBinUnchanged covers a sidecar
+// that exists but declares no `path` key: parseShimPath yields "" and the
+// original binary path must be returned, never an empty string.
+func TestResolveShimTarget_NoPathKeyReturnsBinUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("args = --foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveShimTarget(stub); got != stub {
+		t.Fatalf("resolveShimTarget = %q, want original stub %q when sidecar has no path key", got, stub)
+	}
+}
+
+// TestResolveShimTarget_RelativeTargetResolvesAgainstBinDir covers the
+// defensive normalization for a sidecar whose `path` is relative: it is
+// resolved against the stub's directory before the existence check, and
+// the absolute real target is returned.
+func TestResolveShimTarget_RelativeTargetResolvesAgainstBinDir(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realName := "real-aileron-mcp" + exeSuffix()
+	if err := os.WriteFile(filepath.Join(dir, realName), []byte("real binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("path = "+realName+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveShimTarget(stub)
+	want, _ := filepath.Abs(filepath.Join(dir, realName))
+	if got != want {
+		t.Fatalf("resolveShimTarget = %q, want %q (relative target resolved against bin dir)", got, want)
+	}
+}
+
+// TestParseShimPath covers the sidecar parser's contract directly: it
+// returns the first `path` value with surrounding quotes stripped, and ""
+// when no `path` key is present.
+func TestParseShimPath(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		// A real Scoop .shim records the path verbatim with single
+		// backslashes (it is not TOML, so there is no escaping to undo);
+		// parseShimPath only strips the surrounding quotes.
+		{"quoted windows path", `path = "C:\Users\alr\scoop\apps\aileron\current\aileron-mcp.exe"` + "\nargs = \n", `C:\Users\alr\scoop\apps\aileron\current\aileron-mcp.exe`},
+		{"unquoted", "path = /usr/local/bin/real\n", "/usr/local/bin/real"},
+		{"no path key", "args = --foo\nother = bar\n", ""},
+		{"empty", "", ""},
+		{"path among other keys", "args = x\npath = /real\n", "/real"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := parseShimPath(c.in); got != c.want {
+				t.Fatalf("parseShimPath(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // TestValidateSandboxRuntimeRejectsPodman is the launch-path regression
 // test for #1051: --sandbox=podman must fail validation with the
 // Docker-only message. The runtime seam (the runtimeName parameter)
