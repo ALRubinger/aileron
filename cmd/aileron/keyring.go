@@ -519,7 +519,10 @@ func runKeyringList(args []string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Trusted publishers (%d):\n", len(ownerList))
 	for _, owner := range ownerList {
-		ownerKeys := keyring.Keys(owner)
+		// OwnerKeys is the documented owner-read accessor; owner-level and
+		// per-repo grants share one flat key map, so this returns exactly
+		// the owner-level fingerprints for the header.
+		ownerKeys := keyring.OwnerKeys(owner)
 		fmt.Fprintf(stdout, "  %s  (%d owner %s)\n", owner, len(ownerKeys), pluralKeys(len(ownerKeys)))
 		for _, key := range ownerKeys {
 			fmt.Fprintf(stdout, "    %s\n", fingerprint(key))

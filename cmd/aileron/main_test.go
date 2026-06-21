@@ -5241,10 +5241,12 @@ func TestRunActionAdd_CrossAuthorityDepPromptsTrust(t *testing.T) {
 	home := withTempHome(t)
 	depPub, depPem := genTestKey(t)
 	withMockGitHubRaw(t, map[string][]byte{
-		"/acme/conn-dep/HEAD/keys/publisher.pub": depPem,
+		"/other/conn-dep/HEAD/keys/publisher.pub": depPem,
 	})
-	// Trust the action's authority but NOT the dep's authority.
-	trustTestAuthority(t, "github://acme/conn")
+	// Trust the action's publisher (owner github://acme) but NOT the
+	// dep's publisher (owner github://other), so the dep's owner-level
+	// trust is genuinely absent and the prompt must fire.
+	trustTestAuthority(t, "github://acme")
 
 	installCalled := false
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -5256,7 +5258,7 @@ func TestRunActionAdd_CrossAuthorityDepPromptsTrust(t *testing.T) {
 				"hash":"sha256:abc","name":"my-action",
 				"signature_status":"verified",
 				"connector_deps":[
-					{"fqn":"github://acme/conn-dep","version":"1.0.0","hash":"sha256:dep","already_installed":false}
+					{"fqn":"github://other/conn-dep","version":"1.0.0","hash":"sha256:dep","already_installed":false}
 				]
 			}`)
 		case "/actions/install":
@@ -5278,12 +5280,12 @@ func TestRunActionAdd_CrossAuthorityDepPromptsTrust(t *testing.T) {
 	if !installCalled {
 		t.Error("install should fire after trust + consent")
 	}
-	if !strings.Contains(stdout.String(), "Trust publisher github://acme/conn-dep?") {
-		t.Errorf("expected trust prompt for cross-authority dep; got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "Trust publisher github://other/conn-dep?") {
+		t.Errorf("expected trust prompt for cross-publisher dep; got: %s", stdout.String())
 	}
 	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
-	if !kr.HasOwnerKey("github://acme", depPub) {
-		t.Error("dep authority should be trusted (owner-level) after auto-trust")
+	if !kr.HasOwnerKey("github://other", depPub) {
+		t.Error("dep publisher should be trusted (owner-level) after auto-trust")
 	}
 }
 
