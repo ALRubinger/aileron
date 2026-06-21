@@ -119,6 +119,22 @@ func TestFQN_OwnerAuthority_ReturnsSchemeOwner(t *testing.T) {
 	}
 }
 
+func TestFQN_SubpathBearing_AuthorityDropsSubpathOwnerDropsRepo(t *testing.T) {
+	// A subpath-bearing FQN must reduce to the repo authority and the
+	// owner authority cleanly — owner-level trust derivation keys on
+	// OwnerAuthority(), never the subpath-bearing string.
+	f, err := ParseFQN("github://acme/foo/actions/x")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, want := f.Authority(), "github://acme/foo"; got != want {
+		t.Errorf("Authority() = %q, want %q (subpath dropped)", got, want)
+	}
+	if got, want := f.OwnerAuthority(), "github://acme"; got != want {
+		t.Errorf("OwnerAuthority() = %q, want %q (repo + subpath dropped)", got, want)
+	}
+}
+
 func TestParseRef_AcceptsCanonicalCompactForm(t *testing.T) {
 	r, err := ParseRef("github://aileron/slack@1.2.0")
 	if err != nil {

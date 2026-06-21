@@ -280,6 +280,42 @@ func (k *Ed25519Keyring) Remove(authority string) bool {
 	return true
 }
 
+// RemoveKey drops a single public key from an authority. Returns true
+// when the key was present (and removed), false when the authority or
+// the key was not registered. When the removal empties the authority,
+// the authority is dropped entirely so a subsequent Authorities() /
+// list does not surface an empty entry. This is the per-key counterpart
+// to Remove (whole-authority): `aileron keyring revoke --key <fp>` uses
+// it to retract one rotated/compromised key across every authority
+// (owners and publishers) that registered it, without disturbing the
+// authority's other keys.
+func (k *Ed25519Keyring) RemoveKey(authority string, pub ed25519.PublicKey) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	existing, ok := k.keys[authority]
+	if !ok {
+		return false
+	}
+	kept := make([]ed25519.PublicKey, 0, len(existing))
+	removed := false
+	for _, e := range existing {
+		if ed25519.PublicKey(e).Equal(pub) {
+			removed = true
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if !removed {
+		return false
+	}
+	if len(kept) == 0 {
+		delete(k.keys, authority)
+	} else {
+		k.keys[authority] = kept
+	}
+	return true
+}
+
 // HasKey reports whether the keyring already trusts the given public
 // key for the authority. Used by callers (e.g. `aileron keyring trust`)
 // to detect duplicate adds and avoid bloating the file with copies of
