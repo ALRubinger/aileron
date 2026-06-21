@@ -128,11 +128,11 @@ The `Trust:` line picks one of three labels, color-coded so the unusual states s
 
 | State | Color | Meaning |
 |---|---|---|
-| `already trusted` | green | The publisher's current key is already on your keyring at this FQN. The install proceeds without trust-write work. |
-| `unknown (first install)` | yellow | The keyring has no trusted key for this FQN. Confirming will register the publisher's current key. |
-| `conflict — key differs from a trusted sibling repo` | red | A different connector by the same publisher (per `publisher_github`) carries a key you trust, and the key at this FQN's `key_url` doesn't match. Possible explanations are key rotation, MITM, or impersonation. Worth a closer look before confirming. |
+| `already trusted` | green | An owner-level grant for this publisher is on your keyring and its key matches the key at this FQN. The install proceeds without trust-write work. |
+| `unknown (first install)` | yellow | No owner-level grant for this publisher resolves a trusted key. Confirming will register the publisher's current key. |
+| `conflict — key differs from the publisher's trusted key` | red | An owner-level grant for this publisher is on your keyring, and the key at this FQN's `key_url` doesn't match it. Possible explanations are key rotation, MITM, or impersonation. Worth a closer look before confirming. |
 
-The `conflict` state is rare and intentional. v0.x trust is strictly per-repo (per FQN), so one publisher with two connectors can carry two different keys without anything being wrong. The conflict surface flags the case so you notice. Run `aileron keyring list` to see what's currently trusted, compare fingerprints with the publisher's release notes or commits to `keys/publisher.pub` in their repo, then make a call.
+The `conflict` state is rare and intentional. Trust is evaluated at owner granularity in keyring v2, so a publisher you trust once is expected to sign every connector they ship with the same key. The conflict surface flags the case where a fetched key diverges from that owner-level grant, which the install-decision payload also reports as a non-blocking entry in its `risk_indicators` array. It is informational and never blocks the install on its own. Run `aileron keyring list` to see what's currently trusted, compare fingerprints with the publisher's release notes or commits to `keys/publisher.pub` in their repo, then make a call.
 
 ## The composite install-decision (actions and suites)
 
@@ -180,7 +180,39 @@ Clicking **Install** on a connector opens the connector-level install modal — 
 
 Clicking **Install** on an action or suite opens the composite install modal — the per-authority trust panel grouped exactly like the CLI's `Trust these publishers and continue?` prompt. The modal surfaces the CLI command (`aileron action add ...@latest` or `aileron action add-suite ...@latest`) for completing the install today; webapp-driven install execution for actions and suites is a follow-up (tracked in [#739](https://github.com/ALRubinger/aileron/issues/739)).
 
-Neither modal exposes a "Trust this publisher" button. v0.x trust is per-repo, and the design is deliberately careful not to invite users into a wider trust grant.
+Neither modal exposes a one-click "Trust this publisher" button. Owner-level trust is a deliberate, explicit step rather than something the install modal invites you into. To trust a whole publisher, run `aileron keyring trust github://<owner>` from the CLI (see [Owner-level trust and revocation](#owner-level-trust-and-revocation) below); the modal keeps each install its own decision.
+
+## Owner-level trust and revocation
+
+Keyring v2 lets you trust a publisher once and cover every connector they ship. The keyring stores owner-level grants keyed by `<scheme>://<owner>` alongside the older per-repo grants keyed by `<scheme>://<owner>/<repo>`. An owner-level grant authorizes every connector under that owner.
+
+```sh
+# Trust a whole publisher. The key is fetched from the connector repo you name.
+aileron keyring trust github://ALRubinger/aileron-connector-google
+
+# Trust a whole publisher by owner alone. The key is resolved from the Hub entry.
+aileron keyring trust github://ALRubinger
+
+# Pin a single repo instead, the older per-repo grant.
+aileron keyring trust github://ALRubinger/aileron-connector-slack
+```
+
+Trusting `github://ALRubinger/aileron-connector-google` writes an owner-level grant for `github://ALRubinger`, so a later install of `github://ALRubinger/aileron-connector-slack` verifies against the same publisher key without a second prompt. A bare owner argument resolves the key from the publisher's Hub catalog entry. When no Hub entry carries a usable key, the command errors and points you at the per-connector form.
+
+`aileron keyring list` groups what you trust by owner. Revocation operates at the scope you name:
+
+```sh
+# Drop the owner-level grant for a publisher.
+aileron keyring revoke github://ALRubinger
+
+# Drop a single per-repo grant.
+aileron keyring revoke github://ALRubinger/aileron-connector-slack
+
+# Remove one key everywhere it appears, by fingerprint.
+aileron keyring revoke --key sha256:i4l2kuD8q++d5b9v8/LLI1
+```
+
+The `--key` form retires a rotated or compromised key from every authority at once. Supplying both an authority and `--key`, or neither, is a usage error.
 
 ## What the Hub does not do
 
