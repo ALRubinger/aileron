@@ -225,6 +225,30 @@ func TestEd25519Keyring_OwnerGrantDoesNotLeakAcrossOwners(t *testing.T) {
 	}
 }
 
+// TestEd25519Keyring_OwnerGrantDoesNotLeakAcrossSchemes pins that the
+// derived owner-level key is scheme-scoped: an owner-level grant for
+// github://aileron must NOT authorize gitlab://aileron/widgets (same
+// owner segment, different scheme). Keys are keyed by the full
+// scheme://owner string, so the two are distinct trust domains and the
+// cross-scheme case fails closed.
+func TestEd25519Keyring_OwnerGrantDoesNotLeakAcrossSchemes(t *testing.T) {
+	binary := []byte("BIN")
+	manifest := []byte("MAN")
+	sig, pub := signedManifest(t, binary, manifest)
+
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://aileron", pub)
+
+	err := ring.Verify("gitlab://aileron/widgets", binary, manifest, sig)
+	if err == nil {
+		t.Fatal("Verify across schemes under owner-level grant succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassSignatureFailure {
+		t.Fatalf("err class = %v, want ClassSignatureFailure", aerr)
+	}
+}
+
 // TestEd25519Keyring_MalformedAuthorityStaysFailClosed pins the single
 // behavioral risk: a malformed authority must not widen trust. The
 // ParseFQN error path degrades to per-repo-only resolution; with no
