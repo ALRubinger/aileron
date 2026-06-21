@@ -152,10 +152,10 @@ The other vault writes are:
 
 The bytes must match the envelope schema in the table above when set manually. Render validates on the way in; a malformed envelope fails the launch with a clear error before the container starts.
 
-`aileron vault list` shows which agents currently have an entry, metadata only. The credential value is never listed. Each line it prints is the fully-qualified path (`agents/<name>/oauth`), exactly what `aileron vault delete` accepts, so a listed line can be pasted straight into a delete.
+`aileron vault list --scope agent` shows which agents currently have an entry, metadata only. The credential value is never listed. Each line it prints is the fully-qualified path (`agents/<name>/oauth`), exactly what `aileron vault delete` accepts, so a listed line can be pasted straight into a delete. (Bare `aileron vault list` prints the broader union of every namespace; `--scope agent` narrows to just the agent entries this flow cares about.)
 
 ```
-aileron vault list
+aileron vault list --scope agent
 ```
 
 `aileron auth <agent> --import-from-host` seeds the vault from an already-authenticated host install. It reads the host `claude` or `codex` credential state, validates it against the same schema the launcher's Capture pass enforces, and writes it through the daemon to `agents/<agent>/oauth`. Operators who already ran `claude` or `codex` login on the host skip the per-machine in-container login.

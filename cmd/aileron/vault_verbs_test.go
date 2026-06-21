@@ -324,7 +324,7 @@ func TestRunVaultList_DefaultAndJSON(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -334,7 +334,7 @@ func TestRunVaultList_DefaultAndJSON(t *testing.T) {
 	}
 
 	var jout, jerr bytes.Buffer
-	code = runVault([]string{"list", "--json"}, strings.NewReader(""), &jout, &jerr)
+	code = runVault([]string{"list", "--scope", "agent", "--json"}, strings.NewReader(""), &jout, &jerr)
 	if code != 0 {
 		t.Fatalf("json exit = %d, want 0; stderr=%s", code, jerr.String())
 	}
@@ -359,7 +359,7 @@ func TestRunVaultList_ApikeyOnlyAgentSurfaces(t *testing.T) {
 		_, _ = io.WriteString(w, `{"agents":[{"name":"claude","purpose":"apikey","metadata":{"type":"api_key"}}]}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -378,7 +378,7 @@ func TestRunVaultList_BothPurposesYieldTwoDistinctEntries(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -388,7 +388,7 @@ func TestRunVaultList_BothPurposesYieldTwoDistinctEntries(t *testing.T) {
 	}
 
 	var jout, jerr bytes.Buffer
-	code = runVault([]string{"list", "--json"}, strings.NewReader(""), &jout, &jerr)
+	code = runVault([]string{"list", "--scope", "agent", "--json"}, strings.NewReader(""), &jout, &jerr)
 	if code != 0 {
 		t.Fatalf("json exit = %d, want 0; stderr=%s", code, jerr.String())
 	}
@@ -510,7 +510,7 @@ func TestRunVaultList_ApikeyLineRoundTripsIntoDelete(t *testing.T) {
 		_, _ = io.WriteString(w, `{"agents":[{"name":"claude","purpose":"apikey"}]}`)
 	})
 	var lout, lerr bytes.Buffer
-	if code := runVault([]string{"list"}, strings.NewReader(""), &lout, &lerr); code != 0 {
+	if code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &lout, &lerr); code != 0 {
 		t.Fatalf("list exit = %d, want 0; stderr=%s", code, lerr.String())
 	}
 	listed := strings.TrimSpace(lout.String())
@@ -545,7 +545,7 @@ func TestRunVaultList_NilPurposeRendersOauth(t *testing.T) {
 		_, _ = io.WriteString(w, `{"agents":[{"name":"codex"}]}`)
 	})
 	var stdout, stderr bytes.Buffer
-	if code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "agents/codex/oauth" {
@@ -558,7 +558,7 @@ func TestRunVaultList_EmptyMessage(t *testing.T) {
 		_, _ = io.WriteString(w, `{"agents":[]}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	code := runVault([]string{"list", "--scope", "agent"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
@@ -573,7 +573,7 @@ func TestRunVaultList_EmptyJSONIsEmptyArray(t *testing.T) {
 		_, _ = io.WriteString(w, `{"agents":[]}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := runVault([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	code := runVault([]string{"list", "--scope", "agent", "--json"}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0", code)
 	}
@@ -893,5 +893,161 @@ func TestRunVaultList_ScopeUserNoVault(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "vault") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// #1402: `vault list` with no --scope hits the new /vault union endpoint
+// and renders every namespace, each line prefixed with its scope label.
+func TestRunVaultList_UnionDefaultGroupsByScope(t *testing.T) {
+	const body = `{"entries":[` +
+		`{"path":"agents/claude/oauth","scope":"agent"},` +
+		`{"path":"user/github","scope":"user"},` +
+		`{"path":"connectors/github/default","scope":"binding"},` +
+		`{"path":"oauth2/google/default","scope":"binding"}]}`
+	var gotPath string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.URL.Query().Get("include_control_plane") != "" {
+			t.Errorf("default union must not set include_control_plane: %s", r.URL.RawQuery)
+		}
+		_, _ = io.WriteString(w, body)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPath != "/vault" {
+		t.Errorf("default list hit %q, want /vault (the union endpoint)", gotPath)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"agents/claude/oauth",
+		"user/github",
+		"connectors/github/default",
+		"oauth2/google/default",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("union output missing %q\n%s", want, out)
+		}
+	}
+	// Every scope label must appear; the connector/binding entries are
+	// exactly what the old agent+user default silently hid.
+	for _, label := range []string{"agent:", "user:", "binding:"} {
+		if !strings.Contains(out, label) {
+			t.Errorf("union output missing scope label %q:\n%s", label, out)
+		}
+	}
+}
+
+// --json over the union streams one NDJSON object per entry carrying both
+// path and scope.
+func TestRunVaultList_UnionJSON(t *testing.T) {
+	const body = `{"entries":[{"path":"agents/claude/oauth","scope":"agent"},{"path":"connectors/github/default","scope":"binding"}]}`
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("union --json = %q, want 2 NDJSON lines", stdout.String())
+	}
+	gotScopes := map[string]string{}
+	for _, l := range lines {
+		var e vaultEntry
+		if err := json.Unmarshal([]byte(l), &e); err != nil {
+			t.Fatalf("NDJSON line not valid: %v (%q)", err, l)
+		}
+		gotScopes[e.Path] = e.Scope
+	}
+	if gotScopes["agents/claude/oauth"] != "agent" || gotScopes["connectors/github/default"] != "binding" {
+		t.Errorf("union --json scopes = %v, want agent + binding", gotScopes)
+	}
+}
+
+// --include-control-plane threads the include_control_plane query param.
+func TestRunVaultList_UnionIncludeControlPlane(t *testing.T) {
+	var gotInclude string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotInclude = r.URL.Query().Get("include_control_plane")
+		_, _ = io.WriteString(w, `{"entries":[{"path":"connected-accounts/usr_1/slack","scope":"connected-account"}]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--include-control-plane"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotInclude != "true" {
+		t.Errorf("include_control_plane query = %q, want true", gotInclude)
+	}
+	if !strings.Contains(stdout.String(), "connected-account:") {
+		t.Errorf("output missing control-plane entry:\n%s", stdout.String())
+	}
+}
+
+// An empty union prints the shared "nothing stored" message; --json yields
+// an empty array for script-parseability.
+func TestRunVaultList_UnionEmpty(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"entries":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	if code := runVault([]string{"list"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "No credentials stored.") {
+		t.Errorf("empty union text = %q", stdout.String())
+	}
+
+	var jout, jerr bytes.Buffer
+	if code := runVault([]string{"list", "--json"}, strings.NewReader(""), &jout, &jerr); code != 0 {
+		t.Fatalf("json exit = %d, want 0", code)
+	}
+	if strings.TrimSpace(jout.String()) != "[]" {
+		t.Errorf("empty union --json = %q, want []", jout.String())
+	}
+}
+
+// --include-control-plane only applies to the union; combining it with an
+// explicit --scope is a usage error caught before any HTTP call.
+func TestRunVaultList_IncludeControlPlaneWithScopeRejected(t *testing.T) {
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, _ = io.WriteString(w, `{"agents":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "agent", "--include-control-plane"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for --include-control-plane with --scope")
+	}
+	if called {
+		t.Errorf("HTTP issued for rejected flag combination")
+	}
+}
+
+// The legacy --prefix agents/ still routes to the typed agent endpoint, not
+// the union.
+func TestRunVaultList_PrefixAgentsStillTyped(t *testing.T) {
+	var gotPath string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = io.WriteString(w, `{"agents":[{"name":"claude","purpose":"oauth"}]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--prefix", "agents/"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if gotPath != "/vault/agents" {
+		t.Errorf("--prefix agents/ hit %q, want /vault/agents (typed, not union)", gotPath)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "agents/claude/oauth" {
+		t.Errorf("output = %q, want agents/claude/oauth", got)
 	}
 }

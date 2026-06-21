@@ -1013,6 +1013,64 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/vault:
+    get:
+      tags: [Vault]
+      summary: List every entry in the local vault (union view)
+      description: |
+        Returns the union of every credential entry the local file vault
+        holds, with its plaintext metadata only. The credential `value` is
+        never included (ADR-0011).
+
+        Unlike `/v1/vault/agents` and `/v1/vault/user` — which each surface
+        a single namespace — this endpoint walks the vault once and
+        classifies every entry by namespace, so connector and
+        capability-binding credentials (e.g. an `oauth2/google/...` binding
+        or `connectors/<provider>/default`) appear alongside the
+        `agents/<name>/<purpose>` and `user/<service>` entries. Each entry
+        carries a `scope` label naming its namespace.
+
+        The two tenant-keyed control-plane namespaces
+        (`connected-accounts/<user_id>/<provider>` and
+        `llm-config/<owner>/<id>`) are excluded by default; pass
+        `include_control_plane=true` to include them.
+
+        Per ADR-0011 listing works on a locked vault — metadata is stored
+        in plaintext and the operation never decrypts a credential — so no
+        `vault_locked` (423) response is defined.
+      operationId: listVaultEntries
+      security: []
+      parameters:
+        - name: include_control_plane
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            When true, also include the tenant-keyed control-plane
+            namespaces (`connected-accounts/` and `llm-config/`) that are
+            excluded from the default view.
+      responses:
+        "200":
+          description: Vault entries grouped by scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VaultEntriesList"
+        "500":
+          description: Vault list failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/vault/agents:
     get:
       tags: [Vault]
@@ -7780,6 +7838,51 @@ components:
           description: |
             Service identifier (e.g. "github"), derived from the
             `user/<service>` vault path.
+        metadata:
+          $ref: "#/components/schemas/AgentCredentialsMetadata"
+
+    VaultEntriesList:
+      type: object
+      required: [entries]
+      description: |
+        The union of every entry in the local vault, classified by scope.
+        Metadata only — the credential `value` is never listed (ADR-0011).
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/VaultEntry"
+
+    VaultEntry:
+      type: object
+      required: [path, scope]
+      description: |
+        A single vault entry: its full path, a `scope` label naming the
+        namespace it belongs to, and its plaintext metadata.
+      properties:
+        path:
+          type: string
+          description: |
+            The full vault path (e.g. `agents/claude/oauth`,
+            `user/github`, `oauth2/google/default`,
+            `connectors/github/default`).
+        scope:
+          type: string
+          description: |
+            The namespace classification of this entry. One of:
+            `agent` (`agents/<name>/<purpose>`), `user`
+            (`user/<service>`), `binding` (a capability binding
+            `<kind>/<service>/<identity>` per ADR-0006, which includes
+            connector credentials like `connectors/<provider>/default`),
+            `connected-account` (`connected-accounts/<user_id>/<provider>`,
+            control-plane), `llm-config` (`llm-config/<owner>/<id>`,
+            control-plane), or `other` (any path matching none of the
+            above, surfaced so nothing is silently hidden).
+
+            Modelled as a free-form string (not an OpenAPI `enum`) so the
+            generated `scope` value does not collide with the same literals
+            in other enums (e.g. `agent` in `ActorRef.type`), which would
+            force the code generator to globally prefix every enum constant.
         metadata:
           $ref: "#/components/schemas/AgentCredentialsMetadata"
 
