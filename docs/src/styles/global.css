@@ -3,20 +3,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* Ink-bleed effect: four 1px directional drop-shadows around the element
- * create a soft halo on every glyph (or any visible alpha), reading as
- * ink bleeding into paper. Opt-in via `class="ink-bleed"`. Applied to a
- * single text element gives that element the bleed; applied to a
- * container (e.g. a section wrapper) composites the effect across all
- * descendants. Doesn't compose with background-clip: text — avoid on
- * gradient-text headings.
- *
- * Defined as a plain CSS class (not @utility) so it's always emitted,
- * even when applied dynamically at build time by the rehype plugin
- * (which Tailwind's content scanner can't see). */
-/* Applied to a text element directly OR to a container — when used on a
- * container, filters each text descendant individually so the halo is
- * per-glyph rather than around the container's rectangular composite. */
 /* Right-side TOC aside. Transition explicitly via raw CSS rules and a
  * media query rather than Tailwind responsive variants, because the
  * variant-based approach was animating only one direction (reveal) and
@@ -38,11 +24,6 @@
 		transform: translateX(0);
 		pointer-events: auto;
 	}
-}
-
-.ink-bleed,
-.ink-bleed :is(h2, h3, h4, h5, h6, p, li) {
-	filter: var(--effect-ink-bleed);
 }
 
 @theme inline {
@@ -130,7 +111,6 @@
 		margin-top: 0;
 		margin-bottom: 1.5rem;
 		color: var(--foreground);
-		filter: var(--effect-ink-bleed);
 	}
 	@media (min-width: 640px)  { :where(.prose) h1 { font-size: 3rem; } }
 	@media (min-width: 1024px) { :where(.prose) h1 { font-size: var(--role-display-size); } }

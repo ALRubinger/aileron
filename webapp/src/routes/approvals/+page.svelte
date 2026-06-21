@@ -206,7 +206,7 @@
 	</p>
 {:else}
 	<section data-testid="action-approvals-section">
-		<p class="ink-bleed mb-3 text-sm text-muted-foreground">
+		<p class="mb-3 text-sm text-muted-foreground">
 			The agent is blocked on these tool calls until you approve or deny.
 		</p>
 		{#if focusedMissing}

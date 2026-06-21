@@ -15,7 +15,7 @@
 
 <div class="space-y-4">
 	<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Aileron</h1>
-	<p class="ink-bleed text-muted-foreground">
+	<p class="text-muted-foreground">
 		The local webapp surfaced under <code>aileron launch</code>. Use it to review and decide on
 		action approvals the agent has paused on.
 	</p>
