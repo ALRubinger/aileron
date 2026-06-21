@@ -58,7 +58,16 @@ type Options struct {
 	BinaryArgs []string
 
 	// SpawnTimeout caps how long Resolve waits for daemon.json after
-	// triggering a spawn. Default 5s.
+	// triggering a spawn. Defaults to defaultSpawnTimeout.
+	//
+	// This is a poll deadline for a daemon that is on its way up, not a
+	// liveness budget: a genuinely dead daemon is detected immediately
+	// via the SpawnFn `exited` channel (see waitForDaemon), so a long
+	// SpawnTimeout never makes a real failure hang. It only buys a
+	// slow-but-healthy cold start the time it needs — notably on Windows,
+	// where process creation, exe load, and a first-run Defender scan of
+	// the freshly built daemon binary routinely push readiness past a few
+	// seconds.
 	SpawnTimeout time.Duration
 
 	// PollInterval is how often Resolve polls daemon.json after
@@ -78,6 +87,26 @@ type Options struct {
 // the helper has nothing to fork-exec.
 var ErrNoBinary = errors.New("daemon binary path is empty (set Options.Binary)")
 
+// defaultSpawnTimeout is the poll deadline applied when Options.SpawnTimeout
+// is unset. It is deliberately generous: every CLI caller already wraps
+// Resolve in an outer context (the launcher and `aileron daemon start`
+// both pass a context larger than this), and a genuinely dead daemon fails
+// fast via the SpawnFn `exited` channel regardless of this value. The
+// budget therefore only governs how long a slow-but-healthy cold start is
+// given to publish daemon.json. The previous 5s tripped on Windows cold
+// starts (slower process creation plus a first-run Defender scan of the
+// freshly built daemon binary), reporting a startup failure for a daemon
+// that was in fact coming up fine; 30s clears that window with margin.
+const defaultSpawnTimeout = 30 * time.Second
+
+// ResolveContextBudget is the outer-context timeout callers should apply
+// when wrapping Resolve. It sits above defaultSpawnTimeout so the inner
+// poll deadline expires first and Resolve returns its diagnostic timeout
+// error (with a daemon-log tail) rather than a bare context.DeadlineExceeded.
+// Callers that build their own context.WithTimeout around Resolve should
+// use this value so the two budgets stay in agreement.
+const ResolveContextBudget = defaultSpawnTimeout + 5*time.Second
+
 // Resolve returns the URL of the running Aileron daemon, spawning
 // one if none is reachable. The fast path is one daemon.json read
 // plus a sub-millisecond TCP probe; the spawn path acquires a
@@ -95,7 +124,7 @@ func Resolve(ctx context.Context, opts Options) (string, error) {
 	}
 
 	if opts.SpawnTimeout <= 0 {
-		opts.SpawnTimeout = 5 * time.Second
+		opts.SpawnTimeout = defaultSpawnTimeout
 	}
 	if opts.PollInterval <= 0 {
 		opts.PollInterval = 50 * time.Millisecond

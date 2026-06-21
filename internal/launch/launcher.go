@@ -494,7 +494,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		}
 		opts.Binary = binary
 	}
-	resolveCtx, cancelResolve := context.WithTimeout(ctx, 10*time.Second)
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, spawn.ResolveContextBudget)
 	daemonURL, err := spawn.Resolve(resolveCtx, opts)
 	cancelResolve()
 	if err != nil {
