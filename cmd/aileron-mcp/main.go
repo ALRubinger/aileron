@@ -29,6 +29,14 @@
 //	                       AILERON_SESSION_ID to enable comms tools.
 //	AILERON_SESSION_ID   - The launch session id the daemon stamps on
 //	                       comms approval entries.
+//	AILERON_MCP_REFRESH_INTERVAL
+//	                     - How often (Go duration, e.g. "5s") the server
+//	                       re-discovers actions from the daemon so an
+//	                       install/enable/disable/remove mid-session
+//	                       refreshes the agent's tool surface without a
+//	                       restart. Defaults to 5s. Set to "0" to disable
+//	                       the poller and freeze the tool surface at boot.
+//	                       Only consulted when AILERON_URL is set.
 package main
 
 import (
@@ -43,7 +51,10 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,6 +72,13 @@ import (
 // spans this binary emits. Mirrors the convention in
 // internal/action and internal/observability.
 const tracerName = "github.com/ALRubinger/aileron/cmd/aileron-mcp"
+
+// defaultRefreshInterval is how often the action-refresh poller
+// re-discovers actions from the daemon when AILERON_MCP_REFRESH_INTERVAL
+// is unset. Short enough that an install/enable/disable surfaces to the
+// agent within a couple of poll cycles, long enough that the steady-state
+// GET /v1/actions load is negligible.
+const defaultRefreshInterval = 5 * time.Second
 
 // --- JSON-RPC types ---
 
@@ -228,11 +246,25 @@ type server struct {
 	// path use a tighter timeout without affecting comms.
 	commsHTTPClient *http.Client
 
-	// Discovered actions, populated at startup when AILERON_URL is set.
-	// Keys of actionNameMap are snake_case (LLM-facing) tool names;
-	// values are manifest names (kebab-case) used in /v1/actions/{name}/run.
+	// actionsMu guards actionTools and actionNameMap. The request loop
+	// reads them (tools/list, tools/call) while the refresh poller
+	// (refreshLoop) swaps them on change, so every access is locked.
+	actionsMu sync.RWMutex
+	// Discovered actions, populated at startup when AILERON_URL is set and
+	// refreshed in place by the poller. Keys of actionNameMap are
+	// snake_case (LLM-facing) tool names; values are manifest names
+	// (kebab-case) used in /v1/actions/{name}/run.
 	actionTools   []toolDef
 	actionNameMap map[string]string
+
+	// out is where JSON-RPC responses and notifications are written
+	// (os.Stdout in production). writeMu serializes writes so the
+	// request loop's responses and the poller's tools/list_changed
+	// notification never interleave on the wire. nil out disables
+	// notification emission (the unit tests that don't exercise the
+	// wire leave it nil).
+	out     io.Writer
+	writeMu sync.Mutex
 }
 
 // commsAvailable reports whether the env carries enough context to
@@ -283,7 +315,7 @@ var draftReplyTool = toolDef{
 }
 
 var checkActionStatusTool = toolDef{
-	Name: "check_action_status",
+	Name:        "check_action_status",
 	Description: "Check the status of an approval-gated action call. Call this when an earlier tool returned a `pending_approval` response carrying an approval_id, and you want to know whether the user has approved, denied, or whether the action has finished running. The response carries one of: pending_approval, running, completed (with the result), denied (with the user's reason), failed (with the failure details). Polling is optional — the user knows the next move once they see the approval prompt; this tool exists for agents that want to close the loop on an action they initiated.",
 	InputSchema: schema{
 		Type: "object",
@@ -363,6 +395,7 @@ func main() {
 		// + a small buffer so the daemon's bounded response always
 		// wins over a transport timeout.
 		commsHTTPClient: &http.Client{Timeout: 6 * time.Minute},
+		out:             os.Stdout,
 	}
 
 	// Discover installed actions from the Aileron daemon. Best-effort:
@@ -373,10 +406,14 @@ func main() {
 			slog.Warn("action discovery failed; continuing without action tools",
 				"url", s.aileronURL, "error", err)
 		} else {
-			s.actionTools = tools
-			s.actionNameMap = nameMap
+			s.setActions(tools, nameMap)
 		}
 	}
+
+	// Refresh the action surface in the background so an
+	// install/enable/disable/remove mid-session reaches the agent
+	// without a restart.
+	s.maybeStartRefreshPoller(context.Background(), os.Getenv("AILERON_MCP_REFRESH_INTERVAL"))
 
 	// Handle SIGTERM and SIGINT for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
@@ -403,9 +440,162 @@ func main() {
 		resp := s.handle(req)
 		if resp != nil {
 			data, _ := json.Marshal(resp)
-			fmt.Fprintf(os.Stdout, "%s\n", data)
+			s.writeLine(data)
 		}
 	}
+}
+
+// writeLine writes one newline-terminated JSON-RPC frame to s.out
+// under writeMu so the request loop's responses and the refresh
+// poller's tools/list_changed notification never interleave on the
+// shared stdout stream. A nil out makes this a no-op (tests that
+// don't exercise the wire).
+func (s *server) writeLine(data []byte) {
+	if s.out == nil {
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	fmt.Fprintf(s.out, "%s\n", data)
+}
+
+// setActions atomically replaces the cached action tool surface. Used
+// by both the startup discovery and the refresh poller; centralizes
+// the lock so callers can't forget it.
+func (s *server) setActions(tools []toolDef, nameMap map[string]string) {
+	s.actionsMu.Lock()
+	defer s.actionsMu.Unlock()
+	s.actionTools = tools
+	s.actionNameMap = nameMap
+}
+
+// refreshInterval parses the AILERON_MCP_REFRESH_INTERVAL env value
+// into a poll interval. Empty falls back to the default; "0" (or any
+// non-positive duration) disables the poller — ok=false. An
+// unparseable value logs a warning and falls back to the default so a
+// typo never silently freezes the tool surface.
+func refreshInterval(raw string) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultRefreshInterval, true
+	}
+	// Accept a bare "0" as the explicit disable switch even though
+	// time.ParseDuration would also accept "0s".
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d <= 0 {
+			return 0, false
+		}
+		return d, true
+	}
+	// A bare integer ("0") isn't a valid Go duration; treat 0 as
+	// disable and any other bare integer as seconds for ergonomics.
+	if n, err := strconv.Atoi(raw); err == nil {
+		if n <= 0 {
+			return 0, false
+		}
+		return time.Duration(n) * time.Second, true
+	}
+	slog.Warn("AILERON_MCP_REFRESH_INTERVAL is not a valid duration; using default",
+		"value", raw, "default", defaultRefreshInterval)
+	return defaultRefreshInterval, true
+}
+
+// maybeStartRefreshPoller starts the background action-refresh poller
+// when both conditions hold: AILERON_URL is set (there is a daemon to
+// poll) and the interval knob does not disable it. rawInterval is the
+// AILERON_MCP_REFRESH_INTERVAL value. Returns true when a poller was
+// started. Split from main so the start decision is unit-testable.
+func (s *server) maybeStartRefreshPoller(ctx context.Context, rawInterval string) bool {
+	if s.aileronURL == "" {
+		return false
+	}
+	interval, ok := refreshInterval(rawInterval)
+	if !ok {
+		return false
+	}
+	go s.refreshLoop(ctx, interval)
+	return true
+}
+
+// refreshLoop periodically re-discovers actions from the daemon and,
+// when the resulting tool surface differs from the cached one,
+// atomically swaps the cache and emits notifications/tools/list_changed
+// so the host re-pulls tools/list. Hosts only re-list after this
+// signal, so the proactive poll-and-notify is the mechanism — a
+// refresh on tools/list alone would never fire.
+//
+// Failure handling honors the "must not corrupt the working tool
+// surface" contract: a discovery error logs to stderr and leaves the
+// existing cache untouched; the good surface is never overwritten with
+// an error state.
+func (s *server) refreshLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshOnce(ctx)
+		}
+	}
+}
+
+// refreshOnce performs a single discovery + diff + conditional swap.
+// Split from refreshLoop so the per-tick behavior is unit-testable
+// without driving a ticker. Returns true when the surface changed and
+// a notification was emitted.
+func (s *server) refreshOnce(ctx context.Context) bool {
+	tools, nameMap, err := s.discoverActions(ctx)
+	if err != nil {
+		// Leave the working surface intact; surface the failure on
+		// stderr so it's visible without poisoning the tool list.
+		slog.Warn("action refresh failed; keeping existing tool surface",
+			"url", s.aileronURL, "error", err)
+		return false
+	}
+
+	// Diff on the tool defs alone: actionNameMap is a pure function of
+	// the discovered tools (snake_case name → manifest name), so equal
+	// tool surfaces imply an equal name map. No need to diff both.
+	s.actionsMu.RLock()
+	unchanged := toolDefsEqual(s.actionTools, tools)
+	s.actionsMu.RUnlock()
+	if unchanged {
+		return false
+	}
+
+	s.setActions(tools, nameMap)
+	s.emitToolsListChanged()
+	return true
+}
+
+// emitToolsListChanged writes a JSON-RPC notification telling the host
+// the tool list changed. Notifications carry no id and expect no
+// response, per JSON-RPC 2.0 / the MCP spec.
+func (s *server) emitToolsListChanged() {
+	data, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/tools/list_changed",
+	})
+	s.writeLine(data)
+}
+
+// toolDefsEqual reports whether two discovered tool surfaces are
+// identical (same tools, same order, same schemas). discoverActions
+// preserves the daemon's response order, so order-sensitive equality
+// is correct: a reordering from the daemon is a real change the host
+// should see. Compared by value via the JSON shapes the structs carry.
+func toolDefsEqual(a, b []toolDef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !reflect.DeepEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
@@ -417,7 +607,13 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 			Result: map[string]any{
 				"protocolVersion": "2024-11-05",
 				"capabilities": map[string]any{
-					"tools": map[string]any{},
+					// listChanged: true tells the host we proactively emit
+					// notifications/tools/list_changed when the action set
+					// changes mid-session, so it should re-pull tools/list
+					// on that signal rather than caching the boot snapshot.
+					"tools": map[string]any{
+						"listChanged": true,
+					},
 				},
 				"serverInfo": map[string]any{
 					"name":    "aileron",
@@ -472,8 +668,11 @@ func (s *server) availableTools() []toolDef {
 	// Dynamically discovered Aileron actions from the daemon's
 	// /v1/actions endpoint (per ADR-0008 — kept in MCP shape rather
 	// than the OpenAI/Anthropic shape because the agent host's MCP
-	// integration is the consumer here).
+	// integration is the consumer here). Read under the lock the
+	// refresh poller swaps the slice under.
+	s.actionsMu.RLock()
 	tools = append(tools, s.actionTools...)
+	s.actionsMu.RUnlock()
 	// check_action_status is always available — even when no actions
 	// are discovered (a fresh daemon), the agent might be working
 	// against an approval id minted by an earlier session.
@@ -483,7 +682,11 @@ func (s *server) availableTools() []toolDef {
 
 func (s *server) dispatchTool(ctx context.Context, name string, args map[string]any) toolResult {
 	// Discovered actions: route to /v1/actions/{name}/run on the daemon.
-	if manifestName, ok := s.actionNameMap[name]; ok {
+	// Read the map under the lock the refresh poller swaps it under.
+	s.actionsMu.RLock()
+	manifestName, ok := s.actionNameMap[name]
+	s.actionsMu.RUnlock()
+	if ok {
 		return s.runAction(ctx, manifestName, args)
 	}
 	// Comms tools: handled in-process via the launch product's Unix socket.
@@ -767,9 +970,12 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 	nameMap := make(map[string]string, len(alr.Items))
 	for _, a := range alr.Items {
 		// Disabled actions are hidden from tools/list so the LLM never
-		// learns they exist this session. The MCP server caches at boot,
-		// so a re-enable requires a restart to surface the action again
-		// — documented behavior, deliberate trade-off vs. polling.
+		// learns they exist this session. The refresh poller
+		// (refreshLoop) re-runs this discovery on AILERON_MCP_REFRESH_INTERVAL
+		// and emits notifications/tools/list_changed on a diff, so a
+		// re-enable resurfaces the action without a restart. A restart
+		// is only needed for static config the poller does not re-read
+		// (AILERON_URL, comms env), per the sandbox MCP walkthrough.
 		if !a.isEnabled() {
 			continue
 		}

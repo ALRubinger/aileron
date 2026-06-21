@@ -103,6 +103,26 @@ aileron audit list --session "$SESSION" --json \
 
 Verify the draft landed in Gmail's draft folder. That is the upstream contract under test.
 
+## Refresh the tool surface without a restart
+
+`aileron-mcp` discovers actions from the daemon's `/v1/actions` at startup, then keeps the agent's tool list current while the session runs. It advertises the MCP `tools.listChanged` capability during `initialize` and re-discovers actions on a background poll. When the action set changes, it swaps its cache and emits a `notifications/tools/list_changed` to the host, which re-pulls `tools/list`.
+
+This means an `aileron action install`, `aileron action enable`, `aileron action disable`, or `aileron action remove` in another terminal reaches the running agent within a poll cycle. Installing or enabling an action surfaces it; disabling or removing one drops it. No agent restart.
+
+The poll interval is `AILERON_MCP_REFRESH_INTERVAL` (a Go duration such as `5s`, or a bare integer interpreted as seconds). It defaults to `5s`. Set it to `0` to disable the poller and freeze the tool surface at the boot snapshot. The knob is only consulted when `AILERON_URL` is set.
+
+A discovery failure during a refresh (daemon momentarily unreachable, vault locked) logs to stderr and leaves the existing tool surface intact. The working tool list is never overwritten with an error state, so a transient failure can never strand the agent without its tools.
+
+### When a restart is still required
+
+The poller re-reads the action catalog, nothing else. A restart is genuinely required to pick up changes to the static configuration `aileron-mcp` reads once at boot:
+
+- `AILERON_URL` (which daemon to talk to)
+- `AILERON_TOKEN` (the bearer token)
+- `AILERON_COMMS_URL` and `AILERON_SESSION_ID` (the comms tool surface: `read_messages`, `send_message`, `draft_reply`, `http_request`)
+
+These are launch-time wiring, not catalog state, so they fall outside the refresh path by design.
+
 ## Record the result
 
 The **Linux column is automated** (the tests above), so those cells are green when CI is green; you do not hand-run them. For **macOS and Windows**, the per-agent bar is the light smoke: the agent listed `aileron` with `draft_email`. Record those cells in issue [#962](https://github.com/ALRubinger/aileron/issues/962) (its body, not a comment) with the environment (OS, arch, Docker version, Aileron CLI commit, agent version) and any deviations. If you also run the optional full round-trip, note that the audit assertion above printed `PASS` and the draft landed in Gmail.
