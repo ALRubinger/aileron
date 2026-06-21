@@ -344,6 +344,7 @@ Connector repos publish their own integration tests against real binaries; this 
 
 ## See also
 
+- [The Keyring](/concepts/the-keyring/) — how users trust the `keys/publisher.pub` you commit here, and what owner-level trust authorizes.
 - [ADR-0002: Connector Model](/adr/0002-connector-model)
 - [ADR-0003: Action Model](/adr/0003-action-model)
 - [ADR-0004: Dependency Resolution](/adr/0004-dependency-resolution)

@@ -231,6 +231,7 @@ The `--key` form retires a rotated or compromised key from every authority at on
 
 ## See also
 
+- [The Keyring](/concepts/the-keyring/): the canonical model for the publisher trust state and key fingerprints the Hub panel reads.
 - [Installing a Connector](/guides/installing-a-connector/): the install pipeline that runs after the install-decision prompt.
 - [Publishing to the Hub](/guides/publishing-to-the-hub/): the publisher side of this surface.
 - [ADR-0013: Connector Hub and Trust Distribution](/adr/0013-connector-hub-and-trust-distribution/): design rationale for the Hub.

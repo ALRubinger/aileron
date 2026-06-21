@@ -159,6 +159,7 @@ There are no `aileron connector list` / `show` / `remove` subcommands in v1. `ai
 
 ## Companion reading
 
+- [The Keyring](/concepts/the-keyring/) — the canonical model for publisher trust, owner-level vs per-repo grants, and the fail-closed verification this guide's `keyring trust` step feeds.
 - [Installing an Action](/guides/installing-an-action/) — the more common entry point; `action add` walks connector deps for you.
 - [Authoring a Connector](/guides/authoring-a-connector/) — write the WASM binary this guide installs.
 - [Publishing a Connector](/guides/publishing-a-connector/) — sign and release a connector users can install.

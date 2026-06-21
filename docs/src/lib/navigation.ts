@@ -53,7 +53,8 @@ export const navigation: NavItem[] = [
       { label: 'Actions', href: '/concepts/actions/' },
       { label: 'Connectors', href: '/concepts/connectors/' },
       { label: 'The Vault', href: '/concepts/the-vault/' },
-      { label: 'Proof of Control', href: '/concepts/proof-of-control/' }
+      { label: 'Proof of Control', href: '/concepts/proof-of-control/' },
+      { label: 'The Keyring', href: '/concepts/the-keyring/' }
     ]
   },
   {
