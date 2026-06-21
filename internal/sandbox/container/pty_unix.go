@@ -53,7 +53,14 @@ var errRunPTYUnsupported = errors.New("container: no host PTY to own")
 // raw-TTY session multiplexes stdout and stderr onto the single PTY, which
 // is the behavior a real terminal already gives an in-container agent.
 func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
-	hostIn := int(os.Stdin.Fd())
+	// Capture the stdio handles once. The byte-pump goroutine started below
+	// outlives this function (it blocks on a host read that has no clean
+	// unblock), so it must read a local handle rather than the os.Stdin /
+	// os.Stdout globals: a caller (or test) that swaps and restores those
+	// globals would otherwise race the abandoned goroutine. Pinning to one
+	// pair of handles also keeps the whole session consistent.
+	stdin, stdout := os.Stdin, os.Stdout
+	hostIn := int(stdin.Fd())
 	if !term.IsTerminal(hostIn) {
 		return errRunPTYUnsupported
 	}
@@ -68,7 +75,10 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 		return fmt.Errorf("allocate sandbox PTY: %w", err)
 	}
 	defer func() {
-		// Close the slave from the parent once the child has inherited it.
+		// Backstop for the pre-Start error paths (pty sizing / raw-mode entry
+		// failures) that return before the explicit hand-off close below. On
+		// the success path the slave is already closed, so this is a harmless
+		// no-op double close whose ErrClosed is intentionally ignored.
 		_ = tty.Close()
 		if cerr := ptmx.Close(); cerr != nil && err == nil {
 			err = cerr
@@ -77,7 +87,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 
 	// Match the PTY to the host terminal's current size, then keep them in
 	// sync on SIGWINCH so the in-container agent re-renders on resize.
-	if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
+	if err := pty.InheritSize(stdin, ptmx); err != nil {
 		// A failed initial sizing is non-fatal: the session still runs at
 		// the PTY default size. Fall through rather than aborting launch.
 		_ = err
@@ -87,7 +97,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	defer signal.Stop(winch)
 	go func() {
 		for range winch {
-			_ = pty.InheritSize(os.Stdin, ptmx)
+			_ = pty.InheritSize(stdin, ptmx)
 		}
 	}()
 
@@ -131,6 +141,13 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// The child has inherited the slave fds, so close the parent's copy now.
+	// If the parent held the slave open until this function returned, the
+	// master would never see EOF after the child exits and the master->stdout
+	// copy below would block forever (a hang observed on Linux). Closing here
+	// is the standard PTY hand-off: the master closes cleanly once the child
+	// is the only remaining slave owner and then exits.
+	_ = tty.Close()
 
 	// Pump host terminal <-> PTY master. The stdin->master copy runs in a
 	// goroutine because it blocks on host reads with no clean unblock; it
@@ -138,8 +155,8 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	// teardown owns process lifetime). The master->stdout copy returns
 	// when the child closes the slave, which is our cue that the session
 	// ended.
-	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
-	_, _ = io.Copy(os.Stdout, ptmx)
+	go func() { _, _ = io.Copy(ptmx, stdin) }()
+	_, _ = io.Copy(stdout, ptmx)
 
 	return cmd.Wait()
 }
