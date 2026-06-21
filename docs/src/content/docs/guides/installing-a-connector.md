@@ -152,7 +152,7 @@ There are no `aileron connector list` / `show` / `remove` subcommands in v1. `ai
 
 ## Common errors
 
-- **`signature_failure`** — the connector's authority isn't in your keyring, or the publisher rotated their key. Run `aileron keyring trust <authority>` to fetch the current key. Without a trusted key, no install proceeds.
+- **`signature_failure`** — the connector's authority isn't in your keyring, or the publisher rotated their key. Run `aileron keyring trust <authority>` to fetch the current key. To trust the publisher for every connector they ship, use owner granularity with `aileron keyring trust github://<owner>`. Without a trusted key, no install proceeds.
 - **`hash mismatch`** — `--hash=...` was supplied and the computed hash doesn't match. Either the publisher republished under the same version (which they shouldn't do), or you have the wrong expected hash.
 - **`version is required`** — neither the FQN nor `--version` carried a SemVer. Add `@<version>` to the FQN or pass `--version=<v>`.
 - **`binding_required` (at action runtime)** — the connector installed fine but no binding exists for its credential capability. Run `aileron binding setup <connector-FQN>`.

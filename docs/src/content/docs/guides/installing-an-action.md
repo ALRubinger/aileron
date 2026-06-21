@@ -154,7 +154,7 @@ There are no `aileron action list` / `show` / `remove` subcommands in v1. To rem
 
 ## Common errors
 
-- **`signature_failure`** — the action's authority isn't in your keyring, or the publisher rotated their key without re-running `aileron keyring trust`. Run `aileron keyring trust <authority>` to add the new key, or accept the auto-trust prompt on the next install.
+- **`signature_failure`** — the action's authority isn't in your keyring, or the publisher rotated their key without re-running `aileron keyring trust`. Run `aileron keyring trust <authority>` to add the new key, or accept the auto-trust prompt on the next install. To cover every connector from the same publisher in one step, trust them at owner granularity with `aileron keyring trust github://<owner>`.
 - **`no published releases for <owner>/<repo> — pin with @<release-tag> or @<sha> instead of @latest`** — the repo has no GitHub release. Either the publisher hasn't cut one yet, or you have the wrong repo. Pin a specific tag or SHA.
 - **`actions[N] "..." path-form entries require a remote suite manifest with @<release-tag>`** — a local suite manifest used path-form (`actions/<name>`) entries. Rewrite each as a full FQN with explicit `@<version>`.
 - **`FQN already includes @<v>; --version=<v> conflicts`** — the FQN suffix and `--version` flag disagree. Use one or the other.

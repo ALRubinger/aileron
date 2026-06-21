@@ -1,6 +1,6 @@
 ---
 title: "ADR-0013: Connector Hub and Trust Distribution"
-description: "The Hub points to actions, suites, and connectors at their canonical github://owner/repo FQNs without hosting artifacts or vetting publishers. Trust granularity is per-repo for v0.x with per-publisher (Microsoft model) as the v2 direction. Daemon-fronted, multi-client. Sigstore deferred."
+description: "The Hub points to actions, suites, and connectors at their canonical github://owner/repo FQNs without hosting artifacts or vetting publishers. Keyring v2 ratifies per-publisher (Microsoft model) trust as owner-level grants that coexist with per-repo entries. Daemon-fronted, multi-client. Sigstore deferred."
 order: 13
 ---
 
@@ -9,7 +9,7 @@ order: 13
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-05-06</td></tr>
-  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/488">#488</a> (umbrella), <a href="https://github.com/ALRubinger/aileron/issues/408">#408</a> (trust granularity), <a href="https://github.com/ALRubinger/aileron/issues/709">#709</a> (action-first IA)</td></tr>
+  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/488">#488</a> (umbrella), <a href="https://github.com/ALRubinger/aileron/issues/408">#408</a> (trust granularity), <a href="https://github.com/ALRubinger/aileron/issues/1415">#1415</a> (keyring v2 ratified), <a href="https://github.com/ALRubinger/aileron/issues/709">#709</a> (action-first IA)</td></tr>
 </table>
 </div>
 
@@ -55,7 +55,7 @@ Default browse leads with intent, not provider. The webapp `/hub` tab order is S
 
 Action and suite entries decorate the existing trust gates; they do not replace them. An action install or a suite install produces a *composite* install-decision payload that walks the dependency closure and groups by unique connector authority. One trust panel per authority, however many actions are being installed. The per-authority contents (fingerprint, publisher footprint, risk indicators) are exactly what the connector-level install-decision payload returns today.
 
-Trust granularity is unaffected. Per-repo for v0.x and per-publisher v2 are the answers from "Trust is per-repo for v0.x" and "Per-publisher trust is the v2 direction" below. The progress of the IA shift is tracked in [#709](https://github.com/ALRubinger/aileron/issues/709).
+Trust granularity is unaffected. Per-repo grants and owner-level per-publisher grants coexist in keyring v2, as described in "Trust is per-repo for v0.x" and "Per-publisher trust (keyring v2)" below. The progress of the IA shift is tracked in [#709](https://github.com/ALRubinger/aileron/issues/709).
 
 ### Anyone publishes; Aileron does not vet
 
@@ -67,15 +67,23 @@ Discovery and trust stay decoupled. A connector appearing in the Hub is not an e
 
 ### Trust is per-repo for v0.x
 
-Keyring entries authorize a specific FQN. PR #407 shipped this in `~/.aileron/keyring.json` with `version: 1`. The Microsoft-model alternative (one publisher key trusted for any of their connectors) is the long-term direction but not the v0.x answer.
+Keyring entries authorize a specific FQN. PR #407 shipped this in `~/.aileron/keyring.json` with `version: 1`. The Microsoft-model alternative (one publisher key trusted for any of their connectors) was the original v0.x deferral. Keyring v2 has since shipped that model as owner-level grants, ratified in "Per-publisher trust (keyring v2)" below.
 
 The deferral is deliberate. With one connector per publisher today, per-repo trust is fine; the user trusts the publisher's key for that one FQN. Once a publisher ships a second connector, per-repo trust gets clumsy: the user must trust the same key again under a different FQN. The Hub making it easy to find a publisher's other connectors is the moment per-publisher trust becomes the natural shape.
 
-### Per-publisher trust is the v2 direction
+### Per-publisher trust (keyring v2)
 
-The keyring's loader explicitly checks `version: 1` and rejects anything else (`internal/cstore/keyring_config.go`), reserving the version field for a future v2 schema that supports per-publisher entries alongside or instead of per-repo entries.
+Keyring v2 ships per-publisher trust, keyed by GitHub identity, with the Hub providing the enumeration that makes "trust this publisher" mean something concrete. The four decisions that #408 left open (schema shape, migration path, revocation scope, divergence semantics) are now ratified by the shipped code in `internal/cstore` and the `aileron keyring` CLI.
 
-The v2 schema is **not** ratified here. What this ADR commits to is the *direction*: per-publisher trust, keyed by GitHub identity, with the Hub providing the enumeration that makes "trust this publisher" mean something concrete. The exact schema shape (pure per-publisher vs hybrid coexistence with v1 per-repo entries), the migration path, and the revocation scope are tracked in #408 and will be resolved when the install-time UX work in #487 surfaces concrete needs.
+**Schema.** The loader accepts `version: 1` and `version: 2` (`internal/cstore/keyring_config.go`). A v2 document carries two maps. `owners` holds owner-level grants keyed by `<scheme>://<owner>`. `publishers` holds per-repo grants keyed by `<scheme>://<owner>/<repo>`. The shape is hybrid. Owner-level and per-repo grants coexist in the same file, so a user can trust a whole publisher and still pin a single repo. An owner-level grant authorizes every connector that publisher ships under that owner.
+
+**Migration.** A `version: 1` file loads losslessly under the v2 loader. Its per-repo entries read into `publishers` and the `owners` map stays empty, so no existing trust is lost. `SaveKeyring` writes `version: 2`. An unsupported version value is rejected with a validation error. A `version: 1` document that carries an `owners` map is also rejected, because owner-level grants are a v2-only feature.
+
+**Resolution.** Signature verification resolves trust as the union of the owner-level grant and the per-repo grant for a connector's authority (`internal/cstore/verify.go`). There is no per-repo deny override of an owner-level grant. When the union is empty the connector fails closed with a signature failure, so an untrusted owner never verifies.
+
+**Revocation.** Revocation operates at the scope you name. `aileron keyring revoke github://<owner>` drops the owner-level grant. `aileron keyring revoke <full-fqn>` drops a single per-repo grant. `aileron keyring revoke --key <fingerprint>` removes one key wherever it appears across every authority, which retires a rotated or compromised key everywhere at once.
+
+**Divergence.** Key divergence is surfaced, not blocked. When a connector's fetched signing key differs from the owner-level grant already trusted for that publisher, the install-decision payload carries a non-blocking entry in its `risk_indicators` array and sets `trust_state` to `conflict`. The indicator informs the user and never flips the decision to blocked on its own. `trust_state` and `publisher_footprint` are evaluated at owner granularity.
 
 The closest prior art is `packages.microsoft.com`: one publisher, one key, many products, central discovery. The Hub plays the role of the central discovery surface; the publisher's GitHub identity plays the role of the trust anchor.
 
@@ -124,7 +132,7 @@ Rejected for v0.x. Hub-as-registry creates hosting and abuse-moderation responsi
 
 The keyring stores per-publisher (owner-level, not per-repo) entries from day one. `aileron keyring trust github://owner` covers any repo under that owner.
 
-Rejected for v0.x. With one connector per publisher today, per-publisher trust without Hub-driven enumeration means the user trusts a key for a publisher they cannot enumerate. The Microsoft model needs a discovery layer to be coherent. Per-repo trust is the right answer until the Hub is real and a publisher ships a second connector.
+Rejected for v0.x. With one connector per publisher today, per-publisher trust without Hub-driven enumeration means the user trusts a key for a publisher they cannot enumerate. The Microsoft model needs a discovery layer to be coherent. Per-repo trust was the right answer until the Hub was real and a publisher shipped a second connector. Keyring v2 has since shipped owner-level trust now that those conditions hold, as ratified in "Per-publisher trust (keyring v2)".
 
 ### Aileron-vetted Hub — rejected
 
@@ -158,7 +166,7 @@ The Hub-related portions of [ADR-0002](/adr/0002-connector-model) are superseded
 
 ### For the keyring
 
-`internal/cstore/keyring_config.go` reserves `version: 2` as the migration target. v0.x ships per-repo trust at v1. Per-publisher v2 ships when #408 settles the schema shape.
+`internal/cstore/keyring_config.go` loads both `version: 1` and `version: 2`. Keyring v2 ships per-publisher trust as owner-level grants in the `owners` map alongside per-repo grants in `publishers`. A v1 file loads losslessly, so upgrading the keyring loses no trust.
 
 The install-time prompt becomes the moderation moment. With no Aileron vetting, the user's decision at first-install is the only trust gate. The prompt design is in #487.
 
