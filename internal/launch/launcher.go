@@ -185,15 +185,18 @@ func siblingCandidates(name, suffix string) []string {
 // fallback and already applies %PATHEXT% on Windows, so it needs no
 // extra handling.
 func resolveSibling(selfPath, name string) (string, error) {
+	// Absolutize once so the sibling candidate (and any shim target
+	// resolved relative to it) is absolute without a per-candidate
+	// filepath.Abs guard. A relative selfPath (e.g. os.Args[0]) is
+	// resolved against the cwd here.
+	if abs, err := filepath.Abs(selfPath); err == nil {
+		selfPath = abs
+	}
 	dir := filepath.Dir(selfPath)
 	for _, c := range siblingCandidates(name, exeSuffix()) {
 		candidate := filepath.Join(dir, c)
 		if _, err := os.Stat(candidate); err == nil {
-			abs, err := filepath.Abs(candidate)
-			if err != nil {
-				return "", err
-			}
-			return resolveShimTarget(abs), nil
+			return resolveShimTarget(candidate), nil
 		}
 	}
 	found, err := exec.LookPath(name)
@@ -221,6 +224,10 @@ func resolveSibling(selfPath, name string) (string, error) {
 // unchanged — this is a best-effort unwrap that never makes a working
 // path worse. The lookup is keyed off the sidecar (not GOOS) so a shim
 // layout planted in a test resolves on any host.
+//
+// binPath is expected to be absolute (resolveSibling absolutizes before
+// calling). A relative `path` value in the sidecar is resolved against
+// binPath's directory, so the returned target is absolute too.
 func resolveShimTarget(binPath string) string {
 	shimPath := strings.TrimSuffix(binPath, filepath.Ext(binPath)) + ".shim"
 	data, err := os.ReadFile(shimPath)
@@ -237,11 +244,7 @@ func resolveShimTarget(binPath string) string {
 	if _, err := os.Stat(target); err != nil {
 		return binPath
 	}
-	abs, err := filepath.Abs(target)
-	if err != nil {
-		return binPath
-	}
-	return abs
+	return target
 }
 
 // parseShimPath extracts the real binary path from the contents of a
