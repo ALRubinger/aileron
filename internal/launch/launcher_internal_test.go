@@ -127,6 +127,46 @@ func TestDaemonAPIBaseURLAppendsV1(t *testing.T) {
 	}
 }
 
+// TestHostMCPEnvIncludesTokenWhenAdvertised is the regression test for
+// issue #1406: host-launch aileron-mcp must receive AILERON_TOKEN so its
+// /v1/actions discovery call carries Authorization: Bearer. Without it
+// Codex's MCP server (which only sees the declared config env) 401s and
+// falls back to the built-in tools.
+func TestHostMCPEnvIncludesTokenWhenAdvertised(t *testing.T) {
+	const (
+		daemonURL = "http://127.0.0.1:48123"
+		sessionID = "sess-1406"
+		token     = "tok-abc123"
+	)
+	env := hostMCPEnv(daemonURL, sessionID, token)
+
+	if got := env["AILERON_TOKEN"]; got != token {
+		t.Fatalf("hostMCPEnv AILERON_TOKEN = %q, want %q", got, token)
+	}
+	wantBase := map[string]string{
+		"AILERON_URL":          daemonURL,
+		"AILERON_COMMS_URL":    daemonURL,
+		"AILERON_SESSION_ID":   sessionID,
+		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
+	}
+	for k, want := range wantBase {
+		if got := env[k]; got != want {
+			t.Fatalf("hostMCPEnv[%q] = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestHostMCPEnvOmitsEmptyToken asserts that an unadvertised (empty) token
+// is omitted entirely rather than written as AILERON_TOKEN="". An empty
+// Bearer deterministically 401s, so the key must be absent so aileron-mcp
+// treats it as "no token" rather than "malformed token".
+func TestHostMCPEnvOmitsEmptyToken(t *testing.T) {
+	env := hostMCPEnv("http://127.0.0.1:48123", "sess-1406", "")
+	if _, present := env["AILERON_TOKEN"]; present {
+		t.Fatalf("hostMCPEnv set AILERON_TOKEN with an empty token; want key absent")
+	}
+}
+
 func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	_, err := launchSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: emptyBinaryAgent{},
