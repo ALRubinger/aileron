@@ -77,7 +77,8 @@ export const navigation: NavItem[] = [
       { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' },
       { label: 'Publishing to the Hub', href: '/guides/publishing-to-the-hub/' },
       { label: 'Observability', href: '/guides/observability/' },
-      { label: 'Binding Descriptors', href: '/guides/binding-descriptors/' }
+      { label: 'Binding Descriptors', href: '/guides/binding-descriptors/' },
+      { label: 'Add Your Own CLI Tool to the Sandbox', href: '/guides/customizing-the-sandbox/' }
     ]
   },
   {
