@@ -251,6 +251,69 @@ func TestSaveKeyring_FileMode0600(t *testing.T) {
 	}
 }
 
+func TestSaveKeyring_PartitionsOwnerAndRepoGrantsIntoCorrectBuckets(t *testing.T) {
+	// The v2 file format (ADR-0013) is a contract: owner-level grants
+	// (<scheme>://<owner>) serialize under "owners", per-repo grants
+	// (<scheme>://<owner>/<repo>) under "publishers". HasKey/HasOwnerKey
+	// read the same flattened map and so cannot distinguish the buckets;
+	// this test re-parses the raw saved JSON to guard the partition
+	// directly, which is the only assertion that catches a Save-time
+	// misclassification of an owner authority as a per-repo one.
+	ownerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	repoPub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://acme", ownerPub)
+	kr.Add("github://acme/connector", repoPub)
+
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	if err := kr.SaveKeyring(path); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved keyring: %v", err)
+	}
+	var doc struct {
+		Version    int                 `json:"version"`
+		Owners     map[string][]string `json:"owners"`
+		Publishers map[string][]string `json:"publishers"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse saved keyring: %v", err)
+	}
+
+	if doc.Version != 2 {
+		t.Errorf("saved version = %d, want 2", doc.Version)
+	}
+	if _, ok := doc.Owners["github://acme"]; !ok {
+		t.Errorf("owner grant github://acme not under \"owners\"; owners=%v", doc.Owners)
+	}
+	if _, ok := doc.Publishers["github://acme/connector"]; !ok {
+		t.Errorf("per-repo grant github://acme/connector not under \"publishers\"; publishers=%v", doc.Publishers)
+	}
+	// Cross-check: neither grant leaked into the other bucket.
+	if _, ok := doc.Publishers["github://acme"]; ok {
+		t.Error("owner grant leaked into \"publishers\"")
+	}
+	if _, ok := doc.Owners["github://acme/connector"]; ok {
+		t.Error("per-repo grant leaked into \"owners\"")
+	}
+
+	// And the partition survives a reload at the resolution layer.
+	loaded, err := cstore.LoadKeyring(path)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !loaded.HasOwnerKey("github://acme", ownerPub) {
+		t.Error("owner-level grant not resolvable after round-trip")
+	}
+	if !loaded.HasKey("github://acme/connector", repoPub) {
+		t.Error("per-repo grant not resolvable after round-trip")
+	}
+}
+
 // --- Authorities / Keys / Remove / HasKey ---
 
 func TestKeyringAuthorities_SortedAndDeduplicated(t *testing.T) {
