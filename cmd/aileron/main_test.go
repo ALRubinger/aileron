@@ -892,8 +892,7 @@ func TestRunSandboxPlanSurfacesParseError(t *testing.T) {
 }
 
 func TestRunStatus_All(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 	oldWd, _ := os.Getwd()
 	os.Chdir(dir)
 	defer os.Chdir(oldWd)
@@ -916,8 +915,7 @@ func TestRunStatus_All(t *testing.T) {
 }
 
 func TestRunStatus_Notifications(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 	configDir := filepath.Join(dir, ".aileron")
 	os.MkdirAll(configDir, 0o755)
 	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
@@ -947,8 +945,7 @@ notifications:
 }
 
 func TestRunStatus_Vault(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHome(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"status", "vault"}, newTestRegistry(), &stdout, &stderr)
@@ -962,8 +959,7 @@ func TestRunStatus_Vault(t *testing.T) {
 }
 
 func TestRunStatus_VaultWithSecrets(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
 	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
@@ -1085,8 +1081,7 @@ func TestRunStatus_RuntimeReachable(t *testing.T) {
 // existing sections. Operators reach for `aileron status` first; the
 // daemon snapshot must be there without an extra subcommand.
 func TestRunStatus_RuntimeIncludedInDefault(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 	oldWd, _ := os.Getwd()
 	os.Chdir(dir)
 	defer os.Chdir(oldWd)
@@ -1145,8 +1140,7 @@ func TestRunSecret_SetNoName(t *testing.T) {
 }
 
 func TestRunSecret_ListEmpty(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHome(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
@@ -1162,8 +1156,7 @@ func TestRunSecret_ListEmpty(t *testing.T) {
 }
 
 func TestRunSecret_ListWithSecrets(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 
 	// Pre-populate the vault file directly (skip encryption for test).
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
@@ -1188,8 +1181,7 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 // not the human-targeted prose. Lets scripts detect "nothing here yet"
 // without grepping for "No secrets stored".
 func TestRunSecret_ListJSON_Empty(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHome(t)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"secret", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
@@ -1204,8 +1196,7 @@ func TestRunSecret_ListJSON_Empty(t *testing.T) {
 // TestRunSecret_ListJSON_NDJSON: --json with secrets emits one
 // JSON-encoded name per line.
 func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
@@ -1728,7 +1719,7 @@ func TestBindingAPIBaseURL_OverrideTrimsTrailingSlash(t *testing.T) {
 }
 
 func TestDaemonAuthTokenPrefersEnvironment(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	t.Setenv("AILERON_TOKEN", "tok_env")
 	if got := daemonAuthToken(); got != "tok_env" {
 		t.Fatalf("daemonAuthToken = %q, want tok_env", got)
@@ -1736,8 +1727,8 @@ func TestDaemonAuthTokenPrefersEnvironment(t *testing.T) {
 }
 
 func TestDaemonAuthTokenReadsDiscovery(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	home := setTestHome(t)
+	stateDir := filepath.Join(home, ".aileron")
 	if err := discovery.Write(stateDir, discovery.Info{
 		URL:   "http://127.0.0.1:8721",
 		Token: "tok_file",
@@ -1750,7 +1741,7 @@ func TestDaemonAuthTokenReadsDiscovery(t *testing.T) {
 }
 
 func TestSetDaemonAuthorization(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	t.Setenv("AILERON_TOKEN", "tok_req")
 	req := httptest.NewRequest(http.MethodGet, "http://daemon.test/v1/status", nil)
 

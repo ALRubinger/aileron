@@ -47,8 +47,7 @@ func scriptPrompt(answers ...string) func() {
 
 func vaultInitTempHome(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 	t.Setenv(envVaultPassphrase, "")
 	return filepath.Join(dir, ".aileron", "secrets.json")
 }

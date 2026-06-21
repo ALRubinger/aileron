@@ -70,8 +70,7 @@ func withVaultStateSeams(t *testing.T, fakes vaultStateFakes) {
 // in. Returns the temp HOME dir.
 func scopeHomeAndAPIURL(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	dir := setTestHome(t)
 	t.Setenv("AILERON_API_URL", "")
 	t.Setenv(envVaultPassphrase, "")
 	return dir
