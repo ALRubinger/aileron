@@ -684,3 +684,82 @@ func TestResolve_TimeoutWithoutLogStillReturnsTimeoutError(t *testing.T) {
 		t.Errorf("error %q should mention timeout", err.Error())
 	}
 }
+
+// TestResolve_DefaultTimeout_ToleratesSlowColdStart is the regression
+// for #1404: a cold `aileron launch` on Windows reported "daemon did
+// not become ready within 5s" because the unset SpawnTimeout defaulted
+// to 5s, which is shorter than a Windows cold start (slower process
+// creation plus a first-run Defender scan of the freshly built daemon
+// binary). The daemon was coming up fine; the poll window was just too
+// short, so a retry — hitting the now-published daemon.json — succeeded.
+//
+// Contract: with SpawnTimeout left unset, Resolve must keep polling
+// past the old 5s window for a daemon that is still on its way up. The
+// daemon here publishes daemon.json after 5.5s; the pre-fix 5s default
+// would have timed out before that, the 30s default resolves cleanly.
+//
+// Tagged slow via a guard so `go test -short` skips the multi-second
+// wait; the full suite (and CI) still exercises it.
+func TestResolve_DefaultTimeout_ToleratesSlowColdStart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skips the multi-second cold-start wait in -short mode")
+	}
+	dir := t.TempDir()
+
+	got, err := spawn.Resolve(context.Background(), spawn.Options{
+		StateDir:     dir,
+		EnvLookup:    emptyEnv,
+		PollInterval: 25 * time.Millisecond,
+		// SpawnTimeout deliberately unset — exercises the default.
+		SpawnFn: func(_ context.Context, stateDir string) (<-chan error, error) {
+			// Publish daemon.json only after the old 5s default would
+			// have already fired, simulating a slow Windows cold start.
+			go func() {
+				time.Sleep(5500 * time.Millisecond)
+				_, _ = fakeDaemon(t, stateDir)
+			}()
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve with default timeout should tolerate a slow cold start, got: %v", err)
+	}
+	if got == "" {
+		t.Fatal("got empty URL")
+	}
+}
+
+// TestResolve_DefaultTimeout_StillFailsFastOnDeadDaemon guards the
+// other half of the #1404 fix: lengthening the default poll window must
+// not make a genuinely dead daemon hang. A daemon that exits before
+// publishing daemon.json is detected immediately via the SpawnFn
+// `exited` channel, so Resolve returns its early-exit error well before
+// the (now 30s) default SpawnTimeout — not after it.
+func TestResolve_DefaultTimeout_StillFailsFastOnDeadDaemon(t *testing.T) {
+	dir := t.TempDir()
+
+	exited := make(chan error, 1)
+	exited <- errors.New("exit status 1")
+
+	start := time.Now()
+	_, err := spawn.Resolve(context.Background(), spawn.Options{
+		StateDir:     dir,
+		EnvLookup:    emptyEnv,
+		PollInterval: 25 * time.Millisecond,
+		// SpawnTimeout unset — the long default must not govern this path.
+		SpawnFn: func(context.Context, string) (<-chan error, error) {
+			return exited, nil
+		},
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected early-exit error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exited before becoming ready") {
+		t.Errorf("error %q should mention early exit", err.Error())
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("Resolve took %s; a dead daemon must fail fast via the exited channel, not wait the default SpawnTimeout", elapsed)
+	}
+}

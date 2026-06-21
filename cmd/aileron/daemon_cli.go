@@ -55,7 +55,7 @@ func runDaemonStart(_ []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "Hint: run 'task build:server' to build it next to the aileron binary.")
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), spawn.ResolveContextBudget)
 	defer cancel()
 	url, err := spawnResolveFn(ctx, spawn.Options{
 		StateDir: stateDir,

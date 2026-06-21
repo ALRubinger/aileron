@@ -616,7 +616,7 @@ func spawnResolveOnce() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locate daemon binary: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), spawn.ResolveContextBudget)
 	defer cancel()
 	raw, err := spawnResolveFn(ctx, spawn.Options{
 		StateDir: stateDir,
