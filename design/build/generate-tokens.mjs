@@ -166,7 +166,7 @@ for (const [name, node] of entries(tokens.pattern)) {
 }
 
 // effect (composite filter / decoration values)
-for (const [name, node] of entries(tokens.effect)) {
+for (const [name, node] of entries(tokens.effect ?? {})) {
 	rootVars.push([`effect-${name}`, tokenValue(node)]);
 }
 

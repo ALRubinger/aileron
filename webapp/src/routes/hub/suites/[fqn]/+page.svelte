@@ -51,7 +51,7 @@
 	<p class="text-destructive" data-testid="hub-detail-error">{error}</p>
 {:else if entry}
 	<h1 class="mb-2 font-mono text-2xl font-bold break-all">{entry.fqn}</h1>
-	<p class="ink-bleed mb-6 text-base text-muted-foreground">
+	<p class="mb-6 text-base text-muted-foreground">
 		{entry.description}
 	</p>
 

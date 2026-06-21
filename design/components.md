@@ -27,16 +27,16 @@ The catalog reflects what exists in the docs site today. The webapp's component 
 
 **Status**: implemented (docs)
 
-**Purpose**: White card surface with `--shadow-low` lift and `ink-bleed` text effect that wraps each `h2` and its following content in the docs prose. The card chrome is generated at build time, not authored in markdown.
+**Purpose**: White card surface with `--shadow-low` lift that wraps each `h2` and its following content in the docs prose. The card chrome is generated at build time, not authored in markdown.
 
 **Where it lives**:
 - Generator: `docs/src/lib/rehype-section-wrapper.mjs`
 - CSS: `docs/src/styles/global.css` → `.prose-section`
 - Authors do not touch this — they write flat MDX.
 
-**Markup emitted**: `<section class="prose-section ink-bleed">…</section>`
+**Markup emitted**: `<section class="prose-section">…</section>`
 
-**Tokens consumed**: `color.mode.light.card`, `color.mode.light.card-foreground`, `radius.lg`, `elevation.low`, `effect.ink-bleed`, `spacing.rhythm.card-padding`
+**Tokens consumed**: `color.mode.light.card`, `color.mode.light.card-foreground`, `radius.lg`, `elevation.low`, `spacing.rhythm.card-padding`
 
 **Authoring controls**:
 - `<SectionBreak />` — closes the current section. Content after this until the next `h2` renders unwrapped on the textured page bg.
@@ -199,22 +199,6 @@ Each candidate gets a full entry above when it ships.
 ---
 
 ## Effects and utilities
-
-### `ink-bleed`
-
-**Status**: implemented (docs)
-
-**Purpose**: Subtle drop-shadow halo on text glyphs, giving prose a tactile, paper-like quality. See `DESIGN.md` → "Ink-bleed" for the full principle.
-
-**Class**: `.ink-bleed` (plain CSS class, defined outside `@layer` in `docs/src/styles/global.css`)
-
-**Token**: `effect.ink-bleed` (the composite filter value)
-
-**Usage**:
-- Direct on a text element: `<p class="ink-bleed">…</p>`
-- On a container: applies to descendant text elements via `.ink-bleed :is(h2, h3, h4, h5, h6, p, li, blockquote)`
-
-**Auto-applied to**: every `<section class="prose-section">` produced by the rehype-section-wrapper plugin.
 
 ### `github-icon-shake`
 

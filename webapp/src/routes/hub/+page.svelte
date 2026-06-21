@@ -132,7 +132,7 @@
 </svelte:head>
 
 <h1 class="mb-4 text-3xl font-extrabold tracking-tight">Hub</h1>
-<p class="ink-bleed mb-4 text-sm text-muted-foreground">
+<p class="mb-4 text-sm text-muted-foreground">
 	Browse community-published suites, actions, and providers. The daemon
 	writes publisher trust to your keyring per repo on confirm. Default
 	view leads with intent — start at Suites if you're shopping for a

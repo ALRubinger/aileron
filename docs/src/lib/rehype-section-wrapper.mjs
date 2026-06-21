@@ -30,7 +30,7 @@ export default function rehypeSectionWrapper() {
 		const newSection = (children) => ({
 			type: 'element',
 			tagName: 'section',
-			properties: { className: ['prose-section', 'ink-bleed'] },
+			properties: { className: ['prose-section'] },
 			children,
 		});
 
