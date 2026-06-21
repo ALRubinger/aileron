@@ -90,6 +90,7 @@ type apiServer struct {
 	sessions             sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
 	webappURL            string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
 	localDaemonToken     string                        // local-daemon bearer token; empty disables local bearer auth
+	caveatIssuer         *auth.CaveatIssuer            // mints/validates session-scoped caveat tokens (ADR-0024, #958); nil disables caveat auth
 	actionApprovalTTL    time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings             binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
 	hostBindings         binding.HostBindings          // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/sessions"
 )
 
@@ -42,7 +43,29 @@ func (s *apiServer) CreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_put_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPISession(sess))
+
+	resp := api.CreateSessionResponse{
+		Id:         sess.ID,
+		StartedAt:  sess.StartedAt,
+		EndedAt:    sess.EndedAt,
+		Agent:      sess.Agent,
+		WorkingDir: sess.WorkingDir,
+		ExitCode:   sess.ExitCode,
+	}
+	// Mint a session-scoped caveat token (ADR-0024, #958) so the
+	// in-container aileron-mcp reaches the daemon with only the
+	// capabilities it needs, bound to this session — never the master
+	// token. The issuer is nil on an unprotected daemon (no bearer
+	// required), in which case caveat_token is omitted.
+	if s.caveatIssuer != nil {
+		caveat, err := s.caveatIssuer.Issue(sess.ID, auth.SandboxMCPCaps)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "caveat_mint_failed", err.Error())
+			return
+		}
+		resp.CaveatToken = &caveat
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // EndSession marks a session ended. Called by `aileron launch` on

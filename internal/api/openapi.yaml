@@ -1174,7 +1174,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Session"
+                $ref: "#/components/schemas/CreateSessionResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "503":
@@ -8162,6 +8162,31 @@ components:
           type: string
         working_dir:
           type: string
+
+    CreateSessionResponse:
+      type: object
+      required: [id, started_at, agent, working_dir]
+      description: |
+        Response to `POST /v1/sessions`. Carries the full Session record
+        plus a session-scoped caveat token (ADR-0024). `aileron launch`
+        injects `caveat_token` into the sandbox container as
+        `AILERON_TOKEN`, so the in-container `aileron-mcp` reaches the
+        daemon with only the capabilities it needs (list/run actions,
+        poll approvals, session comms) bound to this session id — never
+        the full-authority master token. The token is returned only here,
+        at session establishment; it is not stored on or echoed by any
+        later Session read.
+      allOf:
+        - $ref: "#/components/schemas/Session"
+        - type: object
+          properties:
+            caveat_token:
+              type: string
+              description: |
+                Session-scoped, HMAC-signed bearer token for the
+                daemon's `/v1/*` surface. Present when the daemon
+                protects its local surface (loopback bind); absent on
+                an unprotected daemon, where no bearer is required.
 
     EndSessionRequest:
       type: object

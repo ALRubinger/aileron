@@ -2,12 +2,16 @@ package launch_test
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/launch"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -412,6 +416,92 @@ func TestLaunch_SandboxProxyDefaultOnForDocker(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("run call missing %q:\n%s", want, args)
 		}
+	}
+}
+
+// TestLaunch_SandboxInjectsCaveatTokenNotMaster covers ADR-0024 / #958:
+// the credential the in-container aileron-mcp carries (AILERON_TOKEN)
+// must be the session-scoped caveat token returned by POST /v1/sessions,
+// NOT the full-authority master daemon token. The master token stays
+// host-side and is used only for the forward-proxy basic-auth credential
+// (the proxy URL), which the daemon validates directly outside the
+// caveat-aware /v1/* middleware.
+func TestLaunch_SandboxInjectsCaveatTokenNotMaster(t *testing.T) {
+	const (
+		masterToken = "master-daemon-token"
+		caveatToken = "caveat.session.jwt"
+	)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_TOKEN", masterToken)
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	// Fake daemon that returns a caveat token from session registration.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":           "01HK0000000000000000000FAK",
+				"started_at":   time.Now().UTC(),
+				"agent":        "test",
+				"working_dir":  "/test",
+				"caveat_token": caveatToken,
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/sessions/") && strings.HasSuffix(r.URL.Path, "/end"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "01HK0000000000000000000FAK"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/vault/local/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{"locked": false, "state": "unlocked"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL)
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	}); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(data)
+
+	// AILERON_TOKEN in the container is the caveat token.
+	if !strings.Contains(args, "--env\nAILERON_TOKEN="+caveatToken+"\n") {
+		t.Errorf("container AILERON_TOKEN is not the caveat token:\n%s", args)
+	}
+	// The master token must NOT be injected as AILERON_TOKEN.
+	if strings.Contains(args, "--env\nAILERON_TOKEN="+masterToken+"\n") {
+		t.Errorf("master token leaked into the container as AILERON_TOKEN:\n%s", args)
+	}
+	// The forward-proxy URL still carries the master token (validated by
+	// the daemon outside the caveat-aware middleware).
+	if !strings.Contains(args, "01HK0000000000000000000FAK:"+masterToken+"@host.docker.internal:") {
+		t.Errorf("proxy URL should still carry the master token:\n%s", args)
 	}
 }
 

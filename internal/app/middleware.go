@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ALRubinger/aileron/internal/auth"
 )
 
 type contextKey int
@@ -118,11 +120,29 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 const localDaemonTokenCookie = "aileron_daemon_token"
 
+// newCaveatIssuer builds a [auth.CaveatIssuer] over the per-daemon
+// signing key, or returns nil when no key is configured (caveat tokens
+// disabled — only the master token is accepted). The issuer string
+// matches the master-token model: there is exactly one local daemon.
+func newCaveatIssuer(signingKey []byte) *auth.CaveatIssuer {
+	if len(signingKey) == 0 {
+		return nil
+	}
+	return auth.NewCaveatIssuer(signingKey, "aileron-daemon")
+}
+
 // localDaemonAuthMiddleware protects the local daemon's /v1/* surface
 // with the token advertised in daemon.json. CLI/shim clients send it as
 // Authorization: Bearer <token>; the same-origin webapp gets a cookie
 // through /v1/auth/handshake so browser EventSource can authenticate.
-func localDaemonAuthMiddleware(token string, next http.Handler) http.Handler {
+//
+// A bearer equal to the master token grants full, unscoped access (host
+// CLI + webapp path, unchanged). Otherwise the middleware attempts to
+// validate the bearer as a session caveat token (ADR-0024, #958): on
+// success it enforces a route->capability map and the token's session
+// binding, so the in-container aileron-mcp reaches only the minimal
+// surface it needs. Anything else is 401.
+func localDaemonAuthMiddleware(token string, caveats *auth.CaveatIssuer, next http.Handler) http.Handler {
 	if token == "" {
 		return next
 	}
@@ -137,12 +157,91 @@ func localDaemonAuthMiddleware(token string, next http.Handler) http.Handler {
 				got = c.Value
 			}
 		}
-		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid daemon token")
+		// Master token: full unscoped access (host CLI + webapp cookie).
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		// Otherwise: try the bearer as a session caveat token.
+		if caveats != nil && got != "" {
+			if claims, err := caveats.Validate(got); err == nil {
+				if status, code, msg := authorizeCaveat(claims, r.Method, r.URL.Path); status != http.StatusOK {
+					writeError(w, status, code, msg)
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid daemon token")
 	})
+}
+
+// authorizeCaveat enforces the caveat token's route->capability map and
+// session binding for the given request. It returns http.StatusOK with
+// empty code/msg when the request is permitted; otherwise the HTTP
+// status, error code, and message to return.
+//
+// Route map (ADR-0024, #958):
+//   - GET  /v1/actions, GET /v1/actions/{name}      -> actions:list
+//   - POST /v1/actions/{name}/run                   -> actions:run
+//   - GET  /v1/action-approvals/{id}/result         -> approvals:poll
+//   - any  /v1/sessions/{id}/comms/*                 -> comms (and the
+//     path's {id} must equal the token's bound session)
+//
+// A path the caveat vocabulary does not cover is 403: the caveat token
+// is scoped strictly below the master token and may not reach it.
+func authorizeCaveat(claims *auth.CaveatClaims, method, path string) (status int, code, msg string) {
+	const forbidden = http.StatusForbidden
+
+	// Session comms: /v1/sessions/{session_id}/comms/...
+	if rest, ok := strings.CutPrefix(path, "/v1/sessions/"); ok {
+		segs := strings.SplitN(rest, "/", 2)
+		if len(segs) == 2 && strings.HasPrefix(segs[1], "comms/") {
+			sessionID := segs[0]
+			if !claims.HasCap(auth.CapComms) {
+				return forbidden, "forbidden", "caveat token lacks the comms capability"
+			}
+			// Defense in depth: reject another session's comms path.
+			if sessionID != claims.Session {
+				return forbidden, "forbidden", "caveat token is bound to a different session"
+			}
+			return http.StatusOK, "", ""
+		}
+		// Other /v1/sessions/* paths are not in the caveat vocabulary.
+		return forbidden, "forbidden", "caveat token does not authorize this route"
+	}
+
+	// Action-approval result poll: GET /v1/action-approvals/{id}/result
+	if method == http.MethodGet &&
+		strings.HasPrefix(path, "/v1/action-approvals/") &&
+		strings.HasSuffix(path, "/result") {
+		if !claims.HasCap(auth.CapApprovalsPoll) {
+			return forbidden, "forbidden", "caveat token lacks the approvals:poll capability"
+		}
+		return http.StatusOK, "", ""
+	}
+
+	// Action run: POST /v1/actions/{name}/run
+	if method == http.MethodPost &&
+		strings.HasPrefix(path, "/v1/actions/") &&
+		strings.HasSuffix(path, "/run") {
+		if !claims.HasCap(auth.CapActionsRun) {
+			return forbidden, "forbidden", "caveat token lacks the actions:run capability"
+		}
+		return http.StatusOK, "", ""
+	}
+
+	// Action list/detail: GET /v1/actions, GET /v1/actions/{name}
+	if method == http.MethodGet &&
+		(path == "/v1/actions" || strings.HasPrefix(path, "/v1/actions/")) {
+		if !claims.HasCap(auth.CapActionsList) {
+			return forbidden, "forbidden", "caveat token lacks the actions:list capability"
+		}
+		return http.StatusOK, "", ""
+	}
+
+	return forbidden, "forbidden", "caveat token does not authorize this route"
 }
 
 func localDaemonAuthSkip(path string) bool {

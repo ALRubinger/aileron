@@ -69,41 +69,53 @@ func newDaemonClient(baseURL string, token ...string) *daemonClient {
 	}
 }
 
+// registeredSession is the result of RegisterSession: the daemon-minted
+// session id and, when the daemon protects its local surface, the
+// session-scoped caveat token (ADR-0024, #958) the launcher injects into
+// the sandbox container as AILERON_TOKEN. CaveatToken is empty on an
+// unprotected daemon, where no bearer is required.
+type registeredSession struct {
+	ID          string
+	CaveatToken string
+}
+
 // RegisterSession POSTs /v1/sessions with the agent name and working
-// directory. The daemon mints a ULID, stamps StartedAt, and returns
-// the session record; we hand the ID back to the caller.
-func (c *daemonClient) RegisterSession(ctx context.Context, agent, workingDir string) (string, error) {
+// directory. The daemon mints a ULID, stamps StartedAt, and returns the
+// session record plus a session-scoped caveat token; we hand both back
+// to the caller.
+func (c *daemonClient) RegisterSession(ctx context.Context, agent, workingDir string) (registeredSession, error) {
 	body, err := json.Marshal(map[string]string{
 		"agent":       agent,
 		"working_dir": workingDir,
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal create-session request: %w", err)
+		return registeredSession{}, fmt.Errorf("marshal create-session request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/sessions", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return registeredSession{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	c.authorize(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("post /v1/sessions: %w", err)
+		return registeredSession{}, fmt.Errorf("post /v1/sessions: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", httpStatusError(resp, "POST /v1/sessions")
+		return registeredSession{}, httpStatusError(resp, "POST /v1/sessions")
 	}
 	var sess struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		CaveatToken string `json:"caveat_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
-		return "", fmt.Errorf("decode create-session response: %w", err)
+		return registeredSession{}, fmt.Errorf("decode create-session response: %w", err)
 	}
 	if sess.ID == "" {
-		return "", fmt.Errorf("daemon returned empty session id")
+		return registeredSession{}, fmt.Errorf("daemon returned empty session id")
 	}
-	return sess.ID, nil
+	return registeredSession{ID: sess.ID, CaveatToken: sess.CaveatToken}, nil
 }
 
 // EndSession POSTs /v1/sessions/{id}/end with the agent's exit code.

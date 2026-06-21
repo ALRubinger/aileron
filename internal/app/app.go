@@ -86,6 +86,15 @@ type Config struct {
 	// GET /v1/auth/handshake so EventSource can authenticate too.
 	LocalDaemonToken string
 
+	// CaveatSigningKey is the per-daemon HMAC key used to mint and
+	// validate session-scoped caveat tokens (ADR-0024, #958). Generated
+	// randomly at startup alongside LocalDaemonToken and never persisted.
+	// When set, CreateSession returns a caveat token bound to the new
+	// session, and localDaemonAuthMiddleware accepts that token for the
+	// minimal route set the sandbox aileron-mcp needs. Empty disables
+	// caveat minting/validation; only the master token is then accepted.
+	CaveatSigningKey []byte
+
 	// Notifier overrides the default notification dispatcher (log +
 	// terminal multi). Production wiring leaves this nil; tests inject
 	// a recorder to observe the action-approval notification payload
@@ -448,6 +457,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		openAIProxy:          openAIProxy,
 		anthropicProxy:       anthropicProxy,
 		localDaemonToken:     cfg.LocalDaemonToken,
+		caveatIssuer:         newCaveatIssuer(cfg.CaveatSigningKey),
 		sandboxProxyStateDir: cfg.SandboxProxyStateDir,
 		newID:                idGen,
 		actions:              action.NewStore(action.DefaultDir()),
@@ -729,7 +739,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 
 	// Middleware chain: CORS -> request ID -> logging -> [auth] -> routes.
 	var handler http.Handler = mux
-	handler = localDaemonAuthMiddleware(cfg.LocalDaemonToken, handler)
+	handler = localDaemonAuthMiddleware(cfg.LocalDaemonToken, newCaveatIssuer(cfg.CaveatSigningKey), handler)
 
 	if authCfg.AuthEnabled() {
 		db, err := postgres.NewDB(ctx, authCfg.DatabaseURL)
