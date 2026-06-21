@@ -189,10 +189,79 @@ func resolveSibling(selfPath, name string) (string, error) {
 	for _, c := range siblingCandidates(name, exeSuffix()) {
 		candidate := filepath.Join(dir, c)
 		if _, err := os.Stat(candidate); err == nil {
-			return filepath.Abs(candidate)
+			abs, err := filepath.Abs(candidate)
+			if err != nil {
+				return "", err
+			}
+			return resolveShimTarget(abs), nil
 		}
 	}
-	return exec.LookPath(name)
+	found, err := exec.LookPath(name)
+	if err != nil {
+		return "", err
+	}
+	return resolveShimTarget(found), nil
+}
+
+// resolveShimTarget unwraps a Scoop shim to the real binary it launches.
+//
+// On a Scoop install (Windows), `aileron-mcp.exe` on PATH / next to
+// `aileron.exe` is not the real binary but a ~133 KB kiennq launcher
+// stub. Scoop records the real target in a co-located `<name>.shim`
+// sidecar as `path = "...\apps\aileron\current\aileron-mcp.exe"`. The
+// stub re-execs that target and works fine standalone, but an agent that
+// spawns the command under a Windows sandbox (e.g. Codex with
+// `[windows] sandbox = "elevated"`) fails to launch the stub with
+// `OS error 2` (issue #1405). Writing the real target into the agent's
+// MCP config instead of the shim path avoids the indirection so the MCP
+// server starts on first launch.
+//
+// When no sidecar is present, or it cannot be read/parsed, or the target
+// it names does not exist on disk, the original path is returned
+// unchanged — this is a best-effort unwrap that never makes a working
+// path worse. The lookup is keyed off the sidecar (not GOOS) so a shim
+// layout planted in a test resolves on any host.
+func resolveShimTarget(binPath string) string {
+	shimPath := strings.TrimSuffix(binPath, filepath.Ext(binPath)) + ".shim"
+	data, err := os.ReadFile(shimPath)
+	if err != nil {
+		return binPath
+	}
+	target := parseShimPath(string(data))
+	if target == "" {
+		return binPath
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(binPath), target)
+	}
+	if _, err := os.Stat(target); err != nil {
+		return binPath
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return binPath
+	}
+	return abs
+}
+
+// parseShimPath extracts the real binary path from the contents of a
+// Scoop `.shim` sidecar, whose body is an INI-like list of `key = value`
+// lines. It returns the value of the first `path` key (surrounding
+// double quotes stripped), or "" when no `path` key is present.
+func parseShimPath(contents string) string {
+	for _, line := range strings.Split(contents, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(key) != "path" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"`)
+		return value
+	}
+	return ""
 }
 
 // resolveMCPBinary locates aileron-mcp. The MCP server is a required
