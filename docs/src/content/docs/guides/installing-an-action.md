@@ -161,6 +161,7 @@ There are no `aileron action list` / `show` / `remove` subcommands in v1. To rem
 
 ## Companion reading
 
+- [The Keyring](/concepts/the-keyring/) — the canonical model for the publisher trust prompt and owner-level grants this guide's install flow exercises.
 - [Authoring an Action](/guides/authoring-an-action/) — write the templates this guide installs.
 - [Authoring an Action Suite](/guides/authoring-an-action-suite/) — author the bundles `add-suite` consumes.
 - [Installing a Connector](/guides/installing-a-connector/) — for connectors you want to install standalone, before any action references them.
