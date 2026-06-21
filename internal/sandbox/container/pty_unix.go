@@ -21,6 +21,20 @@ import (
 // sentinel, never a launch failure.
 var errRunPTYUnsupported = errors.New("container: no host PTY to own")
 
+// Seams for the PTY/terminal syscalls runRuntimeChildPTY depends on. They
+// are package-level vars (not direct calls) so unit tests can drive the
+// full session and each failure path deterministically on a headless CI
+// runner that has no real controlling terminal — where term.MakeRaw would
+// otherwise fail and leave the post-raw-mode body uncovered. Production
+// behavior is unchanged: each var holds the real function.
+var (
+	ptyOpen        = pty.Open
+	ptyInheritSize = pty.InheritSize
+	termIsTerminal = term.IsTerminal
+	termMakeRaw    = term.MakeRaw
+	termRestore    = term.Restore
+)
+
 // runRuntimeChildPTY runs the runtime child (`docker run -t` / `exec -t`)
 // with aileron owning the PTY (ADR-0025, issue #1029).
 //
@@ -61,7 +75,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	// pair of handles also keeps the whole session consistent.
 	stdin, stdout := os.Stdin, os.Stdout
 	hostIn := int(stdin.Fd())
-	if !term.IsTerminal(hostIn) {
+	if !termIsTerminal(hostIn) {
 		return errRunPTYUnsupported
 	}
 
@@ -70,7 +84,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	// terminal (fd exhaustion, /dev/pts unavailable) is a hard error: the
 	// caller asked for an interactive raw-TTY session aileron cannot
 	// provide, so surface it rather than silently degrading.
-	ptmx, tty, err := pty.Open()
+	ptmx, tty, err := ptyOpen()
 	if err != nil {
 		return fmt.Errorf("allocate sandbox PTY: %w", err)
 	}
@@ -87,7 +101,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 
 	// Match the PTY to the host terminal's current size, then keep them in
 	// sync on SIGWINCH so the in-container agent re-renders on resize.
-	if err := pty.InheritSize(stdin, ptmx); err != nil {
+	if err := ptyInheritSize(stdin, ptmx); err != nil {
 		// A failed initial sizing is non-fatal: the session still runs at
 		// the PTY default size. Fall through rather than aborting launch.
 		_ = err
@@ -97,7 +111,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	defer signal.Stop(winch)
 	go func() {
 		for range winch {
-			_ = pty.InheritSize(stdin, ptmx)
+			_ = ptyInheritSize(stdin, ptmx)
 		}
 	}()
 
@@ -105,7 +119,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 	// in-container agent unmodified; restore on exit. Aileron remains the
 	// foreground process, so the SIGINT/SIGTERM handler installed by the
 	// launcher still owns teardown.
-	oldState, err := term.MakeRaw(hostIn)
+	oldState, err := termMakeRaw(hostIn)
 	if err != nil {
 		// A real terminal that cannot enter raw mode is a hard error, not a
 		// fall-through: returning the plain-stdio sentinel would silently
@@ -113,7 +127,7 @@ func runRuntimeChildPTY(cmd *exec.Cmd) (err error) {
 		return fmt.Errorf("set host terminal raw mode: %w", err)
 	}
 	defer func() {
-		if rerr := term.Restore(hostIn, oldState); rerr != nil && err == nil {
+		if rerr := termRestore(hostIn, oldState); rerr != nil && err == nil {
 			err = rerr
 		}
 	}()
