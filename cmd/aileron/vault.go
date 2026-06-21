@@ -64,7 +64,11 @@ const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/<purpose> --from-file <path>
   aileron vault delete agents/<name>/<purpose> [--yes]
-  aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]
+  aileron vault list [--scope agent|user|all] [--prefix agents/] [--include-control-plane] [--json]
+
+vault list with no --scope prints the union of every namespace in the
+vault (agent, user, connector/binding credentials), each line prefixed
+with its scope. --scope narrows to a single typed namespace.
 
 vault delete takes the fully-qualified agents/<name>/<purpose> path
 (e.g. agents/claude/oauth, agents/claude/apikey), exactly what vault
@@ -321,13 +325,25 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 // mirrors `aileron secret list`: one identifier per line by default, or
 // NDJSON (one entry per line) with --json.
 //
-// The --scope flag selects which namespace(s) to surface:
-//   - agent (default): per-agent credential envelopes at
-//     agents/<name>/<purpose>, one line per (name, purpose). Each
-//     purpose the daemon holds for an agent surfaces as its own entry.
-//   - user: user-level credentials at user/<service> (e.g. the entry
-//     `aileron auth github` stores), keyed by service name.
-//   - all: both, agents first then user.
+// With no --scope (the default) it surfaces the grouped UNION of every
+// locally-owned namespace via the /vault endpoint: agent credentials,
+// user credentials, and capability bindings (which include connector
+// credentials like connectors/<provider>/default and oauth2/<provider>/...
+// bindings). Each entry's full vault path is printed, prefixed in text
+// mode by its `scope:` label so the grouping is legible (#1402). This
+// fixes the old default, which queried only the agents and user typed
+// endpoints and silently hid connector/binding credentials.
+//
+// The two tenant-keyed control-plane namespaces (connected-accounts/ and
+// llm-config/) are excluded from the union by default; --include-control-plane
+// adds them.
+//
+// The --scope flag narrows to a single typed namespace, preserved for
+// back-compat:
+//   - agent: per-agent credential envelopes at agents/<name>/<purpose>,
+//     one line per (name, purpose).
+//   - user: user-level credentials at user/<service>, keyed by service.
+//   - all: agents then user (the historical "both typed endpoints" view).
 //
 // The legacy --prefix flag still restricts to agents/ for backward
 // symmetry; passing --prefix together with a non-agent --scope is a usage
@@ -336,7 +352,8 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("vault list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	prefix := flags.String("prefix", "", "Restrict to a path prefix (only agents/ is supported)")
-	scope := flags.String("scope", "agent", "Which namespace to list: agent, user, or all")
+	scope := flags.String("scope", "", "Narrow to a single namespace: agent, user, or all (default: union of every namespace)")
+	includeControlPlane := flags.Bool("include-control-plane", false, "Also list the control-plane namespaces (connected-accounts/, llm-config/) in the union view")
 	asJSON := flags.Bool("json", false, "Render entries as NDJSON, one entry per line")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -346,9 +363,20 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// No --scope: the grouped union over /vault. The legacy --prefix agents/
+	// is treated as the agent scope for back-compat, so it routes to the
+	// typed agent path below rather than the union.
+	if *scope == "" && *prefix != "agents/" {
+		return runVaultListUnion(*includeControlPlane, *asJSON, stdout, stderr)
+	}
+	if *includeControlPlane {
+		fmt.Fprintln(stderr, "error: --include-control-plane applies only to the default union view, not --scope/--prefix")
+		return 1
+	}
+
 	listAgents, listUser := false, false
 	switch *scope {
-	case "agent":
+	case "", "agent": // "" reaches here only with --prefix agents/
 		listAgents = true
 	case "user":
 		listUser = true
@@ -457,6 +485,70 @@ func vaultListEmptyMessage(scope string) string {
 	default:
 		return "No agent credentials stored."
 	}
+}
+
+// vaultEntry is the local subset of api.VaultEntry the union list verb
+// decodes. Like the agent/user summaries it has no Value field — the
+// daemon never returns credential bytes from any list endpoint (ADR-0011).
+type vaultEntry struct {
+	Path     string                `json:"path"`
+	Scope    string                `json:"scope"`
+	Metadata *vaultSummaryMetadata `json:"metadata,omitempty"`
+}
+
+// runVaultListUnion renders the grouped union of every vault namespace via
+// the GET /vault endpoint. In text mode each entry is one line of
+// `scope:  path` so the namespace grouping is legible; in --json mode each
+// entry is streamed as NDJSON (one object per line) exactly like the typed
+// scopes. includeControlPlane threads through as the
+// `include_control_plane` query parameter.
+func runVaultListUnion(includeControlPlane, asJSON bool, stdout, stderr io.Writer) int {
+	path := "/vault"
+	if includeControlPlane {
+		path += "?include_control_plane=true"
+	}
+	respBody, code := vaultListFetch(path, stderr)
+	if code != 0 {
+		return code
+	}
+	var out struct {
+		Entries []vaultEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		fmt.Fprintf(stderr, "error: decode response: %v\n", err)
+		return 1
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(stdout)
+		for _, e := range out.Entries {
+			if err := enc.Encode(e); err != nil {
+				fmt.Fprintf(stderr, "encode: %v\n", err)
+				return 1
+			}
+		}
+		if len(out.Entries) == 0 {
+			fmt.Fprintln(stdout, "[]")
+		}
+		return 0
+	}
+
+	if len(out.Entries) == 0 {
+		fmt.Fprintln(stdout, "No credentials stored.")
+		return 0
+	}
+	// Width-align the printed "scope:" token (label plus its trailing
+	// colon) so the paths line up in a column.
+	width := 0
+	for _, e := range out.Entries {
+		if w := len(e.Scope) + 1; w > width {
+			width = w
+		}
+	}
+	for _, e := range out.Entries {
+		fmt.Fprintf(stdout, "%-*s  %s\n", width, e.Scope+":", e.Path)
+	}
+	return 0
 }
 
 // vaultListFetch issues a GET against a vault list endpoint and maps the
