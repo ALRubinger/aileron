@@ -751,7 +751,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	if sandboxEnabled {
 		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, containerName, captureOnce, sessionLog, proxyBootstrap.Mounts...)
 	} else {
-		result, runErr = launchHost(ctx, config, daemonURL, sessionID, agentEnv)
+		result, runErr = launchHost(ctx, config, daemonURL, sessionID, daemonToken, agentEnv)
 	}
 
 	// Capture fires on clean container exit (R15) and on the
@@ -872,7 +872,7 @@ func printStartupBanner(w io.Writer, daemonURL, sessionID, logPath string, vault
 	}
 }
 
-func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID string, agentEnv map[string]string) (LaunchResult, error) {
+func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID, daemonToken string, agentEnv map[string]string) (LaunchResult, error) {
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
@@ -887,12 +887,7 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 	}
 
 	allArgs := append(config.Agent.Args(ModeHost), config.Args...)
-	mcpEnv := map[string]string{
-		"AILERON_URL":          daemonURL,
-		"AILERON_COMMS_URL":    daemonURL,
-		"AILERON_SESSION_ID":   sessionID,
-		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
-	}
+	mcpEnv := hostMCPEnv(daemonURL, sessionID, daemonToken)
 	extraArgs, mcpMounts, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir, ModeHost)
 	if mcpErr != nil {
 		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
@@ -1202,6 +1197,36 @@ var sandboxSignalNotify = func(ch chan<- os.Signal, sigs ...os.Signal) {
 
 var sandboxSignalStop = func(ch chan<- os.Signal) {
 	signal.Stop(ch)
+}
+
+// hostMCPEnv builds the env block aileron-mcp reads when it runs as a
+// stdio subprocess of the agent under host launch (ModeHost). It mirrors
+// sandboxMCPEnv: the four daemon-coordinate vars are always present, and
+// AILERON_TOKEN is included only when the daemon advertises one.
+//
+// The token is load-bearing for the /v1/actions discovery call, which the
+// daemon gates behind Authorization: Bearer (only /v1/health,
+// /v1/auth/handshake, and the gateway paths skip auth). Codex spawns its
+// MCP server with only the declared config.toml env block, so without an
+// explicit AILERON_TOKEN here it 401s and silently falls back to the
+// built-in tools (issue #1406). Claude works regardless because Claude
+// Code's MCP child inherits the parent process env, but relying on that is
+// the bug.
+//
+// An empty token is omitted entirely rather than injected as an empty
+// value: an empty Bearer deterministically 401s, so writing the key would
+// only mask the "no token advertised" case as a malformed-token failure.
+func hostMCPEnv(daemonURL, sessionID, daemonToken string) map[string]string {
+	mcpEnv := map[string]string{
+		"AILERON_URL":          daemonURL,
+		"AILERON_COMMS_URL":    daemonURL,
+		"AILERON_SESSION_ID":   sessionID,
+		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
+	}
+	if daemonToken != "" {
+		mcpEnv["AILERON_TOKEN"] = daemonToken
+	}
+	return mcpEnv
 }
 
 // sandboxMCPEnv builds the env block aileron-mcp reads when it runs as
