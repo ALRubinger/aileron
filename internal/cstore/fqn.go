@@ -60,6 +60,17 @@ func (f FQN) Authority() string {
 	return f.Scheme + "://" + f.Owner + "/" + f.Repo
 }
 
+// OwnerAuthority returns the owner-level authority portion of the FQN —
+// the `<scheme>://<owner>` pair, dropping the repo segment that
+// Authority() includes. ADR-0013 owner-level (per-publisher) trust uses
+// this string as the keyring lookup key so a single grant covers every
+// repo a publisher owns. Callers and the keyring's owner/per-repo
+// partitioning derive the owner authority from here rather than
+// string-splitting Authority().
+func (f FQN) OwnerAuthority() string {
+	return f.Scheme + "://" + f.Owner
+}
+
 // fqnSchemes is the closed v1 set per ADR-0004. Adding a remote
 // resolver scheme requires implementing the resolver's four
 // operations (resolve URL, fetch, verify signature, list

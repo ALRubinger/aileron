@@ -62,6 +62,18 @@ func (k *Ed25519Keyring) Add(authority string, pub ed25519.PublicKey) {
 	k.keys[authority] = append(k.keys[authority], pub)
 }
 
+// AddOwner registers a public key as authorized for an owner-level
+// authority (`<scheme>://<owner>`, no repo segment) per ADR-0013
+// per-publisher trust. An owner-level grant and a per-repo grant for the
+// same publisher coexist as independent entries in the same flat key
+// map; this is a thin, discoverability wrapper over Add that documents
+// the owner-level contract for the owner-keyed call sites. Derive the
+// owner authority via FQN.OwnerAuthority(). Multiple keys may be
+// registered for the same owner to support key rotation.
+func (k *Ed25519Keyring) AddOwner(ownerAuthority string, pub ed25519.PublicKey) {
+	k.Add(ownerAuthority, pub)
+}
+
 // Verify implements Verifier.
 func (k *Ed25519Keyring) Verify(authority string, binary, manifest, signature []byte) error {
 	k.mu.RLock()
