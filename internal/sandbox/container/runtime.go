@@ -75,7 +75,6 @@ type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	// Put the runtime child in its own process group so a terminal
@@ -86,25 +85,41 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 	// concurrent runtime-initiated kill. No-op on Windows. See ADR-0025
 	// and issue #999.
 	configureRuntimeChild(cmd, args, stdinIsTerminal())
+
+	// Interactive `run -t`/`exec -t` on a real terminal: aileron owns the
+	// PTY. It allocates a pseudo-terminal, puts the host terminal in raw
+	// mode (restored on exit), and hands the runtime child a PTY slave it
+	// controls — so the in-container agent gets a real raw TTY while
+	// aileron stays in the host terminal's foreground process group as the
+	// SIGINT/SIGTERM teardown owner and the #802 approval-TUI substrate.
+	// runRuntimeChildPTY returns errRunPTYUnsupported when there is no PTY
+	// to own (no terminal stdin, or Windows); callers fall through to the
+	// plain stdio path below. See ADR-0025 and issue #1029.
+	if stdinIsTerminal() && interactiveTTYRun(args) {
+		err := runRuntimeChildPTY(cmd)
+		if !errors.Is(err, errRunPTYUnsupported) {
+			return err
+		}
+	}
+
+	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
 
 // configureRuntimeChild sets the process-group attributes for a runtime
-// child. It always isolates the child into its own process group so a
-// terminal Ctrl-C reaches aileron rather than docker directly
-// (ADR-0025, issue #999). For an interactive container `run -t` on a
-// real terminal it additionally hands the child the controlling
-// terminal's foreground process group — without that the runtime's
-// raw-mode tcsetattr runs from a background group and fails with
-// SIGTTOU/EINTR ("unable to set IO streams as raw terminal: interrupted
-// system call"). The stdinTTY gate keeps non-interactive / CI
-// invocations on the background-isolation path, where promoting a child
-// to foreground without a controlling terminal would fail the exec.
-func configureRuntimeChild(cmd *exec.Cmd, args []string, stdinTTY bool) {
+// child. It isolates the child into its own process group so a terminal
+// Ctrl-C reaches aileron rather than docker directly (ADR-0025, issue
+// #999). Aileron itself stays in the controlling terminal's foreground
+// process group so it owns SIGINT/SIGTERM teardown and is the #802
+// approval-TUI substrate. For an interactive `run -t`/`exec -t` the
+// child no longer needs the terminal's foreground group: aileron
+// allocates a PTY and hands the child a slave it controls (runtime.go
+// PTY path), so the child's raw-mode tcsetattr targets that slave rather
+// than the host terminal. The stdinTTY/args parameters are retained for
+// the foreground-gating contract test and any future runtime that opts
+// back into the foreground handoff. See issue #1029.
+func configureRuntimeChild(cmd *exec.Cmd, _ []string, _ bool) {
 	setRuntimeChildPgid(cmd)
-	if stdinTTY && interactiveTTYRun(args) {
-		setRuntimeChildForeground(cmd)
-	}
 }
 
 // stdinIsTerminal reports whether the process's stdin is a real
