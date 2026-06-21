@@ -55,61 +55,27 @@ func TestExecRunnerRunWithPgidPropagatesExit(t *testing.T) {
 	}
 }
 
-// TestSetRuntimeChildForegroundSetsForeground asserts the helper hands
-// the child the controlling terminal's foreground process group so an
-// interactive `docker run -t` can enter raw mode. Regression for the
-// "unable to set IO streams as raw terminal: interrupted system call"
-// failure introduced when #1014 isolated the runtime child into a
-// background process group.
-func TestSetRuntimeChildForegroundSetsForeground(t *testing.T) {
-	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", ":")
-	setRuntimeChildForeground(cmd)
-	if cmd.SysProcAttr == nil {
-		t.Fatal("SysProcAttr is nil; foreground was not configured")
-	}
-	if !cmd.SysProcAttr.Setpgid {
-		t.Fatal("SysProcAttr.Setpgid = false, want true (Foreground requires Setpgid)")
-	}
-	if !cmd.SysProcAttr.Foreground {
-		t.Fatal("SysProcAttr.Foreground = false, want true")
-	}
-	if cmd.SysProcAttr.Ctty != 0 {
-		t.Fatalf("SysProcAttr.Ctty = %d, want 0 (child stdin)", cmd.SysProcAttr.Ctty)
-	}
-}
-
-// TestSetRuntimeChildForegroundPreservesExistingFields verifies the
-// helper mutates rather than replaces a pre-set SysProcAttr.
-func TestSetRuntimeChildForegroundPreservesExistingFields(t *testing.T) {
-	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", ":")
-	cmd.SysProcAttr = &syscall.SysProcAttr{}
-	existing := cmd.SysProcAttr
-	setRuntimeChildForeground(cmd)
-	if cmd.SysProcAttr != existing {
-		t.Fatal("helper replaced the existing SysProcAttr rather than mutating it")
-	}
-}
-
-// TestConfigureRuntimeChildGating pins the foreground gate: an
-// interactive `run -t` on a real terminal gets the foreground handoff,
-// while a non-terminal stdin or a non-`run`/non-TTY argv stays on the
-// background-isolation path. The background path is what #1014 wants for
-// CI and for graceful-stop salvage; the foreground path is what an
-// interactive raw-mode container needs.
-func TestConfigureRuntimeChildGating(t *testing.T) {
+// TestConfigureRuntimeChildNeverPromotesForeground pins the #1029
+// contract: configureRuntimeChild isolates the runtime child into its own
+// process group but never promotes it to the host terminal's foreground
+// group. Aileron keeps the foreground group so it owns SIGINT/SIGTERM
+// teardown and is the #802 approval-TUI substrate; the in-container agent
+// gets its raw TTY from a PTY slave aileron hands it (see pty_unix.go),
+// not from the host terminal's foreground group. This is the regression
+// guard against re-introducing the #1028 Foreground+Ctty handoff that sent
+// Ctrl-C to the agent instead of aileron.
+func TestConfigureRuntimeChildNeverPromotesForeground(t *testing.T) {
 	cases := []struct {
-		name           string
-		args           []string
-		stdinTTY       bool
-		wantForeground bool
+		name     string
+		args     []string
+		stdinTTY bool
 	}{
-		{"interactive run on terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, true, true},
-		{"interactive run without terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, false, false},
-		{"non-tty run on terminal", []string{"run", "--rm", "-i", "img", "claude"}, true, false},
-		{"interactive exec on terminal", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, true, true},
-		{"interactive exec without terminal", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, false, false},
-		{"non-tty exec on terminal", []string{"exec", "-i", "c", "gh", "auth", "token"}, true, false},
-		{"build on terminal", []string{"build", "-t", "img", "."}, true, false},
+		{"interactive run on terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, true},
+		{"interactive run without terminal", []string{"run", "--rm", "-i", "-t", "img", "claude"}, false},
+		{"non-tty run on terminal", []string{"run", "--rm", "-i", "img", "claude"}, true},
+		{"interactive exec on terminal", []string{"exec", "-i", "-t", "c", "gh", "auth", "login"}, true},
+		{"non-tty exec on terminal", []string{"exec", "-i", "c", "gh", "auth", "token"}, true},
+		{"build on terminal", []string{"build", "-t", "img", "."}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,8 +87,8 @@ func TestConfigureRuntimeChildGating(t *testing.T) {
 			if !cmd.SysProcAttr.Setpgid {
 				t.Fatal("SysProcAttr.Setpgid = false; isolation must always apply")
 			}
-			if cmd.SysProcAttr.Foreground != tc.wantForeground {
-				t.Fatalf("SysProcAttr.Foreground = %v, want %v", cmd.SysProcAttr.Foreground, tc.wantForeground)
+			if cmd.SysProcAttr.Foreground {
+				t.Fatal("SysProcAttr.Foreground = true; the runtime child must never own the host terminal's foreground group (issue #1029)")
 			}
 		})
 	}
