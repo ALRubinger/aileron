@@ -538,10 +538,22 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
-	sessionID, err := client.RegisterSession(regCtx, config.Agent.Name(), config.Dir)
+	reg, err := client.RegisterSession(regCtx, config.Agent.Name(), config.Dir)
 	cancelReg()
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("register session: %w", err)
+	}
+	sessionID := reg.ID
+	// Session-scoped caveat token (ADR-0024, #958): the credential the
+	// in-container aileron-mcp carries. It grants only the minimal /v1/*
+	// surface (list/run actions, poll approvals, this session's comms),
+	// so a leaked container token can never exercise full daemon
+	// authority. The master daemonToken stays host-side. On an
+	// unprotected daemon the caveat is empty and we fall back to the
+	// (also empty) master token — no bearer is required there.
+	containerMCPToken := reg.CaveatToken
+	if containerMCPToken == "" {
+		containerMCPToken = daemonToken
 	}
 	sessionClosed := false
 	defer func() {
@@ -582,8 +594,12 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// agents ignore it. Host launch is unaffected (this block is
 		// sandbox-only), so a user's own writable install still updates.
 		agentEnv["DISABLE_AUTOUPDATER"] = "1"
-		if daemonToken != "" {
-			agentEnv["AILERON_TOKEN"] = daemonToken
+		// AILERON_TOKEN in the container is the session-scoped caveat
+		// token, not the master daemon token. aileron-mcp reads it and
+		// authenticates to the daemon's /v1/* surface with only the
+		// capabilities the agent uses, bound to this session.
+		if containerMCPToken != "" {
+			agentEnv["AILERON_TOKEN"] = containerMCPToken
 		}
 		if proxyState.Enabled {
 			proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken)

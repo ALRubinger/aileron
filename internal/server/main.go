@@ -28,6 +28,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/app"
 	"github.com/ALRubinger/aileron/internal/approval"
 	approvaljsonl "github.com/ALRubinger/aileron/internal/approval/jsonl"
+	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
@@ -343,6 +344,17 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 			return fmt.Errorf("generate daemon token: %w", err)
 		}
 		cfg.LocalDaemonToken = daemonToken
+
+		// Per-daemon HMAC key for session-scoped caveat tokens
+		// (ADR-0024, #958). Distinct from the master daemon token and
+		// never persisted: caveat tokens live one daemon-process
+		// lifetime, so a fresh key on each restart is acceptable.
+		caveatKey, err := auth.GenerateCaveatSigningKey()
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("generate caveat signing key: %w", err)
+		}
+		cfg.CaveatSigningKey = caveatKey
 	}
 
 	// The daemon serves the webapp itself (see internal/app/webapp_embed.go),

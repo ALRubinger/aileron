@@ -10,7 +10,7 @@ import (
 )
 
 // daemon_client.go contract:
-//   - RegisterSession returns the daemon-minted ULID on 200.
+//   - RegisterSession returns the daemon-minted ULID and caveat token on 200.
 //   - RegisterSession surfaces a typed status error on non-200, with
 //     the daemon's `error.code` / `error.message` from the body.
 //   - EndSession is a fire-and-forget round-trip on 200; non-200
@@ -25,21 +25,25 @@ func TestDaemonClient_RegisterSession_Success(t *testing.T) {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":          "01HK00000000000000000XYZAB",
-			"started_at":  "2026-05-06T00:00:00Z",
-			"agent":       "claude",
-			"working_dir": "/work",
+			"id":           "01HK00000000000000000XYZAB",
+			"started_at":   "2026-05-06T00:00:00Z",
+			"agent":        "claude",
+			"working_dir":  "/work",
+			"caveat_token": "caveat.jwt.value",
 		})
 	}))
 	defer srv.Close()
 
 	c := newDaemonClient(srv.URL)
-	id, err := c.RegisterSession(context.Background(), "claude", "/work")
+	reg, err := c.RegisterSession(context.Background(), "claude", "/work")
 	if err != nil {
 		t.Fatalf("RegisterSession: %v", err)
 	}
-	if id != "01HK00000000000000000XYZAB" {
-		t.Errorf("got id %q, want from server", id)
+	if reg.ID != "01HK00000000000000000XYZAB" {
+		t.Errorf("got id %q, want from server", reg.ID)
+	}
+	if reg.CaveatToken != "caveat.jwt.value" {
+		t.Errorf("got caveat token %q, want from server", reg.CaveatToken)
 	}
 }
 

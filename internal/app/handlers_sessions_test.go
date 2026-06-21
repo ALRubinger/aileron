@@ -13,6 +13,7 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/sessions/jsonl"
 )
@@ -67,6 +68,72 @@ func TestCreateSession_HappyPath(t *testing.T) {
 	}
 	if got.EndedAt != nil {
 		t.Errorf("EndedAt should be nil on creation, got %v", got.EndedAt)
+	}
+}
+
+// TestCreateSession_MintsValidatableCaveat covers ADR-0024 / #958: when
+// the daemon is configured with a caveat signing key, CreateSession
+// returns a caveat_token bound to the new session id and carrying the
+// full sandbox-mcp capability set. The token must validate under the
+// same key.
+func TestCreateSession_MintsValidatableCaveat(t *testing.T) {
+	s, _ := newSessionsServer(t)
+	key, err := auth.GenerateCaveatSigningKey()
+	if err != nil {
+		t.Fatalf("GenerateCaveatSigningKey: %v", err)
+	}
+	issuer := auth.NewCaveatIssuer(key, "aileron-daemon")
+	s.caveatIssuer = issuer
+
+	body := mustJSON(t, api.CreateSessionRequest{Agent: "claude", WorkingDir: ptr("/work")})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.CreateSession(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var got api.CreateSessionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CaveatToken == nil || *got.CaveatToken == "" {
+		t.Fatal("response missing caveat_token")
+	}
+	claims, err := issuer.Validate(*got.CaveatToken)
+	if err != nil {
+		t.Fatalf("minted caveat failed validation: %v", err)
+	}
+	if claims.Session != got.Id {
+		t.Errorf("caveat session = %q, want bound to returned id %q", claims.Session, got.Id)
+	}
+	for _, want := range auth.SandboxMCPCaps {
+		if !claims.HasCap(want) {
+			t.Errorf("caveat missing capability %q", want)
+		}
+	}
+}
+
+// TestCreateSession_NoCaveatWhenUnconfigured covers the unprotected
+// daemon path: with no signing key, CreateSession omits caveat_token
+// (no bearer is required on an unprotected /v1/* surface).
+func TestCreateSession_NoCaveatWhenUnconfigured(t *testing.T) {
+	s, _ := newSessionsServer(t) // caveatIssuer nil
+
+	body := mustJSON(t, api.CreateSessionRequest{Agent: "claude"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.CreateSession(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got api.CreateSessionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.CaveatToken != nil {
+		t.Errorf("caveat_token = %v, want nil on unconfigured daemon", *got.CaveatToken)
 	}
 }
 
@@ -304,4 +371,3 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return b
 }
-
