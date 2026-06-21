@@ -49,7 +49,7 @@ func TestRunDaemon_UnknownSubcommand(t *testing.T) {
 // --- daemon stop ---
 
 func TestRunDaemonStop_NoDaemon_IsIdempotent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	var stdout, stderr bytes.Buffer
 	code := runDaemonStop(nil, &stdout, &stderr)
 	if code != 0 {
@@ -61,8 +61,8 @@ func TestRunDaemonStop_NoDaemon_IsIdempotent(t *testing.T) {
 }
 
 func TestRunDaemonStop_StaleDaemonJSON_CleansUp(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	home := setTestHome(t)
+	stateDir := filepath.Join(home, ".aileron")
 
 	// Write daemon.json with a PID that's almost certainly not alive.
 	// PID 1 (init) exists on Unix, so use a fabricated high one.
@@ -91,7 +91,7 @@ func TestRunDaemonStop_StaleDaemonJSON_CleansUp(t *testing.T) {
 // --- daemon status ---
 
 func TestRunDaemonStatus_NoDaemon(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	var stdout, stderr bytes.Buffer
 	code := runDaemonStatus(nil, &stdout, &stderr)
 	if code != 0 {
@@ -103,8 +103,8 @@ func TestRunDaemonStatus_NoDaemon(t *testing.T) {
 }
 
 func TestRunDaemonStatus_RunningDaemon_RendersInfo(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	home := setTestHome(t)
+	stateDir := filepath.Join(home, ".aileron")
 
 	// Bind a real loopback port so daemon.json carries a reachable URL.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -193,8 +193,8 @@ func TestProbeLocalVaultLocked_Non200(t *testing.T) {
 }
 
 func TestRunDaemonStatus_WithVaultProbe(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	home := setTestHome(t)
+	stateDir := filepath.Join(home, ".aileron")
 
 	// Real httptest server that serves the local vault status endpoint.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +241,7 @@ func TestBindingAPIBaseURL_RespectsAILERON_API_URL(t *testing.T) {
 // --- runDaemon dispatch ---
 
 func TestRunDaemon_DispatchToStop(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	var stdout, stderr bytes.Buffer
 	code := runDaemon([]string{"stop"}, &stdout, &stderr)
 	if code != 0 {
@@ -265,7 +265,7 @@ func withSpawnResolve(t *testing.T, fn func(context.Context, spawn.Options) (str
 }
 
 func TestRunDaemonStart_HappyPath_PrintsURL(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 
 	withSpawnResolve(t, func(_ context.Context, opts spawn.Options) (string, error) {
 		// Sanity: opts.StateDir resolves to ~/.aileron under the test HOME.
@@ -278,12 +278,7 @@ func TestRunDaemonStart_HappyPath_PrintsURL(t *testing.T) {
 	// daemonBinaryPath looks for a sibling 'aileron-server' binary;
 	// when not found it falls back to PATH lookup, which will fail in
 	// test. Place a no-op binary on PATH so the resolution succeeds.
-	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
-	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	stageServerOnPath(t)
 
 	var stdout, stderr bytes.Buffer
 	code := runDaemonStart(nil, &stdout, &stderr)
@@ -296,14 +291,9 @@ func TestRunDaemonStart_HappyPath_PrintsURL(t *testing.T) {
 }
 
 func TestRunDaemonStart_SpawnError_NonZeroExit(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 
-	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
-	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	stageServerOnPath(t)
 
 	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
 		return "", errors.New("spawn-failed-on-purpose")
@@ -320,7 +310,7 @@ func TestRunDaemonStart_SpawnError_NonZeroExit(t *testing.T) {
 }
 
 func TestRunDaemonStart_BinaryNotFound_NonZeroExit(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	// Empty PATH and no sibling 'aileron-server' next to the test
 	// binary → daemonBinaryPath fails before spawn is even called.
 	t.Setenv("PATH", "")
@@ -341,13 +331,8 @@ func TestRunDaemonStart_BinaryNotFound_NonZeroExit(t *testing.T) {
 // --- spawnResolveOnce (the body that spawnResolveCached wraps) ---
 
 func TestSpawnResolveOnce_HappyPath(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
-	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	setTestHome(t)
+	stageServerOnPath(t)
 
 	withSpawnResolve(t, func(_ context.Context, opts spawn.Options) (string, error) {
 		return "http://127.0.0.1:54321", nil
@@ -364,13 +349,8 @@ func TestSpawnResolveOnce_HappyPath(t *testing.T) {
 }
 
 func TestSpawnResolveOnce_TrimsTrailingSlash(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
-	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	setTestHome(t)
+	stageServerOnPath(t)
 
 	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
 		return "http://127.0.0.1:54321/", nil
@@ -386,7 +366,7 @@ func TestSpawnResolveOnce_TrimsTrailingSlash(t *testing.T) {
 }
 
 func TestSpawnResolveOnce_BinaryMissing_Errors(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	t.Setenv("PATH", "")
 
 	_, err := spawnResolveOnce()
@@ -399,13 +379,8 @@ func TestSpawnResolveOnce_BinaryMissing_Errors(t *testing.T) {
 }
 
 func TestSpawnResolveOnce_PropagatesSpawnError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
-	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	setTestHome(t)
+	stageServerOnPath(t)
 
 	wantErr := errors.New("kaboom")
 	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
@@ -546,12 +521,12 @@ func TestRunDaemonStop_UnixSIGTERM_WaitsForSelfClean(t *testing.T) {
 // --- defaultStateDir / daemonBinaryPath ---
 
 func TestDefaultStateDir_UnderHome(t *testing.T) {
-	t.Setenv("HOME", "/test/home")
+	home := setTestHome(t)
 	got, err := defaultStateDir()
 	if err != nil {
 		t.Fatalf("defaultStateDir: %v", err)
 	}
-	want := "/test/home/.aileron"
+	want := filepath.Join(home, ".aileron")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -597,9 +572,10 @@ func TestDaemonBinaryPath_FindsSibling(t *testing.T) {
 func TestDaemonBinaryPath_FallsBackToPATH(t *testing.T) {
 	// No sibling 'aileron-server' near the test binary (we don't write
 	// one), so resolution should fall back to PATH lookup. Place one
-	// on PATH — mirrors the Homebrew install layout.
+	// on PATH — mirrors the Homebrew install layout. The exeSuffix keeps
+	// exec.LookPath able to find it on Windows.
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "aileron-server")
+	server := filepath.Join(binDir, "aileron-server"+exeSuffix)
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -632,7 +608,7 @@ func TestDaemonBinaryPath_NotFound(t *testing.T) {
 }
 
 func TestRunDaemon_DispatchToStatus(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t)
 	var stdout, stderr bytes.Buffer
 	code := runDaemon([]string{"status"}, &stdout, &stderr)
 	if code != 0 {

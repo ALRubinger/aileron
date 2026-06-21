@@ -32,14 +32,12 @@ func genTestKey(t *testing.T) (ed25519.PublicKey, []byte) {
 	return pub, pemBytes
 }
 
-// withTempHome points $HOME at a fresh temp dir for the test, so the
-// CLI's DefaultKeyringPath() lands inside the test's filesystem and
-// the test does not pollute the user's real ~/.aileron.
+// withTempHome points the home directory at a fresh temp dir for the
+// test, so the CLI's DefaultKeyringPath() lands inside the test's
+// filesystem and the test does not pollute the user's real ~/.aileron.
 func withTempHome(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	return dir
+	return setTestHome(t)
 }
 
 // withMockGitHubRaw stands up an httptest server that mimics
