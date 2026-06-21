@@ -58,9 +58,9 @@ func TestParseFQN_RejectsUnknownScheme(t *testing.T) {
 
 func TestParseFQN_RejectsMissingRepoOrOwner(t *testing.T) {
 	for _, in := range []string{
-		"github://owner",      // missing repo
-		"github://",           // missing both
-		"",                    // empty
+		"github://owner",       // missing repo
+		"github://",            // missing both
+		"",                     // empty
 		"github://owner@1.0.0", // version suffix forbidden
 	} {
 		t.Run(in, func(t *testing.T) {
@@ -82,6 +82,40 @@ func TestFQN_Authority_ReturnsSchemeOwnerRepo(t *testing.T) {
 	}
 	if got, want := f.Authority(), "github://aileron/integrations"; got != want {
 		t.Errorf("Authority() = %q, want %q", got, want)
+	}
+}
+
+func TestFQN_OwnerAuthority_ReturnsSchemeOwner(t *testing.T) {
+	// ADR-0013: owner-level (per-publisher) trust keys on
+	// `<scheme>://<owner>`, dropping the repo segment Authority()
+	// includes. The two accessors differ exactly by the repo segment.
+	cases := []struct {
+		fqn           string
+		wantOwner     string
+		wantAuthority string
+	}{
+		{"github://acme/connector/sub", "github://acme", "github://acme/connector"},
+		{"gitlab://acme/connector", "gitlab://acme", "gitlab://acme/connector"},
+		{"hub://acme/namespace/nested", "hub://acme", "hub://acme/namespace"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fqn, func(t *testing.T) {
+			f, err := ParseFQN(tc.fqn)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := f.OwnerAuthority(); got != tc.wantOwner {
+				t.Errorf("OwnerAuthority() = %q, want %q", got, tc.wantOwner)
+			}
+			if got := f.Authority(); got != tc.wantAuthority {
+				t.Errorf("Authority() = %q, want %q", got, tc.wantAuthority)
+			}
+			// The owner authority is the per-repo authority minus the
+			// `/<repo>` segment.
+			if want := f.OwnerAuthority() + "/" + f.Repo; want != f.Authority() {
+				t.Errorf("OwnerAuthority()+/+Repo = %q, want Authority() = %q", want, f.Authority())
+			}
+		})
 	}
 }
 

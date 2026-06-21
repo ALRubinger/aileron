@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -402,6 +403,375 @@ func TestLoadKeyring_RetainsErrFromIO(t *testing.T) {
 	// errors.Is(fs.ErrNotExist) must be false for this case.
 	if _, err := cstore.LoadKeyring(dir); errors.Is(err, os.ErrNotExist) {
 		t.Error("EISDIR was misinterpreted as missing file")
+	}
+}
+
+// --- v2 schema: owners + publishers ---
+
+func TestLoadKeyring_V1FileLoadsUnderV2LoaderNoDataLoss(t *testing.T) {
+	// A version:1 file with only per-repo grants loads losslessly under
+	// the v2 loader: the per-repo key verifies and OwnerAuthorities() is
+	// empty.
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	body := `{"version":1,"publishers":{"github://acme/connector":["` +
+		base64.StdEncoding.EncodeToString(pub) + `"]}}`
+	p := filepath.Join(t.TempDir(), "k.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	kr, err := cstore.LoadKeyring(p)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	sig := ed25519.Sign(priv, append([]byte("x"), []byte("y")...))
+	if err := kr.Verify("github://acme/connector", []byte("x"), []byte("y"), sig); err != nil {
+		t.Errorf("per-repo key did not verify: %v", err)
+	}
+	if got := kr.OwnerAuthorities(); len(got) != 0 {
+		t.Errorf("OwnerAuthorities() = %v, want empty for a v1 file", got)
+	}
+	if got := kr.Authorities(); len(got) != 1 || got[0] != "github://acme/connector" {
+		t.Errorf("Authorities() = %v, want [github://acme/connector]", got)
+	}
+}
+
+func TestLoadKeyring_V2FileWithBothMapsLoadsIndependently(t *testing.T) {
+	// An owner key verifies via the owner authority, a repo key via the
+	// repo authority, independently of each other.
+	ownerPub, ownerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	repoPub, repoPriv, _ := ed25519.GenerateKey(rand.Reader)
+	body := `{
+		"version": 2,
+		"owners": {"github://acme": ["` + base64.StdEncoding.EncodeToString(ownerPub) + `"]},
+		"publishers": {"github://acme/connector": ["` + base64.StdEncoding.EncodeToString(repoPub) + `"]}
+	}`
+	p := filepath.Join(t.TempDir(), "k.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	kr, err := cstore.LoadKeyring(p)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	ownerSig := ed25519.Sign(ownerPriv, append([]byte("o"), []byte("m")...))
+	if err := kr.Verify("github://acme", []byte("o"), []byte("m"), ownerSig); err != nil {
+		t.Errorf("owner key did not verify under owner authority: %v", err)
+	}
+	repoSig := ed25519.Sign(repoPriv, append([]byte("r"), []byte("m")...))
+	if err := kr.Verify("github://acme/connector", []byte("r"), []byte("m"), repoSig); err != nil {
+		t.Errorf("repo key did not verify under repo authority: %v", err)
+	}
+	// The owner key must NOT verify under the repo authority (independence).
+	if err := kr.Verify("github://acme/connector", []byte("o"), []byte("m"), ownerSig); err == nil {
+		t.Error("owner key should not verify under a per-repo authority")
+	}
+}
+
+func TestSaveKeyring_V2RoundTripBothMaps(t *testing.T) {
+	ownerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	repoPub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	kr := cstore.NewEd25519Keyring()
+	kr.Add("github://acme/connector", repoPub)
+	kr.AddOwner("github://acme", ownerPub)
+
+	p := filepath.Join(t.TempDir(), "keyring.json")
+	if err := kr.SaveKeyring(p); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var doc struct {
+		Version    int                 `json:"version"`
+		Owners     map[string][]string `json:"owners"`
+		Publishers map[string][]string `json:"publishers"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	if doc.Version != 2 {
+		t.Errorf("saved version = %d, want 2", doc.Version)
+	}
+	if _, ok := doc.Owners["github://acme"]; !ok {
+		t.Errorf("owners map missing github://acme: %v", doc.Owners)
+	}
+	if _, ok := doc.Publishers["github://acme/connector"]; !ok {
+		t.Errorf("publishers map missing github://acme/connector: %v", doc.Publishers)
+	}
+
+	loaded, err := cstore.LoadKeyring(p)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !loaded.HasOwnerKey("github://acme", ownerPub) {
+		t.Error("owner key not preserved across round-trip")
+	}
+	if !loaded.HasKey("github://acme/connector", repoPub) {
+		t.Error("repo key not preserved across round-trip")
+	}
+}
+
+func TestSaveKeyring_OmitsOwnersWhenNoneButStillV2(t *testing.T) {
+	// A keyring with only per-repo entries saves version:2 with no
+	// "owners" key (omitempty) yet still reloads.
+	repoPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.Add("github://acme/connector", repoPub)
+
+	p := filepath.Join(t.TempDir(), "keyring.json")
+	if err := kr.SaveKeyring(p); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(probe["version"]) != "2" {
+		t.Errorf("version = %s, want 2", probe["version"])
+	}
+	if _, present := probe["owners"]; present {
+		t.Errorf("owners key should be omitted when there are no owner grants; file: %s", raw)
+	}
+	loaded, err := cstore.LoadKeyring(p)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !loaded.HasKey("github://acme/connector", repoPub) {
+		t.Error("repo key not preserved")
+	}
+}
+
+func TestLoadKeyring_RejectsVersionsOtherThan1And2(t *testing.T) {
+	for _, ver := range []string{"3", "0"} {
+		t.Run("version_"+ver, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "k.json")
+			_ = os.WriteFile(p, []byte(`{"version":`+ver+`}`), 0o600)
+			_, err := cstore.LoadKeyring(p)
+			if err == nil {
+				t.Fatalf("expected error on version %s", ver)
+			}
+			var cerr *cstore.Error
+			if !errors.As(err, &cerr) || cerr.Class != cstore.ClassValidationError {
+				t.Errorf("err class = %v, want ClassValidationError", err)
+			}
+		})
+	}
+}
+
+func TestLoadKeyring_RejectsOwnersUnderVersion1(t *testing.T) {
+	// Owner-level grants are v2-only; a downgrade to version:1 that still
+	// lists owners must be rejected, not silently honored.
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	body := `{"version":1,"owners":{"github://acme":["` +
+		base64.StdEncoding.EncodeToString(pub) + `"]}}`
+	p := filepath.Join(t.TempDir(), "k.json")
+	_ = os.WriteFile(p, []byte(body), 0o600)
+	_, err := cstore.LoadKeyring(p)
+	if err == nil {
+		t.Fatal("expected error: owners under version 1")
+	}
+	var cerr *cstore.Error
+	if !errors.As(err, &cerr) || cerr.Class != cstore.ClassValidationError {
+		t.Errorf("err class = %v, want ClassValidationError", err)
+	}
+}
+
+func TestLoadKeyring_RejectsBadKeyInOwners(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "k.json")
+	_ = os.WriteFile(p, []byte(`{"version":2,"owners":{"github://acme":["not-base64!!!"]}}`), 0o600)
+	_, err := cstore.LoadKeyring(p)
+	if err == nil {
+		t.Fatal("expected error on invalid base64 in owners")
+	}
+	var cerr *cstore.Error
+	if !errors.As(err, &cerr) || cerr.Class != cstore.ClassValidationError {
+		t.Errorf("err class = %v, want ClassValidationError", err)
+	}
+}
+
+func TestLoadKeyring_RejectsWrongLengthKeyInOwners(t *testing.T) {
+	tooShort := base64.StdEncoding.EncodeToString([]byte("only-a-few-bytes"))
+	p := filepath.Join(t.TempDir(), "k.json")
+	_ = os.WriteFile(p, []byte(`{"version":2,"owners":{"github://acme":["`+tooShort+`"]}}`), 0o600)
+	_, err := cstore.LoadKeyring(p)
+	if err == nil {
+		t.Fatal("expected error on wrong key length in owners")
+	}
+	var cerr *cstore.Error
+	if !errors.As(err, &cerr) || cerr.Class != cstore.ClassValidationError {
+		t.Errorf("err class = %v, want ClassValidationError", err)
+	}
+}
+
+func TestLoadKeyring_RejectsEmptyAuthorityInOwners(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	body := `{"version":2,"owners":{"":["` + base64.StdEncoding.EncodeToString(pub) + `"]}}`
+	p := filepath.Join(t.TempDir(), "k.json")
+	_ = os.WriteFile(p, []byte(body), 0o600)
+	_, err := cstore.LoadKeyring(p)
+	if err == nil {
+		t.Fatal("expected error on empty authority in owners")
+	}
+	var cerr *cstore.Error
+	if !errors.As(err, &cerr) || cerr.Class != cstore.ClassValidationError {
+		t.Errorf("err class = %v, want ClassValidationError", err)
+	}
+}
+
+// --- owner-keyed helper contracts ---
+
+func TestKeyringAddOwner_RegistersUnderOwnerAuthority(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://acme", pub)
+	sig := ed25519.Sign(priv, append([]byte("a"), []byte("b")...))
+	if err := kr.Verify("github://acme", []byte("a"), []byte("b"), sig); err != nil {
+		t.Errorf("AddOwner key did not verify: %v", err)
+	}
+}
+
+func TestKeyringOwnerKeys_CopyAndNilForAbsent(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://acme", pub)
+
+	keys := kr.OwnerKeys("github://acme")
+	if len(keys) != 1 {
+		t.Fatalf("len(OwnerKeys) = %d, want 1", len(keys))
+	}
+	keys[0] = ed25519.PublicKey(make([]byte, 32)) // mutate the copy
+	again := kr.OwnerKeys("github://acme")
+	if !ed25519.PublicKey(again[0]).Equal(pub) {
+		t.Error("OwnerKeys() returned a slice aliased to internal storage")
+	}
+	if got := kr.OwnerKeys("github://absent"); got != nil {
+		t.Errorf("OwnerKeys(absent) = %v, want nil", got)
+	}
+}
+
+func TestKeyringHasOwnerKey_ExactKeyAndAuthorityOnly(t *testing.T) {
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://acme", pub1)
+
+	if !kr.HasOwnerKey("github://acme", pub1) {
+		t.Error("HasOwnerKey should be true for the added key")
+	}
+	if kr.HasOwnerKey("github://acme", pub2) {
+		t.Error("HasOwnerKey should be false for a different key")
+	}
+	if kr.HasOwnerKey("github://other", pub1) {
+		t.Error("HasOwnerKey should be false for a different authority")
+	}
+}
+
+func TestKeyringRemoveOwner_TrueHitFalseMiss(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://acme", pub)
+
+	if !kr.RemoveOwner("github://acme") {
+		t.Error("RemoveOwner(present) = false; want true")
+	}
+	if kr.RemoveOwner("github://acme") {
+		t.Error("RemoveOwner(absent) = true; want false")
+	}
+	if got := kr.OwnerAuthorities(); len(got) != 0 {
+		t.Errorf("OwnerAuthorities after remove = %v, want empty", got)
+	}
+}
+
+func TestKeyringOwnerAuthorities_SortedOwnerOnlySplitFromAuthorities(t *testing.T) {
+	// A keyring with one owner-level entry and one per-repo entry returns
+	// just the owner authority from OwnerAuthorities() and just the repo
+	// authority from Authorities().
+	ownerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	repoPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	owner2Pub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	kr := cstore.NewEd25519Keyring()
+	kr.Add("github://acme/connector", repoPub)
+	kr.AddOwner("github://zzz", owner2Pub)
+	kr.AddOwner("github://acme", ownerPub)
+
+	gotOwners := kr.OwnerAuthorities()
+	wantOwners := []string{"github://acme", "github://zzz"}
+	if len(gotOwners) != len(wantOwners) {
+		t.Fatalf("OwnerAuthorities() = %v, want %v", gotOwners, wantOwners)
+	}
+	for i, w := range wantOwners {
+		if gotOwners[i] != w {
+			t.Errorf("OwnerAuthorities()[%d] = %q, want %q (sorted, owner-only)", i, gotOwners[i], w)
+		}
+	}
+	// Authorities() returns the full flat set (owner + per-repo), but the
+	// per-repo authority must be present and the owner-level split must
+	// not leak into OwnerAuthorities's exclusion of the repo entry.
+	gotAuth := kr.Authorities()
+	foundRepo := false
+	for _, a := range gotAuth {
+		if a == "github://acme/connector" {
+			foundRepo = true
+		}
+	}
+	if !foundRepo {
+		t.Errorf("Authorities() = %v, want it to include github://acme/connector", gotAuth)
+	}
+	// The per-repo authority is NOT an owner authority.
+	for _, a := range gotOwners {
+		if a == "github://acme/connector" {
+			t.Error("OwnerAuthorities() leaked a per-repo authority")
+		}
+	}
+}
+
+// --- parsing-unchanged regression (brief: decode + PEM stay byte-for-byte) ---
+
+func TestLoadKeyring_DecodeUnchangedAcrossBase64Variants(t *testing.T) {
+	// Guards the brief's "decodeEd25519Pub stays unchanged" requirement:
+	// std/raw-std/url/raw-url base64 all decode and verify, in both the
+	// owners and publishers maps.
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	encs := map[string]string{
+		"std":     base64.StdEncoding.EncodeToString(pub),
+		"raw_std": base64.RawStdEncoding.EncodeToString(pub),
+		"url":     base64.URLEncoding.EncodeToString(pub),
+		"raw_url": base64.RawURLEncoding.EncodeToString(pub),
+	}
+	for name, encoded := range encs {
+		t.Run(name, func(t *testing.T) {
+			body := `{"version":2,"owners":{"github://acme":["` + encoded + `"]}}`
+			p := filepath.Join(t.TempDir(), "k.json")
+			_ = os.WriteFile(p, []byte(body), 0o600)
+			kr, err := cstore.LoadKeyring(p)
+			if err != nil {
+				t.Fatalf("LoadKeyring(%s): %v", name, err)
+			}
+			sig := ed25519.Sign(priv, append([]byte("x"), []byte("y")...))
+			if err := kr.Verify("github://acme", []byte("x"), []byte("y"), sig); err != nil {
+				t.Errorf("%s: owner verify: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestParsePEMPublicKey_UnchangedRoundTrip(t *testing.T) {
+	// Guards the brief's "ParsePEMPublicKey stays unchanged" requirement.
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	got, err := cstore.ParsePEMPublicKey(makeTestPEM(t, pub))
+	if err != nil {
+		t.Fatalf("ParsePEMPublicKey: %v", err)
+	}
+	if !ed25519.PublicKey(got).Equal(pub) {
+		t.Error("PKIX PEM round-trip changed the key")
 	}
 }
 

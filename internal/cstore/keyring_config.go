@@ -12,24 +12,74 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // keyringFile is the JSON shape persisted at ~/.aileron/keyring.json
 // (and overridden via the path passed to LoadKeyring). It maps FQN
 // authority strings to one or more base64-encoded ed25519 public keys.
 //
+// The v2 shape is hybrid: two sibling maps segregate the two grant kinds
+// ADR-0013 introduces.
+//
+//		{
+//		  "version": 2,
+//		  "owners":     { "github://acme":           ["<b64>", ...] },
+//		  "publishers": { "github://acme/connector":  ["<b64>", ...] }
+//		}
+//
+//	  - Publishers is the unchanged v1 field; its keys are per-repo
+//	    authorities (`<scheme>://<owner>/<repo>`).
+//	  - Owners is new in v2; its keys are owner-level authorities
+//	    (`<scheme>://<owner>`, no repo segment) granting trust across every
+//	    repo a publisher owns.
+//
+// Both maps fold into the same flat in-memory key map, so Verify is
+// unchanged and an owner-level grant coexists with a per-repo grant for
+// the same publisher as two independent entries. A v1 file (only
+// Publishers, "version": 1) loads losslessly under the v2 loader: its
+// per-repo entries land untouched and Owners is simply empty.
+//
 // Multiple keys per authority support publisher key rotation: callers
 // install a new key alongside the old one, switch signing to the new
 // key, then drop the old. The verifier accepts any registered key.
 type keyringFile struct {
 	Version    int                 `json:"version"`
+	Owners     map[string][]string `json:"owners,omitempty"`
 	Publishers map[string][]string `json:"publishers"`
+}
+
+// isOwnerAuthority reports whether s is an owner-level authority
+// (`<scheme>://<owner>`, no repo segment) rather than a per-repo
+// authority (`<scheme>://<owner>/<repo>`). The single classifier drives
+// both the load-time "v1 must not carry owners" guard and the save-time
+// owners/publishers partition, so the rule lives in exactly one place.
+//
+// Classification is by path segments after the `://` separator: zero
+// slashes after the host means owner-level; one or more means per-repo.
+// Strings without `://` (which never occur for valid authorities) are
+// treated as owner-level so they are not silently dropped from a save.
+func isOwnerAuthority(s string) bool {
+	const sep = "://"
+	idx := strings.Index(s, sep)
+	if idx < 0 {
+		return true
+	}
+	return !strings.Contains(s[idx+len(sep):], "/")
 }
 
 // LoadKeyring loads an Ed25519Keyring from a JSON file at the given
 // path. Per ADR-0002's "signing keys and rotation" deferral, the file
-// is the v1 source of trust — users edit it (or a future
+// is the source of trust — users edit it (or a future
 // `aileron keyring add` command does) to authorize a publisher.
+//
+// Versions 1 and 2 are accepted. A v1 file carries only per-repo grants
+// in "publishers"; the v2 loader reads it losslessly (its per-repo
+// entries land untouched and the owner-level set is empty). A v2 file
+// additionally carries owner-level grants in "owners". Both maps fold
+// into the same flat in-memory key map. This is a hybrid forward-read,
+// not a deprecation shim: v1 files are not rewritten until the next
+// SaveKeyring, which emits v2.
 //
 // Behavior:
 //
@@ -38,13 +88,19 @@ type keyringFile struct {
 //     install with ClassSignatureFailure. Aileron defaults to no
 //     trusted publishers; users opt in.
 //   - Malformed JSON → ClassValidationError.
-//   - Unsupported version → ClassValidationError.
-//   - Bad base64 or invalid key length → ClassValidationError.
+//   - Unsupported version (anything other than 1 or 2) →
+//     ClassValidationError.
+//   - A "version": 1 document carrying an "owners" map →
+//     ClassValidationError. Owner-level grants are a v2-only feature;
+//     honoring them under v1 would let a downgrade hide trust.
+//   - Empty authority key in either map → ClassValidationError.
+//   - Bad base64 or invalid key length in either map →
+//     ClassValidationError.
 //
-// The single "Publishers" key per authority accepts a list of base64
-// public keys (raw ed25519, 32 bytes after decode). Both base64
-// standard encoding (with padding) and URL encoding (with or without
-// padding) are accepted; standard is canonical.
+// Each authority maps to a list of base64 public keys (raw ed25519, 32
+// bytes after decode). Both base64 standard encoding (with padding) and
+// URL encoding (with or without padding) are accepted; standard is
+// canonical.
 func LoadKeyring(path string) (*Ed25519Keyring, error) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
@@ -58,26 +114,45 @@ func LoadKeyring(path string) (*Ed25519Keyring, error) {
 		return nil, newError(ClassValidationError, BoundaryRuntime, false,
 			"keyring %q: invalid JSON: %s", path, err.Error())
 	}
-	if doc.Version != 1 {
+	if doc.Version != 1 && doc.Version != 2 {
 		return nil, newError(ClassValidationError, BoundaryRuntime, false,
-			"keyring %q: unsupported version %d (expected 1)", path, doc.Version)
+			"keyring %q: unsupported version %d (expected 1 or 2)", path, doc.Version)
+	}
+	if doc.Version == 1 && len(doc.Owners) > 0 {
+		return nil, newError(ClassValidationError, BoundaryRuntime, false,
+			"keyring %q: owner-level grants require version 2 (found %d owners under version 1)",
+			path, len(doc.Owners))
 	}
 	kr := NewEd25519Keyring()
-	for authority, pubs := range doc.Publishers {
+	if err := loadAuthorities(path, doc.Publishers, kr); err != nil {
+		return nil, err
+	}
+	if err := loadAuthorities(path, doc.Owners, kr); err != nil {
+		return nil, err
+	}
+	return kr, nil
+}
+
+// loadAuthorities decodes a map of authority → base64 keys into kr,
+// applying the empty-authority and key-decode validation shared by the
+// owners and publishers maps. Both grant kinds fold into the same flat
+// key map.
+func loadAuthorities(path string, authorities map[string][]string, kr *Ed25519Keyring) error {
+	for authority, pubs := range authorities {
 		if authority == "" {
-			return nil, newError(ClassValidationError, BoundaryRuntime, false,
+			return newError(ClassValidationError, BoundaryRuntime, false,
 				"keyring %q: empty authority key", path)
 		}
 		for i, pubB64 := range pubs {
 			pub, err := decodeEd25519Pub(pubB64)
 			if err != nil {
-				return nil, newError(ClassValidationError, BoundaryRuntime, false,
+				return newError(ClassValidationError, BoundaryRuntime, false,
 					"keyring %q: authority %q key[%d]: %s", path, authority, i, err.Error())
 			}
 			kr.Add(authority, pub)
 		}
 	}
-	return kr, nil
+	return nil
 }
 
 // decodeEd25519Pub decodes a base64-encoded ed25519 public key,
@@ -103,11 +178,20 @@ func decodeEd25519Pub(s string) (ed25519.PublicKey, error) {
 	return nil, fmt.Errorf("not valid base64")
 }
 
-// SaveKeyring writes the keyring's current state to disk as the v1
-// JSON shape. Authorities are emitted in sorted order so successive
-// saves produce stable diffs. The file is written with mode 0600 to
-// match the surrounding ~/.aileron/ files (vault, secrets); parent
-// directories are created with 0700 if missing.
+// SaveKeyring writes the keyring's current state to disk as the v2
+// JSON shape. The flat in-memory key map is partitioned back into the
+// "owners" and "publishers" maps by authority shape: owner-level
+// authorities (`<scheme>://<owner>`) go to "owners"; per-repo
+// authorities (`<scheme>://<owner>/<repo>`) go to "publishers". Both
+// maps emit authorities in sorted order so successive saves produce
+// stable diffs.
+//
+// "version" is always 2. When the keyring has no owner-level entries the
+// "owners" map is empty and omitted from the JSON (omitempty), so a file
+// whose content is v1-shaped stays clean while still declaring version
+// 2. The file is written with mode 0600 to match the surrounding
+// ~/.aileron/ files (vault, secrets); parent directories are created
+// with 0700 if missing.
 //
 // Save is the inverse of LoadKeyring: a subsequent Load reads back an
 // equivalent keyring (modulo key ordering within each authority,
@@ -115,17 +199,29 @@ func decodeEd25519Pub(s string) (ed25519.PublicKey, error) {
 func (k *Ed25519Keyring) SaveKeyring(path string) error {
 	k.mu.RLock()
 	doc := keyringFile{
-		Version:    1,
-		Publishers: make(map[string][]string, len(k.keys)),
+		Version:    2,
+		Owners:     map[string][]string{},
+		Publishers: map[string][]string{},
 	}
 	for authority, pubs := range k.keys {
 		encoded := make([]string, 0, len(pubs))
 		for _, pub := range pubs {
 			encoded = append(encoded, base64.StdEncoding.EncodeToString(pub))
 		}
-		doc.Publishers[authority] = encoded
+		if isOwnerAuthority(authority) {
+			doc.Owners[authority] = encoded
+		} else {
+			doc.Publishers[authority] = encoded
+		}
 	}
 	k.mu.RUnlock()
+
+	// omitempty fires on a nil map, not an empty non-nil one; drop the
+	// owners map explicitly when there are no owner-level grants so the
+	// common v1-shaped file omits the key entirely.
+	if len(doc.Owners) == 0 {
+		doc.Owners = nil
+	}
 
 	body, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -197,6 +293,48 @@ func (k *Ed25519Keyring) HasKey(authority string, pub ed25519.PublicKey) bool {
 		}
 	}
 	return false
+}
+
+// OwnerAuthorities returns the owner-level authorities
+// (`<scheme>://<owner>`, no repo segment) the keyring has at least one
+// key registered for, in sorted order. It filters the flat key map to
+// owner-level entries, so it is the owner-grant counterpart to
+// Authorities(), which returns the per-repo set. ADR-0013 install-time
+// UX enumerates owner grants via this accessor without seeing per-repo
+// noise.
+func (k *Ed25519Keyring) OwnerAuthorities() []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make([]string, 0, len(k.keys))
+	for authority := range k.keys {
+		if isOwnerAuthority(authority) {
+			out = append(out, authority)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// OwnerKeys returns a copy of the keys registered for an owner-level
+// authority. Returns nil if the authority is not present. Mirrors
+// Keys() for the owner-keyed call sites; derive the owner authority via
+// FQN.OwnerAuthority().
+func (k *Ed25519Keyring) OwnerKeys(ownerAuthority string) []ed25519.PublicKey {
+	return k.Keys(ownerAuthority)
+}
+
+// RemoveOwner drops every key registered for an owner-level authority.
+// Returns true when the authority was present (and its keys were
+// removed), false when it was not registered. Mirrors Remove().
+func (k *Ed25519Keyring) RemoveOwner(ownerAuthority string) bool {
+	return k.Remove(ownerAuthority)
+}
+
+// HasOwnerKey reports whether the keyring already trusts the given
+// public key for an owner-level authority. Mirrors HasKey() for the
+// owner-keyed call sites; matches on exact key and exact authority.
+func (k *Ed25519Keyring) HasOwnerKey(ownerAuthority string, pub ed25519.PublicKey) bool {
+	return k.HasKey(ownerAuthority, pub)
 }
 
 // ParsePEMPublicKey decodes a PEM-encoded ed25519 public key
