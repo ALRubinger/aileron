@@ -348,12 +348,13 @@ export type HubConnectorList = {
 	connectors: HubConnectorEntry[];
 };
 
-/** Trust-state enum for the install-decision payload. Drives the
- *  modal's color and copy. `unknown` = first install from this
- *  publisher at this FQN; `already_trusted` = key already on the
- *  local keyring; `conflict` = the publisher's key differs from one
- *  the operator trusts for a sibling repo (rotation, MITM, or
- *  impersonation — surface in red). */
+/** Trust-state enum for the install-decision payload, evaluated at
+ *  owner granularity (ADR-0013 per-publisher trust). Drives the modal's
+ *  color and copy. `unknown` = no owner-level grant for this publisher;
+ *  `already_trusted` = an owner-level grant matches the fetched key (one
+ *  grant covers every repo the owner publishes); `conflict` = an owner
+ *  grant exists but the fetched key diverges from it (rotation, MITM, or
+ *  impersonation — surface in red; informational, never blocks). */
 export type HubTrustState = 'already_trusted' | 'unknown' | 'conflict';
 
 /** Pre-computed install-decision payload. Mirrors api.HubInstallDecision.
@@ -369,6 +370,11 @@ export type HubInstallDecision = {
 	trust_state: HubTrustState;
 	publisher_footprint: string[];
 	risk_indicators: string[];
+	/** True when the fetched signing key diverges from the owner-level
+	 *  keyring grant for this publisher. Informational only — never
+	 *  blocks the install; also surfaced via risk_indicators and
+	 *  trust_state: 'conflict'. Optional (additive, may be absent). */
+	key_divergence?: boolean;
 };
 
 /** Lists every connector published to the Hub. Pass `q` to filter
@@ -452,6 +458,11 @@ export type HubInstallAuthority = {
 	trust_state: HubTrustState;
 	publisher_footprint: string[];
 	risk_indicators: string[];
+	/** True when the fetched signing key diverges from the owner-level
+	 *  keyring grant for this publisher. Informational only — never
+	 *  blocks the install; also surfaced via risk_indicators and
+	 *  trust_state: 'conflict'. Optional (additive, may be absent). */
+	key_divergence?: boolean;
 };
 
 /** Composite install-decision payload for an action install.

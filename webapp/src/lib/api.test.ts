@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decideActionApproval } from './api';
+import { decideActionApproval, getHubInstallDecision } from './api';
+import type { HubInstallDecision } from './api';
 
 // Regression target: the user clicked "Approve" in the webapp, the
 // daemon executed the action successfully, but the page surfaced
@@ -97,5 +98,77 @@ describe('decideActionApproval — server returns 204 No Content', () => {
 		await expect(decideActionApproval('act-test-1', true)).rejects.toThrow(
 			'approval id is unknown or already resolved'
 		);
+	});
+});
+
+// The webapp client is a hand-maintained mirror of the daemon's
+// OpenAPI shape. The owner-level publisher-divergence work (#1419) added
+// an optional `key_divergence` boolean to the install-decision payload.
+// These tests pin that the field round-trips through the client and that
+// the divergence signal is non-blocking (the call resolves normally with
+// a 200 even when key_divergence is true).
+describe('getHubInstallDecision — key_divergence mirror (#1419)', () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, 'fetch');
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it('round-trips key_divergence: true alongside a conflict trust_state on a 200', async () => {
+		const payload: HubInstallDecision = {
+			fqn: 'github://alice/a',
+			description: 'A connector',
+			publisher_github: 'alice',
+			fingerprint: 'sha256:abc',
+			trust_state: 'conflict',
+			publisher_footprint: ['github://alice/b'],
+			risk_indicators: [
+				'Fetched signing key differs from the key you trust for this publisher (owner-level)'
+			],
+			key_divergence: true
+		};
+		fetchSpy.mockResolvedValue(
+			new Response(JSON.stringify(payload), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		const got = await getHubInstallDecision('github://alice/a');
+
+		expect(got.key_divergence).toBe(true);
+		expect(got.trust_state).toBe('conflict');
+		expect(got.risk_indicators).toHaveLength(1);
+		// The publisher footprint and fingerprint still come through — the
+		// divergence does not strip the decision down.
+		expect(got.publisher_footprint).toEqual(['github://alice/b']);
+		expect(got.fingerprint).toBe('sha256:abc');
+	});
+
+	it('tolerates an absent key_divergence field (optional, additive)', async () => {
+		const payload = {
+			fqn: 'github://alice/a',
+			description: 'A connector',
+			publisher_github: 'alice',
+			fingerprint: 'sha256:abc',
+			trust_state: 'already_trusted',
+			publisher_footprint: [],
+			risk_indicators: []
+		};
+		fetchSpy.mockResolvedValue(
+			new Response(JSON.stringify(payload), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		const got = await getHubInstallDecision('github://alice/a');
+
+		expect(got.key_divergence).toBeUndefined();
+		expect(got.trust_state).toBe('already_trusted');
 	});
 });

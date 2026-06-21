@@ -139,6 +139,9 @@ func TestGetHubInstallDecision_UnknownTrustState(t *testing.T) {
 	if got.TrustState != api.HubTrustStateUnknown {
 		t.Fatalf("trust_state = %s, want unknown", got.TrustState)
 	}
+	if got.KeyDivergence == nil || *got.KeyDivergence {
+		t.Errorf("key_divergence = %v, want false when no owner grant", got.KeyDivergence)
+	}
 	if got.Fingerprint != hub.Fingerprint(pub) {
 		t.Fatalf("fingerprint = %s, want %s", got.Fingerprint, hub.Fingerprint(pub))
 	}
@@ -158,8 +161,10 @@ func TestGetHubInstallDecision_AlreadyTrustedWhenKeyringMatches(t *testing.T) {
 	url := makeHubFixture(t, map[string]string{
 		"alice_a.yaml": entryYAML("github://alice/a", "A", "alice", keyServer.URL+"/publisher.pub"),
 	})
+	// Owner-level grant for the publisher (github://alice) authorizes
+	// every repo the owner publishes, including github://alice/a.
 	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
-		"github://alice/a": {pub},
+		"github://alice": {pub},
 	})
 	srv := &apiServer{
 		log:         slog.Default(),
@@ -177,9 +182,12 @@ func TestGetHubInstallDecision_AlreadyTrustedWhenKeyringMatches(t *testing.T) {
 	if got.TrustState != api.HubTrustStateAlreadyTrusted {
 		t.Fatalf("trust_state = %s, want already_trusted", got.TrustState)
 	}
-	// Already-trusted with no sibling footprint must not surface the
-	// "First connector by this publisher you've installed" line — the
-	// user has this exact connector trusted, so that framing is wrong.
+	if got.KeyDivergence == nil || *got.KeyDivergence {
+		t.Errorf("key_divergence = %v, want false when fetched key matches owner grant", got.KeyDivergence)
+	}
+	// Already-trusted must not surface the "First connector by this
+	// publisher you've installed" line — the owner is trusted, so that
+	// framing is wrong.
 	for _, r := range got.RiskIndicators {
 		if strings.Contains(r, "First connector by this publisher") {
 			t.Errorf("already_trusted should not emit first-connector risk; got %q", r)
@@ -187,12 +195,13 @@ func TestGetHubInstallDecision_AlreadyTrustedWhenKeyringMatches(t *testing.T) {
 	}
 }
 
-// TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling: when the
-// keyring already trusts this FQN AND a sibling repo by the same
-// publisher, surface the sibling-trust line as informational context.
-// Reupgrade flow: don't claim "First connector"; do say "Publisher has
-// N other connectors you already trust" when truthy.
-func TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling(t *testing.T) {
+// TestGetHubInstallDecision_AlreadyTrustedViaOwnerGrantUnderSiblingFQN:
+// the owner-level grant was established while installing a *different*
+// repo by the same owner (github://alice/b), yet installing
+// github://alice/a still reads already_trusted. This is the core
+// owner-granularity contract: one grant covers every repo the owner
+// publishes, even one the user has never installed before.
+func TestGetHubInstallDecision_AlreadyTrustedViaOwnerGrantUnderSiblingFQN(t *testing.T) {
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	keyServer := httpKeyServer(t, pub)
 	defer keyServer.Close()
@@ -201,9 +210,9 @@ func TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling(t *testing.T) {
 		"alice_a.yaml": entryYAML("github://alice/a", "A", "alice", keyServer.URL+"/publisher.pub"),
 		"alice_b.yaml": entryYAML("github://alice/b", "B", "alice", "https://example.com/b.pub"),
 	})
+	// Owner grant only — no per-repo entry for github://alice/a at all.
 	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
-		"github://alice/a": {pub},
-		"github://alice/b": {pub},
+		"github://alice": {pub},
 	})
 	srv := &apiServer{
 		log:         slog.Default(),
@@ -221,38 +230,41 @@ func TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling(t *testing.T) {
 	if got.TrustState != api.HubTrustStateAlreadyTrusted {
 		t.Fatalf("trust_state = %s, want already_trusted", got.TrustState)
 	}
-	foundSiblingIndicator := false
+	if got.KeyDivergence == nil || *got.KeyDivergence {
+		t.Errorf("key_divergence = %v, want false", got.KeyDivergence)
+	}
 	for _, r := range got.RiskIndicators {
 		if strings.Contains(r, "First connector by this publisher") {
 			t.Errorf("already_trusted should not emit first-connector risk; got %q", r)
 		}
-		if strings.Contains(r, "other connector") {
-			foundSiblingIndicator = true
-		}
-	}
-	if !foundSiblingIndicator {
-		t.Errorf("expected trusted-sibling indicator, got %v", got.RiskIndicators)
 	}
 }
 
-func TestGetHubInstallDecision_ConflictWhenSiblingHasDifferentKey(t *testing.T) {
+// TestGetHubInstallDecision_DivergenceSetButNotBlocked is the
+// regression test for the non-blocking-divergence fork: when an
+// owner-level grant exists whose key differs from the fetched signing
+// key, trust_state flips to conflict and key_divergence is set, but the
+// response is still a fully-populated 200 install-decision — the
+// divergence is informational, never a block.
+func TestGetHubInstallDecision_DivergenceSetButNotBlocked(t *testing.T) {
 	currentPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	siblingPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ownerGrantPub, _, _ := ed25519.GenerateKey(rand.Reader)
 
 	keyServer := httpKeyServer(t, currentPub)
 	defer keyServer.Close()
 
-	// Hub has two entries by the same publisher.
+	// Hub has two entries by the same owner; the footprint should carry
+	// the sibling even though trust is evaluated at owner scope.
 	url := makeHubFixture(t, map[string]string{
 		"alice_a.yaml": entryYAML("github://alice/a", "A", "alice", keyServer.URL+"/publisher.pub"),
 		"alice_b.yaml": entryYAML("github://alice/b", "B", "alice", "https://example.com/alice-b.pub"),
 	})
 
-	// Keyring trusts sibling (b) under a DIFFERENT key from the one
-	// the Hub now declares for (a). That cross-FQN mismatch is the
-	// conflict the TOFU check is meant to catch.
+	// Owner grant trusts a DIFFERENT key from the one the Hub now
+	// declares for the fetched connector. That owner-scope mismatch is
+	// the divergence the TOFU check catches.
 	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
-		"github://alice/b": {siblingPub},
+		"github://alice": {ownerGrantPub},
 	})
 	srv := &apiServer{
 		log:         slog.Default(),
@@ -262,6 +274,7 @@ func TestGetHubInstallDecision_ConflictWhenSiblingHasDifferentKey(t *testing.T) 
 	rec := httptest.NewRecorder()
 	srv.GetHubInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/install-decision?fqn=github://alice/a", nil), api.GetHubInstallDecisionParams{Fqn: "github://alice/a"})
 
+	// Still a 200 install-decision — divergence does not block.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -270,15 +283,29 @@ func TestGetHubInstallDecision_ConflictWhenSiblingHasDifferentKey(t *testing.T) 
 	if got.TrustState != api.HubTrustStateConflict {
 		t.Fatalf("trust_state = %s, want conflict", got.TrustState)
 	}
-	foundConflictIndicator := false
+	if got.KeyDivergence == nil || !*got.KeyDivergence {
+		t.Fatalf("key_divergence = %v, want true", got.KeyDivergence)
+	}
+	// The decision object is structurally unchanged: every field a
+	// normal install-decision carries is still populated.
+	if got.Fqn != "github://alice/a" {
+		t.Errorf("fqn = %q, want github://alice/a", got.Fqn)
+	}
+	if got.Fingerprint != hub.Fingerprint(currentPub) {
+		t.Errorf("fingerprint = %q, want fetched key fingerprint", got.Fingerprint)
+	}
+	if len(got.PublisherFootprint) != 1 || got.PublisherFootprint[0] != "github://alice/b" {
+		t.Errorf("publisher_footprint = %v, want [github://alice/b]", got.PublisherFootprint)
+	}
+	foundDivergenceIndicator := false
 	for _, risk := range got.RiskIndicators {
-		if strings.Contains(risk, "differs from one you trust") {
-			foundConflictIndicator = true
+		if strings.Contains(risk, "differs from the key you trust") {
+			foundDivergenceIndicator = true
 			break
 		}
 	}
-	if !foundConflictIndicator {
-		t.Fatalf("expected conflict risk indicator, got %v", got.RiskIndicators)
+	if !foundDivergenceIndicator {
+		t.Fatalf("expected divergence risk indicator, got %v", got.RiskIndicators)
 	}
 }
 
@@ -307,23 +334,24 @@ func TestGetHubInstallDecision_PublisherFootprintIncludesSiblings(t *testing.T) 
 	}
 }
 
-func TestGetHubInstallDecision_TrustedSiblingProducesPositiveIndicator(t *testing.T) {
+// TestGetHubInstallDecision_DifferentOwnerGrantDoesNotConferTrust:
+// trust is keyed on the owner authority. A grant for a *different*
+// owner (github://bob) must not make alice's connector already_trusted;
+// it reads unknown (first-connector) with no divergence.
+func TestGetHubInstallDecision_DifferentOwnerGrantDoesNotConferTrust(t *testing.T) {
 	currentPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	bobPub, _, _ := ed25519.GenerateKey(rand.Reader)
 
 	keyServer := httpKeyServer(t, currentPub)
 	defer keyServer.Close()
 
 	url := makeHubFixture(t, map[string]string{
 		"alice_a.yaml": entryYAML("github://alice/a", "A", "alice", keyServer.URL+"/publisher.pub"),
-		"alice_b.yaml": entryYAML("github://alice/b", "B", "alice", "https://example.com/alice-b.pub"),
+		"bob_x.yaml":   entryYAML("github://bob/x", "X", "bob", "https://example.com/bob-x.pub"),
 	})
-	// Sibling b has a trusted key whose fingerprint matches what would
-	// be fetched for it (we don't fetch sibling keys; the conflict check
-	// only fires when *any* sibling key fingerprint differs from the
-	// current entry's fingerprint). Use the same key everywhere to keep
-	// trust_state out of conflict territory.
+	// Owner grant exists for bob, not alice.
 	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
-		"github://alice/b": {currentPub},
+		"github://bob": {bobPub},
 	})
 	srv := &apiServer{
 		log:         slog.Default(),
@@ -335,15 +363,41 @@ func TestGetHubInstallDecision_TrustedSiblingProducesPositiveIndicator(t *testin
 
 	var got api.HubInstallDecision
 	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got.TrustState != api.HubTrustStateUnknown {
+		t.Fatalf("trust_state = %s, want unknown (different owner's grant must not confer trust)", got.TrustState)
+	}
+	if got.KeyDivergence == nil || *got.KeyDivergence {
+		t.Errorf("key_divergence = %v, want false", got.KeyDivergence)
+	}
 	found := false
 	for _, r := range got.RiskIndicators {
-		if strings.Contains(r, "other connector you already trust") || strings.Contains(r, "other connectors you already trust") {
+		if strings.Contains(r, "First connector by this publisher") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected 'other connector(s) you already trust' indicator, got %v", got.RiskIndicators)
+		t.Fatalf("expected first-connector indicator, got %v", got.RiskIndicators)
+	}
+}
+
+// TestOwnerGrantKeys_MalformedFQNYieldsNoGrant: a malformed FQN must
+// not widen trust. Owner derivation is skipped and the lookup returns
+// nil, so the decision degrades to "unknown" rather than matching some
+// owner grant. Covers the fail-closed branch in ownerGrantKeys.
+func TestOwnerGrantKeys_MalformedFQNYieldsNoGrant(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.AddOwner("github://alice", pub)
+
+	srv := &apiServer{log: slog.Default()}
+	// "not a valid fqn" has no scheme/owner — ParseFQN errors.
+	if got := srv.ownerGrantKeys(kr, "not a valid fqn"); got != nil {
+		t.Fatalf("expected nil owner keys for malformed FQN, got %v", got)
+	}
+	// Sanity: a valid FQN under the granted owner does resolve.
+	if got := srv.ownerGrantKeys(kr, "github://alice/a"); len(got) != 1 {
+		t.Fatalf("expected 1 owner key for github://alice/a, got %d", len(got))
 	}
 }
 
@@ -712,6 +766,110 @@ func TestGetHubActionInstallDecision_HappyPath(t *testing.T) {
 	}
 	if auth.TrustState != api.HubTrustStateUnknown {
 		t.Fatalf("trust_state = %s, want unknown", auth.TrustState)
+	}
+	if auth.KeyDivergence == nil || *auth.KeyDivergence {
+		t.Fatalf("authority key_divergence = %v, want false", auth.KeyDivergence)
+	}
+}
+
+// TestGetHubActionInstallDecision_AuthorityCarriesKeyDivergence: the
+// composite action payload's single authority entry must carry the
+// owner-level key_divergence flag and conflict trust_state when the
+// connector's fetched key diverges from the owner grant — parity with
+// the connector-level install-decision.
+func TestGetHubActionInstallDecision_AuthorityCarriesKeyDivergence(t *testing.T) {
+	currentPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ownerGrantPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, currentPub)
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		nil,
+	)
+	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
+		"github://alice": {ownerGrantPub},
+	})
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: keyringPath,
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/actions/draft-email"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Authorities) != 1 {
+		t.Fatalf("expected 1 authority, got %d", len(got.Authorities))
+	}
+	auth := got.Authorities[0]
+	if auth.TrustState != api.HubTrustStateConflict {
+		t.Errorf("authority trust_state = %s, want conflict", auth.TrustState)
+	}
+	if auth.KeyDivergence == nil || !*auth.KeyDivergence {
+		t.Errorf("authority key_divergence = %v, want true", auth.KeyDivergence)
+	}
+}
+
+// TestGetHubSuiteInstallDecision_AuthorityCarriesKeyDivergence: same
+// parity check on the suite composite path.
+func TestGetHubSuiteInstallDecision_AuthorityCarriesKeyDivergence(t *testing.T) {
+	currentPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	ownerGrantPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, currentPub)
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		map[string]string{
+			"comms.yaml": suiteYAML("github://alice/conn-google/suite", "Comms suite", "alice", "", []string{"github://alice/conn-google/actions/draft-email"}, nil),
+		},
+	)
+	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
+		"github://alice": {ownerGrantPub},
+	})
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: keyringPath,
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Authorities) != 1 {
+		t.Fatalf("expected 1 authority, got %d", len(got.Authorities))
+	}
+	auth := got.Authorities[0]
+	if auth.TrustState != api.HubTrustStateConflict {
+		t.Errorf("authority trust_state = %s, want conflict", auth.TrustState)
+	}
+	if auth.KeyDivergence == nil || !*auth.KeyDivergence {
+		t.Errorf("authority key_divergence = %v, want true", auth.KeyDivergence)
 	}
 }
 
