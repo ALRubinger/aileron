@@ -8482,12 +8482,25 @@ components:
           $ref: "#/components/schemas/HubTrustState"
         publisher_footprint:
           type: array
+          description: |
+            FQNs of the owner's other connectors listed in the Hub
+            (owner-granularity context: every repo published under the
+            same owner, informational only).
           items:
             type: string
         risk_indicators:
           type: array
           items:
             type: string
+        key_divergence:
+          type: boolean
+          description: |
+            True when the connector's fetched signing key diverges from
+            the owner-level keyring grant for this publisher. Informational
+            only — never blocks the install decision; the divergence is
+            also surfaced as a `risk_indicators` string and reflected in
+            `trust_state: conflict`. Absent/false when no owner grant
+            exists or the fetched key matches it.
 
     HubActionInstallDecision:
       type: object
@@ -8583,12 +8596,17 @@ components:
       type: string
       enum: [already_trusted, unknown, conflict]
       description: |
-        Trust state for the connector's FQN against the local keyring.
-        `already_trusted`: the keyring has the publisher's key for this
-        FQN. `unknown`: no keyring entry for this FQN.
-        `conflict`: keyring has a key for the same publisher under a
-        sibling FQN, and that key differs from the one declared by the
-        Hub entry — surface as a risk indicator.
+        Trust state for the connector's publisher against the local
+        keyring, evaluated at owner granularity (ADR-0013 per-publisher
+        trust). `already_trusted`: an owner-level grant exists for this
+        publisher whose key matches the fetched signing key (the grant
+        covers every repo the owner publishes, so a sibling FQN grant
+        counts). `unknown`: no owner-level grant for this publisher.
+        `conflict`: an owner-level grant exists but the fetched signing
+        key diverges from the trusted key — a key rotation, MITM, or
+        impersonation signal. The divergence is surfaced as a risk
+        indicator and via `key_divergence`; it is informational and does
+        not block the install on its own.
 
     HubInstallDecision:
       type: object
@@ -8602,9 +8620,11 @@ components:
         - risk_indicators
       description: |
         Pre-computed payload for the install-time prompt (CLI y/N and
-        webapp modal). Shape resolved in #487. Publisher info is
-        informational context, NOT a trust target: v0.x trust is
-        strictly per-repo (per-FQN).
+        webapp modal). Shape resolved in #487. `trust_state` and
+        `publisher_footprint` are evaluated at owner granularity
+        (ADR-0013 per-publisher trust): a single owner-level grant
+        covers every repo the publisher owns. Publisher info remains
+        informational context for the decision, not an auto-approve gate.
       properties:
         fqn:
           type: string
@@ -8624,8 +8644,9 @@ components:
         publisher_footprint:
           type: array
           description: |
-            FQNs of the publisher's other connectors listed in the Hub
-            (informational context for the user's decision).
+            FQNs of the owner's other connectors listed in the Hub
+            (owner-granularity context: every repo published under the
+            same owner, informational only).
           items:
             type: string
         risk_indicators:
@@ -8633,8 +8654,18 @@ components:
           description: |
             Human-readable risk strings derived from the trust state and
             keyring contents, e.g. "First connector by this publisher
-            you've installed" (informational, yellow) or "Key fingerprint
-            differs from one you trust for a sibling repo" (conflict,
-            red).
+            you've installed" (informational, yellow) or the owner-level
+            key-divergence warning (conflict, red). Non-blocking by
+            construction: the payload has no boolean gate, so risk
+            strings are rendered as warnings, never as install blockers.
           items:
             type: string
+        key_divergence:
+          type: boolean
+          description: |
+            True when the connector's fetched signing key diverges from
+            the owner-level keyring grant for this publisher. Informational
+            only — never blocks the install decision; the divergence is
+            also surfaced as a `risk_indicators` string and reflected in
+            `trust_state: conflict`. Absent/false when no owner grant
+            exists or the fetched key matches it.

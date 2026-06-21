@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"net/http"
 	"strings"
@@ -120,56 +121,51 @@ func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.Connec
 		TrustState:         auth.TrustState,
 		PublisherFootprint: auth.PublisherFootprint,
 		RiskIndicators:     auth.RiskIndicators,
+		KeyDivergence:      auth.KeyDivergence,
 	}
 }
 
 // buildAuthority combines the connector entry + fingerprint with the
-// local keyring's view of the publisher to produce trust_state,
-// publisher_footprint, and risk_indicators. Trust granularity in v0.x
-// is strictly per-repo (per-FQN) per ADR-0013; publisher framing here
-// is informational context, not a trust target. Used by both the
-// connector-level install-decision and the composite action/suite
-// install-decision endpoints.
+// local keyring's owner-level view of the publisher to produce
+// trust_state, publisher_footprint, risk_indicators, and the
+// non-blocking key_divergence flag. Trust is evaluated at owner
+// granularity per ADR-0013: a single owner-level grant
+// (`<scheme>://<owner>`) covers every repo the publisher owns, so the
+// publisher_footprint (the owner's other connectors) is the trust
+// surface rather than the exact FQN. Used by both the connector-level
+// install-decision and the composite action/suite endpoints.
 func (s *apiServer) buildAuthority(entries []hub.ConnectorEntry, entry hub.ConnectorEntry, fingerprint string) api.HubInstallAuthority {
 	footprint := hub.PublisherFootprint(entries, entry)
 
 	kr, _ := cstore.LoadKeyring(s.resolveKeyringPath())
 	trustState := api.HubTrustStateUnknown
-	conflictFQN := ""
+	keyDivergence := false
 	if kr != nil {
-		// Already-trusted: keyring carries a key for this exact FQN
-		// whose fingerprint matches the current publisher key. The
-		// presence of *any* key for the FQN is enough — `aileron
-		// keyring trust` only writes a key if the user has explicitly
-		// confirmed it, so any keyring entry counts as consent.
-		for _, k := range kr.Keys(entry.FQN) {
-			if hub.Fingerprint(k) == fingerprint {
-				trustState = api.HubTrustStateAlreadyTrusted
-				break
-			}
-		}
-		// Conflict: a sibling FQN by the same publisher_github carries
-		// a trusted key, and that key's fingerprint differs from the
-		// one this entry's publisher is about to be installed with.
-		// Indicates a key rotation, MITM, or impersonation — surface
-		// in red so the user notices.
-		if trustState == api.HubTrustStateUnknown {
-			for _, sibling := range footprint {
-				for _, k := range kr.Keys(sibling) {
-					if hub.Fingerprint(k) != fingerprint {
-						trustState = api.HubTrustStateConflict
-						conflictFQN = sibling
-						break
-					}
-				}
-				if trustState == api.HubTrustStateConflict {
+		ownerKeys := s.ownerGrantKeys(kr, entry.FQN)
+		if len(ownerKeys) > 0 {
+			// An owner-level grant exists for this publisher. If any
+			// trusted owner key matches the fetched fingerprint the
+			// publisher is already trusted; otherwise the fetched key
+			// diverges from what the user trusts at owner scope (key
+			// rotation, MITM, or impersonation) — a non-blocking
+			// conflict surfaced in red.
+			matched := false
+			for _, k := range ownerKeys {
+				if hub.Fingerprint(k) == fingerprint {
+					matched = true
 					break
 				}
+			}
+			if matched {
+				trustState = api.HubTrustStateAlreadyTrusted
+			} else {
+				trustState = api.HubTrustStateConflict
+				keyDivergence = true
 			}
 		}
 	}
 
-	risks := buildRiskIndicators(kr, footprint, trustState, conflictFQN)
+	risks := buildRiskIndicators(trustState)
 
 	return api.HubInstallAuthority{
 		Fqn:                entry.FQN,
@@ -178,43 +174,40 @@ func (s *apiServer) buildAuthority(entries []hub.ConnectorEntry, entry hub.Conne
 		TrustState:         trustState,
 		PublisherFootprint: footprint,
 		RiskIndicators:     risks,
+		KeyDivergence:      &keyDivergence,
 	}
 }
 
-func buildRiskIndicators(kr *cstore.Ed25519Keyring, footprint []string, trustState api.HubTrustState, conflictFQN string) []string {
-	var risks []string
-	trustedSiblings := 0
-	if kr != nil {
-		for _, sibling := range footprint {
-			if len(kr.Keys(sibling)) > 0 {
-				trustedSiblings++
-			}
-		}
+// ownerGrantKeys returns the owner-level keyring keys for the publisher
+// that owns fqn, deriving the owner authority (`<scheme>://<owner>`)
+// from the FQN. A malformed FQN yields no owner authority and therefore
+// no owner grant (degrading to "unknown" rather than widening trust).
+// This is the single coupling point to the #1416 owner-keyed keyring
+// API; if that accessor is renamed, only this helper changes.
+func (s *apiServer) ownerGrantKeys(kr *cstore.Ed25519Keyring, fqn string) []ed25519.PublicKey {
+	parsed, err := cstore.ParseFQN(fqn)
+	if err != nil {
+		return nil
 	}
-	switch {
-	case trustState == api.HubTrustStateConflict:
-		risks = append(risks, "Key fingerprint differs from one you trust for a sibling repo ("+conflictFQN+")")
-	case trustState == api.HubTrustStateAlreadyTrusted:
-		// Already trusted at this FQN: the "first install" framing would
-		// be a lie (the user has this exact connector). Surface sibling
-		// trust as informational context, otherwise emit nothing — the
-		// already_trusted state itself carries the reassurance.
-		if trustedSiblings > 0 {
-			risks = append(risks, pluralizeTrustedSiblings(trustedSiblings))
-		}
-	case trustedSiblings == 0:
-		risks = append(risks, "First connector by this publisher you've installed")
+	return kr.OwnerKeys(parsed.OwnerAuthority())
+}
+
+func buildRiskIndicators(trustState api.HubTrustState) []string {
+	var risks []string
+	switch trustState {
+	case api.HubTrustStateConflict:
+		// Owner-level key divergence: the fetched signing key differs
+		// from the key the user trusts for this publisher. Informational
+		// red warning — it never blocks the install on its own.
+		risks = append(risks, "Fetched signing key differs from the key you trust for this publisher (owner-level)")
+	case api.HubTrustStateAlreadyTrusted:
+		// Publisher is trusted at owner scope; the already_trusted state
+		// itself carries the reassurance, so emit no extra line.
 	default:
-		risks = append(risks, pluralizeTrustedSiblings(trustedSiblings))
+		// No owner-level grant for this publisher yet.
+		risks = append(risks, "First connector by this publisher you've installed")
 	}
 	return risks
-}
-
-func pluralizeTrustedSiblings(n int) string {
-	if n == 1 {
-		return "Publisher has 1 other connector you already trust"
-	}
-	return "Publisher has multiple other connectors you already trust"
 }
 
 func (s *apiServer) resolveKeyringPath() string {
