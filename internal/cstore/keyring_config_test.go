@@ -699,6 +699,51 @@ func TestKeyringRemoveOwner_TrueHitFalseMiss(t *testing.T) {
 	}
 }
 
+func TestKeyringRemoveKey_RemovesOneLeavesSiblingsDropsEmptied(t *testing.T) {
+	pub1, _, _ := ed25519.GenerateKey(rand.Reader)
+	pub2, _, _ := ed25519.GenerateKey(rand.Reader)
+	absent, _, _ := ed25519.GenerateKey(rand.Reader)
+	kr := cstore.NewEd25519Keyring()
+	kr.Add("github://acme/connector", pub1)
+	kr.Add("github://acme/connector", pub2)
+	kr.AddOwner("github://acme", pub1)
+
+	// Remove one key from a multi-key authority: the sibling survives,
+	// the authority stays present.
+	if !kr.RemoveKey("github://acme/connector", pub1) {
+		t.Fatal("RemoveKey(present) = false; want true")
+	}
+	if kr.HasKey("github://acme/connector", pub1) {
+		t.Error("removed key still present")
+	}
+	if !kr.HasKey("github://acme/connector", pub2) {
+		t.Error("sibling key was dropped; want preserved")
+	}
+
+	// Removing the last key from an authority drops the authority so a
+	// subsequent Authorities()/list does not surface an empty entry.
+	if !kr.RemoveKey("github://acme/connector", pub2) {
+		t.Fatal("RemoveKey(last key) = false; want true")
+	}
+	for _, a := range kr.Authorities() {
+		if a == "github://acme/connector" {
+			t.Error("emptied authority not dropped from Authorities()")
+		}
+	}
+	// The owner-level grant is independent and untouched.
+	if !kr.HasOwnerKey("github://acme", pub1) {
+		t.Error("owner-level grant removed by per-repo RemoveKey")
+	}
+
+	// Absent key / absent authority both return false.
+	if kr.RemoveKey("github://acme", absent) {
+		t.Error("RemoveKey(absent key) = true; want false")
+	}
+	if kr.RemoveKey("github://nope/none", pub1) {
+		t.Error("RemoveKey(absent authority) = true; want false")
+	}
+}
+
 func TestKeyringOwnerAuthorities_SortedOwnerOnlySplitFromAuthorities(t *testing.T) {
 	// A keyring with one owner-level entry and one per-repo entry returns
 	// just the owner authority from OwnerAuthorities() and just the repo

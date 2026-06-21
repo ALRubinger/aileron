@@ -4483,7 +4483,7 @@ func TestRunActionAdd_AutoTrustPromptsAndInstalls(t *testing.T) {
 	for _, want := range []string{
 		"Publisher github://acme/conn is not yet trusted",
 		"Trust publisher github://acme/conn?",
-		"✓ Trusted publisher github://acme/conn",
+		"✓ Trusted publisher github://acme\n",
 		"Action install preview",
 		"Install? [y/n]:",
 		"Added: my-action",
@@ -4492,13 +4492,14 @@ func TestRunActionAdd_AutoTrustPromptsAndInstalls(t *testing.T) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	// Trust must persist across runs.
+	// Trust must persist across runs; the grant is owner-level so it
+	// covers every connector this publisher ships (ADR-0013).
 	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
 	if err != nil {
 		t.Fatalf("LoadKeyring: %v", err)
 	}
-	if !kr.HasKey("github://acme/conn", pub) {
-		t.Error("keyring should contain trusted key after auto-trust")
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("keyring should contain owner-level trusted key after auto-trust")
 	}
 }
 
@@ -4595,8 +4596,8 @@ func TestRunActionAdd_HubCompositeAcceptTrustsAuthoritiesAndInstalls(t *testing.
 	if err != nil {
 		t.Fatalf("LoadKeyring: %v", err)
 	}
-	if !kr.HasKey("github://acme/conn", pub) {
-		t.Error("keyring should contain trusted key after composite accept")
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("keyring should contain owner-level trusted key after composite accept")
 	}
 }
 
@@ -5186,15 +5187,15 @@ func TestRunActionAdd_YesFlagAutoTrusts(t *testing.T) {
 	if strings.Contains(stdout.String(), "Trust publisher github://acme/conn?") {
 		t.Errorf("--yes should suppress the trust prompt; got: %s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "✓ Trusted publisher github://acme/conn") {
-		t.Errorf("expected key-added confirmation line; got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "✓ Trusted publisher github://acme\n") {
+		t.Errorf("expected owner-level key-added confirmation line; got: %s", stdout.String())
 	}
 	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
 	if err != nil {
 		t.Fatalf("LoadKeyring: %v", err)
 	}
-	if !kr.HasKey("github://acme/conn", pub) {
-		t.Error("keyring should contain trusted key after --yes auto-trust")
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("keyring should contain owner-level trusted key after --yes auto-trust")
 	}
 }
 
@@ -5281,8 +5282,8 @@ func TestRunActionAdd_CrossAuthorityDepPromptsTrust(t *testing.T) {
 		t.Errorf("expected trust prompt for cross-authority dep; got: %s", stdout.String())
 	}
 	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
-	if !kr.HasKey("github://acme/conn-dep", depPub) {
-		t.Error("dep authority should be trusted after auto-trust")
+	if !kr.HasOwnerKey("github://acme", depPub) {
+		t.Error("dep authority should be trusted (owner-level) after auto-trust")
 	}
 }
 
@@ -6561,8 +6562,8 @@ actions = [
 	if err != nil {
 		t.Fatalf("LoadKeyring: %v", err)
 	}
-	if !kr.HasKey("github://acme/conn", pub) {
-		t.Error("keyring should contain trusted key after composite accept")
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("keyring should contain owner-level trusted key after composite accept")
 	}
 }
 
