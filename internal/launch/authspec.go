@@ -174,6 +174,32 @@ type FileBinding struct {
 	// returns a plain error so garbage is never written.
 	Fresher func(captured, current vault.Secret) (bool, error)
 
+	// CaptureValidate, when non-nil, runs after the binding's Capture
+	// succeeds and BEFORE the presence/Fresher branch decides whether
+	// to PUT. It is a host-side liveness probe: the launcher hands it
+	// an *http.Client (the same timed pre-launch client RefreshDeps
+	// uses) plus the just-captured Secret, and the hook confirms the
+	// credential actually authenticates against the vendor.
+	//
+	// A nil error means the credential is live and the PUT proceeds (the
+	// usual presence/Fresher gating still applies). A non-nil error
+	// means the credential did not authenticate (a bad, expired, or
+	// garbage token an in-container login wrote): CaptureFn logs a
+	// stderr warning and SKIPS the PUT, so the prior vault entry — if
+	// any — is retained rather than overwritten with a credential that
+	// cannot work. A token that poisons the vault for future launches is
+	// the durable harm this guards against; it cannot pre-validate the
+	// running session, whose credential does not exist until the agent
+	// logs in mid-session.
+	//
+	// The probe MUST run host-side. The container's deny-by-default
+	// network policy (ADR-0005) blocks outbound calls to the vendor, so
+	// the validation lives here in the launcher (which runs on the host),
+	// not inside the sandbox. The hook is invoked on every clean capture,
+	// before the freshness gate, so an invalid token is rejected on
+	// re-launch as well as on first seed.
+	CaptureValidate func(ctx context.Context, client *http.Client, captured vault.Secret) error
+
 	// PreLaunchRefresh, when non-nil, runs before Render. It
 	// receives the resolved vault secret plus the daemon-backed
 	// dependencies needed to refresh and persist a rotated token,

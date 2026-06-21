@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -11,6 +13,39 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
+
+// claudeModelsCapture records what the api-key validation probe sent so a
+// test can assert the acquirer's contract with the provider (the key
+// header and version header on the GET /v1/models request).
+type claudeModelsCapture struct {
+	apiKey  string
+	version string
+	path    string
+}
+
+// claudeModelsServer is an httptest server standing in for Claude's
+// /v1/models endpoint that the api-key validation probe hits. status is
+// the HTTP status it returns, letting a test drive the 2xx (valid key)
+// and 401 (invalid key) branches. The returned capture records the
+// x-api-key / anthropic-version headers and the request path.
+func claudeModelsServer(t *testing.T, status int) (*httptest.Server, *claudeModelsCapture) {
+	t.Helper()
+	cap := &claudeModelsCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cap.apiKey = r.Header.Get("x-api-key")
+		cap.version = r.Header.Get("anthropic-version")
+		cap.path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status/100 == 2 {
+			_, _ = io.WriteString(w, `{"data":[{"id":"claude-3"}]}`)
+		} else {
+			_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, cap
+}
 
 // Claude api-key auth contract (#1339):
 //
@@ -91,9 +126,11 @@ func TestClaudeAPIKey_Render_RejectsEmpty(t *testing.T) {
 
 func TestClaudeAPIKey_HostAcquire_ReturnsApiKeySecret(t *testing.T) {
 	eb := claudeAPIKeyBinding(t)
+	srv, capture := claudeModelsServer(t, http.StatusOK)
 	var out bytes.Buffer
 	secret, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
 		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
 		Out:          &out,
 		CodePrompter: scriptedPrompter("  sk-ant-xyz  ", nil),
 	})
@@ -102,6 +139,18 @@ func TestClaudeAPIKey_HostAcquire_ReturnsApiKeySecret(t *testing.T) {
 	}
 	if string(secret.Value) != "sk-ant-xyz" {
 		t.Errorf("Secret.Value = %q, want trimmed sk-ant-xyz", secret.Value)
+	}
+	// The validation probe must present the trimmed key via x-api-key
+	// (NOT a Bearer token) and the pinned anthropic-version, against the
+	// models endpoint.
+	if capture.apiKey != "sk-ant-xyz" {
+		t.Errorf("probe x-api-key = %q, want trimmed sk-ant-xyz", capture.apiKey)
+	}
+	if capture.version == "" {
+		t.Errorf("probe anthropic-version header is empty; want it set")
+	}
+	if capture.path != "/v1/models" {
+		t.Errorf("probe path = %q, want /v1/models", capture.path)
 	}
 	if secret.Metadata.Type != "api_key" {
 		t.Errorf("Metadata.Type = %q, want api_key", secret.Metadata.Type)
@@ -127,6 +176,7 @@ func TestClaudeAPIKey_HostAcquire_ReturnsApiKeySecret(t *testing.T) {
 // a writer to print its own.
 func TestClaudeAPIKey_HostAcquire_PrompterReceivesNilWriter(t *testing.T) {
 	eb := claudeAPIKeyBinding(t)
+	srv, _ := claudeModelsServer(t, http.StatusOK)
 	var out bytes.Buffer
 	gotWriter := io.Writer(&out) // sentinel: must be overwritten to nil
 	called := false
@@ -137,6 +187,7 @@ func TestClaudeAPIKey_HostAcquire_PrompterReceivesNilWriter(t *testing.T) {
 	}
 	if _, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
 		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
 		Out:          &out,
 		CodePrompter: prompter,
 	}); err != nil {
@@ -192,4 +243,67 @@ func TestClaudeAPIKey_HostAcquire_NilPrompterIsNonFatal(t *testing.T) {
 		t.Errorf("nil prompter must yield empty Secret, got %q", secret.Value)
 	}
 	_ = err
+}
+
+// Regression (#1384, sub-req B): a pasted key that authenticates (2xx
+// from the models probe) is seeded; a key the provider rejects (401) is
+// NOT seeded — the acquirer returns an empty Secret so the launcher logs
+// and falls back to the in-container login rather than persisting a dead
+// key into the vault.
+func TestClaudeAPIKey_HostAcquire_ValidKeyIsSeeded(t *testing.T) {
+	eb := claudeAPIKeyBinding(t)
+	srv, _ := claudeModelsServer(t, http.StatusOK)
+	secret, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
+		CodePrompter: scriptedPrompter("sk-ant-valid", nil),
+	})
+	if err != nil {
+		t.Fatalf("HostAcquire: %v", err)
+	}
+	if string(secret.Value) != "sk-ant-valid" {
+		t.Errorf("Secret.Value = %q, want sk-ant-valid", secret.Value)
+	}
+}
+
+func TestClaudeAPIKey_HostAcquire_InvalidKeyIsNotSeeded(t *testing.T) {
+	eb := claudeAPIKeyBinding(t)
+	srv, _ := claudeModelsServer(t, http.StatusUnauthorized)
+	var out bytes.Buffer
+	secret, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
+		Out:          &out,
+		CodePrompter: scriptedPrompter("sk-ant-revoked", nil),
+	})
+	// A rejected key is non-fatal: empty Secret (no seed) so the launcher
+	// falls back. An accompanying error is permitted as a fallback signal.
+	if len(secret.Value) != 0 {
+		t.Errorf("invalid key must yield empty Secret (no seed), got %q", secret.Value)
+	}
+	if err == nil {
+		t.Error("invalid key should surface a (non-fatal) error so the launcher logs the fallback")
+	}
+	// The user sees a message explaining the key did not validate.
+	if !strings.Contains(out.String(), "did not validate") {
+		t.Errorf("Out = %q, want a message that the key did not validate", out.String())
+	}
+}
+
+// A 403 (e.g. key valid but lacking model access) is treated the same as
+// a 401: not seeded, launcher falls back.
+func TestClaudeAPIKey_HostAcquire_ForbiddenKeyIsNotSeeded(t *testing.T) {
+	eb := claudeAPIKeyBinding(t)
+	srv, _ := claudeModelsServer(t, http.StatusForbidden)
+	secret, err := eb.HostAcquire(context.Background(), launch.HostAcquireDeps{
+		Ctx:          context.Background(),
+		HTTPClient:   testHTTPClient(srv.URL),
+		CodePrompter: scriptedPrompter("sk-ant-forbidden", nil),
+	})
+	if len(secret.Value) != 0 {
+		t.Errorf("forbidden key must yield empty Secret (no seed), got %q", secret.Value)
+	}
+	if err == nil {
+		t.Error("forbidden key should surface a (non-fatal) error so the launcher logs the fallback")
+	}
 }

@@ -334,6 +334,9 @@ func prepareAuthSpec(
 		// Fresher is the binding's optional freshness hook; nil
 		// preserves last-writer-wins. See FileBinding.Fresher.
 		Fresher func(captured, current vault.Secret) (bool, error)
+		// CaptureValidate is the binding's optional host-side liveness
+		// probe; nil skips validation. See FileBinding.CaptureValidate.
+		CaptureValidate func(ctx context.Context, client *http.Client, captured vault.Secret) error
 	}
 	var captureTargets []fileCapture
 
@@ -371,6 +374,7 @@ func prepareAuthSpec(
 			Capture:         fb.Capture,
 			PresentAtRender: true,
 			Fresher:         fb.Fresher,
+			CaptureValidate: fb.CaptureValidate,
 		})
 		// MountAsFile bindings get an individual file mount at
 		// ContainerPath. The mount is writable so Capture can read
@@ -459,6 +463,7 @@ func prepareAuthSpec(
 				Capture:         fb.Capture,
 				PresentAtRender: false,
 				Fresher:         fb.Fresher,
+				CaptureValidate: fb.CaptureValidate,
 			})
 			continue
 		case getErr != nil:
@@ -620,6 +625,23 @@ func prepareAuthSpec(
 						fmt.Errorf("schema-validate captured bytes: %w (skipping vault write so a partial-write or schema-drift session does not clobber the prior entry; inspect %s or re-login)",
 							err, target.HostPath))
 					continue
+				}
+				// Host-side liveness probe. The Capture above only checks
+				// envelope structure; CaptureValidate confirms the captured
+				// credential actually authenticates against the vendor. Run
+				// it before the presence/Fresher branch so a bad, expired, or
+				// garbage token an in-container login wrote is rejected on
+				// every clean capture (first seed and re-launch alike) rather
+				// than poisoning the vault for future launches. The probe is
+				// host-side because the container's deny-by-default network
+				// policy (ADR-0005) blocks the vendor call from inside the
+				// sandbox.
+				if target.CaptureValidate != nil {
+					if err := target.CaptureValidate(captureCtx, preLaunchRefreshHTTPClient(), captured); err != nil {
+						captureWarn(sessionLog, stderr, agentName, target.HostPath,
+							fmt.Errorf("validate captured credential: %w (skipping vault write so an unusable token does not overwrite the prior entry; re-login to seed a working credential)", err))
+						continue
+					}
 				}
 				// Decide whether to PUT via the presence-aware,
 				// three-way branch (ADR-0025). Read the current vault
