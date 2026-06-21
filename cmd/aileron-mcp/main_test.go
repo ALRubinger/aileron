@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,7 +10,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // --- JSON-RPC handling ---
@@ -88,7 +92,7 @@ func TestDispatchTool_UnknownTool(t *testing.T) {
 // which the MCP server registers unconditionally so the agent can
 // poll outcomes from any session.
 func TestAvailableTools_CommsOnly(t *testing.T) {
-	s := &server{commsURL:    "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
+	s := &server{commsURL: "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
 	tools := s.availableTools()
 	if len(tools) != 5 {
 		t.Fatalf("expected 4 comms tools + check_action_status, got %d", len(tools))
@@ -126,8 +130,8 @@ func TestAvailableTools_ActionsOnly(t *testing.T) {
 
 func TestAvailableTools_CommsAndActions(t *testing.T) {
 	s := &server{
-		commsURL:    "http://x", sessionID: "sess-x",
-		httpClient:  &http.Client{},
+		commsURL: "http://x", sessionID: "sess-x",
+		httpClient: &http.Client{},
 		actionTools: []toolDef{
 			{Name: "ship_update", Description: "x", InputSchema: schema{Type: "object"}},
 			{Name: "list_emails", Description: "y", InputSchema: schema{Type: "object"}},
@@ -1295,4 +1299,404 @@ func commsServerWithFakeDaemon(t *testing.T, handler http.Handler) *server {
 		httpClient:      &http.Client{},
 		commsHTTPClient: &http.Client{},
 	}
+}
+
+// --- Mid-session action refresh (issue #897) ---
+
+// syncBuffer is a goroutine-safe bytes.Buffer so a test can read the
+// poller's emitted notifications while the refresh goroutine (or a
+// direct refreshOnce call) writes to s.out under writeMu.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// emittedMethods parses every newline-delimited JSON-RPC frame written
+// to the buffer and returns the "method" field of each. Non-JSON or
+// frames without a method are skipped.
+func emittedMethods(t *testing.T, s string) []string {
+	t.Helper()
+	var methods []string
+	sc := bufio.NewScanner(strings.NewReader(s))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var frame struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+			continue
+		}
+		if frame.Method != "" {
+			methods = append(methods, frame.Method)
+		}
+	}
+	return methods
+}
+
+func countListChanged(t *testing.T, s string) int {
+	t.Helper()
+	n := 0
+	for _, m := range emittedMethods(t, s) {
+		if m == "notifications/tools/list_changed" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestHandle_Initialize_AdvertisesListChanged(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "initialize",
+	})
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatal("expected map result")
+	}
+	caps, ok := result["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("capabilities missing or wrong type: %#v", result["capabilities"])
+	}
+	tools, ok := caps["tools"].(map[string]any)
+	if !ok {
+		t.Fatalf("capabilities.tools missing or wrong type: %#v", caps["tools"])
+	}
+	if tools["listChanged"] != true {
+		t.Errorf("capabilities.tools.listChanged = %v, want true", tools["listChanged"])
+	}
+}
+
+// mutableActions is a goroutine-safe holder for the action set an
+// httptest daemon serves, so a test can swap what GET /v1/actions
+// returns between poll cycles while the poller goroutine reads it
+// concurrently (no data race on the slice).
+type mutableActions struct {
+	mu    sync.Mutex
+	items []actionMeta
+}
+
+func newMutableActions(items ...actionMeta) *mutableActions {
+	return &mutableActions{items: items}
+}
+
+func (m *mutableActions) set(items ...actionMeta) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items = items
+}
+
+func (m *mutableActions) get() []actionMeta {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]actionMeta(nil), m.items...)
+}
+
+func (m *mutableActions) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(actionListResponse{Items: m.get()})
+	})
+}
+
+func enabledPtr() *bool  { b := true; return &b }
+func disabledPtr() *bool { b := false; return &b }
+
+func TestRefreshOnce_EmitsOnActionAdded(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	// Seed the cache with the startup surface.
+	tools, nameMap, err := s.discoverActions(context.Background())
+	if err != nil {
+		t.Fatalf("discoverActions: %v", err)
+	}
+	s.setActions(tools, nameMap)
+
+	// Add a second action and poll.
+	actions.set(
+		actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()},
+		actionMeta{Name: "list-emails", Body: "# List", Enabled: enabledPtr()},
+	)
+	if !s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned false; expected a change (action added)")
+	}
+	if got := countListChanged(t, out.String()); got != 1 {
+		t.Fatalf("list_changed emissions = %d, want 1", got)
+	}
+	// The new action is now routable.
+	s.actionsMu.RLock()
+	_, ok := s.actionNameMap["list_emails"]
+	s.actionsMu.RUnlock()
+	if !ok {
+		t.Error("added action 'list-emails' not present in nameMap after refresh")
+	}
+}
+
+func TestRefreshOnce_EmitsOnActionEnabled(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "list-emails", Body: "# List", Enabled: disabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+	// Disabled action is hidden at boot.
+	s.actionsMu.RLock()
+	hidden := len(s.actionTools)
+	s.actionsMu.RUnlock()
+	if hidden != 0 {
+		t.Fatalf("disabled action surfaced at boot: %d tools", hidden)
+	}
+
+	actions.set(actionMeta{Name: "list-emails", Body: "# List", Enabled: enabledPtr()})
+	if !s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned false; expected a change (action enabled)")
+	}
+	if got := countListChanged(t, out.String()); got != 1 {
+		t.Fatalf("list_changed emissions = %d, want 1", got)
+	}
+}
+
+func TestRefreshOnce_EmitsOnActionDisabled(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "list-emails", Body: "# List", Enabled: enabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+
+	actions.set(actionMeta{Name: "list-emails", Body: "# List", Enabled: disabledPtr()})
+	if !s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned false; expected a change (action disabled)")
+	}
+	if got := countListChanged(t, out.String()); got != 1 {
+		t.Fatalf("list_changed emissions = %d, want 1", got)
+	}
+	s.actionsMu.RLock()
+	remaining := len(s.actionTools)
+	s.actionsMu.RUnlock()
+	if remaining != 0 {
+		t.Errorf("disabled action still surfaced after refresh: %d tools", remaining)
+	}
+}
+
+func TestRefreshOnce_EmitsOnActionRemoved(t *testing.T) {
+	actions := newMutableActions(
+		actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()},
+		actionMeta{Name: "list-emails", Body: "# List", Enabled: enabledPtr()},
+	)
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+
+	actions.set(actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()}) // remove list-emails
+	if !s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned false; expected a change (action removed)")
+	}
+	if got := countListChanged(t, out.String()); got != 1 {
+		t.Fatalf("list_changed emissions = %d, want 1", got)
+	}
+	s.actionsMu.RLock()
+	_, ok := s.actionNameMap["list_emails"]
+	s.actionsMu.RUnlock()
+	if ok {
+		t.Error("removed action 'list-emails' still routable after refresh")
+	}
+}
+
+func TestRefreshOnce_NoEmitWhenUnchanged(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+
+	if s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned true; expected no change")
+	}
+	if got := countListChanged(t, out.String()); got != 0 {
+		t.Fatalf("list_changed emissions = %d, want 0 (no change)", got)
+	}
+}
+
+func TestRefreshOnce_FailureLeavesSurfaceIntact(t *testing.T) {
+	// First call succeeds, subsequent calls 500 — proves a refresh
+	// failure does not overwrite a good cache (the #897 contract:
+	// failures must not corrupt the working tool surface).
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(actionListResponse{
+				Items: []actionMeta{{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()}},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, err := s.discoverActions(context.Background())
+	if err != nil {
+		t.Fatalf("seed discovery: %v", err)
+	}
+	s.setActions(tools, nameMap)
+
+	if s.refreshOnce(context.Background()) {
+		t.Fatal("refreshOnce returned true on a failed discovery")
+	}
+	if got := countListChanged(t, out.String()); got != 0 {
+		t.Fatalf("list_changed emitted on failure: %d", got)
+	}
+	// The good surface survives.
+	s.actionsMu.RLock()
+	_, ok := s.actionNameMap["ship_update"]
+	n := len(s.actionTools)
+	s.actionsMu.RUnlock()
+	if !ok || n != 1 {
+		t.Errorf("failure corrupted surface: tools=%d, ship_update present=%v", n, ok)
+	}
+}
+
+func TestRefreshInterval(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantDur time.Duration
+		wantOn  bool
+	}{
+		{"", defaultRefreshInterval, true},
+		{"10s", 10 * time.Second, true},
+		{"2m", 2 * time.Minute, true},
+		{"3", 3 * time.Second, true}, // bare integer → seconds
+		{"0", 0, false},              // explicit disable
+		{"0s", 0, false},             // zero duration → disable
+		{"  ", defaultRefreshInterval, true},
+		{"-5s", 0, false},                         // non-positive → disable
+		{"garbage", defaultRefreshInterval, true}, // typo falls back to default
+	}
+	for _, tc := range cases {
+		gotDur, gotOn := refreshInterval(tc.raw)
+		if gotOn != tc.wantOn {
+			t.Errorf("refreshInterval(%q) enabled = %v, want %v", tc.raw, gotOn, tc.wantOn)
+			continue
+		}
+		if gotOn && gotDur != tc.wantDur {
+			t.Errorf("refreshInterval(%q) = %v, want %v", tc.raw, gotDur, tc.wantDur)
+		}
+	}
+}
+
+func TestWriteLine_NilOutIsNoop(t *testing.T) {
+	s := &server{} // out is nil
+	// Must not panic.
+	s.writeLine([]byte(`{"jsonrpc":"2.0"}`))
+}
+
+func TestRefreshLoop_StopsOnContextCancel(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.refreshLoop(ctx, 10*time.Millisecond)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshLoop did not return after context cancel")
+	}
+}
+
+func TestMaybeStartRefreshPoller_NoURLDoesNotStart(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	if s.maybeStartRefreshPoller(context.Background(), "5s") {
+		t.Error("poller started without AILERON_URL")
+	}
+}
+
+func TestMaybeStartRefreshPoller_DisabledIntervalDoesNotStart(t *testing.T) {
+	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
+	if s.maybeStartRefreshPoller(context.Background(), "0") {
+		t.Error("poller started with interval=0 (disabled)")
+	}
+}
+
+func TestMaybeStartRefreshPoller_StartsAndStopsOnCancel(t *testing.T) {
+	actions := newMutableActions(actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()})
+	srv := httptest.NewServer(actions.handler())
+	defer srv.Close()
+
+	out := &syncBuffer{}
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client(), out: out}
+	tools, nameMap, _ := s.discoverActions(context.Background())
+	s.setActions(tools, nameMap)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if !s.maybeStartRefreshPoller(ctx, "10ms") {
+		t.Fatal("poller did not start with valid URL + interval")
+	}
+
+	// Flip the served set; the running poller should emit list_changed.
+	actions.set(
+		actionMeta{Name: "ship-update", Body: "# Ship", Enabled: enabledPtr()},
+		actionMeta{Name: "list-emails", Body: "# List", Enabled: enabledPtr()},
+	)
+	deadline := time.After(2 * time.Second)
+	for {
+		if countListChanged(t, out.String()) >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("poller never emitted list_changed after action added")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
 }
