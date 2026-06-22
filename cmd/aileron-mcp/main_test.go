@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1699,4 +1700,249 @@ func TestMaybeStartRefreshPoller_StartsAndStopsOnCancel(t *testing.T) {
 		}
 	}
 	cancel()
+}
+
+// --- Discovery failure classification + aileron_diagnostics tool ---
+
+// TestDiscoverActions_UnreachableClassified asserts a transport failure
+// (daemon not listening) classifies as reasonUnreachable so the warning
+// and diagnostics tool can say "daemon unreachable", not a generic error.
+func TestDiscoverActions_UnreachableClassified(t *testing.T) {
+	// Point at a closed port so the request fails at the transport layer.
+	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{Timeout: time.Second}}
+	_, _, err := s.discoverActions(context.Background())
+	if err == nil {
+		t.Fatal("expected transport error for unreachable daemon")
+	}
+	diag := classifyDiscovery(nil, err)
+	if diag.reason != reasonUnreachable {
+		t.Fatalf("reason = %v, want reasonUnreachable", diag.reason)
+	}
+	if !strings.Contains(diag.summary(s.aileronURL), "unreachable") {
+		t.Errorf("summary = %q, want it to mention 'unreachable'", diag.summary(s.aileronURL))
+	}
+}
+
+// TestDiscoverActions_UnauthorizedClassified asserts a 401 classifies as
+// reasonUnauthorized — distinct from a generic HTTP error — so the
+// operator learns the token/session is stale.
+func TestDiscoverActions_UnauthorizedClassified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	_, _, err := s.discoverActions(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 401")
+	}
+	diag := classifyDiscovery(nil, err)
+	if diag.reason != reasonUnauthorized {
+		t.Fatalf("reason = %v, want reasonUnauthorized", diag.reason)
+	}
+	if !strings.Contains(diag.summary(srv.URL), "unauthorized") {
+		t.Errorf("summary = %q, want 'unauthorized'", diag.summary(srv.URL))
+	}
+	if !strings.Contains(diag.remediation(), "Re-authenticate") {
+		t.Errorf("remediation = %q, want re-auth guidance", diag.remediation())
+	}
+}
+
+// TestDiscoverActions_HTTPErrorClassified asserts a non-401 non-200 (500)
+// classifies as reasonHTTPError, keeping it distinct from unreachable /
+// unauthorized.
+func TestDiscoverActions_HTTPErrorClassified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	_, _, err := s.discoverActions(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	diag := classifyDiscovery(nil, err)
+	if diag.reason != reasonHTTPError {
+		t.Fatalf("reason = %v, want reasonHTTPError", diag.reason)
+	}
+}
+
+// TestClassifyDiscovery_EmptyIsReasonEmpty asserts a successful response
+// carrying zero actions classifies as reasonEmpty — the wire succeeded
+// but the daemon exposes nothing, distinct from a discovery failure.
+func TestClassifyDiscovery_EmptyIsReasonEmpty(t *testing.T) {
+	diag := classifyDiscovery([]toolDef{}, nil)
+	if diag.reason != reasonEmpty {
+		t.Fatalf("reason = %v, want reasonEmpty", diag.reason)
+	}
+	if diag.ok() {
+		t.Error("ok() = true for empty result")
+	}
+	if !strings.Contains(diag.summary("http://x"), "0 actions") {
+		t.Errorf("summary = %q, want '0 actions'", diag.summary("http://x"))
+	}
+}
+
+// TestClassifyDiscovery_SuccessIsReasonOK asserts a non-empty result
+// classifies as reasonOK with the action count.
+func TestClassifyDiscovery_SuccessIsReasonOK(t *testing.T) {
+	diag := classifyDiscovery([]toolDef{{Name: "a"}, {Name: "b"}}, nil)
+	if !diag.ok() {
+		t.Fatalf("ok() = false, reason = %v", diag.reason)
+	}
+	if diag.count != 2 {
+		t.Errorf("count = %d, want 2", diag.count)
+	}
+}
+
+// TestAvailableTools_IncludesDiagnosticsWhenURLSet asserts the synthetic
+// aileron_diagnostics tool is present whenever AILERON_URL is set, so the
+// agent can always ask why connector actions are missing.
+func TestAvailableTools_IncludesDiagnosticsWhenURLSet(t *testing.T) {
+	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
+	names := map[string]bool{}
+	for _, td := range s.availableTools() {
+		names[td.Name] = true
+	}
+	if !names["aileron_diagnostics"] {
+		t.Errorf("aileron_diagnostics missing; tools = %v", names)
+	}
+}
+
+// TestAvailableTools_OmitsDiagnosticsWhenNoURL asserts the diagnostics
+// tool is absent when there is no daemon to discover against — it would
+// have nothing to report and would inflate the host-launch tool surface.
+func TestAvailableTools_OmitsDiagnosticsWhenNoURL(t *testing.T) {
+	s := &server{commsURL: "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
+	for _, td := range s.availableTools() {
+		if td.Name == "aileron_diagnostics" {
+			t.Fatal("aileron_diagnostics present without AILERON_URL")
+		}
+	}
+}
+
+// TestDiagnostics_ReportsUnreachable asserts the synthetic tool's result
+// names the unreachable daemon and the remediation when discovery failed
+// at the transport layer — the operator's core complaint, answerable
+// from the agent.
+func TestDiagnostics_ReportsUnreachable(t *testing.T) {
+	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonUnreachable, err: context.DeadlineExceeded})
+	res := s.diagnostics()
+	if res.IsError {
+		t.Fatal("diagnostics should not be an error result")
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "degraded") || !strings.Contains(text, "unreachable") {
+		t.Errorf("text = %q, want degraded + unreachable", text)
+	}
+	if !strings.Contains(text, "aileron launch") {
+		t.Errorf("text = %q, want remediation mentioning aileron launch", text)
+	}
+}
+
+// TestDiagnostics_ReportsUnauthorized asserts a 401 surfaces as a
+// re-auth prompt the agent can relay.
+func TestDiagnostics_ReportsUnauthorized(t *testing.T) {
+	s := &server{aileronURL: "http://daemon", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonUnauthorized})
+	text := s.diagnostics().Content[0].Text
+	if !strings.Contains(text, "unauthorized") {
+		t.Errorf("text = %q, want 'unauthorized'", text)
+	}
+	if !strings.Contains(text, "Re-authenticate") {
+		t.Errorf("text = %q, want re-auth remediation", text)
+	}
+}
+
+// TestDiagnostics_ReportsEmpty asserts a reachable-but-empty daemon is
+// reported as such, distinct from a transport/auth failure.
+func TestDiagnostics_ReportsEmpty(t *testing.T) {
+	s := &server{aileronURL: "http://daemon", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonEmpty})
+	text := s.diagnostics().Content[0].Text
+	if !strings.Contains(text, "0 actions") {
+		t.Errorf("text = %q, want '0 actions'", text)
+	}
+	if !strings.Contains(text, "reachable and authorized") {
+		t.Errorf("text = %q, want note that daemon is reachable", text)
+	}
+}
+
+// TestDiagnostics_ReportsHealthy asserts a successful discovery reports a
+// healthy state with the action count.
+func TestDiagnostics_ReportsHealthy(t *testing.T) {
+	s := &server{aileronURL: "http://daemon", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonOK, count: 21})
+	text := s.diagnostics().Content[0].Text
+	if !strings.Contains(text, "healthy") || !strings.Contains(text, "21") {
+		t.Errorf("text = %q, want healthy + count", text)
+	}
+}
+
+// TestDiagnostics_NoURL asserts that without AILERON_URL the tool still
+// answers (it is only registered when URL is set, but the dispatch path
+// is defensive) and explains that no connector actions are expected.
+func TestDiagnostics_NoURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	text := s.diagnostics().Content[0].Text
+	if !strings.Contains(text, "AILERON_URL not set") {
+		t.Errorf("text = %q, want AILERON_URL note", text)
+	}
+}
+
+// TestRefreshOnce_RecordsDiagnosticOnFailure asserts a refresh failure
+// updates the cached diagnostic so a later aileron_diagnostics call
+// reflects the current (degraded) state, while leaving the tool surface
+// intact.
+func TestRefreshOnce_RecordsDiagnosticOnFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	// Seed a healthy prior surface so we can confirm it survives.
+	s.setActions([]toolDef{{Name: "ship_update"}}, map[string]string{"ship_update": "ship-update"})
+	if s.refreshOnce(context.Background()) {
+		t.Error("refreshOnce reported a change on a failed discovery")
+	}
+	if d := s.discoveryState(); d.reason != reasonUnauthorized {
+		t.Fatalf("recorded reason = %v, want reasonUnauthorized", d.reason)
+	}
+	// Tool surface must be untouched.
+	s.actionsMu.RLock()
+	got := len(s.actionTools)
+	s.actionsMu.RUnlock()
+	if got != 1 {
+		t.Errorf("action surface mutated on failure: len = %d, want 1", got)
+	}
+}
+
+// TestDispatchTool_RoutesDiagnostics asserts the dispatcher routes the
+// synthetic tool name to the diagnostics handler.
+func TestDispatchTool_RoutesDiagnostics(t *testing.T) {
+	s := &server{aileronURL: "http://daemon", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonOK, count: 3})
+	res := s.dispatchTool(context.Background(), "aileron_diagnostics", nil)
+	if res.IsError {
+		t.Fatalf("unexpected error result: %+v", res)
+	}
+	if !strings.Contains(res.Content[0].Text, "healthy") {
+		t.Errorf("text = %q, want healthy report", res.Content[0].Text)
+	}
+}
+
+// TestDiagnostics_ReportsHTTPError asserts a non-401 daemon error surfaces
+// the daemon-error summary (including the status) so the operator can tell
+// it apart from unreachable / unauthorized.
+func TestDiagnostics_ReportsHTTPError(t *testing.T) {
+	s := &server{aileronURL: "http://daemon", httpClient: &http.Client{}}
+	s.setDiscovery(discoveryDiagnostic{reason: reasonHTTPError, err: errors.New("/v1/actions: 500 Internal Server Error")})
+	text := s.diagnostics().Content[0].Text
+	if !strings.Contains(text, "daemon error") || !strings.Contains(text, "500") {
+		t.Errorf("text = %q, want daemon error with status", text)
+	}
 }
