@@ -257,6 +257,60 @@ func TestFeatureInstallScriptsMatchCanonicalRecipe(t *testing.T) {
 	}
 }
 
+// TestCodexFeatureShipsApacheLicenseAndNotice encodes the Apache-2.0
+// redistribution obligation for the published Codex image (issue #1455). The
+// @openai/codex npm package declares "license": "Apache-2.0" but ships neither
+// the license text nor the upstream NOTICE, so the only way the published image
+// can satisfy Apache-2.0 §4(d) (include the License, reproduce NOTICE) is for
+// the Codex Feature to vendor both files and persist them into the image. This
+// contract asserts (1) the vendored files exist and carry the load-bearing
+// upstream content, and (2) install.sh actually copies them somewhere durable so
+// they survive the build's removal of the Feature tree. claude is intentionally
+// excluded: Claude Code is not redistributed under these terms.
+func TestCodexFeatureShipsApacheLicenseAndNotice(t *testing.T) {
+	root := featuresContext(t)
+	codexDir := filepath.Join(root, "codex")
+
+	license, err := os.ReadFile(filepath.Join(codexDir, "LICENSE"))
+	if err != nil {
+		t.Fatalf("Codex Feature must vendor the Apache-2.0 LICENSE text (issue #1455): %v", err)
+	}
+	// The full Apache-2.0 text, not a stub: the header line plus the APPENDIX
+	// boilerplate that only the complete license carries.
+	for _, want := range []string{"Apache License", "Version 2.0", "APPENDIX: How to apply the Apache License"} {
+		if !strings.Contains(string(license), want) {
+			t.Fatalf("codex/LICENSE does not look like the full Apache-2.0 text (missing %q)", want)
+		}
+	}
+
+	notice, err := os.ReadFile(filepath.Join(codexDir, "NOTICE"))
+	if err != nil {
+		t.Fatalf("Codex Feature must reproduce the openai/codex NOTICE attributions (issue #1455): %v", err)
+	}
+	// The two attributions Apache-2.0 §4(d) requires us to reproduce: OpenAI's
+	// own copyright and the Ratatui/MIT derivation. Asserted as substrings the
+	// upstream NOTICE carries verbatim (the upstream line is "Copyright **2025**
+	// OpenAI" with Markdown emphasis, which we reproduce as-is rather than
+	// reformatting upstream's NOTICE).
+	for _, want := range []string{"OpenAI Codex", "2025", "OpenAI", "Ratatui", "MIT license"} {
+		if !strings.Contains(string(notice), want) {
+			t.Fatalf("codex/NOTICE missing required attribution %q", want)
+		}
+	}
+
+	// install.sh must actually place both files into the image; vendoring them in
+	// the Feature dir is useless if the build removes the tree without copying.
+	body, err := os.ReadFile(filepath.Join(codexDir, "install.sh"))
+	if err != nil {
+		t.Fatalf("read codex/install.sh: %v", err)
+	}
+	for _, want := range []string{"LICENSE", "NOTICE"} {
+		if !strings.Contains(string(body), "cp ") || !strings.Contains(string(body), want) {
+			t.Fatalf("codex/install.sh must copy the vendored %s into the image so it survives Feature-tree removal:\n%s", want, body)
+		}
+	}
+}
+
 // TestGHFeatureInstallScriptMatchesBaseContainerfile is the gh-specific install
 // parity check. gh is not an npm agent recipe (no @vendor/pkg, not in
 // agentRecipes), so it is deliberately excluded from
