@@ -38,7 +38,7 @@ With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>
 
 `sandbox check --agent=<agent>` resolves the same image, so a passing check matches what launch will run.
 
-The launcher resolves the image for this build-free default in two ways. A release build with a recorded digest pin pulls a fixed image by `@sha256` (see [Reproducible releases](#reproducible-releases-digest-pinning) below). Otherwise it resolves a floating tag: a release build with no recorded pin pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (published on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the fallback when no digest is pinned. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
+The launcher resolves the image for this build-free default in two ways. A release build with a recorded digest pin pulls a fixed image by `@sha256` (see [Reproducible releases](#reproducible-releases-digest-pinning) below). Otherwise it resolves a floating tag: a release build with no recorded pin pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (republished on every merge to `main` that touches the image source, and on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the fallback when no digest is pinned. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
 
 When the requested agent has no published image, launch falls back to the customization tier. The image validation then emits the actionable message to install the agent CLI in the sandbox image or launch with `--local`.
 
@@ -55,14 +55,16 @@ Each image is built for `linux/amd64` and `linux/arm64`, so a `docker pull` reso
 
 The base image (`sandbox-base.yml`) and the per-agent images (`sandbox-agents.yml`) are two separate workflows, both triggered directly by a `v*` tag push, so they run concurrently on the same tag. A per-agent build `FROM`s the version-pinned base tag, so before that `FROM` it waits for the base tag to publish: it polls the registry on a bounded retry loop until the concurrently-building base tag appears. A base that never publishes surfaces a precise timeout error naming the absent tag rather than failing mid-build.
 
-The tag scheme is `<aileron-version>-<agent-cli-version>` plus two floating tags: `latest`, moved only by a `v*` tag release, and `edge`, moved by a `workflow_dispatch` publish off `main`. The `<aileron-version>` is the Aileron release the image was built from. The `<agent-cli-version>` is the agent CLI version baked into the image, resolved at build time from the installed package. A git-traceability tag `git-<sha>` is also published.
+On a merge to `main` the two workflows run in sequence rather than concurrently. The base workflow runs on the `main` push (filtered to image-affecting paths) and republishes `base:edge`. The per-agent workflow then runs as a `workflow_run` cascade keyed on the base workflow's completion, so it starts only after the base finishes its multi-arch push and composes the agents onto the freshly republished `base:edge`, never a stale one. The cascade leg runs only when the triggering base run succeeded on `main`. This keeps the image source and the `edge` tags in lockstep, so an in-repo change to the image (for example a new in-image entrypoint helper) cannot leave dev/main consumers pulling a base that predates it.
+
+The tag scheme is `<aileron-version>-<agent-cli-version>` plus two floating tags: `latest`, moved only by a `v*` tag release, and `edge`, republished on every merge to `main` that touches the image source and on a `workflow_dispatch`. The `<aileron-version>` is the Aileron release the image was built from. The `<agent-cli-version>` is the agent CLI version baked into the image, resolved at build time from the installed package. A git-traceability tag `git-<sha>` is also published.
 
 Pull the most recent release (`latest`), or the latest dev publish off `main` (`edge`):
 
 ```bash
 docker pull ghcr.io/alrubinger/aileron-sandbox-claude:latest
 docker pull ghcr.io/alrubinger/aileron-sandbox-codex:latest
-# tip of main, published on workflow_dispatch:
+# tip of main, republished on every image-affecting merge to main:
 docker pull ghcr.io/alrubinger/aileron-sandbox-claude:edge
 ```
 

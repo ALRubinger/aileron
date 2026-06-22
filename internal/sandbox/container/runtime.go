@@ -47,6 +47,13 @@ const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
 const AgentImagesDocsURL = "https://docs.withaileron.ai/development/sandbox-agent-images/"
 
+// remapAgentUIDHelper is the in-image entrypoint helper (shipped by
+// images/sandbox-base) the remap-enabled launch/validate path prepends as the
+// container command so the agent uid is remapped to the workspace owner before
+// the agent starts (issue #1461). Centralized here so the validate prepend and
+// the stale-image diagnostic in Validate name the exact same binary.
+const remapAgentUIDHelper = "aileron-remap-agent-uid"
+
 // WorkspaceUIDRemapActive reports whether a launch/validate against runtimeName
 // should route the container through the aileron-remap-agent-uid entrypoint to
 // align the in-container agent uid/gid with the workspace owner. The DAC uid
@@ -693,7 +700,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 	user := ""
 	if opts.RemapWorkspaceUID {
 		user = "root"
-		command = append([]string{"aileron-remap-agent-uid", "su-exec", "agent"}, command...)
+		command = append([]string{remapAgentUIDHelper, "su-exec", "agent"}, command...)
 	}
 	_, err := builder.Run(ctx, RunOptions{
 		Runtime: opts.Runtime,
@@ -708,11 +715,43 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 		return nil
 	}
 	detail := strings.TrimSpace(stderr.String())
+	// A remap-enabled validate prepends aileron-remap-agent-uid as the literal
+	// container command (see above). When the image predates the entrypoint
+	// contract and lacks that helper, the image's tini entrypoint fails to exec
+	// it (exit 127) BEFORE the validation script ever runs, so none of the
+	// script's friendly diagnostics are produced. Detect that tini exec-failure
+	// signature and translate it into an actionable message naming the stale
+	// image, instead of letting the opaque tini error reach the launcher. See
+	// issue #1466.
+	if opts.RemapWorkspaceUID && missingEntrypointHelperSignature(detail) {
+		return fmt.Errorf("validate sandbox image %s: %s: %w", opts.Image, staleEntrypointContractMessage, err)
+	}
 	if detail != "" {
 		detail = sandboxValidationDetail(detail)
 		return fmt.Errorf("validate sandbox image %s: %s: %w", opts.Image, detail, err)
 	}
 	return fmt.Errorf("validate sandbox image %s: image must support /bin/sh command execution, a writable %s workspace mount, and agent command %q on PATH; see %s: %w", opts.Image, WorkspacePath, opts.Command[0], AgentImagesDocsURL, err)
+}
+
+// staleEntrypointContractMessage is surfaced when a remap-enabled launch hits a
+// sandbox image whose tini entrypoint cannot exec the aileron-remap-agent-uid
+// helper because the image predates the launcher's in-image entrypoint
+// contract. It tells the operator the concrete remedy: rebuild the edge images.
+const staleEntrypointContractMessage = "sandbox image predates this launcher's entrypoint contract: the in-image " +
+	remapAgentUIDHelper + " helper is missing, so the container entrypoint fails before launch. " +
+	"Rebuild the base+agent edge images (or pull a newer edge tag); see " + AgentImagesDocsURL
+
+// missingEntrypointHelperSignature reports whether the container runtime's
+// stderr carries the tini exec-failure signature emitted when PID 1 cannot
+// exec the aileron-remap-agent-uid helper (the helper is absent from a stale
+// image). tini prints `exec <prog> failed: No such file or directory` and
+// exits 127; matching the helper name plus the "exec ... failed" framing keeps
+// this from firing on unrelated stderr that merely mentions the helper.
+func missingEntrypointHelperSignature(stderr string) bool {
+	lowered := strings.ToLower(stderr)
+	return strings.Contains(lowered, "exec "+remapAgentUIDHelper+" failed") ||
+		(strings.Contains(lowered, remapAgentUIDHelper) &&
+			strings.Contains(lowered, "no such file or directory"))
 }
 
 func sandboxValidationDetail(detail string) string {
