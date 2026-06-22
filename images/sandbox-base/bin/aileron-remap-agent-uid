@@ -105,20 +105,33 @@ if [ -d "$workspace" ]; then
   fi
 
   # Re-assert ownership of the agent's home scaffolding (dotfiles, proxy/CA and
-  # manifest dirs) after the remap so the agent still owns them under its new
-  # uid/gid. Because we changed the ids by editing /etc/passwd and /etc/group
-  # directly (not via usermod -u), nothing rewrote home ownership for us, so this
-  # walk is the SOLE re-chown and must cover the agent's home scaffolding.
-  # CRITICAL: the workspace bind mount lives at $workspace under /home/agent and
-  # is the operator's real host CWD; it must NOT be recursively chowned (that
-  # would rewrite the host project's file ownership, and is unnecessary because
-  # the agent uid was just aligned to the workspace owner). Prune it from the
-  # walk.
+  # manifest dirs) plus the launcher-managed WRITABLE mounts the agent must own
+  # under its new id — the host-chowned auth trees and fresh, root-owned Docker
+  # named cache volumes. Because we changed the ids by editing /etc/passwd and
+  # /etc/group directly (not via usermod -u), nothing rewrote home ownership for
+  # us, so this walk is the SOLE re-chown.
+  #
+  # It chowns EVERYTHING under /home/agent except the workspace, and tolerates
+  # per-entry chown failures:
+  #   - Prune $workspace: it is the operator's real host CWD; recursively
+  #     chowning it would rewrite the host project's ownership (and is
+  #     unnecessary — the agent id was just aligned to the workspace owner).
+  #   - Do NOT scope the walk by current ownership. The launcher mounts fresh
+  #     Docker named cache volumes under /home/agent that come up root-owned, and
+  #     the now-non-root agent must own them to use its cache. An owner-scoped
+  #     walk (e.g. only entries already owned by the old agent id) would skip
+  #     those root-owned mounts and silently break the cache.
+  #   - Tolerate failures (`2>/dev/null || true`): the launcher also bind-mounts
+  #     read-only files under /home/agent (.claude.json, .gitconfig today; codex's
+  #     config tomorrow — issue #1467). chowning a read-only mount fails EROFS,
+  #     which under `set -e` would otherwise abort the entrypoint before the agent
+  #     starts. Those mounts are host-managed and need no in-container re-chown,
+  #     so a failed chown must not fail the launch.
   if [ -n "$remap_uid" ] || [ -n "$remap_gid" ]; then
     new_uid="${remap_uid:-$cur_uid}"
     new_gid="${remap_gid:-$cur_gid}"
     find /home/agent -path "$workspace" -prune -o \
-      -exec chown -h "$new_uid:$new_gid" {} +
+      -exec chown -h "$new_uid:$new_gid" {} + 2>/dev/null || true
   fi
 fi
 
