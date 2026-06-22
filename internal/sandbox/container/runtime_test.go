@@ -1507,6 +1507,123 @@ func TestRunArgs_LinuxNonDockerOmitsHostGateway(t *testing.T) {
 	}
 }
 
+// --- runArgs SELinux :z workspace relabel (#1458) ---
+
+// pinSELinux overrides the package-level hostOS and selinuxEnforcing seams so
+// the relabel argv branch can be exercised on any test runner.
+func pinSELinux(t *testing.T, os string, enforcing bool) {
+	t.Helper()
+	origOS := hostOS
+	origSE := selinuxEnforcing
+	hostOS = func() string { return os }
+	selinuxEnforcing = func() bool { return enforcing }
+	t.Cleanup(func() {
+		hostOS = origOS
+		selinuxEnforcing = origSE
+	})
+}
+
+// workspaceMountSpec returns the value following the first "--volume" flag,
+// which runArgs always emits as the workspace bind mount.
+func workspaceMountSpec(t *testing.T, args []string) string {
+	t.Helper()
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--volume" {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("no --volume found in args: %v", args)
+	return ""
+}
+
+func TestRunArgs_LinuxSELinuxEnforcingRelabelsWorkspace(t *testing.T) {
+	pinSELinux(t, "linux", true)
+	opts := runOptsForGateway(t)
+	args, err := runArgs("docker", opts)
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	spec := workspaceMountSpec(t, args)
+	if !strings.HasSuffix(spec, ":"+WorkspacePath+":z") {
+		t.Errorf("workspace mount %q missing :z relabel suffix under SELinux enforcing", spec)
+	}
+}
+
+func TestRunArgs_LinuxSELinuxEnforcingRelabelsHostVolumes(t *testing.T) {
+	pinSELinux(t, "linux", true)
+	dir := t.TempDir()
+	extra := filepath.Join(dir, "actions")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	args, err := runArgs("docker", RunOptions{
+		Image:   "img",
+		WorkDir: dir,
+		Command: []string{"sh"},
+		Volumes: []Volume{
+			{Source: extra, Target: "/opt/aileron/manifests/actions", ReadOnly: true},
+			{Source: "aileron-cache-npm", Target: "/home/agent/.npm", Named: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	absExtra, _ := filepath.Abs(extra)
+	joined := strings.Join(args, " ")
+	// A read-only host bind mount keeps ro and gains z, joined as a single
+	// comma-separated options field (Docker rejects ro:z as a fourth field).
+	if !strings.Contains(joined, "--volume "+absExtra+":/opt/aileron/manifests/actions:ro,z") {
+		t.Errorf("host bind mount missing ro,z options under SELinux enforcing; got %v", args)
+	}
+	// A named volume is runtime-managed and must NOT be relabeled.
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--volume" && strings.HasPrefix(args[i+1], "aileron-cache-npm:") {
+			if strings.HasSuffix(args[i+1], ":z") {
+				t.Errorf("named volume must not be relabeled; got %q", args[i+1])
+			}
+		}
+	}
+}
+
+func TestRunArgs_DarwinOmitsRelabel(t *testing.T) {
+	pinSELinux(t, "darwin", true) // enforcing forced true, but non-Linux must skip
+	opts := runOptsForGateway(t)
+	args, err := runArgs("docker", opts)
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	spec := workspaceMountSpec(t, args)
+	if strings.HasSuffix(spec, ":z") {
+		t.Errorf("workspace mount %q must not be relabeled on darwin", spec)
+	}
+}
+
+func TestRunArgs_LinuxNonEnforcingOmitsRelabel(t *testing.T) {
+	pinSELinux(t, "linux", false)
+	opts := runOptsForGateway(t)
+	args, err := runArgs("docker", opts)
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	spec := workspaceMountSpec(t, args)
+	if strings.HasSuffix(spec, ":z") {
+		t.Errorf("workspace mount %q must not be relabeled when SELinux is not enforcing", spec)
+	}
+}
+
+func TestRunArgs_LinuxNonDockerOmitsRelabel(t *testing.T) {
+	pinSELinux(t, "linux", true)
+	opts := runOptsForGateway(t)
+	args, err := runArgs("nondocker", opts)
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	spec := workspaceMountSpec(t, args)
+	if strings.HasSuffix(spec, ":z") {
+		t.Errorf("workspace mount %q must not be relabeled on a non-docker runtime", spec)
+	}
+}
+
 // --- BakedMCPVersion image-label detection (U3 / #957) ---
 
 func TestBakedMCPVersion(t *testing.T) {
