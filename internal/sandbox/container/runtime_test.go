@@ -1233,6 +1233,70 @@ func TestValidateReportsActionableRuntimeFailure(t *testing.T) {
 	}
 }
 
+// TestValidateReportsStaleEntrypointContract reproduces the issue #1466 failure
+// class: a remap-enabled validate prepends aileron-remap-agent-uid as the
+// container command, but the image predates the entrypoint contract and lacks
+// that helper, so the image's tini entrypoint fails to exec it (exit 127) with
+// the tini "exec <prog> failed: No such file or directory" signature before the
+// validation script runs. Validate must translate that into an actionable
+// rebuild-edge message instead of surfacing the opaque tini error.
+func TestValidateReportsStaleEntrypointContract(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+		// Verbatim tini diagnostic when PID 1 cannot exec its child.
+		_, _ = stderr.Write([]byte("[FATAL tini (8)] exec aileron-remap-agent-uid failed: No such file or directory\n"))
+		return errors.New("exit status 127")
+	})
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:             "ghcr.io/alrubinger/aileron-sandbox-claude:edge",
+		WorkDir:           t.TempDir(),
+		Command:           []string{"claude"},
+		RemapWorkspaceUID: true,
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"validate sandbox image ghcr.io/alrubinger/aileron-sandbox-claude:edge",
+		"predates this launcher's entrypoint contract",
+		"aileron-remap-agent-uid",
+		"Rebuild the base+agent edge images",
+		AgentImagesDocsURL,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+	// The opaque tini line must not be the headline diagnostic; the actionable
+	// remedy replaces it.
+	if strings.Contains(msg, "[FATAL tini") {
+		t.Fatalf("error should not surface the raw tini diagnostic, got %q", msg)
+	}
+}
+
+// TestValidateStaleEntrypointSignatureRequiresRemap guards the gate: the
+// stale-entrypoint translation only fires on the remap path. A non-remap
+// validate that happens to see the helper name in stderr must fall through to
+// the verbatim-detail path, not the rebuild-edge message.
+func TestValidateStaleEntrypointSignatureRequiresRemap(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+		_, _ = stderr.Write([]byte("exec aileron-remap-agent-uid failed: No such file or directory\n"))
+		return errors.New("exit status 127")
+	})
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: t.TempDir(),
+		Command: []string{"codex"},
+		// RemapWorkspaceUID intentionally false.
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if strings.Contains(err.Error(), "predates this launcher's entrypoint contract") {
+		t.Fatalf("non-remap validate must not emit the stale-entrypoint message, got %q", err.Error())
+	}
+}
+
 func TestValidateRejectsMissingImage(t *testing.T) {
 	err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Validate(context.Background(), ValidateOptions{
 		Command: []string{"codex"},
