@@ -47,6 +47,29 @@ const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
 const AgentImagesDocsURL = "https://docs.withaileron.ai/development/sandbox-agent-images/"
 
+// WorkspaceUIDRemapActive reports whether a launch/validate against runtimeName
+// should route the container through the aileron-remap-agent-uid entrypoint to
+// align the in-container agent uid/gid with the workspace owner. The DAC uid
+// mismatch only reproduces on rootful Docker on Linux: a host bind mount keeps
+// the host uid, and the non-root agent user is denied write access to the 0755
+// workspace. macOS/Windows Docker Desktop translate uids at the file-sharing
+// boundary, so the remap is scoped to Linux+Docker, mirroring the launcher's
+// AuthSpec chown guard (issue #1461). It shares the hostOS() seam with the
+// SELinux-relabel decision so both stay unit-testable together.
+func WorkspaceUIDRemapActive(runtimeName string) bool {
+	return runtimeName == "docker" && hostOS() == "linux"
+}
+
+// WorkspaceRelabelActive reports whether runArgs adds the `:z` SELinux relabel
+// suffix to host bind mounts for runtimeName: only on rootful Docker on Linux
+// with SELinux in enforcing mode (PR #1460). Exported so the validate-error
+// enrichment can decide whether the SELinux relabel was actually applied (and
+// thus whether SELinux guidance is relevant) versus the daemon lacking SELinux
+// support, where a DAC uid mismatch is the real cause (issue #1461).
+func WorkspaceRelabelActive(runtimeName string) bool {
+	return runtimeName == "docker" && hostOS() == "linux" && selinuxEnforcing()
+}
+
 // DevcontainerCLIVersion pins the @devcontainers/cli version Aileron uses to
 // build a Tier 1 devcontainer that declares `features`. Raw `docker build`
 // cannot apply Features, so the Features build path routes through
@@ -244,6 +267,15 @@ type ValidateOptions struct {
 	// cross-arch ENOEXEC case where `command -v` succeeds but the
 	// binary fails to exec inside the container. See ADR-0024.
 	RequireMCPBinary bool
+	// RemapWorkspaceUID routes the validation run through the
+	// aileron-remap-agent-uid entrypoint exactly as the real launch does:
+	// the container starts as root, the helper remaps the agent uid/gid to
+	// the workspace owner, then drops to the agent user before the
+	// writability probe runs. Without this the probe runs as the image's
+	// default agent uid and would still report exit 3 on a DAC mismatch even
+	// after the launch path is fixed, so validation must mirror the run. Set
+	// by the launcher / `sandbox check` on Linux+Docker (issue #1461).
+	RemapWorkspaceUID bool
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -642,21 +674,35 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 	if builder.Stderr == nil {
 		builder.Stderr = &stderr
 	}
+	// The validation script runs as the image's default agent user. When the
+	// real launch remaps the agent uid to the workspace owner (Linux+Docker,
+	// issue #1461), the probe must run through the same remap or it would
+	// report exit 3 on a DAC mismatch the launch path no longer hits. Prepend
+	// the remap entrypoint and start as root; the helper drops to the agent
+	// user via su-exec before exec'ing /bin/sh, so the probe sees the remapped
+	// identity exactly as the agent will at runtime.
+	command := []string{
+		"/bin/sh",
+		"-c",
+		validationScript,
+		"aileron-validate",
+		opts.Command[0],
+		boolArg(opts.RequireProxyTrust),
+		boolArg(opts.RequireMCPBinary),
+	}
+	user := ""
+	if opts.RemapWorkspaceUID {
+		user = "root"
+		command = append([]string{"aileron-remap-agent-uid", "su-exec", "agent"}, command...)
+	}
 	_, err := builder.Run(ctx, RunOptions{
 		Runtime: opts.Runtime,
 		Image:   opts.Image,
 		WorkDir: opts.WorkDir,
 		Env:     opts.Env,
 		Volumes: opts.Volumes,
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			validationScript,
-			"aileron-validate",
-			opts.Command[0],
-			boolArg(opts.RequireProxyTrust),
-			boolArg(opts.RequireMCPBinary),
-		},
+		User:    user,
+		Command: command,
 	})
 	if err == nil {
 		return nil
@@ -800,7 +846,7 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	// where it is required; elsewhere it is omitted (it would be rejected or be a
 	// no-op). Named volumes are managed by the runtime and already carry a
 	// container-accessible label, so they are not relabeled.
-	relabel := runtimeName == "docker" && hostOS() == "linux" && selinuxEnforcing()
+	relabel := WorkspaceRelabelActive(runtimeName)
 	workspaceSpec := absWorkDir + ":" + WorkspacePath
 	if relabel {
 		workspaceSpec += ":z"

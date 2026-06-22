@@ -13,6 +13,69 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
+// remapAgentUIDHelper is the in-image entrypoint helper (shipped by
+// images/sandbox-base) that, started as root, remaps the container's `agent`
+// user/group to the numeric uid/gid owning the mounted workspace, then execs
+// the rest of its argv still as root. The launcher prepends it so the
+// privilege drop the next link performs (aileron-run-with-proxy-ca's su-exec,
+// or a bare su-exec) lands on the workspace-owner uid, fixing the DAC mismatch
+// that otherwise denies the agent write access to the operator's bind-mounted
+// CWD. See issue #1461 and the BYO entrypoint contract.
+const remapAgentUIDHelper = "aileron-remap-agent-uid"
+
+// workspaceUIDRemapActive reports whether `aileron launch` should route the
+// sandbox container through the remap-agent-uid entrypoint. It delegates to the
+// container package's decision so the launch path, the validate probe, and the
+// SELinux-relabel argv all share one source of truth for the Linux+Docker gate
+// (mirroring newAgentDirChownHook's GOOS guard; issue #1461).
+//
+// It is a package-level seam (var, not func) so tests can pin the gate
+// independent of the test runner's OS: the real value is GOOS-dependent, so
+// argv-asserting launcher tests would otherwise pass on macOS and fail on Linux
+// (and vice versa).
+var workspaceUIDRemapActive = func(runtime string) bool {
+	return sandboxcontainer.WorkspaceUIDRemapActive(strings.TrimSpace(runtime))
+}
+
+// sandboxEntrypointCommand composes the in-container entrypoint chain for a
+// sandbox launch and returns the final command argv and the runtime --user.
+//
+// Both the proxy-CA bootstrap and the workspace uid remap must run as root
+// before the agent starts, then drop to the unprivileged agent user. They
+// compose as a chain of root wrappers in this order: become root -> remap the
+// agent uid to the workspace owner -> install the proxy CA -> su-exec agent.
+// Each wrapper execs the next; the final privilege drop happens exactly once.
+//
+//	proxy on,  remap on:  [remap, run-with-proxy-ca, CMD...]   user=root
+//	proxy on,  remap off: [run-with-proxy-ca, CMD...]          user=root
+//	proxy off, remap on:  [remap, su-exec, agent, CMD...]      user=root
+//	proxy off, remap off: [CMD...]                             user=""   (image default agent user)
+//
+// The remap is gated to Linux+Docker by the caller (workspaceUIDRemapActive),
+// mirroring newAgentDirChownHook's GOOS guard, so macOS/Windows Docker Desktop
+// is untouched. The returned slice is a fresh allocation; the input command is
+// not mutated.
+func sandboxEntrypointCommand(command []string, proxyActive, remapActive bool) (cmd []string, user string) {
+	cmd = append([]string(nil), command...)
+	if proxyActive {
+		user = "root"
+		cmd = append([]string{"aileron-run-with-proxy-ca"}, cmd...)
+	}
+	if remapActive {
+		user = "root"
+		if proxyActive {
+			// aileron-run-with-proxy-ca performs the privilege drop; the
+			// remap helper only needs to remap then exec it (still root).
+			cmd = append([]string{remapAgentUIDHelper}, cmd...)
+		} else {
+			// No proxy wrapper to drop privileges, so the remap helper hands
+			// off to su-exec itself.
+			cmd = append([]string{remapAgentUIDHelper, "su-exec", "agent"}, cmd...)
+		}
+	}
+	return cmd, user
+}
+
 // agentUIDCacheKey identifies a resolved UID lookup by runtime+image so
 // repeated launches against the same image pay the inspect/run cost at
 // most once per process.

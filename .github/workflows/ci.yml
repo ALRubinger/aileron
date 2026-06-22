@@ -682,6 +682,20 @@ jobs:
         env:
           AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
 
+      - name: Run workspace uid-remap integration test (#1461)
+        # The ubuntu runner has rootful Docker, where the host operator's UID
+        # owns the workspace bind mount but the container runs as the image's
+        # non-root agent user — the exact DAC mismatch that blocks the
+        # writability probe (exit 3) and that the aileron-remap-agent-uid
+        # entrypoint fixes by remapping the agent uid to the workspace owner.
+        # The test self-skips on non-Linux / no-Docker hosts, so this is the
+        # acceptance environment. Additive step so a failure is attributable to
+        # this specific contract.
+        run: go test -v -tags=integration_sandbox -run TestWorkspaceUIDRemap ./launch/...
+        working-directory: internal
+        env:
+          AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
+
       - name: Run in-container credential read + capture round-trip test (#1025)
         # Closes the ADR-0025 verification gap that was previously covered only
         # by a manual smoke-check: renders a Claude-shaped AuthSpec, launches a

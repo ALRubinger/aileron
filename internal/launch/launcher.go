@@ -455,7 +455,7 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 		})
 	}
 	if err := validateSandboxImageForLaunch(ctx, plan, config, agentEnv, mounts, commandName); err != nil {
-		err = sandboxcomposition.EnrichValidateError(err, plan.Tier, config.Agent.Name(), version.Version, config.Dir)
+		err = sandboxcomposition.EnrichValidateError(err, plan.Tier, config.Agent.Name(), version.Version, config.Dir, sandboxcontainer.WorkspaceRelabelActive(plan.Runtime))
 		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
 	}
 	return nil
@@ -474,6 +474,7 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Command:           []string{commandName},
 		RequireProxyTrust: agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
 		RequireMCPBinary:  true,
+		RemapWorkspaceUID: workspaceUIDRemapActive(plan.Runtime),
 	}); err != nil {
 		return err
 	}
@@ -1080,11 +1081,11 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	command := append([]string{commandName}, config.Agent.Args(ModeSandbox)...)
 	command = append(command, extraArgs...)
 	command = append(command, config.Args...)
-	user := ""
-	if sandboxProxyBootstrapActive(agentEnv) {
-		user = "root"
-		command = append([]string{"aileron-run-with-proxy-ca"}, command...)
-	}
+	command, user := sandboxEntrypointCommand(
+		command,
+		sandboxProxyBootstrapActive(agentEnv),
+		workspaceUIDRemapActive(plan.Runtime),
+	)
 
 	runOpts := sandboxcontainer.RunOptions{
 		Runtime: plan.Runtime,

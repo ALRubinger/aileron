@@ -277,6 +277,10 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 }
 
 func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
+	// Pin the workspace uid-remap gate off so this test asserts the
+	// OS-independent container shape; the Linux+Docker remap chain is covered
+	// by TestLaunch_SandboxWorkspaceUIDRemap* (#1461).
+	launch.PinWorkspaceUIDRemapForTest(t, false)
 	// Proxy bootstrap is default-on for --sandbox=docker per the
 	// U3 plan. This test exercises the opt-out path via
 	// --sandbox-proxy=off so it can assert the rest of the container
@@ -557,6 +561,12 @@ func TestLaunch_SandboxProxyLegacyEnvVarIgnored(t *testing.T) {
 // AILERON_SANDBOX_PROXY_MODE env, no --user root, no
 // aileron-run-with-proxy-ca prefix.
 func TestLaunch_SandboxProxyOffViaFlag(t *testing.T) {
+	// Pin the workspace uid-remap gate off: this test asserts that
+	// --sandbox-proxy=off does not force --user root, which only holds when the
+	// remap is also inactive (the remap independently forces root on
+	// Linux+Docker). The remap-on behavior is covered by
+	// TestLaunch_SandboxWorkspaceUIDRemap* (#1461).
+	launch.PinWorkspaceUIDRemapForTest(t, false)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("AILERON_SANDBOX_PROXY", "")
@@ -818,6 +828,10 @@ func TestLaunch_SandboxMountsAileronManifestStores(t *testing.T) {
 }
 
 func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) {
+	// Pin the workspace uid-remap gate off so the run-command assertion checks
+	// the proxy-ca wrapper shape directly; the remap chain is covered by
+	// TestLaunch_SandboxWorkspaceUIDRemap* (#1461).
+	launch.PinWorkspaceUIDRemapForTest(t, false)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	actionsDir := filepath.Join(home, ".aileron", "actions")
@@ -1092,6 +1106,10 @@ func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 }
 
 func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
+	// Pin the workspace uid-remap gate off so the run command asserts the
+	// proxy-ca wrapper shape; the remap chain is covered by
+	// TestLaunch_SandboxWorkspaceUIDRemap* (#1461).
+	launch.PinWorkspaceUIDRemapForTest(t, false)
 	dir := t.TempDir()
 	baseDir := filepath.Join(dir, "images", "sandbox-base")
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
@@ -1152,6 +1170,10 @@ type publishedAgent struct {
 func (a publishedAgent) Name() string { return a.name }
 
 func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing.T) {
+	// Pin the workspace uid-remap gate off so the run command asserts the
+	// proxy-ca wrapper shape; the remap chain is covered by
+	// TestLaunch_SandboxWorkspaceUIDRemap* (#1461).
+	launch.PinWorkspaceUIDRemapForTest(t, false)
 	dir := t.TempDir()
 	// No images/sandbox-base context and no .devcontainer: the only build-free
 	// route is the published per-agent image. If the launcher fell back to the
@@ -1406,6 +1428,45 @@ func setupSandboxDockerCaptureLaunch(t *testing.T, dir string, agent launch.Agen
 		t.Fatalf("read docker args: %v", err)
 	}
 	return string(data)
+}
+
+// TestLaunch_SandboxWorkspaceUIDRemapChainsAheadOfProxyCA verifies the
+// Linux+Docker workspace uid-remap (#1461): when the gate is active the launcher
+// runs the container as root and prepends aileron-remap-agent-uid ahead of the
+// proxy-CA wrapper, so the order is remap -> install CA -> su-exec agent.
+func TestLaunch_SandboxWorkspaceUIDRemapChainsAheadOfProxyCA(t *testing.T) {
+	launch.PinWorkspaceUIDRemapForTest(t, true)
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, claudeTestAgent{})
+
+	if !strings.Contains(args, "--user\nroot\n") {
+		t.Errorf("expected --user root under active workspace uid-remap; got:\n%s", args)
+	}
+	// The remap helper must immediately precede the proxy-CA wrapper, which in
+	// turn precedes the agent image command.
+	if !regexp.MustCompile(`ghcr.io/acme/agent:latest\naileron-remap-agent-uid\naileron-run-with-proxy-ca\n`).MatchString(args) {
+		t.Errorf("expected remap helper chained ahead of the proxy-ca wrapper; got:\n%s", args)
+	}
+}
+
+// TestLaunch_SandboxWorkspaceUIDRemapInactiveOmitsHelper is the negative: with
+// the gate inactive (non-Linux / non-Docker) the remap helper must not appear,
+// and the proxy-ca wrapper stands alone in front of the agent image command.
+// Note: --user root is still expected here because the proxy bootstrap is
+// default-on for --sandbox=docker and runs its own root wrapper; the remap is
+// not what forces root in this case.
+func TestLaunch_SandboxWorkspaceUIDRemapInactiveOmitsHelper(t *testing.T) {
+	launch.PinWorkspaceUIDRemapForTest(t, false)
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, claudeTestAgent{})
+
+	if strings.Contains(args, "aileron-remap-agent-uid") {
+		t.Errorf("remap helper must not appear when the gate is inactive; got:\n%s", args)
+	}
+	// The proxy-ca wrapper stands alone, immediately following the image.
+	if !regexp.MustCompile(`ghcr.io/acme/agent:latest\naileron-run-with-proxy-ca\n`).MatchString(args) {
+		t.Errorf("expected the proxy-ca wrapper directly after the image with no remap helper; got:\n%s", args)
+	}
 }
 
 // TestLaunch_Sandbox_MountsAileronMCPBinary verifies the host-built

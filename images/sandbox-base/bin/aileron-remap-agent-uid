@@ -1,0 +1,90 @@
+#!/bin/sh
+#
+# aileron-remap-agent-uid — remap the in-container `agent` user/group so its
+# numeric uid/gid matches the owner of the mounted workspace, then exec the
+# rest of the argv (still as root). This is the canonical implementation for
+# aileron/sandbox-base.
+#
+# Why: `aileron launch --sandbox=docker` runs the container as the image's
+# non-root `agent` user, while the workspace bind mount is the operator's host
+# CWD owned by the host uid (e.g. 1000). When those uids differ, DAC denies the
+# agent user write access to the 0755 workspace directory ("other" carries no
+# write bit) and the agent cannot create files. PR #1460's `:z` SELinux relabel
+# only addresses MAC denials on SELinux-enforcing hosts; it is a no-op against a
+# DAC uid mismatch and on daemons without SELinux support. This helper fixes the
+# DAC mismatch directly by aligning the agent uid/gid to the workspace owner.
+#
+# Strategy B (issue #1461): keep the "container runs as agent + the host chowns
+# transient auth trees to the agent uid" invariant intact. Rather than inverting
+# that ownership model, the entrypoint remaps the agent identity itself at
+# startup so the existing invariant lands on the right numeric uid.
+#
+# CLI contract:
+#   aileron-remap-agent-uid COMMAND [ARG...]
+#       Must run as root. Remap agent uid/gid to the workspace owner, then
+#       `exec COMMAND [ARG...]` still as root. The caller composes the
+#       privilege drop (e.g. `aileron-run-with-proxy-ca` installs the CA then
+#       `su-exec agent`, or a bare `su-exec agent COMMAND`).
+#
+# Exit codes:
+#   0    success (execs COMMAND, inheriting its exit code)
+#   64   no command supplied
+#   126  invoked without root
+#
+# See https://docs.withaileron.ai/development/sandbox-agent-images/#byo-image-proxy-contract
+# for the full BYO entrypoint contract.
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: aileron-remap-agent-uid COMMAND [ARG...]" >&2
+  exit 64
+fi
+
+if [ "$(id -u)" != "0" ]; then
+  echo "aileron-remap-agent-uid must run as root" >&2
+  exit 126
+fi
+
+workspace="${AILERON_SANDBOX_WORKSPACE:-/home/agent/workspace}"
+
+# Read the workspace owner's numeric uid/gid. If the workspace is absent (an
+# image started without the bind mount) the remap is skipped and the argv is
+# exec'd unchanged — the no-op keeps non-launch invocations working.
+if [ -d "$workspace" ]; then
+  want_uid="$(stat -c '%u' "$workspace")"
+  want_gid="$(stat -c '%g' "$workspace")"
+
+  cur_uid="$(id -u agent)"
+  cur_gid="$(id -g agent)"
+
+  # Never remap to root (uid 0): the agent must stay unprivileged. A
+  # root-owned workspace already grants the agent no less access than before,
+  # and remapping the agent to uid 0 would defeat the non-root sandbox model.
+  remap_uid=""
+  remap_gid=""
+  if [ "$want_gid" != "0" ] && [ "$want_gid" != "$cur_gid" ]; then
+    groupmod -g "$want_gid" -o agent
+    remap_gid="$want_gid"
+  fi
+  if [ "$want_uid" != "0" ] && [ "$want_uid" != "$cur_uid" ]; then
+    usermod -u "$want_uid" -o agent
+    remap_uid="$want_uid"
+  fi
+
+  # Re-assert ownership of the agent's home scaffolding (dotfiles, proxy/CA and
+  # manifest dirs) after the remap so the agent still owns them under its new
+  # uid/gid. usermod -u rewrites ownership only for files already owned by the
+  # OLD uid, so this also covers anything created since build time. CRITICAL:
+  # the workspace bind mount lives at $workspace under /home/agent and is the
+  # operator's real host CWD; it must NOT be recursively chowned (that would
+  # rewrite the host project's file ownership, and is unnecessary because the
+  # agent uid was just aligned to the workspace owner). Prune it from the walk.
+  if [ -n "$remap_uid" ] || [ -n "$remap_gid" ]; then
+    new_uid="${remap_uid:-$cur_uid}"
+    new_gid="${remap_gid:-$cur_gid}"
+    find /home/agent -path "$workspace" -prune -o \
+      -exec chown -h "$new_uid:$new_gid" {} +
+  fi
+fi
+
+exec "$@"

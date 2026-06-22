@@ -1624,6 +1624,101 @@ func TestRunArgs_LinuxNonDockerOmitsRelabel(t *testing.T) {
 	}
 }
 
+// --- Workspace uid-remap gate + Validate routing (#1461) ---
+
+func TestWorkspaceUIDRemapActive(t *testing.T) {
+	cases := []struct {
+		name    string
+		os      string
+		runtime string
+		want    bool
+	}{
+		{"linux docker remaps", "linux", "docker", true},
+		{"darwin docker skips", "darwin", "docker", false},
+		{"windows docker skips", "windows", "docker", false},
+		{"linux non-docker skips", "linux", "podman", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// enforcing is irrelevant to the remap gate; pin it false.
+			pinSELinux(t, tc.os, false)
+			if got := WorkspaceUIDRemapActive(tc.runtime); got != tc.want {
+				t.Errorf("WorkspaceUIDRemapActive(%q) on %s = %v, want %v", tc.runtime, tc.os, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRelabelActive(t *testing.T) {
+	cases := []struct {
+		name      string
+		os        string
+		enforcing bool
+		runtime   string
+		want      bool
+	}{
+		{"linux docker enforcing relabels", "linux", true, "docker", true},
+		{"linux docker non-enforcing skips", "linux", false, "docker", false},
+		{"darwin docker enforcing skips", "darwin", true, "docker", false},
+		{"linux non-docker enforcing skips", "linux", true, "podman", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pinSELinux(t, tc.os, tc.enforcing)
+			if got := WorkspaceRelabelActive(tc.runtime); got != tc.want {
+				t.Errorf("WorkspaceRelabelActive(%q) os=%s enforcing=%v = %v, want %v", tc.runtime, tc.os, tc.enforcing, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateRoutesThroughRemapWhenRequested asserts that with
+// RemapWorkspaceUID set, Validate runs the container as root and prepends the
+// aileron-remap-agent-uid + su-exec chain so the writability probe sees the
+// remapped agent identity (issue #1461). Without it, the probe runs as the
+// image default user with no wrapper.
+func TestValidateRoutesThroughRemapWhenRequested(t *testing.T) {
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Runtime:           "docker",
+		Image:             "img",
+		Command:           []string{"claude"},
+		RemapWorkspaceUID: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	joined := strings.Join(runner.args, " ")
+	if !strings.Contains(joined, "--user root") {
+		t.Errorf("remap Validate must run as root; args: %v", runner.args)
+	}
+	// The remap helper, su-exec, agent, then the validation shell must appear
+	// in order before the image, with the remap chain immediately preceding
+	// /bin/sh.
+	if !strings.Contains(joined, "aileron-remap-agent-uid su-exec agent /bin/sh -c") {
+		t.Errorf("remap Validate must chain remap->su-exec->agent->/bin/sh; args: %v", runner.args)
+	}
+}
+
+func TestValidateNoRemapByDefault(t *testing.T) {
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Runtime: "docker",
+		Image:   "img",
+		Command: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	joined := strings.Join(runner.args, " ")
+	if strings.Contains(joined, "--user root") {
+		t.Errorf("default Validate must not force root; args: %v", runner.args)
+	}
+	if strings.Contains(joined, "aileron-remap-agent-uid") {
+		t.Errorf("default Validate must not prepend the remap helper; args: %v", runner.args)
+	}
+}
+
 // --- BakedMCPVersion image-label detection (U3 / #957) ---
 
 func TestBakedMCPVersion(t *testing.T) {

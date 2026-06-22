@@ -142,6 +142,8 @@ A BYO image must provide:
 - a writable `/home/agent/workspace` bind mount when launched by Docker
 - the requested agent command on `PATH`
 
+On Linux + Docker the launcher additionally routes the container through the `aileron-remap-agent-uid` entrypoint (see the proxy contract below). A BYO image that runs as a non-root user must ship that helper so the workspace bind mount is writable by the agent. See [Workspace ownership on Linux](#workspace-ownership-on-linux).
+
 Validate a BYO image by setting `customizations.aileron.image` in `.devcontainer/devcontainer.json` and running:
 
 ```bash
@@ -160,6 +162,7 @@ A BYO image meets the proxy contract by providing two helpers on `PATH`:
 |---|---|
 | `aileron-install-proxy-ca` | Installs the mounted CA into the in-container trust store. Must accept `--check` to dry-run the trust-store probe without writing anything, and must accept an optional positional CA file argument (default `${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}`). Exits 0 on success, 2 when the CA file is missing or empty, 126 when invoked unprivileged for an install, 127 when the underlying trust-store tooling is missing. |
 | `aileron-run-with-proxy-ca` | Entrypoint wrapper that installs the CA as root, then drops privileges to the `agent` user and executes the requested agent command. The launcher always starts the container through this wrapper when the proxy is in force. |
+| `aileron-remap-agent-uid` | Entrypoint wrapper that, started as root, remaps the in-container `agent` user/group to the numeric uid/gid owning the mounted workspace, then execs the rest of its argv still as root. The launcher prepends it on Linux + Docker so the workspace bind mount is writable by the agent. See [Workspace ownership on Linux](#workspace-ownership-on-linux). |
 
 The canonical implementations ship with the `ghcr.io/alrubinger/aileron-sandbox-base` image. BYO authors who derive from another base distro can write drop-in equivalents — the launcher only cares about the CLI shape, not the trust-store mechanism. Pick the mechanism that matches the base:
 
@@ -181,6 +184,20 @@ aileron sandbox check --runtime=docker --build=never --agent=claude
 ```
 
 The check reports `support: ok` only when the agent command and both proxy helpers are present and the `--check` probe succeeds. To launch without the proxy — useful for images that cannot meet the contract during initial bring-up — pass `--sandbox-proxy=off` on `aileron launch`. `sandbox check` does not honor that opt-out; it always exercises the full contract so BYO authors see the same failures the launcher would see.
+
+## Workspace ownership on Linux
+
+`aileron launch --sandbox=docker` bind-mounts your current working directory into the container at `/home/agent/workspace`. The container runs as the image's non-root `agent` user. On Linux + Docker the workspace bind mount keeps the host directory's owner uid (your operator uid, e.g. `1000`), while the `agent` user has its own uid baked into the image. When those differ, the directory's `0755` permissions deny the agent write access, so the agent cannot create files in your workspace.
+
+To fix this, the launcher routes the container through the `aileron-remap-agent-uid` entrypoint on Linux + Docker. Started as root, it reads the workspace owner's uid/gid, remaps the in-container `agent` user/group to match, then drops to the agent user before the agent runs. The remap composes with the proxy contract: the launcher chains `aileron-remap-agent-uid` ahead of `aileron-run-with-proxy-ca` so the order is remap uid, then install the CA, then drop to the agent user.
+
+This is scoped to Linux + Docker. On macOS and Windows, Docker Desktop's file-sharing layer translates uids at the boundary, so the mismatch never surfaces and the remap is skipped.
+
+A third operational requirement therefore applies to BYO images that run as a non-root user on Linux:
+
+3. The `aileron-remap-agent-uid` helper must be on `PATH` and the image must let it run as root at startup before dropping to the agent user. The helper needs `usermod`/`groupmod` (the `shadow` package on Alpine, `passwd`/`shadow-utils` on Debian/RHEL) and a `stat` that supports `-c` (GNU coreutils). The canonical implementation ships with the sandbox-base image.
+
+> This addresses a different failure than SELinux relabeling: the `:z` relabel handles SELinux MAC denials on enforcing hosts, while the uid remap handles the DAC permission mismatch that occurs on every Linux + Docker host regardless of SELinux. Both can apply on the same host.
 
 ## Current Limits
 
