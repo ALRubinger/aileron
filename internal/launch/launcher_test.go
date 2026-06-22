@@ -1450,8 +1450,11 @@ func TestLaunch_SandboxWorkspaceUIDRemapChainsAheadOfProxyCA(t *testing.T) {
 }
 
 // TestLaunch_SandboxWorkspaceUIDRemapInactiveOmitsHelper is the negative: with
-// the gate inactive (non-Linux / non-Docker) the remap helper and forced root
-// must not appear; the proxy-ca wrapper stands alone.
+// the gate inactive (non-Linux / non-Docker) the remap helper must not appear,
+// and the proxy-ca wrapper stands alone in front of the agent image command.
+// Note: --user root is still expected here because the proxy bootstrap is
+// default-on for --sandbox=docker and runs its own root wrapper; the remap is
+// not what forces root in this case.
 func TestLaunch_SandboxWorkspaceUIDRemapInactiveOmitsHelper(t *testing.T) {
 	launch.PinWorkspaceUIDRemapForTest(t, false)
 	dir := t.TempDir()
@@ -1459,6 +1462,10 @@ func TestLaunch_SandboxWorkspaceUIDRemapInactiveOmitsHelper(t *testing.T) {
 
 	if strings.Contains(args, "aileron-remap-agent-uid") {
 		t.Errorf("remap helper must not appear when the gate is inactive; got:\n%s", args)
+	}
+	// The proxy-ca wrapper stands alone, immediately following the image.
+	if !regexp.MustCompile(`ghcr.io/acme/agent:latest\naileron-run-with-proxy-ca\n`).MatchString(args) {
+		t.Errorf("expected the proxy-ca wrapper directly after the image with no remap helper; got:\n%s", args)
 	}
 }
 
