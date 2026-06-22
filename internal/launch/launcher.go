@@ -196,14 +196,40 @@ func resolveSibling(selfPath, name string) (string, error) {
 	for _, c := range siblingCandidates(name, exeSuffix()) {
 		candidate := filepath.Join(dir, c)
 		if _, err := os.Stat(candidate); err == nil {
-			return resolveShimTarget(candidate), nil
+			return resolveReparsePoints(resolveShimTarget(candidate)), nil
 		}
 	}
 	found, err := exec.LookPath(name)
 	if err != nil {
 		return "", err
 	}
-	return resolveShimTarget(found), nil
+	return resolveReparsePoints(resolveShimTarget(found)), nil
+}
+
+// resolveReparsePoints collapses symlinks and Windows directory junctions
+// in path to a concrete on-disk path, best-effort.
+//
+// Scoop exposes an installed binary through an
+// `...\apps\<app>\current\...` directory junction (a reparse point) that
+// points at the versioned install dir. resolveShimTarget unwraps the
+// Scoop stub to that junction path; a normal shell launch traverses it
+// fine, but Codex's elevated Windows sandbox cannot spawn a command whose
+// path crosses the junction and still fails with `OS error 2` even after
+// the stub is unwrapped — the successor symptom to #1405, where writing
+// the real (but junction-rooted) target was necessary yet not sufficient.
+// The command written into the agent's MCP config must therefore be the
+// resolved versioned path (`...\apps\<app>\0.0.9\...`). EvalSymlinks
+// resolves junctions as well as symlinks on Windows.
+//
+// On failure (the path does not exist, or the platform cannot evaluate
+// it) the input is returned unchanged so a working path is never made
+// worse. The behavior is keyed off on-disk reparse data, not GOOS, so a
+// symlink planted in a test exercises it on any host.
+func resolveReparsePoints(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // resolveShimTarget unwraps a Scoop shim to the real binary it launches.

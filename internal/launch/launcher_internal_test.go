@@ -581,7 +581,7 @@ func TestResolveSandboxMCPBinary_PrefersLinuxSibling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSandboxMCPBinary: %v", err)
 	}
-	want, _ := filepath.Abs(linuxBin)
+	want := wantResolvedPath(t, linuxBin)
 	if got != want {
 		t.Fatalf("got %q, want %q (the Linux-suffixed sibling)", got, want)
 	}
@@ -605,7 +605,7 @@ func TestResolveSandboxMCPBinary_FallsBackToHostBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSandboxMCPBinary: %v", err)
 	}
-	want, _ := filepath.Abs(hostBin)
+	want := wantResolvedPath(t, hostBin)
 	if got != want {
 		t.Fatalf("got %q, want %q (fallback to plain aileron-mcp)", got, want)
 	}
@@ -691,7 +691,7 @@ func TestResolveSibling_FindsHostSibling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSibling: %v", err)
 	}
-	want, _ := filepath.Abs(mcp)
+	want := wantResolvedPath(t, mcp)
 	if got != want {
 		t.Fatalf("resolveSibling = %q, want %q", got, want)
 	}
@@ -733,9 +733,80 @@ func TestResolveSibling_UnwrapsScoopShim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSibling: %v", err)
 	}
-	want, _ := filepath.Abs(realBin)
+	want := wantResolvedPath(t, realBin)
 	if got != want {
 		t.Fatalf("resolveSibling = %q, want the real target %q (not the Scoop shim stub)", got, want)
+	}
+}
+
+// wantResolvedPath returns the absolute, reparse-point-resolved form of p,
+// matching what resolveSibling now emits. It is needed because resolveSibling
+// collapses symlinks/junctions (resolveReparsePoints) and t.TempDir() is
+// itself a symlink on macOS (/var -> /private/var); a bare filepath.Abs
+// would otherwise mismatch the resolved result on that host.
+func wantResolvedPath(t *testing.T, p string) string {
+	t.Helper()
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", p, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks(%q): %v", abs, err)
+	}
+	return resolved
+}
+
+// TestResolveSibling_ResolvesScoopCurrentJunction is the regression test for
+// the successor to #1405: unwrapping the Scoop stub to the real target was
+// necessary but not sufficient, because that target rides the
+// `...\apps\<app>\current\...` directory junction. A normal shell launch
+// traverses the junction, but Codex's elevated Windows sandbox cannot spawn a
+// command whose path crosses it and still fails with OS error 2.
+// resolveSibling must collapse the junction to the versioned install dir
+// (`...\apps\<app>\0.0.9\...`) before the command is written into config.toml.
+// A POSIX symlink stands in for the Windows junction so this is verifiable on
+// any host.
+func TestResolveSibling_ResolvesScoopCurrentJunction(t *testing.T) {
+	// Canonicalize the base so the only reparse point under test is the
+	// `current` link, not t.TempDir()'s own /var -> /private/var on macOS.
+	dir := wantResolvedPath(t, t.TempDir())
+	selfPath := filepath.Join(dir, "aileron"+exeSuffix())
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(dir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(stub, []byte("scoop shim stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versionedDir := filepath.Join(dir, "apps", "aileron", "0.0.9")
+	if err := os.MkdirAll(versionedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(versionedDir, "aileron-mcp"+exeSuffix())
+	if err := os.WriteFile(realBin, []byte("the real 14 MB binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// `current` is a junction to the versioned dir on a real Scoop install;
+	// a directory symlink is the cross-platform stand-in.
+	currentLink := filepath.Join(dir, "apps", "aileron", "current")
+	if err := os.Symlink(versionedDir, currentLink); err != nil {
+		t.Skipf("cannot create symlink on this host (unprivileged Windows?): %v", err)
+	}
+	// The Scoop sidecar points at the binary *through* the current junction,
+	// exactly as resolveShimTarget would hand it back.
+	shimTarget := filepath.Join(currentLink, "aileron-mcp"+exeSuffix())
+	sidecar := filepath.Join(dir, "aileron-mcp.shim")
+	if err := os.WriteFile(sidecar, []byte("path = \""+shimTarget+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveSibling(selfPath, "aileron-mcp")
+	if err != nil {
+		t.Fatalf("resolveSibling: %v", err)
+	}
+	if got != realBin {
+		t.Fatalf("resolveSibling = %q, want junction-free %q (sandbox spawns the versioned path, not the `current` junction)", got, realBin)
 	}
 }
 
@@ -759,7 +830,7 @@ func TestResolveSibling_NoShimSidecarReturnsSiblingUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSibling: %v", err)
 	}
-	want, _ := filepath.Abs(mcp)
+	want := wantResolvedPath(t, mcp)
 	if got != want {
 		t.Fatalf("resolveSibling = %q, want %q (sibling unchanged when no shim sidecar)", got, want)
 	}
