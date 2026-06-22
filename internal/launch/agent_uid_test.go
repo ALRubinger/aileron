@@ -426,3 +426,68 @@ func TestResolveAgentUIDValidatesInputs(t *testing.T) {
 		t.Fatal("expected error for empty image")
 	}
 }
+
+// TestSandboxEntrypointCommand covers the four entrypoint-composition cases
+// (#1461): the remap and proxy-CA wrappers each force --user root and the chain
+// drops to the agent user exactly once, in the order remap -> proxy-CA ->
+// su-exec agent.
+func TestSandboxEntrypointCommand(t *testing.T) {
+	base := []string{"claude", "--flag", "value"}
+	cases := []struct {
+		name     string
+		proxy    bool
+		remap    bool
+		wantCmd  []string
+		wantUser string
+	}{
+		{
+			name:     "neither: image default agent user",
+			proxy:    false,
+			remap:    false,
+			wantCmd:  []string{"claude", "--flag", "value"},
+			wantUser: "",
+		},
+		{
+			name:     "proxy only",
+			proxy:    true,
+			remap:    false,
+			wantCmd:  []string{"aileron-run-with-proxy-ca", "claude", "--flag", "value"},
+			wantUser: "root",
+		},
+		{
+			name:     "remap only drops via su-exec",
+			proxy:    false,
+			remap:    true,
+			wantCmd:  []string{"aileron-remap-agent-uid", "su-exec", "agent", "claude", "--flag", "value"},
+			wantUser: "root",
+		},
+		{
+			name:     "proxy and remap compose: remap then proxy-ca",
+			proxy:    true,
+			remap:    true,
+			wantCmd:  []string{"aileron-remap-agent-uid", "aileron-run-with-proxy-ca", "claude", "--flag", "value"},
+			wantUser: "root",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCmd, gotUser := sandboxEntrypointCommand(base, tc.proxy, tc.remap)
+			if gotUser != tc.wantUser {
+				t.Errorf("user = %q, want %q", gotUser, tc.wantUser)
+			}
+			if strings.Join(gotCmd, " ") != strings.Join(tc.wantCmd, " ") {
+				t.Errorf("command = %v, want %v", gotCmd, tc.wantCmd)
+			}
+		})
+	}
+}
+
+// TestSandboxEntrypointCommandDoesNotMutateInput guards against the prepend
+// aliasing the caller's slice.
+func TestSandboxEntrypointCommandDoesNotMutateInput(t *testing.T) {
+	base := []string{"claude"}
+	_, _ = sandboxEntrypointCommand(base, true, true)
+	if len(base) != 1 || base[0] != "claude" {
+		t.Errorf("input command was mutated: %v", base)
+	}
+}

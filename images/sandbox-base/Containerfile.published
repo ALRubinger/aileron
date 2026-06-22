@@ -86,6 +86,7 @@ RUN apk add --no-cache \
     grep \
     procps \
     sed \
+    shadow \
     su-exec \
     tini \
     wget
@@ -96,7 +97,11 @@ RUN addgroup -S agent && adduser -S -G agent -h /home/agent agent \
 
 COPY images/sandbox-base/bin/aileron-install-proxy-ca /usr/local/bin/aileron-install-proxy-ca
 COPY images/sandbox-base/bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
-RUN chmod 0755 /usr/local/bin/aileron-install-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
+COPY images/sandbox-base/bin/aileron-remap-agent-uid /usr/local/bin/aileron-remap-agent-uid
+RUN chmod 0755 \
+    /usr/local/bin/aileron-install-proxy-ca \
+    /usr/local/bin/aileron-run-with-proxy-ca \
+    /usr/local/bin/aileron-remap-agent-uid
 
 # Baked aileron-mcp from the builder stage. Root-owned, world-executable
 # (matches the proxy-CA helpers). The launcher's sandboxMCPBinPath const and
