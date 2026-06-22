@@ -74,10 +74,52 @@ func TestEnrichValidateErrorUnpublishedAgentUnchanged(t *testing.T) {
 }
 
 func TestEnrichValidateErrorUnrelatedFailureUnchanged(t *testing.T) {
-	base := errors.New("validate sandbox image: sandbox workspace is not writable at /workspace")
+	base := errors.New("validate sandbox image: image must support /bin/sh command execution")
 	got := EnrichValidateError(base, TierDevcontainer, "claude", "1.2.3", "/home/dev/project")
 	if got != base {
 		t.Errorf("unrelated failure: error was enriched, want unchanged: %s", got.Error())
+	}
+}
+
+// TestEnrichValidateErrorWorkspaceNotWritable verifies the opaque writability
+// failure (which surfaces to the operator as a bare "exit status 3") is enriched
+// with the SELinux root cause, the automatic-relabel note, and the manual
+// fallback. This fails before the fix (the raw error explains none of those) and
+// passes after.
+func TestEnrichValidateErrorWorkspaceNotWritable(t *testing.T) {
+	const workDir = "/home/dev/project"
+	base := errors.New("validate sandbox image img: sandbox workspace is not writable at /home/agent/workspace: exit status 3")
+	got := EnrichValidateError(base, TierBase, "claude", "1.2.3", workDir)
+	msg := got.Error()
+
+	for _, want := range []string{
+		"SELinux",       // names the root cause
+		"enforcing",     // names the enforcing-mode condition
+		"automatically", // states Aileron applies the relabel itself
+		"`:z`",          // names the relabel mount option
+		"chcon",         // gives the manual fallback command
+		workDir,         // names the operator's workspace
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("enriched writability error missing %q: %s", want, msg)
+		}
+	}
+	// The original error must remain wrapped so callers' %w chains still match.
+	if !errors.Is(got, base) {
+		t.Errorf("enriched error does not wrap the original validate error")
+	}
+}
+
+// TestEnrichValidateErrorWorkspaceNotWritableAllTiers verifies the writability
+// enrichment is tier-independent: every sandbox tier bind-mounts the workspace,
+// so the SELinux denial can occur regardless of which image was selected.
+func TestEnrichValidateErrorWorkspaceNotWritableAllTiers(t *testing.T) {
+	base := errors.New("validate sandbox image img: sandbox workspace is not writable at /home/agent/workspace: exit status 3")
+	for _, tier := range []Tier{TierBase, TierPublished, TierBYOImage, TierDevcontainer} {
+		got := EnrichValidateError(base, tier, "claude", "1.2.3", "/home/dev/project")
+		if !strings.Contains(got.Error(), "SELinux") {
+			t.Errorf("tier %q: writability error was not enriched: %s", tier, got.Error())
+		}
 	}
 }
 

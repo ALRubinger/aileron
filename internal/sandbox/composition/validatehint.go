@@ -12,6 +12,14 @@ import (
 // detect the CWD-determined-tier mismatch and enrich the error.
 const agentNotFoundMarker = "agent command not found in sandbox image:"
 
+// workspaceNotWritableMarker is the substring the in-container validation script
+// emits when the writability probe fails (see runtime.go validationScript, the
+// exit-3 branch). The bare runtime failure surfaces as an opaque "exit status
+// 3"; EnrichValidateError matches this marker to explain the most common cause
+// (SELinux denying the confined container process access to the host-labeled
+// workspace bind mount) and the remedy.
+const workspaceNotWritableMarker = "sandbox workspace is not writable at"
+
 // EnrichValidateError augments a sandbox-image validate failure with tier, CWD,
 // and published-image context when the failure is the CWD-determined-tier
 // mismatch: a hand-authored .devcontainer/ in workDir selected the devcontainer
@@ -26,6 +34,13 @@ const agentNotFoundMarker = "agent command not found in sandbox image:"
 func EnrichValidateError(err error, tier Tier, agent, version, workDir string) error {
 	if err == nil {
 		return nil
+	}
+	// The writability failure is tier-independent: any sandbox tier bind-mounts
+	// the operator's workspace, and SELinux on the host denies the confined
+	// container process access to it regardless of which image was selected.
+	// Match and enrich before the devcontainer-specific branch below.
+	if strings.Contains(err.Error(), workspaceNotWritableMarker) {
+		return enrichWorkspaceNotWritable(err, workDir)
 	}
 	if tier != TierDevcontainer {
 		return err
@@ -53,4 +68,29 @@ func EnrichValidateError(err error, tier Tier, agent, version, workDir string) e
 		"A published per-agent image %s exists as an alternative: "+
 		"launch from a directory without a .devcontainer/, or add the %q agent Feature to %s.",
 		err, TierDevcontainer, devcontainerPath, wd, agent, publishedImage, agent, devcontainerPath)
+}
+
+// enrichWorkspaceNotWritable augments the opaque workspace-writability failure
+// with the SELinux root cause and remediation. The bare runtime surface is an
+// uninformative "exit status 3"; on a Linux host with SELinux enforcing, the
+// confined container process (the image's non-root agent user) is denied access
+// to the host-labeled workspace bind mount. Aileron now applies a `:z` relabel
+// to the mount automatically, so this message also points operators at the
+// manual fallback for hosts where the automatic relabel cannot take effect.
+func enrichWorkspaceNotWritable(err error, workDir string) error {
+	wd := workDir
+	if wd == "" {
+		wd = "."
+	}
+	return fmt.Errorf("%w\n"+
+		"the sandbox container could not write to the mounted workspace %s. "+
+		"On a Linux host with SELinux in enforcing mode, the host directory's "+
+		"SELinux label denies the container's non-root agent user access to the "+
+		"bind mount. Aileron applies a shared SELinux relabel (the `:z` mount "+
+		"option) automatically when it detects SELinux enforcing; if the failure "+
+		"persists, relabel the directory manually with "+
+		"`chcon -Rt svirt_sandbox_file_t %s` (or run the host with SELinux "+
+		"permissive). On non-SELinux hosts, check that the workspace directory is "+
+		"writable by the container's agent user.",
+		err, wd, wd)
 }

@@ -27,6 +27,22 @@ import (
 // test runner's OS.
 var hostOS = func() string { return goruntime.GOOS }
 
+// selinuxEnforcing reports whether the host is running SELinux in
+// enforcing mode. It is a package-level indirection (mirroring the hostOS
+// seam) so the SELinux-relabel argv branch stays unit-testable without
+// depending on the test runner's host. The kernel exposes the current
+// mode at /sys/fs/selinux/enforce: the file holds "1" when enforcing and
+// "0" when permissive, and is absent when SELinux is disabled or the host
+// is not Linux. Any read error (absent file, non-Linux host) means "not
+// enforcing", so the relabel suffix is only ever added where it is needed.
+var selinuxEnforcing = func() bool {
+	data, err := os.ReadFile("/sys/fs/selinux/enforce")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(data)) == "1"
+}
+
 const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
 const AgentImagesDocsURL = "https://docs.withaileron.ai/development/sandbox-agent-images/"
@@ -773,9 +789,25 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	if runtimeName == "docker" && hostOS() == "linux" {
 		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}
+	// On a Linux host running SELinux in enforcing mode, a host bind mount keeps
+	// the host's SELinux label, so the container's confined process (the image's
+	// non-root agent user) is denied access to it. Docker's `:z` mount option
+	// asks the runtime to relabel the mount with a shared (svirt_sandbox_file_t)
+	// label so the container can read and write it. We use `:z` rather than `:Z`
+	// (private) because the workspace mount is the operator's real project CWD
+	// that the host must keep accessing; a private relabel would lock the host
+	// out. The suffix is only emitted on Linux Docker under SELinux enforcing,
+	// where it is required; elsewhere it is omitted (it would be rejected or be a
+	// no-op). Named volumes are managed by the runtime and already carry a
+	// container-accessible label, so they are not relabeled.
+	relabel := runtimeName == "docker" && hostOS() == "linux" && selinuxEnforcing()
+	workspaceSpec := absWorkDir + ":" + WorkspacePath
+	if relabel {
+		workspaceSpec += ":z"
+	}
 	args = append(args,
 		"--workdir", WorkspacePath,
-		"--volume", absWorkDir+":"+WorkspacePath,
+		"--volume", workspaceSpec,
 	)
 	for _, volume := range opts.Volumes {
 		if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
@@ -792,9 +824,22 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 			}
 			source = abs
 		}
-		spec := source + ":" + volume.Target
+		// Mount options go in the third `:`-delimited field as a comma-separated
+		// list (e.g. `ro,z`). Emitting them as separate `:`-delimited fields
+		// (`ro:z`) would make Docker read a fourth field and reject the spec, so
+		// ro and the SELinux relabel must be joined here. Host bind mounts need
+		// the same relabel as the workspace mount; named volumes are
+		// runtime-managed and already container-accessible.
+		var mountOpts []string
 		if volume.ReadOnly {
-			spec += ":ro"
+			mountOpts = append(mountOpts, "ro")
+		}
+		if relabel && !volume.Named {
+			mountOpts = append(mountOpts, "z")
+		}
+		spec := source + ":" + volume.Target
+		if len(mountOpts) > 0 {
+			spec += ":" + strings.Join(mountOpts, ",")
 		}
 		args = append(args, "--volume", spec)
 	}
