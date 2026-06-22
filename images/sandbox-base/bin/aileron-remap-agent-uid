@@ -60,25 +60,60 @@ if [ -d "$workspace" ]; then
   # Never remap to root (uid 0): the agent must stay unprivileged. A
   # root-owned workspace already grants the agent no less access than before,
   # and remapping the agent to uid 0 would defeat the non-root sandbox model.
+  #
+  # We rewrite /etc/passwd and /etc/group directly rather than calling shadow's
+  # `usermod -u` / `groupmod -g`. shadow's `usermod -u` automatically rewrites
+  # ownership of the ENTIRE home tree (/home/agent) as part of the uid change,
+  # and that walk is NOT prune-aware: it descends into the operator's
+  # bind-mounted workspace at $workspace and prints
+  # "usermod: Failed to change ownership of the home directory" (issue #1467).
+  # Editing the account databases in place changes only the numeric ids; the
+  # deliberate, workspace-pruning re-chown below (the `find ... -prune` block)
+  # then owns the home-scaffolding re-chown without ever touching the workspace.
+  #
+  # remap_field rewrites COLUMN (1-based) of the line whose first colon-field is
+  # `agent` in FILE, replacing it with VALUE. The rewrite is atomic: a sibling
+  # temp file is written then `mv`'d over the target so a crash mid-write can
+  # never leave a truncated account database.
+  remap_field() {
+    file="$1"
+    column="$2"
+    value="$3"
+    tmp="$file.aileron-remap.$$"
+    awk -F: -v OFS=: -v col="$column" -v val="$value" '
+      $1 == "agent" { $col = val }
+      { print }
+    ' "$file" >"$tmp"
+    chmod --reference="$file" "$tmp"
+    mv "$tmp" "$file"
+  }
+
   remap_uid=""
   remap_gid=""
   if [ "$want_gid" != "0" ] && [ "$want_gid" != "$cur_gid" ]; then
-    groupmod -g "$want_gid" -o agent
+    # /etc/group: name:passwd:GID:members — rewrite the agent group's GID.
+    remap_field /etc/group 3 "$want_gid"
+    # /etc/passwd: name:passwd:UID:GID:... — keep the agent user's primary GID
+    # pointed at the agent group's new numeric GID.
+    remap_field /etc/passwd 4 "$want_gid"
     remap_gid="$want_gid"
   fi
   if [ "$want_uid" != "0" ] && [ "$want_uid" != "$cur_uid" ]; then
-    usermod -u "$want_uid" -o agent
+    # /etc/passwd: name:passwd:UID:GID:... — rewrite the agent user's UID.
+    remap_field /etc/passwd 3 "$want_uid"
     remap_uid="$want_uid"
   fi
 
   # Re-assert ownership of the agent's home scaffolding (dotfiles, proxy/CA and
   # manifest dirs) after the remap so the agent still owns them under its new
-  # uid/gid. usermod -u rewrites ownership only for files already owned by the
-  # OLD uid, so this also covers anything created since build time. CRITICAL:
-  # the workspace bind mount lives at $workspace under /home/agent and is the
-  # operator's real host CWD; it must NOT be recursively chowned (that would
-  # rewrite the host project's file ownership, and is unnecessary because the
-  # agent uid was just aligned to the workspace owner). Prune it from the walk.
+  # uid/gid. Because we changed the ids by editing /etc/passwd and /etc/group
+  # directly (not via usermod -u), nothing rewrote home ownership for us, so this
+  # walk is the SOLE re-chown and must cover the agent's home scaffolding.
+  # CRITICAL: the workspace bind mount lives at $workspace under /home/agent and
+  # is the operator's real host CWD; it must NOT be recursively chowned (that
+  # would rewrite the host project's file ownership, and is unnecessary because
+  # the agent uid was just aligned to the workspace owner). Prune it from the
+  # walk.
   if [ -n "$remap_uid" ] || [ -n "$remap_gid" ]; then
     new_uid="${remap_uid:-$cur_uid}"
     new_gid="${remap_gid:-$cur_gid}"

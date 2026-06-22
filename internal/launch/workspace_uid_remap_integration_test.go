@@ -38,8 +38,10 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,6 +108,64 @@ func TestWorkspaceUIDRemap(t *testing.T) {
 		}
 		if got := strings.TrimSpace(stdout); got != "writable" {
 			t.Fatalf("in-container probe output = %q, want %q", got, "writable")
+		}
+	})
+
+	// Regression for #1467: the remap must NOT trigger shadow's non-prune-aware
+	// home-tree chown. Before the fix, the helper called `usermod -u`, whose
+	// built-in ownership walk descended into the bind-mounted workspace and
+	// printed "usermod: Failed to change ownership of the home directory". The
+	// fix rewrites /etc/passwd and /etc/group directly, so no such walk runs.
+	// The remap stderr must be free of any usermod chown-failure noise while the
+	// workspace stays writable.
+	t.Run("remap_emits_no_home_chown_failure", func(t *testing.T) {
+		hostWorkspace := newWorkspaceDir(t, hostUID)
+		stdout, stderr, runErr := runWorkspaceProbe(ctx, rt, hostWorkspace, true, probeCmd)
+		if runErr != nil {
+			t.Fatalf("remap probe failed (host UID %d, agent UID %d): %v\nstderr: %s", hostUID, agentUID, runErr, strings.TrimSpace(stderr))
+		}
+		if got := strings.TrimSpace(stdout); got != "writable" {
+			t.Fatalf("remap probe output = %q, want %q (workspace must stay writable)", got, "writable")
+		}
+		for _, marker := range []string{"usermod", "Failed to change ownership"} {
+			if strings.Contains(stderr, marker) {
+				t.Fatalf("remap stderr contained %q, indicating shadow's non-prune-aware home-tree chown ran (regression #1467):\n%s", marker, strings.TrimSpace(stderr))
+			}
+		}
+	})
+
+	// Regression for #1467: the remap must leave the operator's host files inside
+	// the bind-mounted workspace untouched. A pre-existing file the operator
+	// created in the workspace must retain its host ownership after the remap —
+	// proving the prune-aware re-chown excluded the workspace and that shadow's
+	// recursive home chown (which would rewrite the host project's ownership) did
+	// not run.
+	t.Run("remap_leaves_host_workspace_files_untouched", func(t *testing.T) {
+		hostWorkspace := newWorkspaceDir(t, hostUID)
+		hostFile := filepath.Join(hostWorkspace, "operator-file.txt")
+		if err := os.WriteFile(hostFile, []byte("host content\n"), 0o644); err != nil {
+			t.Fatalf("seed host workspace file: %v", err)
+		}
+		before, err := os.Stat(hostFile)
+		if err != nil {
+			t.Fatalf("stat seeded host file: %v", err)
+		}
+		beforeUID := before.Sys().(*syscall.Stat_t).Uid
+
+		// Run the remap; the command is incidental, the side effect on host
+		// ownership is what we assert.
+		_, stderr, runErr := runWorkspaceProbe(ctx, rt, hostWorkspace, true, "echo done")
+		if runErr != nil {
+			t.Fatalf("remap probe failed: %v\nstderr: %s", runErr, strings.TrimSpace(stderr))
+		}
+
+		after, err := os.Stat(hostFile)
+		if err != nil {
+			t.Fatalf("stat host file after remap: %v", err)
+		}
+		afterUID := after.Sys().(*syscall.Stat_t).Uid
+		if afterUID != beforeUID {
+			t.Fatalf("host workspace file ownership changed by the remap: uid %d -> %d (regression #1467: the workspace bind mount must be pruned from the re-chown and shadow's recursive home chown must not run)", beforeUID, afterUID)
 		}
 	})
 }
