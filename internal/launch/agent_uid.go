@@ -28,7 +28,12 @@ const remapAgentUIDHelper = "aileron-remap-agent-uid"
 // container package's decision so the launch path, the validate probe, and the
 // SELinux-relabel argv all share one source of truth for the Linux+Docker gate
 // (mirroring newAgentDirChownHook's GOOS guard; issue #1461).
-func workspaceUIDRemapActive(runtime string) bool {
+//
+// It is a package-level seam (var, not func) so tests can pin the gate
+// independent of the test runner's OS: the real value is GOOS-dependent, so
+// argv-asserting launcher tests would otherwise pass on macOS and fail on Linux
+// (and vice versa).
+var workspaceUIDRemapActive = func(runtime string) bool {
 	return sandboxcontainer.WorkspaceUIDRemapActive(strings.TrimSpace(runtime))
 }
 
