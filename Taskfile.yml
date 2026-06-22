@@ -391,7 +391,7 @@ tasks:
     desc: "Run the workspace uid-remap integration test on a Linux Docker host (#1461): proves the agent uid mismatch blocks the writability probe and that the aileron-remap-agent-uid entrypoint fixes it; self-skips on non-Linux or when no Docker runtime is on PATH"
     dir: internal
     cmds:
-      - go test -tags=integration_sandbox -run TestWorkspaceUIDRemap ./launch/...
+      - go test -v -tags=integration_sandbox -run TestWorkspaceUIDRemap ./launch/...
     env:
       AILERON_SANDBOX_BASE_CONTEXT:
         sh: cd "{{.ROOT_DIR}}/images/sandbox-base" && pwd
