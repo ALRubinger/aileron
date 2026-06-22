@@ -13,9 +13,7 @@ The integration test at `internal/app/sandbox_mcp_test.go` (build tag `integrati
 - Docker installed and running.
 - A development build of the Aileron CLI and `aileron-mcp` siblings, both on `PATH`. `task build:cli && task build:mcp` produces them under `./build/`.
 - `jq` available on `PATH` (used by the audit-verification command below).
-- A Google OAuth client configured via `aileron binding setup gmail` (or any installed action you want to test).
-- The `aileron-connector-google` connector installed (`aileron connector install github://ALRubinger/aileron-connector-google`).
-- The `draft-email` action installed (`aileron action install github://ALRubinger/aileron-connector-google/actions/draft-email`).
+- The Google connector and its `draft-email` action installed, with a Google credential bound. The simplest path is the suite installer, which fetches the connector, installs its actions, and walks Google sign-in in one command: `aileron action add-suite github://ALRubinger/aileron-connector-google/suite.toml@latest`. (To install them individually instead: `aileron connector install github://ALRubinger/aileron-connector-google` then `aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email`.)
 
 ## What to validate (agents and runtimes)
 
@@ -48,10 +46,10 @@ Pick the agent to validate. Every other step is identical.
 
 ```bash
 AGENT=claude   # one of: claude | pi | goose | opencode | codex
-aileron launch --sandbox=docker "$AGENT"
+aileron launch "$AGENT"
 ```
 
-The launcher will:
+`aileron launch` runs the agent in a Docker sandbox by default; no `--sandbox` flag is needed. The launcher will:
 
 1. Resolve the host-built `aileron-mcp` binary and bind-mount it read-only into the container at `/usr/local/bin/aileron-mcp`. The launcher skips this step when the resolved image already bakes `aileron-mcp` in. It detects a baked image by reading the `ai.aileron.mcp.version` label ([issue #957](https://github.com/ALRubinger/aileron/issues/957)). The published `ghcr.io/alrubinger/aileron-sandbox-base` image bakes the binary so sealed customer-operated runtimes launch without a host `aileron-mcp`. The local Tier 0 base build stays unbaked and keeps using this host-mount.
 2. Build the MCP environment (`AILERON_URL` rewritten to `host.docker.internal:<port>`, `AILERON_SESSION_ID`, `AILERON_TOKEN`).
@@ -83,22 +81,21 @@ The agent calls `mcp__aileron__draft_email`. The flow:
 6. `aileron-mcp`'s `check_action_status` polling surfaces the result back to the agent.
 7. The audit log records the chain `approval.requested → approval.approved → execution.started → execution.succeeded`, all stamped with the launch session id.
 
-Verify the audit chain:
+Verify the audit chain. List the recent entries (there is no session filter; audit is keyed by `audit_id`, so look at the recent window right after the run):
 
 ```bash
-aileron audit list --session "$(aileron sessions list --json | jq -r '.[0].id')"
+aileron audit list --limit 20
 ```
 
-Assert the four contractual events are present for the session in one shot:
+Assert the four contractual events are present in one shot. `audit list --json` returns `{"events":[...]}`, and each event carries an `event_type`:
 
 ```bash
-SESSION=$(aileron sessions list --json | jq -r '.[0].id')
-aileron audit list --session "$SESSION" --json \
-  | jq -r '[.[].type] | sort | unique' \
+aileron audit list --limit 20 --json \
+  | jq -r '[.events[].event_type] | sort | unique' \
   | jq -e 'index("approval.requested") and index("approval.approved")
            and index("execution.started") and index("execution.succeeded")' \
-  && echo "PASS: audit chain complete for $SESSION" \
-  || echo "FAIL: audit chain incomplete for $SESSION"
+  && echo "PASS: audit chain complete" \
+  || echo "FAIL: audit chain incomplete"
 ```
 
 Verify the draft landed in Gmail's draft folder. That is the upstream contract under test.
@@ -107,7 +104,7 @@ Verify the draft landed in Gmail's draft folder. That is the upstream contract u
 
 `aileron-mcp` discovers actions from the daemon's `/v1/actions` at startup, then keeps the agent's tool list current while the session runs. It advertises the MCP `tools.listChanged` capability during `initialize` and re-discovers actions on a background poll. When the action set changes, it swaps its cache and emits a `notifications/tools/list_changed` to the host, which re-pulls `tools/list`.
 
-This means an `aileron action install`, `aileron action enable`, `aileron action disable`, or `aileron action remove` in another terminal reaches the running agent within a poll cycle. Installing or enabling an action surfaces it; disabling or removing one drops it. No agent restart.
+This means an `aileron action add`, `aileron action enable`, or `aileron action disable` in another terminal reaches the running agent within a poll cycle. Adding or enabling an action surfaces it; disabling one drops it. No agent restart.
 
 The poll interval is `AILERON_MCP_REFRESH_INTERVAL` (a Go duration such as `5s`, or a bare integer interpreted as seconds). It defaults to `5s`. Set it to `0` to disable the poller and freeze the tool surface at the boot snapshot. The knob is only consulted when `AILERON_URL` is set.
 
@@ -157,7 +154,7 @@ To verify, add a user MCP server to your global Claude Code config (`~/.config/c
 Re-launch under sandbox:
 
 ```bash
-aileron launch --sandbox=docker claude
+aileron launch claude
 ```
 
 In Claude, `/mcp` should show BOTH `aileron` and `userthing`. Both work independently. The Aileron daemon never sees the `userthing` traffic.
