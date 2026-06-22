@@ -60,20 +60,30 @@ if [ -d "$workspace" ]; then
   # Never remap to root (uid 0): the agent must stay unprivileged. A
   # root-owned workspace already grants the agent no less access than before,
   # and remapping the agent to uid 0 would defeat the non-root sandbox model.
+  remap_uid=""
+  remap_gid=""
   if [ "$want_gid" != "0" ] && [ "$want_gid" != "$cur_gid" ]; then
     groupmod -g "$want_gid" -o agent
+    remap_gid="$want_gid"
   fi
   if [ "$want_uid" != "0" ] && [ "$want_uid" != "$cur_uid" ]; then
     usermod -u "$want_uid" -o agent
-    # usermod -u rewrites ownership of files inside the home directory tree
-    # automatically, but only for files already owned by the OLD uid. The home
-    # directory and proxy/manifest scaffolding were chowned to the agent at
-    # build time, so they follow. Re-assert ownership of the home tree so the
-    # agent still owns its dotfiles after the remap.
-    chown -R "$want_uid:$want_gid" /home/agent
-  elif [ "$want_gid" != "0" ] && [ "$want_gid" != "$cur_gid" ]; then
-    # gid changed but uid did not: realign group ownership of the home tree.
-    chown -R "$want_uid:$want_gid" /home/agent
+    remap_uid="$want_uid"
+  fi
+
+  # Re-assert ownership of the agent's home scaffolding (dotfiles, proxy/CA and
+  # manifest dirs) after the remap so the agent still owns them under its new
+  # uid/gid. usermod -u rewrites ownership only for files already owned by the
+  # OLD uid, so this also covers anything created since build time. CRITICAL:
+  # the workspace bind mount lives at $workspace under /home/agent and is the
+  # operator's real host CWD; it must NOT be recursively chowned (that would
+  # rewrite the host project's file ownership, and is unnecessary because the
+  # agent uid was just aligned to the workspace owner). Prune it from the walk.
+  if [ -n "$remap_uid" ] || [ -n "$remap_gid" ]; then
+    new_uid="${remap_uid:-$cur_uid}"
+    new_gid="${remap_gid:-$cur_gid}"
+    find /home/agent -path "$workspace" -prune -o \
+      -exec chown -h "$new_uid:$new_gid" {} +
   fi
 fi
 

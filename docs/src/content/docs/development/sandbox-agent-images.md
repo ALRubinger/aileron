@@ -197,7 +197,7 @@ A third operational requirement therefore applies to BYO images that run as a no
 
 3. The `aileron-remap-agent-uid` helper must be on `PATH` and the image must let it run as root at startup before dropping to the agent user. The helper needs `usermod`/`groupmod` (the `shadow` package on Alpine, `passwd`/`shadow-utils` on Debian/RHEL) and a `stat` that supports `-c` (GNU coreutils). The canonical implementation ships with the sandbox-base image.
 
-> This addresses [SELinux relabeling](#byo-image-proxy-contract) for a different failure: the `:z` relabel handles SELinux MAC denials on enforcing hosts, while the uid remap handles the DAC permission mismatch that occurs on every Linux + Docker host regardless of SELinux. Both can apply on the same host.
+> This addresses a different failure than SELinux relabeling: the `:z` relabel handles SELinux MAC denials on enforcing hosts, while the uid remap handles the DAC permission mismatch that occurs on every Linux + Docker host regardless of SELinux. Both can apply on the same host.
 
 ## Current Limits
 
