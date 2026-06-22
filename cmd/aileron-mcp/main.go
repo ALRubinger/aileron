@@ -15,6 +15,14 @@
 // a per-session unix socket; ADR-0012 step 9B-2 moved comms ownership
 // to the daemon and switched the wire to HTTP long-poll.
 //
+// When AILERON_URL is set the server also exposes an always-present
+// `aileron_diagnostics` tool. Action discovery is best-effort: if it
+// fails (daemon unreachable, 401 unauthorized, daemon error) or returns
+// zero actions, the server keeps serving the built-in tools and records
+// the classified reason. `aileron_diagnostics` reports that reason and
+// the remediation so an agent can answer "why are connector actions
+// missing?" without an operator reading the stderr warning.
+//
 // The binary communicates over stdio using JSON-RPC 2.0, per the MCP
 // specification.
 //
@@ -44,6 +52,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -232,6 +241,113 @@ type actionApprovalResult struct {
 	Failure json.RawMessage `json:"failure,omitempty"`
 }
 
+// discoveryReason classifies the outcome of a /v1/actions discovery
+// attempt so the generic "discovery failed" warning can be replaced
+// with one that names the actual failure mode, and so the synthetic
+// aileron_diagnostics tool can explain it to the agent.
+type discoveryReason int
+
+const (
+	// reasonOK means discovery succeeded and returned at least one action.
+	reasonOK discoveryReason = iota
+	// reasonUnreachable means the HTTP request never completed — the
+	// daemon is not listening (connection refused, DNS, timeout).
+	reasonUnreachable
+	// reasonUnauthorized means the daemon returned 401 — a stale or
+	// missing AILERON_TOKEN / session.
+	reasonUnauthorized
+	// reasonHTTPError means the daemon returned a non-200 status other
+	// than 401 (e.g. 5xx), or the response body failed to decode.
+	reasonHTTPError
+	// reasonEmpty means discovery succeeded over the wire but the daemon
+	// reported zero installed actions.
+	reasonEmpty
+)
+
+// discoveryDiagnostic captures the outcome of the most recent discovery
+// attempt: its classified reason, the action count on success, and (for
+// failures) the underlying error for the stderr log. It is the single
+// source the reason-tagged warning and the aileron_diagnostics tool both
+// read from.
+type discoveryDiagnostic struct {
+	reason discoveryReason
+	// count is the number of enabled actions discovered (only meaningful
+	// when reason is reasonOK).
+	count int
+	// err is the transport/decode/status error, if any. Nil for reasonOK
+	// and reasonEmpty.
+	err error
+}
+
+// ok reports whether discovery succeeded with at least one action.
+func (d discoveryDiagnostic) ok() bool { return d.reason == reasonOK }
+
+// summary returns a short, reason-tagged phrase naming the failure mode,
+// with the daemon URL interpolated where it aids diagnosis. Used as the
+// human-facing line in both the stderr warning and the synthetic tool's
+// output.
+func (d discoveryDiagnostic) summary(url string) string {
+	switch d.reason {
+	case reasonOK:
+		return fmt.Sprintf("discovered %d action(s) from %s", d.count, url)
+	case reasonUnreachable:
+		return fmt.Sprintf("daemon unreachable at %s", url)
+	case reasonUnauthorized:
+		return "unauthorized (stale or missing AILERON_TOKEN / session)"
+	case reasonHTTPError:
+		if d.err != nil {
+			return "daemon error: " + d.err.Error()
+		}
+		return "daemon returned an unexpected response"
+	case reasonEmpty:
+		return fmt.Sprintf("daemon at %s returned 0 actions", url)
+	default:
+		return "unknown discovery state"
+	}
+}
+
+// remediation returns the suggested operator fix for a failed discovery,
+// or the empty string when discovery succeeded. Surfaced to the agent via
+// aileron_diagnostics so "why do I only see the built-in tools?" is
+// answerable without reading stderr.
+func (d discoveryDiagnostic) remediation() string {
+	switch d.reason {
+	case reasonUnreachable:
+		return "Start the daemon (e.g. run `aileron launch`) and confirm AILERON_URL points at it."
+	case reasonUnauthorized:
+		return "Re-authenticate: the AILERON_TOKEN or session is stale. Re-run `aileron launch` to mint a fresh token."
+	case reasonHTTPError:
+		return "Check the daemon logs; it returned an unexpected response to /v1/actions."
+	case reasonEmpty:
+		return "Install actions with `aileron action add <name>`, then they will appear without restarting."
+	default:
+		return ""
+	}
+}
+
+// discoveryError wraps a discovery failure with its classified reason so
+// callers (startup, refresh) can build a reason-tagged warning and record
+// the diagnostic. Unwraps to the underlying error for callers that only
+// care that discovery failed.
+type discoveryError struct {
+	reason discoveryReason
+	err    error
+}
+
+func (e *discoveryError) Error() string { return e.err.Error() }
+func (e *discoveryError) Unwrap() error { return e.err }
+
+// aileronDiagnosticsTool is an always-present (when AILERON_URL is set)
+// synthetic tool the agent can call to learn why connector actions are
+// missing. Mirrors the always-on check_action_status precedent. Its
+// description and call result report the classified discovery state and
+// the remediation so the degraded surface is answerable from the agent.
+var aileronDiagnosticsTool = toolDef{
+	Name:        "aileron_diagnostics",
+	Description: "Report Aileron's action-discovery health. Call this to learn why connector action tools may be missing — it distinguishes a daemon that is unreachable, an unauthorized (stale token/session) response, a daemon error, and a daemon that returned zero installed actions, and reports how many actions are currently exposed plus the remediation. Useful when the agent sees only the built-in tools and expects connector actions.",
+	InputSchema: schema{Type: "object"},
+}
+
 // --- Server ---
 
 type server struct {
@@ -246,9 +362,9 @@ type server struct {
 	// path use a tighter timeout without affecting comms.
 	commsHTTPClient *http.Client
 
-	// actionsMu guards actionTools and actionNameMap. The request loop
-	// reads them (tools/list, tools/call) while the refresh poller
-	// (refreshLoop) swaps them on change, so every access is locked.
+	// actionsMu guards actionTools, actionNameMap, and discovery. The
+	// request loop reads them (tools/list, tools/call) while the refresh
+	// poller (refreshLoop) swaps them on change, so every access is locked.
 	actionsMu sync.RWMutex
 	// Discovered actions, populated at startup when AILERON_URL is set and
 	// refreshed in place by the poller. Keys of actionNameMap are
@@ -256,6 +372,12 @@ type server struct {
 	// (kebab-case) used in /v1/actions/{name}/run.
 	actionTools   []toolDef
 	actionNameMap map[string]string
+	// discovery records the outcome of the most recent /v1/actions
+	// discovery attempt (startup or a refresh tick). The aileron_diagnostics
+	// synthetic tool reports it so the degraded state is answerable from
+	// the agent, not just from stderr. Zero value (reasonOK, no count)
+	// before the first attempt.
+	discovery discoveryDiagnostic
 
 	// out is where JSON-RPC responses and notifications are written
 	// (os.Stdout in production). writeMu serializes writes so the
@@ -402,11 +524,21 @@ func main() {
 	// if discovery fails (daemon not running yet, vault locked, etc.)
 	// we proceed without action tools. Comms tools remain available.
 	if s.aileronURL != "" {
-		if tools, nameMap, err := s.discoverActions(context.Background()); err != nil {
+		tools, nameMap, err := s.discoverActions(context.Background())
+		diag := classifyDiscovery(tools, err)
+		s.setDiscovery(diag)
+		if err != nil {
 			slog.Warn("action discovery failed; continuing without action tools",
-				"url", s.aileronURL, "error", err)
+				"url", s.aileronURL, "reason", diag.summary(s.aileronURL), "error", err)
 		} else {
 			s.setActions(tools, nameMap)
+			if !diag.ok() {
+				// Wire succeeded but the daemon exposes no actions —
+				// distinct from a transport/auth failure, and worth a
+				// reason-tagged line so the operator isn't left guessing.
+				slog.Warn("action discovery returned no actions",
+					"url", s.aileronURL, "reason", diag.summary(s.aileronURL))
+			}
 		}
 	}
 
@@ -467,6 +599,43 @@ func (s *server) setActions(tools []toolDef, nameMap map[string]string) {
 	defer s.actionsMu.Unlock()
 	s.actionTools = tools
 	s.actionNameMap = nameMap
+}
+
+// classifyDiscovery turns a discoverActions result into a
+// discoveryDiagnostic. A discoveryError carries its own classified
+// reason; a success with zero tools is reasonEmpty (the daemon answered
+// but exposes no actions); a success with tools is reasonOK. Any error
+// that is not a *discoveryError is treated as an HTTP-class failure so
+// the diagnostic is never silently dropped.
+func classifyDiscovery(tools []toolDef, err error) discoveryDiagnostic {
+	if err != nil {
+		var de *discoveryError
+		if errors.As(err, &de) {
+			return discoveryDiagnostic{reason: de.reason, err: err}
+		}
+		return discoveryDiagnostic{reason: reasonHTTPError, err: err}
+	}
+	if len(tools) == 0 {
+		return discoveryDiagnostic{reason: reasonEmpty}
+	}
+	return discoveryDiagnostic{reason: reasonOK, count: len(tools)}
+}
+
+// setDiscovery records the latest discovery diagnostic under the same
+// lock that guards the action cache, so the aileron_diagnostics tool and
+// the refresh poller never read a torn state.
+func (s *server) setDiscovery(d discoveryDiagnostic) {
+	s.actionsMu.Lock()
+	defer s.actionsMu.Unlock()
+	s.discovery = d
+}
+
+// discoveryState returns a copy of the latest discovery diagnostic under
+// the read lock.
+func (s *server) discoveryState() discoveryDiagnostic {
+	s.actionsMu.RLock()
+	defer s.actionsMu.RUnlock()
+	return s.discovery
 }
 
 // refreshInterval parses the AILERON_MCP_REFRESH_INTERVAL env value
@@ -547,11 +716,15 @@ func (s *server) refreshLoop(ctx context.Context, interval time.Duration) {
 // a notification was emitted.
 func (s *server) refreshOnce(ctx context.Context) bool {
 	tools, nameMap, err := s.discoverActions(ctx)
+	diag := classifyDiscovery(tools, err)
+	s.setDiscovery(diag)
 	if err != nil {
 		// Leave the working surface intact; surface the failure on
-		// stderr so it's visible without poisoning the tool list.
+		// stderr so it's visible without poisoning the tool list. The
+		// reason tag distinguishes unreachable / unauthorized / daemon
+		// error so the operator can tell the modes apart.
 		slog.Warn("action refresh failed; keeping existing tool surface",
-			"url", s.aileronURL, "error", err)
+			"url", s.aileronURL, "reason", diag.summary(s.aileronURL), "error", err)
 		return false
 	}
 
@@ -677,6 +850,14 @@ func (s *server) availableTools() []toolDef {
 	// are discovered (a fresh daemon), the agent might be working
 	// against an approval id minted by an earlier session.
 	tools = append(tools, checkActionStatusTool)
+	// aileron_diagnostics is always available whenever there is a daemon
+	// to discover against (AILERON_URL set). It answers "why do I only
+	// see the built-in tools?" from the agent — reporting whether
+	// discovery is degraded and how to fix it — mirroring the always-on
+	// check_action_status precedent.
+	if s.aileronURL != "" {
+		tools = append(tools, aileronDiagnosticsTool)
+	}
 	return tools
 }
 
@@ -701,6 +882,8 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.httpRequest(args)
 	case "check_action_status":
 		return s.checkActionStatus(ctx, args)
+	case "aileron_diagnostics":
+		return s.diagnostics()
 	default:
 		return errorResult("unknown tool: " + name)
 	}
@@ -956,15 +1139,19 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 	s.setActionAuthHeaders(req)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, &discoveryError{reason: reasonUnreachable, err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("/v1/actions: %s", resp.Status)
+		reason := reasonHTTPError
+		if resp.StatusCode == http.StatusUnauthorized {
+			reason = reasonUnauthorized
+		}
+		return nil, nil, &discoveryError{reason: reason, err: fmt.Errorf("/v1/actions: %s", resp.Status)}
 	}
 	var alr actionListResponse
 	if err := json.NewDecoder(resp.Body).Decode(&alr); err != nil {
-		return nil, nil, fmt.Errorf("decoding /v1/actions: %w", err)
+		return nil, nil, &discoveryError{reason: reasonHTTPError, err: fmt.Errorf("decoding /v1/actions: %w", err)}
 	}
 	tools := make([]toolDef, 0, len(alr.Items))
 	nameMap := make(map[string]string, len(alr.Items))
@@ -1128,6 +1315,36 @@ func (s *server) checkActionStatus(ctx context.Context, args map[string]any) too
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: formatActionApprovalResult(result)}},
 	}
+}
+
+// diagnostics implements the aileron_diagnostics MCP tool. It reports
+// the classified outcome of the most recent /v1/actions discovery so the
+// agent can answer "why are connector actions missing?" without the
+// operator reading stderr. Not an error result even when discovery is
+// degraded — the tool call itself succeeded; the degraded state rides in
+// the text.
+func (s *server) diagnostics() toolResult {
+	if s.aileronURL == "" {
+		return toolResult{Content: []toolContent{{Type: "text",
+			Text: "Aileron daemon not configured (AILERON_URL not set); no connector actions are expected. Only built-in tools are available."}}}
+	}
+	d := s.discoveryState()
+	var b strings.Builder
+	if d.ok() {
+		fmt.Fprintf(&b, "Action discovery healthy: %s.", d.summary(s.aileronURL))
+		return toolResult{Content: []toolContent{{Type: "text", Text: b.String()}}}
+	}
+	fmt.Fprintf(&b, "Action discovery degraded: %s.", d.summary(s.aileronURL))
+	if d.reason == reasonEmpty {
+		b.WriteString(" The daemon is reachable and authorized, but no actions are installed, so only the built-in tools are exposed.")
+	} else {
+		b.WriteString(" Only the built-in tools are exposed; connector actions could not be discovered.")
+	}
+	if rem := d.remediation(); rem != "" {
+		b.WriteString("\nRemediation: ")
+		b.WriteString(rem)
+	}
+	return toolResult{Content: []toolContent{{Type: "text", Text: b.String()}}}
 }
 
 // formatActionApprovalResult turns the API response into an LLM-
