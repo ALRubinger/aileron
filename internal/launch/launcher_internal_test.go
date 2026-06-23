@@ -670,6 +670,187 @@ func TestSiblingCandidates_AlreadySuffixed(t *testing.T) {
 	}
 }
 
+// TestArchSuffixedCandidates_PerPlatform locks the exact ordered candidate
+// filenames archSuffixedCandidates produces for every supported target
+// platform. The platform axis (goos/goarch) is a parameter, so all M
+// targets are exercised from a single host (CI runs on one OS): the
+// windows `.exe` suffix and the darwin/linux ordering are each verified
+// here without needing to build on those platforms.
+func TestArchSuffixedCandidates_PerPlatform(t *testing.T) {
+	cases := []struct {
+		goos, goarch string
+		want         []string
+	}{
+		{"darwin", "arm64", []string{"aileron-mcp-darwin-arm64", "aileron-mcp"}},
+		{"darwin", "amd64", []string{"aileron-mcp-darwin-amd64", "aileron-mcp"}},
+		{"windows", "amd64", []string{"aileron-mcp-windows-amd64.exe", "aileron-mcp"}},
+		{"linux", "amd64", []string{"aileron-mcp-linux-amd64", "aileron-mcp"}},
+		{"linux", "arm64", []string{"aileron-mcp-linux-arm64", "aileron-mcp"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
+			got := archSuffixedCandidates("aileron-mcp", tc.goos, tc.goarch)
+			if len(got) != len(tc.want) || got[0] != tc.want[0] || got[1] != tc.want[1] {
+				t.Fatalf("archSuffixedCandidates(%q, %q, %q) = %v, want %v",
+					"aileron-mcp", tc.goos, tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestArchSuffixedCandidates_AlreadySuffixed guards against a double `.exe`
+// when a windows-target candidate name already carries the platform
+// extension: the suffixed candidate is returned as-is rather than producing
+// `...amd64.exe.exe`. Mirrors TestSiblingCandidates_AlreadySuffixed.
+func TestArchSuffixedCandidates_AlreadySuffixed(t *testing.T) {
+	// Pass a name that, once platform-suffixed, already ends in `.exe`.
+	got := archSuffixedCandidates("aileron-mcp-windows-amd64.exe", "windows", "amd64")
+	want := []string{"aileron-mcp-windows-amd64.exe-windows-amd64.exe", "aileron-mcp-windows-amd64.exe"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("archSuffixedCandidates double-suffix guard = %v, want %v", got, want)
+	}
+}
+
+// TestGoosExeSuffix confirms the target-GOOS exe extension is applied per
+// the *target* platform, not the host: windows yields `.exe` and every
+// other GOOS yields empty, verifiable from any build host.
+func TestGoosExeSuffix(t *testing.T) {
+	cases := map[string]string{
+		"windows": ".exe",
+		"linux":   "",
+		"darwin":  "",
+	}
+	for goos, want := range cases {
+		if got := goosExeSuffix(goos); got != want {
+			t.Fatalf("goosExeSuffix(%q) = %q, want %q", goos, got, want)
+		}
+	}
+}
+
+// TestResolveManagedBinary_LocatesNonHostTargetSibling exercises the
+// generalized selection unit for a *non-host* target: a
+// `<name>-<goos>-<goarch>` sibling placed next to the running binary
+// resolves to its absolute path even though goos/goarch differ from the
+// host. This is the M-way generalization the issue mandates — selecting a
+// managed binary for any platform from one host.
+func TestResolveManagedBinary_LocatesNonHostTargetSibling(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Target a platform deliberately different from the host so the test
+	// proves the axis is a parameter, not runtime.GOOS/GOARCH.
+	goos, goarch := "linux", "amd64"
+	managed := filepath.Join(dir, "managed-tool-"+goos+"-"+goarch)
+	if err := os.WriteFile(managed, []byte("the managed binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveManagedBinary(selfPath, "managed-tool", goos, goarch)
+	if err != nil {
+		t.Fatalf("resolveManagedBinary: %v", err)
+	}
+	want := wantResolvedPath(t, managed)
+	if got != want {
+		t.Fatalf("resolveManagedBinary = %q, want %q (the per-platform sibling)", got, want)
+	}
+}
+
+// TestResolveManagedBinary_UnwrapsScoopShimOnWindowsTarget proves the
+// Windows reparse/Scoop-shim tail is preserved for the generalized lookup:
+// a windows/amd64 managed binary published as `<name>-windows-amd64.exe`
+// but installed through a Scoop `.shim` + `current` junction must resolve
+// to the junction-free versioned target, exactly like resolveSibling does
+// for aileron-mcp. A POSIX symlink stands in for the Windows junction so
+// this is verifiable on any host.
+func TestResolveManagedBinary_UnwrapsScoopShimOnWindowsTarget(t *testing.T) {
+	// Canonicalize the base so the only reparse point under test is the
+	// `current` link, not t.TempDir()'s own /var -> /private/var on macOS.
+	dir := wantResolvedPath(t, t.TempDir())
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The published windows candidate name is `<name>-windows-amd64.exe`;
+	// the Scoop stub sits next to aileron under that name.
+	candidate := "managed-tool-windows-amd64.exe"
+	stub := filepath.Join(dir, candidate)
+	if err := os.WriteFile(stub, []byte("scoop shim stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versionedDir := filepath.Join(dir, "apps", "managed-tool", "0.0.9")
+	if err := os.MkdirAll(versionedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(versionedDir, candidate)
+	if err := os.WriteFile(realBin, []byte("the real managed binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	currentLink := filepath.Join(dir, "apps", "managed-tool", "current")
+	if err := os.Symlink(versionedDir, currentLink); err != nil {
+		t.Skipf("cannot create symlink on this host (unprivileged Windows?): %v", err)
+	}
+	shimTarget := filepath.Join(currentLink, candidate)
+	sidecar := filepath.Join(dir, "managed-tool-windows-amd64.shim")
+	if err := os.WriteFile(sidecar, []byte("path = \""+shimTarget+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveManagedBinary(selfPath, "managed-tool", "windows", "amd64")
+	if err != nil {
+		t.Fatalf("resolveManagedBinary: %v", err)
+	}
+	if got != realBin {
+		t.Fatalf("resolveManagedBinary = %q, want junction-free %q (Scoop shim + current junction unwrapped)", got, realBin)
+	}
+}
+
+// TestResolveManagedBinary_FallsBackToBareName confirms the bare-name
+// fallback candidate is honored: when no `<name>-<goos>-<goarch>` sibling
+// exists but a manually placed extension-less binary does, the bare name
+// resolves (same fallback contract as siblingCandidates).
+func TestResolveManagedBinary_FallsBackToBareName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bare-named sibling is not the Windows on-disk shape; covered by the shim/candidate tests")
+	}
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(dir, "managed-tool")
+	if err := os.WriteFile(bare, []byte("manually placed binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	got, err := resolveManagedBinary(selfPath, "managed-tool", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("resolveManagedBinary: %v", err)
+	}
+	want := wantResolvedPath(t, bare)
+	if got != want {
+		t.Fatalf("resolveManagedBinary = %q, want bare-name fallback %q", got, want)
+	}
+}
+
+// TestResolveManagedBinary_PropagatesMissingError confirms a real error is
+// returned (not an empty path) when neither the platform-suffixed nor the
+// bare candidate resolves.
+func TestResolveManagedBinary_PropagatesMissingError(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	if _, err := resolveManagedBinary(selfPath, "managed-tool", "linux", "amd64"); err == nil {
+		t.Fatal("expected error when no candidate resolves")
+	}
+}
+
 // TestResolveSibling_FindsHostSibling exercises resolveSibling end-to-end
 // on the current host: a bare-named sibling placed next to the running
 // binary resolves to its absolute path. This locks the non-Windows

@@ -146,15 +146,55 @@ func ResolveBinary(names []string) (string, error) {
 	return "", fmt.Errorf("could not find any of %v on PATH", names)
 }
 
-// exeSuffix is the platform's executable file extension. On Windows the
-// aileron and aileron-mcp binaries are written as `aileron.exe` /
-// `aileron-mcp.exe`, so a bare sibling name like "aileron-mcp" never
-// resolves on disk; everywhere else it is empty.
-func exeSuffix() string {
-	if runtime.GOOS == "windows" {
+// goosExeSuffix is the executable file extension for the given target GOOS.
+// On Windows the aileron and aileron-mcp binaries are written as
+// `aileron.exe` / `aileron-mcp.exe`, so a bare sibling name like
+// "aileron-mcp" never resolves on disk; everywhere else it is empty.
+//
+// The GOOS is a parameter (not read from runtime.GOOS) so the Windows
+// extension can be applied to a cross-target candidate — e.g. a
+// `windows/amd64` managed-binary name on a macOS build host — and so the
+// rule is unit-testable for every target from any host.
+func goosExeSuffix(goos string) string {
+	if goos == "windows" {
 		return ".exe"
 	}
 	return ""
+}
+
+// exeSuffix is the host platform's executable file extension. It is the
+// host-bound convenience wrapper over goosExeSuffix; callers that probe
+// for a sibling of the running binary (same OS as the host) use it.
+func exeSuffix() string {
+	return goosExeSuffix(runtime.GOOS)
+}
+
+// archSuffixedCandidates returns the on-disk filenames to probe for a
+// managed binary that is published per platform as `<name>-<goos>-<goarch>`
+// (with the target-GOOS executable suffix), in priority order.
+//
+// The published, platform-suffixed filename is tried first because that is
+// the real name a cross-platform build produces (e.g.
+// `aileron-mcp-linux-arm64`, `aileron-mcp-windows-amd64.exe`). The bare
+// `name` is still probed last so a manually placed, extension-less binary
+// resolves too — the same fallback contract siblingCandidates provides.
+//
+// goos and goarch are parameters (not read from runtime.GOOS/GOARCH) so
+// the candidate names for all M target platforms are computed — and
+// unit-tested — from a single host: CI runs on one OS, but the windows
+// `.exe` suffix and the darwin/linux ordering must all be verifiable. This
+// mirrors siblingCandidates' design exactly, where the platform axis is
+// injected rather than read from the runtime.
+//
+// If name already carries the target suffix it is not double-suffixed
+// (mirrors siblingCandidates' already-suffixed guard).
+func archSuffixedCandidates(name, goos, goarch string) []string {
+	suffixed := name + "-" + goos + "-" + goarch
+	exe := goosExeSuffix(goos)
+	if exe != "" && !strings.HasSuffix(suffixed, exe) {
+		suffixed += exe
+	}
+	return []string{suffixed, name}
 }
 
 // siblingCandidates returns the on-disk filenames to probe for a sibling
@@ -318,6 +358,40 @@ func resolveMCPBinary(selfPath string) (string, error) {
 	)
 }
 
+// resolveManagedBinary locates a managed binary published per platform as
+// `<name>-<goos>-<goarch>` next to the running aileron binary, for the
+// given target platform.
+//
+// It asks archSuffixedCandidates for the ordered on-disk filenames to
+// probe (the `<name>-<goos>-<goarch>` form first, then the bare name) and
+// hands each to resolveSibling, which does the actual stat / PATH search
+// and unwraps Scoop `.shim` sidecars and `current` junctions. Because the
+// probe flows through resolveSibling unchanged, the Windows `.exe`,
+// reparse-point, and Scoop-shim handling is preserved for free; this
+// helper only decides *which* candidate names to look for, in what order.
+//
+// goos/goarch are the *target* platform, passed in so a managed binary for
+// any of the M supported platforms can be located from any host (the
+// platform axis is a parameter, mirroring archSuffixedCandidates and
+// siblingCandidates — independent testability from a single CI host is the
+// reason). The first candidate that resolves wins; the last error is
+// returned when none do.
+//
+// This is the shared selection seam reused to locate the managed Node
+// binary (sub-issues 1/4) per platform; no binary-specific logic lives
+// here.
+func resolveManagedBinary(selfPath, name, goos, goarch string) (string, error) {
+	var lastErr error
+	for _, candidate := range archSuffixedCandidates(name, goos, goarch) {
+		bin, err := resolveSibling(selfPath, candidate)
+		if err == nil {
+			return bin, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
 // resolveSandboxMCPBinary locates an aileron-mcp binary suitable for
 // bind-mounting into a Linux sandbox container.
 //
@@ -333,14 +407,22 @@ func resolveMCPBinary(selfPath string) (string, error) {
 // resolver prefers that sibling when it exists and falls back to the
 // host-arch binary otherwise.
 //
+// The platform-suffixed candidate construction now flows through the
+// shared, M-way archSuffixedCandidates / resolveManagedBinary unit (the
+// target is always linux/<host-goarch> for the sandbox case), rather than
+// a hardcoded `aileron-mcp-linux-<arch>` string; the aileron-mcp contract
+// is unchanged. When neither the Linux sibling nor a bare-name candidate
+// resolves through resolveManagedBinary, the lookup falls back to
+// resolveMCPBinary so the plain host binary (the Linux-host case) still
+// resolves and the "not found" remediation hint is preserved.
+//
 // Container platform != host GOARCH (e.g. user passes
 // `DOCKER_DEFAULT_PLATFORM=linux/amd64` on an arm64 host) remains a hard
 // error at validate time; cross-architecture launch is out of scope for
 // the local dev build path and is handled by the published per-agent
 // images on the v4 roadmap.
 func resolveSandboxMCPBinary(selfPath string) (string, error) {
-	suffixed := "aileron-mcp-linux-" + runtime.GOARCH
-	if bin, err := resolveSibling(selfPath, suffixed); err == nil {
+	if bin, err := resolveManagedBinary(selfPath, "aileron-mcp", "linux", runtime.GOARCH); err == nil {
 		return bin, nil
 	}
 	return resolveMCPBinary(selfPath)
