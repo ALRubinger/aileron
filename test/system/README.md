@@ -148,10 +148,12 @@ audit round-trip are identical to codex and reuse the shared probes unchanged.
 Prerequisites (the scenario fail-fasts with the exact remediation if missing):
 
 1. A reachable Docker daemon (`docker info`).
-2. A host-side Claude login. Claude's credentials are vault-captured on first
-   launch (ADR-0025), not a plain creds file you write directly: run
-   `aileron launch claude` once and complete the in-flow login (or
-   `claude /login`) so `~/.claude/.credentials.json` is populated.
+2. A Claude login resolvable by the launcher's AuthSpec. Claude's credentials
+   are vault-backed (`agents/claude/oauth`, ADR-0025), so the precondition
+   passes when EITHER the host file `~/.claude/.credentials.json` exists OR the
+   vault holds the entry (`aileron vault list --scope agent` prints
+   `agents/claude/oauth`). Run `aileron launch claude` once and complete the
+   in-flow login (or `claude /login`) to populate it.
 3. A running Aileron daemon if you want the R10 audit assertion to read real
    records (`AILERON_STATE_DIR` defaults to `~/.aileron`).
 
