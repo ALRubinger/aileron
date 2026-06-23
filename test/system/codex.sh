@@ -70,19 +70,27 @@ EXEC_PROMPT="Do exactly two things and then stop. \
 log "codex scenario: runid=${RUNID} workspace=${WORKSPACE} image=${EXPECTED_IMAGE}"
 
 # --- launch (R7a arg-forwarding asserted: post-\`--\` tokens reach codex) -----
-# `-- exec "<prompt>"` forwards verbatim through LaunchConfig.Args
-# (cmd/aileron/main.go applyTrailingLaunchFlags) ->
+# `-- exec --skip-git-repo-check "<prompt>"` forwards verbatim through
+# LaunchConfig.Args (cmd/aileron/main.go applyTrailingLaunchFlags) ->
 # launcher.go `command = append(command, config.Args...)` ->
 # runtime.go image then opts.Command. We run the launch in the background so
 # the live-container probes can inspect the container while codex is still
 # resident, then reap the exit code.
+#
+# `--skip-git-repo-check` is required: codex exec refuses to run in a directory
+# that is not a trusted/git workspace ("Not inside a trusted directory and
+# --skip-git-repo-check was not specified"), and the mounted workspace
+# (/home/agent/workspace) is a bare temp dir, not a git repo. Without the flag
+# codex exits immediately, the container stops, and the R8.1 .State.Running
+# probe fails. stdin is redirected from /dev/null so codex exec never blocks
+# waiting for piped instructions (the prompt is supplied as an arg).
 LAUNCH_LOG="$WORKSPACE/.launch.log"
 (
 	cd "$WORKSPACE"
 	# --sandbox=docker is the codex default (cmd/aileron/main.go), so we do
 	# not pass an explicit sandbox flag — the run also asserts that default.
-	"$AILERON_BIN" launch "$AGENT" -- exec "$EXEC_PROMPT"
-) >"$LAUNCH_LOG" 2>&1 &
+	"$AILERON_BIN" launch "$AGENT" -- exec --skip-git-repo-check "$EXEC_PROMPT"
+) </dev/null >"$LAUNCH_LOG" 2>&1 &
 LAUNCH_PID=$!
 
 # Under `set -e` a failing probe aborts the script before the explicit
@@ -109,7 +117,11 @@ while [ "$i" -lt 120 ]; do
 		log "launch exited before container probe window; continuing to post-run checks"
 		break
 	fi
-	if container="$(discover_container "$AILERON_SBX_PREFIX")"; then
+	# A zero-match is expected while the container is still coming up (image
+	# resolve + create takes a few seconds), so suppress discover_container's
+	# per-poll "no running container" diagnostic here — a genuine timeout is
+	# reported by the explicit `fail` after the loop.
+	if container="$(discover_container "$AILERON_SBX_PREFIX" 2>/dev/null)"; then
 		break
 	fi
 	container=''

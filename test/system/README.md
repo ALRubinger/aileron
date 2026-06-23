@@ -21,6 +21,8 @@ test/system/
     probes.sh          agent-agnostic R8 wiring-invariant probes (sourced)
     assert_test.sh     contract tests for assert.sh   (CI-safe, no Docker)
     probes_test.sh     contract tests for probes.sh   (CI-safe, stubbed docker)
+    taskenv_test.sh    regression: launch targets export AILERON_BIN et al.
+                       at task scope, where go-task honors `env:` (CI-safe)
 ```
 
 ## Static gate (what runs unattended vs. by hand)
