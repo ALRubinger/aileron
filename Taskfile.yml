@@ -450,10 +450,12 @@ tasks:
     internal: true
     desc: >-
       Fail-fast preconditions for an agent system-test scenario: Docker must be
-      reachable AND the agent's host-side auth file (the launcher's AuthSpec
-      mounts these) must exist. Pass AGENT=codex|claude. On a missing auth
-      file, exits non-zero naming the file and the command to create it — never
-      a silent skip.
+      reachable AND the agent's credential must be resolvable. Pass
+      AGENT=codex|claude. For codex the host-side auth file the launcher's
+      AuthSpec mounts must exist. For claude the credential is vault-backed
+      (agents/claude/oauth), so the gate passes when EITHER the host file
+      exists OR the vault/daemon holds the entry. On a missing credential,
+      exits non-zero naming the remediation — never a silent skip.
     vars:
       AGENT: '{{.AGENT}}'
     cmds:
@@ -465,20 +467,32 @@ tasks:
           codex)
             authfile="$HOME/.codex/auth.json"
             logincmd="codex login"
+            if [ ! -f "$authfile" ]; then
+              echo "Missing codex auth file: $authfile. Authenticate first with: $logincmd" >&2
+              exit 1
+            fi
             ;;
           claude)
+            # Claude's credential is vault-backed (agents/claude/oauth): the
+            # launcher's AuthSpec renders it into the sandbox at run time, so
+            # the host file may be absent on a machine where the credential
+            # lives only in the vault. Accept EITHER source.
             authfile="$HOME/.claude/.credentials.json"
             logincmd="claude /login"
+            if [ -f "$authfile" ]; then
+              :
+            elif aileron vault list --scope agent 2>/dev/null | grep -qx "agents/claude/oauth"; then
+              :
+            else
+              echo "Missing claude credential: neither host file $authfile nor a vault entry (agents/claude/oauth) is present. Authenticate first with: $logincmd" >&2
+              exit 1
+            fi
             ;;
           *)
             echo "Unknown AGENT '{{.AGENT}}' (expected codex or claude)" >&2
             exit 1
             ;;
         esac
-        if [ ! -f "$authfile" ]; then
-          echo "Missing {{.AGENT}} auth file: $authfile. Authenticate first with: $logincmd" >&2
-          exit 1
-        fi
 
   _test:system:cleanup:
     internal: true
