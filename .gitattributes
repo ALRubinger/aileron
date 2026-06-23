@@ -3,3 +3,8 @@
 # LF so a Windows checkout does not rewrite it with CRLF and fail that test (and
 # so the embedded bytes are identical across platforms).
 internal/sandbox/composition/agent-images.lock.json text eol=lf
+
+# The managed-toolchain (Node) pin lockfile is byte-compared against its canonical
+# LF rendering by TestCommittedToolsLockIsCanonical. Force LF for the same reason:
+# a Windows checkout must not rewrite it with CRLF and fail that test.
+internal/sandbox/container/tools.lock.json text eol=lf

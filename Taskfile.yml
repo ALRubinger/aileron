@@ -65,6 +65,22 @@ tasks:
     cmds:
       - go run ./tools/agentdigests -tag {{.TAG}} -out sandbox/composition/agent-images.lock.json
 
+  generate:tools-lock:
+    desc: >-
+      Regenerate the managed-toolchain lockfile that pins Node.js for reproducible
+      sandbox devcontainer builds (#1525). Resolves the per-platform sha256 of
+      each supported Node distribution archive from Node's published
+      SHASUMS256.txt and writes internal/sandbox/container/tools.lock.json so a
+      build verifies a fetched archive against the pin and rejects a tampered or
+      drifted distribution. Run when bumping the pinned Node version. Pass the
+      version with VERSION=<x.y.z> (default: the version already in the lock).
+      Requires network read access to nodejs.org.
+    dir: internal
+    vars:
+      VERSION: '{{.VERSION | default "22.14.0"}}'
+    cmds:
+      - go run ./tools/toolslock -version {{.VERSION}} -out sandbox/container/tools.lock.json
+
   build:
     desc: Build everything (containers, server, MCP, CLI, webapp, docs)
     cmds:
@@ -546,6 +562,7 @@ tasks:
     cmds:
       - sh "{{.ROOT_DIR}}/test/system/lib/assert_test.sh"
       - sh "{{.ROOT_DIR}}/test/system/lib/probes_test.sh"
+      - sh "{{.ROOT_DIR}}/test/system/lib/taskenv_test.sh"
 
   test:system:smoke:
     desc: >-
@@ -618,6 +635,16 @@ tasks:
         sh: echo "codex-$(date +%s)-$$"
       WORKSPACE:
         sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-codex
+    # Task-scoped env: go-task only honors `env:` at the task level, not on an
+    # individual `cmds:` entry (a command-level `env:` is silently ignored), so
+    # the scenario script must receive AILERON_BIN et al. from here. Keeping it
+    # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
+    env:
+      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+      AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
+      WORKSPACE: '{{.WORKSPACE}}'
+      AILERON_STATE_DIR:
+        sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
     cmds:
       # Register cleanup FIRST so a failed precondition (Docker down or codex
       # auth absent) still removes the mktemp WORKSPACE created by the dynamic
@@ -627,12 +654,6 @@ tasks:
         vars:
           AGENT: codex
       - cmd: sh "{{.ROOT_DIR}}/test/system/codex.sh"
-        env:
-          AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
-          AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
-          WORKSPACE: '{{.WORKSPACE}}'
-          AILERON_STATE_DIR:
-            sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
 
   test:system:launch:claude:
     desc: >-
@@ -654,6 +675,16 @@ tasks:
         sh: echo "claude-$(date +%s)-$$"
       WORKSPACE:
         sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-claude
+    # Task-scoped env: go-task only honors `env:` at the task level, not on an
+    # individual `cmds:` entry (a command-level `env:` is silently ignored), so
+    # the scenario script must receive AILERON_BIN et al. from here. Keeping it
+    # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
+    env:
+      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+      AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
+      WORKSPACE: '{{.WORKSPACE}}'
+      AILERON_STATE_DIR:
+        sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
     cmds:
       # Register cleanup FIRST so a failed precondition (Docker down or claude
       # auth absent) still removes the mktemp WORKSPACE created by the dynamic
@@ -663,12 +694,6 @@ tasks:
         vars:
           AGENT: claude
       - cmd: sh "{{.ROOT_DIR}}/test/system/claude.sh"
-        env:
-          AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
-          AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
-          WORKSPACE: '{{.WORKSPACE}}'
-          AILERON_STATE_DIR:
-            sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
 
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services
