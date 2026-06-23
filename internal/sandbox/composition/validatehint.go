@@ -15,12 +15,16 @@ const agentNotFoundMarker = "agent command not found in sandbox image:"
 // workspaceNotWritableMarker is the substring the in-container validation script
 // emits when the writability probe fails (see runtime.go validationScript, the
 // exit-3 branch). The bare runtime failure surfaces as an opaque "exit status
-// 3"; EnrichValidateError matches this marker to explain the real cause and the
-// remedy. There are two distinct causes: a DAC uid mismatch (the non-root agent
-// user's uid differs from the host workspace owner, so "other" carries no write
-// bit on the 0755 directory) and, on SELinux-enforcing hosts, a MAC denial. The
-// enrichment picks the right diagnosis from whether the `:z` SELinux relabel was
-// actually applied (issue #1461).
+// 3"; EnrichValidateError matches this marker to lead with the one actionable
+// remedy (the launch working directory is not writable; run from a directory you
+// own) and then append a platform-appropriate deeper diagnostic. The diagnostic
+// has distinct causes by platform: a DAC uid mismatch on Linux + Docker (the
+// non-root agent user's uid differs from the host workspace owner, so "other"
+// carries no write bit on the 0755 directory), a MAC denial on SELinux-enforcing
+// hosts, and the C:\WINDOWS\system32 default-CWD trap on Windows (where Docker
+// Desktop translates uids and the uid-remap machinery does not apply). The
+// enrichment picks the diagnosis from hostOS and whether the `:z` SELinux
+// relabel was actually applied (issues #1461 and #1495).
 const workspaceNotWritableMarker = "sandbox workspace is not writable at"
 
 // EnrichValidateError augments a sandbox-image validate failure with tier, CWD,
@@ -34,7 +38,7 @@ const workspaceNotWritableMarker = "sandbox workspace is not writable at"
 // absent and what the operator can do. When the failure is not that case
 // (different tier, no published image, or a different validate error),
 // EnrichValidateError returns err unchanged.
-func EnrichValidateError(err error, tier Tier, agent, version, workDir string, selinuxRelabelActive bool) error {
+func EnrichValidateError(err error, tier Tier, agent, version, workDir, hostOS string, selinuxRelabelActive bool) error {
 	if err == nil {
 		return nil
 	}
@@ -43,7 +47,7 @@ func EnrichValidateError(err error, tier Tier, agent, version, workDir string, s
 	// denied access regardless of which image was selected. Match and enrich
 	// before the devcontainer-specific branch below.
 	if strings.Contains(err.Error(), workspaceNotWritableMarker) {
-		return enrichWorkspaceNotWritable(err, workDir, selinuxRelabelActive)
+		return enrichWorkspaceNotWritable(err, workDir, hostOS, selinuxRelabelActive)
 	}
 	if tier != TierDevcontainer {
 		return err
@@ -74,50 +78,78 @@ func EnrichValidateError(err error, tier Tier, agent, version, workDir string, s
 }
 
 // enrichWorkspaceNotWritable augments the opaque workspace-writability failure
-// ("exit status 3") with its real root cause and remediation. There are two
-// distinct causes, and the selinuxRelabelActive flag (from
-// container.WorkspaceRelabelActive: Linux + Docker + SELinux enforcing)
-// disambiguates them:
+// ("exit status 3") with its real root cause and remediation. Every variant
+// LEADS with the one actionable sentence that matters to the user — the launch
+// working directory is not writable, so run from a directory you own (e.g.
+// somewhere under your home) — and only then appends a platform-appropriate
+// deeper diagnostic. The headline is the same on every OS; the diagnostic is
+// chosen from hostOS and the selinuxRelabelActive flag (from
+// container.WorkspaceRelabelActive: Linux + Docker + SELinux enforcing):
 //
-//   - selinuxRelabelActive: Aileron applied the `:z` SELinux relabel to the
-//     mount, so a SELinux MAC denial is the plausible remaining cause. Keep the
-//     SELinux guidance and the manual `chcon` fallback.
-//   - !selinuxRelabelActive: the daemon has no SELinux support, or SELinux is
-//     not enforcing, so the `:z` relabel was never emitted. The cause is a DAC
-//     uid mismatch — the container's non-root agent user has a different numeric
-//     uid than the host owner of the workspace, so "other" carries no write bit
-//     on the 0755 directory. Report that mismatch and the remap remediation, and
-//     do NOT claim Aileron applied any relabel (it did not).
+//   - selinuxRelabelActive (Linux + Docker + SELinux enforcing): Aileron applied
+//     the `:z` SELinux relabel to the mount, so a SELinux MAC denial is the
+//     plausible remaining cause. Append the SELinux note and the manual `chcon`
+//     fallback.
+//   - hostOS == "linux" (Docker, no SELinux relabel): the cause is a DAC uid
+//     mismatch — the container's non-root agent user has a different numeric uid
+//     than the host owner of the workspace, so "other" carries no write bit on
+//     the 0755 directory. Append the uid-remap diagnostic, but do NOT claim
+//     Aileron applied any relabel (it did not).
+//   - Windows: Docker Desktop translates uids at the file-sharing boundary, so
+//     the Linux uid-remap machinery does not apply. The common cause is the
+//     PowerShell default CWD of C:\WINDOWS\system32, which a normal user cannot
+//     write. Append the system32 trap and the `cd` to home remedy.
+//   - any other host (macOS, etc.): the file-sharing boundary likewise hides the
+//     uid mismatch, so the actionable headline stands alone with no Linux-only
+//     uid-remap internals.
 //
-// Aileron's startup remap (aileron-remap-agent-uid) aligns the agent uid to the
-// workspace owner on Linux+Docker, so a persistent DAC failure points at an
-// image whose entrypoint does not run the remap (e.g. a BYO image missing the
-// helper) or a workspace the host operator cannot themselves write.
-func enrichWorkspaceNotWritable(err error, workDir string, selinuxRelabelActive bool) error {
+// The Linux uid-remap detail (aileron-remap-agent-uid aligns the agent uid to
+// the workspace owner on Linux + Docker) stays available as the deeper Linux
+// diagnostic — a persistent DAC failure points at an image whose entrypoint does
+// not run the remap (e.g. a BYO image missing the helper) or a workspace the
+// host operator cannot themselves write — but it is no longer the headline, and
+// it is never shown on platforms where it does not apply.
+func enrichWorkspaceNotWritable(err error, workDir, hostOS string, selinuxRelabelActive bool) error {
 	wd := workDir
 	if wd == "" {
 		wd = "."
 	}
-	if selinuxRelabelActive {
-		return fmt.Errorf("%w\n"+
-			"the sandbox container could not write to the mounted workspace %s. "+
-			"This host runs SELinux in enforcing mode, so the host directory's "+
-			"SELinux label can deny the container's non-root agent user access to "+
-			"the bind mount. Aileron applied a shared SELinux relabel (the `:z` "+
-			"mount option) automatically; if the failure persists, relabel the "+
-			"directory manually with `chcon -Rt svirt_sandbox_file_t %s` (or run "+
-			"the host with SELinux permissive).",
-			err, wd, wd)
+	// Headline: the same actionable problem + simplest fix on every platform.
+	headline := fmt.Sprintf("the launch working directory %s is not writable by "+
+		"you, so the sandbox container cannot write to the mounted workspace. Run "+
+		"aileron from a directory you own (for example a project directory under "+
+		"your home directory) and try again.", wd)
+	switch {
+	case selinuxRelabelActive:
+		return fmt.Errorf("%w\n%s\n"+
+			"Deeper diagnostic: this host runs SELinux in enforcing mode, so the "+
+			"host directory's SELinux label can deny the container's non-root agent "+
+			"user access to the bind mount. Aileron applied a shared SELinux relabel "+
+			"(the `:z` mount option) automatically; if the failure persists on a "+
+			"directory you do own, relabel it manually with "+
+			"`chcon -Rt svirt_sandbox_file_t %s` (or run the host with SELinux "+
+			"permissive).",
+			err, headline, wd)
+	case hostOS == "linux":
+		return fmt.Errorf("%w\n%s\n"+
+			"Deeper diagnostic (Linux + Docker): the container's non-root agent user "+
+			"does not own the workspace bind mount. Its in-container uid differs "+
+			"from the host user that owns %s, so the directory's permissions deny "+
+			"the agent write access. Aileron remaps the agent uid to the workspace "+
+			"owner at container start (aileron-remap-agent-uid); if the failure "+
+			"persists on a directory you do own, the image's entrypoint may not run "+
+			"that remap (BYO images must ship the helper on PATH and chain it as "+
+			"root before dropping to the agent user).",
+			err, headline, wd)
+	case hostOS == "windows":
+		return fmt.Errorf("%w\n%s\n"+
+			"On Windows, PowerShell opens by default in C:\\WINDOWS\\system32, which "+
+			"a normal user cannot write. If that is your current directory, `cd` to "+
+			"your user home (for example `cd $HOME`) or a project directory under it "+
+			"and re-run. (Docker Desktop translates uids at the file-sharing "+
+			"boundary, so the Linux uid-remap machinery does not apply here.)",
+			err, headline)
+	default:
+		return fmt.Errorf("%w\n%s", err, headline)
 	}
-	return fmt.Errorf("%w\n"+
-		"the sandbox container could not write to the mounted workspace %s. "+
-		"The container's non-root agent user does not own the workspace bind "+
-		"mount: its in-container uid differs from the host user that owns %s, so "+
-		"the directory's permissions deny the agent write access. Aileron remaps "+
-		"the agent uid to the workspace owner at container start "+
-		"(aileron-remap-agent-uid) on Linux+Docker; if the failure persists, the "+
-		"image's entrypoint may not run that remap (BYO images must ship the "+
-		"helper on PATH and chain it as root before dropping to the agent user). "+
-		"Confirm the host directory is writable by you, the launching user.",
-		err, wd, wd)
 }
