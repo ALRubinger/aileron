@@ -1152,6 +1152,19 @@ func TestPrepareAuthSpec_ChownHookInvokedWithHostRootAfterFilesExist(t *testing.
 	}
 	defer prep.Cleanup()
 
+	// The chown is deferred (issue #1488): prep wraps the hook in
+	// prep.ChownFn and the launcher invokes it AFTER placing the MCP
+	// config, not at prep time. So the hook must not have run yet.
+	if gotDir != "" {
+		t.Fatal("chown hook ran during prepareAuthSpec; it must be deferred to prep.ChownFn so the launcher can place the MCP config first")
+	}
+	if prep.ChownFn == nil {
+		t.Fatal("prep.ChownFn must be non-nil when a chown hook is supplied")
+	}
+	if err := prep.ChownFn(); err != nil {
+		t.Fatalf("prep.ChownFn: %v", err)
+	}
+
 	if gotDir == "" {
 		t.Fatal("chown hook was never invoked")
 	}
@@ -1213,6 +1226,12 @@ func TestPrepareAuthSpec_ChownHookErrorIsNonFatal(t *testing.T) {
 
 	if len(prep.Mounts) != 1 {
 		t.Fatalf("Mounts = %d, want 1 (prep proceeds despite hook error)", len(prep.Mounts))
+	}
+	// The chown is deferred into prep.ChownFn; invoking it surfaces the
+	// non-fatal warning. A hook error must not propagate out of ChownFn
+	// (the launcher proceeds with the launch).
+	if err := prep.ChownFn(); err != nil {
+		t.Fatalf("ChownFn must not propagate a hook error, got %v", err)
 	}
 	// The permanent diagnostic must name the UID mismatch and the
 	// chown-to-agent-UID remedy so a regression is attributable.

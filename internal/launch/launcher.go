@@ -792,7 +792,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	var result LaunchResult
 	var runErr error
 	if sandboxEnabled {
-		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, containerName, captureOnce, sessionLog, proxyBootstrap.Mounts...)
+		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, containerName, captureOnce, authPrep.ChownFn, sessionLog, proxyBootstrap.Mounts...)
 	} else {
 		result, runErr = launchHost(ctx, config, daemonURL, sessionID, daemonToken, agentEnv)
 	}
@@ -1020,7 +1020,16 @@ func enclosingDirMount(mounts []sandboxcontainer.Volume, target string) *sandbox
 	return nil
 }
 
-func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, containerName string, captureOnce func(), sessionLog *slog.Logger, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
+// chownAuthTree, when non-nil, recursively chowns the AuthSpec transient
+// tree to the resolved in-container agent UID. The launcher invokes it
+// AFTER collapseNestedMCPMounts has placed the agent's MCP config into
+// that tree, so the single delegated chown re-owns config.toml alongside
+// auth.json. Running the chown before the placement re-owned the tree to
+// the foreign agent UID with mode 0700 first, which made the unprivileged
+// host-side MkdirAll/WriteFile in the collapse fail with EPERM on rootful
+// Docker Linux (issue #1488). A nil chownAuthTree is a safe no-op (host
+// launch, non-Linux host, or an agent with no AuthSpec).
+func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, containerName string, captureOnce func(), chownAuthTree func() error, sessionLog *slog.Logger, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
 	commandName := firstAgentBinary(config.Agent)
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
@@ -1077,6 +1086,20 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return LaunchResult{}, fmt.Errorf("placing MCP config for %s: %w", config.Agent.Name(), err)
 	}
 	mounts = collapsed
+
+	// Chown the AuthSpec transient tree to the in-container agent UID now
+	// that the MCP config has been placed into it (issue #1488). The chown
+	// MUST follow the collapse above: the collapse does an unprivileged
+	// host-side MkdirAll+WriteFile of Codex's config.toml into the AuthSpec
+	// dir mount's host source, and chowning the tree to the foreign agent
+	// UID with mode 0700 first would make that write fail with EPERM on
+	// rootful Docker Linux. The single delegated chown here re-owns
+	// config.toml alongside auth.json. A nil hook is a safe no-op.
+	if chownAuthTree != nil {
+		if err := chownAuthTree(); err != nil {
+			return LaunchResult{}, fmt.Errorf("chowning auth tree for %s: %w", config.Agent.Name(), err)
+		}
+	}
 
 	command := append([]string{commandName}, config.Agent.Args(ModeSandbox)...)
 	command = append(command, extraArgs...)

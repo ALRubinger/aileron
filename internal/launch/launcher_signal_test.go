@@ -115,7 +115,7 @@ func runSalvageLaunchSandbox(t *testing.T, captureOnce func()) (LaunchResult, er
 	// A real (discarding) logger exercises the sessionLog != nil
 	// branches the production launcher always takes.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return launchSandbox(context.Background(), plan, cfg, map[string]string{}, "aileron-sbx-test", captureOnce, logger)
+	return launchSandbox(context.Background(), plan, cfg, map[string]string{}, "aileron-sbx-test", captureOnce, nil, logger)
 }
 
 // TestLaunchSandboxSignalSalvagesCapture is the core regression: a
