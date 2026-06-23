@@ -455,7 +455,7 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 		})
 	}
 	if err := validateSandboxImageForLaunch(ctx, plan, config, agentEnv, mounts, commandName); err != nil {
-		err = sandboxcomposition.EnrichValidateError(err, plan.Tier, config.Agent.Name(), version.Version, config.Dir, sandboxcontainer.WorkspaceRelabelActive(plan.Runtime))
+		err = sandboxcomposition.EnrichValidateError(err, plan.Tier, config.Agent.Name(), version.Version, config.Dir, runtime.GOOS, sandboxcontainer.WorkspaceRelabelActive(plan.Runtime))
 		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
 	}
 	return nil

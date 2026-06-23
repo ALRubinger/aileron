@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -317,7 +318,7 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	// aileron-mcp mounted under sandbox check, so requiring it would fail.
 	bakedVersion := sandboxCheckBakedVersionFn(context.Background(), resolvedRuntime, result.Image)
 	if err := sandboxCheckValidateFn(context.Background(), resolvedRuntime, cwd, result.Image, command, bakedVersion != ""); err != nil {
-		err = sandboxcomposition.EnrichValidateError(err, result.Tier, command, version.Version, cwd, sandboxcontainer.WorkspaceRelabelActive(resolvedRuntime))
+		err = sandboxcomposition.EnrichValidateError(err, result.Tier, command, version.Version, cwd, runtime.GOOS, sandboxcontainer.WorkspaceRelabelActive(resolvedRuntime))
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
