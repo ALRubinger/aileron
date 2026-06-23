@@ -105,7 +105,10 @@ LAUNCH_LOG="$WORKSPACE/.launch.log"
 	# --sandbox=docker is the claude default (cmd/aileron/main.go), so we do
 	# not pass an explicit sandbox flag — the run also asserts that default.
 	"$AILERON_BIN" launch "$AGENT" -- -p "$EXEC_PROMPT"
-) >"$LAUNCH_LOG" 2>&1 &
+# stdin from /dev/null (matching codex.sh): the launch is headless, claude -p
+# takes its prompt as an arg, and backgrounding already yields /dev/null stdin
+# by POSIX — making it explicit keeps the two scenarios symmetric.
+) </dev/null >"$LAUNCH_LOG" 2>&1 &
 LAUNCH_PID=$!
 
 # Under `set -e` a failing probe aborts the script before the explicit
@@ -132,7 +135,11 @@ while [ "$i" -lt 120 ]; do
 		log "launch exited before container probe window; continuing to post-run checks"
 		break
 	fi
-	if container="$(discover_container "$AILERON_SBX_PREFIX")"; then
+	# A zero-match is expected while the container is still coming up (image
+	# resolve + create takes a few seconds), so suppress discover_container's
+	# per-poll "no running container" diagnostic here — a genuine timeout is
+	# reported by the explicit `fail` after the loop.
+	if container="$(discover_container "$AILERON_SBX_PREFIX" 2>/dev/null)"; then
 		break
 	fi
 	container=''
