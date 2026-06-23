@@ -503,12 +503,26 @@ tasks:
   test:system:
     desc: >-
       Run the `aileron launch` system-test scenarios (run-by-hand, not wired
-      into CI — v1). Today runs the harness smoke self-test; the agent
-      scenarios test:system:launch:codex / :claude (added in #1476/#1477)
-      become deps here. Requires a reachable Docker daemon and, per scenario,
-      host-side agent auth.
+      into CI — v1). Today runs the harness smoke self-test plus the shared
+      scenario-library contract tests; the agent scenarios
+      test:system:launch:codex / :claude (added in #1476/#1477) become deps
+      here. Requires a reachable Docker daemon and, per scenario, host-side
+      agent auth.
     cmds:
+      - task: test:system:lib
       - task: test:system:smoke
+
+  test:system:lib:
+    desc: >-
+      Contract tests for the shared system-test scenario library
+      (test/system/lib/assert.sh + probes.sh) used by the codex (#1476) and
+      claude (#1477) scenarios. Pure POSIX shell with a stubbed `docker`, so
+      it needs no Docker daemon and no `aileron launch` — safe to run in CI
+      and unattended. Validates the assert helpers and discover_container's
+      match-count arbitration against their contracts.
+    cmds:
+      - sh "{{.ROOT_DIR}}/test/system/lib/assert_test.sh"
+      - sh "{{.ROOT_DIR}}/test/system/lib/probes_test.sh"
 
   test:system:smoke:
     desc: >-
@@ -564,11 +578,16 @@ tasks:
 
   test:system:launch:codex:
     desc: >-
-      System-test scenario for the codex agent under `aileron launch`. Wires
-      the reusable build seam (build:launch), fail-fast preconditions
-      (_test:system:precond AGENT=codex), and `defer` cleanup. The agent-launch
-      + transcript-assertion body lands in #1476; today it fail-fasts after the
-      seams so `--dry` exercises the wiring without launching.
+      System-test scenario for the codex agent under `aileron launch` (#1476).
+      Wires the reusable build seam (build:launch), fail-fast preconditions
+      (_test:system:precond AGENT=codex), and `defer` cleanup (#1475), then runs
+      test/system/codex.sh: it drives `aileron launch codex -- exec "…"` once
+      (never `docker run` directly), runs the shared R8 wiring-invariant probes
+      against the live container, asserts R7a arg-forwarding, the R9 sentinel,
+      and the R10 audit round-trip. STATIC GATE — a live run needs a real codex
+      login and LLM tokens, so it is run BY HAND on a real host; the headless
+      path validates wiring with `task --dry test:system:launch:codex`, which
+      compiles the target without executing the scenario. See test/system/README.md.
     deps:
       - build:launch
     vars:
@@ -577,13 +596,20 @@ tasks:
       WORKSPACE:
         sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-codex
     cmds:
+      # Register cleanup FIRST so a failed precondition (Docker down or codex
+      # auth absent) still removes the mktemp WORKSPACE created by the dynamic
+      # var above — a `defer` only registers once its line is reached.
+      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
       - task: _test:system:precond
         vars:
           AGENT: codex
-      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
-      - |
-        echo "test:system:launch:codex — reusable seams wired; scenario logic lands in #1476" >&2
-        exit 1
+      - cmd: sh "{{.ROOT_DIR}}/test/system/codex.sh"
+        env:
+          AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+          AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
+          WORKSPACE: '{{.WORKSPACE}}'
+          AILERON_STATE_DIR:
+            sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
 
   test:system:launch:claude:
     desc: >-
