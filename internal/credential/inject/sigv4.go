@@ -60,6 +60,19 @@ func signSigV4(req *http.Request, secretAccessKey []byte, accessKeyID, region, s
 		return fmt.Errorf("inject: sigv4-resign read request body: %w", err)
 	}
 
+	// Drop any inbound Authorization header before deriving the signed-header
+	// set. A SigV4-aware client (e.g. the AWS CLI / botocore) pre-signs the
+	// request and carries its own AWS4-HMAC-SHA256 Authorization. If that
+	// stale header were left in place it would be folded into the canonical
+	// request and the SignedHeaders list, then overwritten by the new
+	// Authorization we set below. The result would be a signature computed
+	// over a header value the upstream never receives, which AWS rejects with
+	// SignatureDoesNotMatch. Removing it keeps the signature consistent with
+	// exactly what the upstream sees. (X-Amz-Date and X-Amz-Content-Sha256
+	// are overwritten by the Set calls below, so their signed value already
+	// matches the final value.)
+	req.Header.Del(hdrAuthorization)
+
 	// Stage the headers that participate in the signature. We set them on
 	// the request first so the canonical/signed header derivation reads
 	// the real header set (which keeps a future X-Amz-Security-Token

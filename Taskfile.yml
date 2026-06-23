@@ -372,6 +372,11 @@ tasks:
     cmds:
       - go test -tags=integration_sandbox -race -run TestSandboxMCP ./internal/app/...
 
+  test:integration:sandbox-proxy-clients:
+    desc: "Run the real-client sandbox-proxy subprocess integration tests: curl (credential injection + proxied audit) and aws (SigV4 re-sign end-to-end + seal). In-process daemon + intercepting CONNECT/TLS proxy + fake HTTPS upstream; the CLIs run as host subprocesses. Fail-fast — requires `curl` AND `aws` on PATH (no self-skip)."
+    cmds:
+      - go test -tags=integration_sandbox -race -run 'TestSandboxProxyCurlIntegration|TestSandboxProxyAWSSigV4Integration' ./internal/app/...
+
   test:integration:auth-github-route:
     desc: "Run the auth github route-drift guard (#1157): stands up the real daemon handler over a MemVault and asserts the CLI's hardcoded vault path still resolves to the spec-registered route. In-process, no external prereqs (no self-skip)."
     dir: cmd/aileron

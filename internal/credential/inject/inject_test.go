@@ -312,6 +312,51 @@ func TestInjectSigV4ResignVectors(t *testing.T) {
 	}
 }
 
+// TestInjectSigV4ResignDropsClientAuthorization is the regression guard
+// for the AWS-CLI end-to-end path (#1505): a SigV4-aware client (botocore)
+// pre-signs the request and carries its own AWS4-HMAC-SHA256 Authorization
+// header. If the signer folded that stale header into the canonical request
+// and the SignedHeaders list, it would then overwrite it with the new
+// Authorization, producing a signature over a header value the upstream
+// never receives. AWS rejects that with SignatureDoesNotMatch.
+//
+// The contract: the signer must drop the inbound Authorization before
+// deriving the signed-header set, so the emitted signature is identical to
+// the one produced for the same request with no inbound Authorization. We
+// assert byte-for-byte equality against the get-vanilla published vector,
+// which proves `authorization` is absent from SignedHeaders and the
+// canonical request.
+func TestInjectSigV4ResignDropsClientAuthorization(t *testing.T) {
+	pinClock(t)
+	req, err := http.NewRequest(http.MethodGet, "https://example.amazonaws.com/", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
+	// A SigV4-aware client's stale, self-computed Authorization header.
+	req.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential=CLIENTKEY/20150830/us-east-1/service/aws4_request, "+
+			"SignedHeaders=host;x-amz-date, Signature=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+	if err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
+		AccessKeyID: vectorAccessKeyID,
+		Region:      vectorRegion,
+		Service:     vectorService,
+	}); err != nil {
+		t.Fatalf("Inject sigv4: %v", err)
+	}
+
+	// Identical to the get-vanilla vector: the stale Authorization did not
+	// enter the canonical request or the SignedHeaders list.
+	wantAuth := authHeader("host;x-amz-content-sha256;x-amz-date",
+		"726c5c4879a6b4ccbbd3b24edbd6b8826d34f87450fbbf4e85546fc7ba9c1642")
+	if got := req.Header.Get("Authorization"); got != wantAuth {
+		t.Errorf("Authorization mismatch (stale client header was not dropped)\n got = %q\nwant = %q", got, wantAuth)
+	}
+	if strings.Contains(req.Header.Get("Authorization"), "CLIENTKEY") {
+		t.Error("emitted Authorization still references the client's stale credential")
+	}
+}
+
 func TestInjectSigV4MissingAccessKeyID(t *testing.T) {
 	req := newReq(t, "https://example.amazonaws.com/")
 	err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{

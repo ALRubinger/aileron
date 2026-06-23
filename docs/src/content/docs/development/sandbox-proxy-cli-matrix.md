@@ -189,7 +189,7 @@ The `gh` sentinel-swap is asserted by the deterministic end-to-end test `TestSen
 
 ## aws (AWS CLI)
 
-`aws` does not read `HTTPS_PROXY` from the standard env by default — it reads `HTTPS_PROXY` only when configured to do so via `~/.aws/config`, or via the deprecated `--no-verify-ssl` workaround. The cleanest path is to set `HTTPS_PROXY` and `AWS_CA_BUNDLE` env vars and rely on `aws`'s standard env support.
+`aws`'s botocore HTTP layer reads `HTTPS_PROXY` from the environment, so the launcher-set proxy applies with no extra config. You only need to point `aws` at Aileron's session CA. Set `AWS_CA_BUNDLE` to the mounted CA so botocore trusts the proxy's intercepted TLS.
 
 ### Install
 
@@ -212,29 +212,33 @@ aws configure set aws_secret_access_key placeholder-aileron-injects-real
 aws configure set region us-east-1
 ```
 
+`aws` is `proxy-sealable` via `sigv4-resign`. The placeholder credentials above let botocore sign the request locally so it leaves the client. At the TLS proxy boundary the daemon strips that local signature and re-signs the request with the real secret access key resolved host-side, using the access key id, region, and service declared in the `sigv4-resign` host binding. The real secret access key never enters the container; it is HMAC key material the daemon holds in the vault. See [ADR-0019](/adr/0019-v4-https-data-plane/).
+
 ### Success case
 
-For an installed AWS connector spec with, say, `GET /` on `sts.us-east-1.amazonaws.com`:
+For a `sigv4-resign` host binding on `s3.amazonaws.com` whose `credential_ref` resolves the secret access key from your vault (`user/aws`):
 
 ```bash
-aws sts get-caller-identity
+aws s3api list-buckets
 ```
 
 Expected:
 
-- 200 with the calling identity.
-- `connector.proxy.proxied` audit, `aileron.proxy.upstream.host: "sts.us-east-1.amazonaws.com"`.
+- 200 with the upstream's response body.
+- A `sandbox.proxy.binding_injected` audit event with `aileron.proxy.binding.host: "s3.amazonaws.com"` and `aileron.proxy.binding.scheme: "sigv4-resign"`. The upstream received a well-formed `Authorization: AWS4-HMAC-SHA256 …` header whose `Credential=<access-key-id>/.../<region>/<service>/aws4_request` scope and signature validate against the daemon's secret. The placeholder secret you configured locally never reaches the upstream, and the audit payload holds no secret bytes.
+
+The verification point is that the secret access key is present in the daemon vault and nowhere in the container. The container's static credentials are placeholders. The signature the upstream accepts was computed host-side with the real secret.
 
 ### Unmatched case
 
 ```bash
-aws ec2 describe-instances  # unmatched if no ec2 operation is in the spec
+aws ec2 describe-instances --region us-east-1  # unmatched if no sigv4-resign binding covers ec2
 ```
 
 Expected:
 
-- `aws` reports the EC2 endpoint's actual response. Without an installed credential the request returns a SigV4 authentication error.
-- `sandbox.proxy.passthrough` audit, `aileron.proxy.upstream.host: "ec2.us-east-1.amazonaws.com"`. The proxy does not inject a credential and does not refuse the request.
+- `aws` reports the EC2 endpoint's actual response. With no `sigv4-resign` binding for that host the proxy injects nothing, so the placeholder credentials botocore signed with reach the upstream and AWS returns a SigV4 authentication error.
+- `sandbox.proxy.passthrough` audit, `aileron.proxy.upstream.host: "ec2.us-east-1.amazonaws.com"`. The proxy does not re-sign the request and does not refuse it. A matched host gets a real signature; an unmatched host passes through unchanged.
 
 ## What "no credential leak" means in practice
 
@@ -248,19 +252,28 @@ This should return nothing. The audit subsystem sanitizes payloads before they t
 
 ## Automated coverage
 
-A `curl`-driven Go integration test lives at `internal/app/sandbox_proxy_curl_integration_test.go` and runs under the `integration_sandbox` build tag:
+Two real-client subprocess integration tests live under the `integration_sandbox` build tag and run together with one command:
 
 ```bash
-task test:integration:sandbox
+task test:integration:sandbox-proxy-clients
 ```
 
-The test stands up a fake HTTPS upstream, runs `curl` as a host subprocess pointed at the in-process proxy with a generated session CA, and asserts:
+The target is fail-fast and requires both `curl` and `aws` on PATH. It does not self-skip.
+
+A `curl`-driven Go integration test lives at `internal/app/sandbox_proxy_curl_integration_test.go`. The test stands up a fake HTTPS upstream, runs `curl` as a host subprocess pointed at the in-process proxy with a generated session CA, and asserts:
 
 1. `curl` honors the `HTTPS_PROXY` env var (proves env-driven configuration works for the canonical case).
 2. The proxy injects the credential at the boundary (the fake upstream sees `Authorization: Bearer <secret>`, never the `curl` invocation).
 3. The container's `curl` invocation does not carry the credential (proves credential isolation).
 4. A `connector.proxy.proxied` audit event is emitted with the matched connector FQN, tool, operation, upstream host (not URL), and `aileron.connector.boundary: https_proxy`.
 
-The `gh` sentinel-swap is covered deterministically by `internal/app/sandbox_forward_proxy_sentinel_swap_test.go`, which drives sentinel-bearing and foreign-token requests through the in-process proxy against a fake `api.github.com` upstream and asserts the swap, the no-swap, the sentinel-never-reaches-upstream isolation, and the no-secret audit shape. It does not require real `gh`, a real token, or real network.
+An `aws`-driven SigV4 integration test lives at `internal/app/sandbox_proxy_aws_sigv4_integration_test.go`. The test stands up a SigV4-validating fake HTTPS upstream, runs `aws s3api list-buckets` as a host subprocess against a `sigv4-resign` host binding with the secret access key in the daemon vault and placeholder static credentials in the subprocess environment, and asserts:
 
-The `aws` recipe above is manual-only for now. The same harness can be extended to cover it when there is a published Aileron connector spec for the upstream.
+1. `aws` honors `HTTPS_PROXY` and `AWS_CA_BUNDLE` (proves env-driven configuration works for the AWS CLI).
+2. The upstream receives a syntactically and cryptographically valid `AWS4-HMAC-SHA256` Authorization header whose signature the upstream recomputes with the same secret the daemon holds and confirms matches (proves a genuine valid SigV4 reached upstream, not merely a 200).
+3. The real secret access key appears in none of the `aws` subprocess environment, the `aws` argv, or any upstream request header, query, or body (proves credential isolation).
+4. A `sandbox.proxy.binding_injected` audit event is emitted with `aileron.proxy.binding.scheme: "sigv4-resign"` and the upstream host, and no secret bytes in the payload.
+
+The upstream is a local SigV4-validating stub, not live AWS. The stub recomputes the canonical request and signature from what it received using the secret the daemon vault holds, which proves the proxy emitted a valid signature without requiring network egress to AWS or a real account.
+
+The `gh` sentinel-swap is covered deterministically by `internal/app/sandbox_forward_proxy_sentinel_swap_test.go`, which drives sentinel-bearing and foreign-token requests through the in-process proxy against a fake `api.github.com` upstream and asserts the swap, the no-swap, the sentinel-never-reaches-upstream isolation, and the no-secret audit shape. It does not require real `gh`, a real token, or real network.
