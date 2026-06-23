@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -142,10 +143,16 @@ func fakeDeviceAuthServer(t *testing.T, st *codexDeviceServerState) *httptest.Se
 				_, _ = io.WriteString(w, st.usercodeRawBody)
 				return
 			}
+			// The live usercode endpoint sends interval as a
+			// STRING-encoded number (Codex's upstream UserCodeResp uses a
+			// custom deserializer). Emit the string form so the harness
+			// exercises the real wire shape; the launcher's codexInterval
+			// type must tolerate it. Regression for the device-code parse
+			// failure that killed host credential capture (#1489).
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"device_auth_id": "dev-1",
 				"user_code":      "WXYZ-1234",
-				"interval":       st.userCodeInterval,
+				"interval":       strconv.Itoa(st.userCodeInterval),
 			})
 
 		case strings.HasSuffix(r.URL.Path, "/deviceauth/token"):
