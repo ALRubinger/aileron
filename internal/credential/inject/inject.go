@@ -23,8 +23,11 @@
 //
 // The five schemes ([SchemeBearer], [SchemeBasic], [SchemeHeaderTemplate],
 // [SchemeQueryParam], [SchemeSigV4Resign]) are the closed set ratified by
-// [ADR-0019]. [SchemeSigV4Resign] is enumerated but deferred; it returns
-// [ErrSchemeNotImplemented].
+// [ADR-0019]. [SchemeSigV4Resign] re-signs the request with an AWS
+// Signature Version 4 signature derived from the secret access key; the
+// signing core is std-library-only (no AWS SDK). [ErrSchemeNotImplemented]
+// is retained as a sentinel for the closed-set contract but is no longer
+// returned by [Inject] for any current scheme.
 //
 // [ADR-0005]: https://docs.withaileron.ai/adr/0005-sandbox-choice
 // [ADR-0011]: https://docs.withaileron.ai/adr/0011-local-credential-vault
@@ -68,16 +71,37 @@ type Params struct {
 	// ParamName is the query-parameter name to set, used only by
 	// [SchemeQueryParam]. Required for that scheme.
 	ParamName string
+
+	// AccessKeyID is the AWS access key ID, used only by
+	// [SchemeSigV4Resign]. It is non-secret (it appears verbatim in the
+	// Credential= field of the Authorization header) and is required for
+	// that scheme. The secret access key arrives via the secret argument
+	// to [Inject], never through this struct.
+	AccessKeyID string
+
+	// Region is the AWS region (e.g. "us-east-1"), used only by
+	// [SchemeSigV4Resign] for the credential scope. Required for that
+	// scheme.
+	Region string
+
+	// Service is the AWS service name (e.g. "s3"), used only by
+	// [SchemeSigV4Resign] for the credential scope. Required for that
+	// scheme.
+	Service string
 }
 
 // Inject binds secret onto req according to scheme. The secret bytes are
 // written only into the request surface the scheme defines (a header
 // value or a query parameter); they never appear in the returned error.
 //
+// For [SchemeSigV4Resign] the required [Params] fields are AccessKeyID,
+// Region, and Service, and the secret argument carries the AWS secret
+// access key; the secret is used only as HMAC key material to derive the
+// signing key and never appears in the resulting Authorization header.
+//
 // Returns [ErrMissingParam] if a scheme's required [Params] field is
-// absent, [ErrSchemeNotImplemented] for [SchemeSigV4Resign], and
-// [ErrUnknownScheme] for any value outside the closed set. On any error
-// the request is left unmutated.
+// absent and [ErrUnknownScheme] for any value outside the closed set. On
+// any error the request is left unmutated.
 func Inject(req *http.Request, scheme Scheme, secret []byte, params Params) error {
 	if req == nil {
 		return fmt.Errorf("%w: request is nil", ErrMissingParam)
@@ -118,7 +142,16 @@ func Inject(req *http.Request, scheme Scheme, secret []byte, params Params) erro
 		return nil
 
 	case SchemeSigV4Resign:
-		return fmt.Errorf("%w: sigv4-resign is enumerated but deferred until an AWS-style consumer appears", ErrSchemeNotImplemented)
+		if params.AccessKeyID == "" {
+			return fmt.Errorf("%w: sigv4-resign scheme requires AccessKeyID", ErrMissingParam)
+		}
+		if params.Region == "" {
+			return fmt.Errorf("%w: sigv4-resign scheme requires Region", ErrMissingParam)
+		}
+		if params.Service == "" {
+			return fmt.Errorf("%w: sigv4-resign scheme requires Service", ErrMissingParam)
+		}
+		return signSigV4(req, secret, params.AccessKeyID, params.Region, params.Service, now())
 
 	default:
 		// scheme did not originate from ParseScheme; treat as unknown.
