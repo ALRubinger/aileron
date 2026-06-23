@@ -25,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	sandboxtoolchain "github.com/ALRubinger/aileron/internal/sandbox/toolchain"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
@@ -470,14 +471,25 @@ func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolic
 	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
-	result, err := sandboxcontainer.Builder{
+	// Launch opts into the managed toolchain via env only (no flag); the default
+	// stays host-npx until #1530 flips it. The flag value is always empty here, so
+	// resolution is env → default.
+	toolchainMode, nodeBinary, cliEntrypoint := sandboxcontainer.ResolveToolchainSelection("", "", "", os.Getenv)
+	builder := sandboxcontainer.Builder{
 		Runtime: runtimeName,
 		Stdout:  stdout,
 		Stderr:  stderr,
-	}.Build(ctx, sandboxcontainer.BuildOptions{
-		WorkDir: workDir,
-		Plan:    plan,
-		Policy:  policy,
+	}
+	if sandboxcontainer.IsManagedToolchain(toolchainMode) {
+		builder.Provisioner = sandboxtoolchain.Provisioner{}
+	}
+	result, err := builder.Build(ctx, sandboxcontainer.BuildOptions{
+		WorkDir:                   workDir,
+		Plan:                      plan,
+		Policy:                    policy,
+		ToolchainMode:             toolchainMode,
+		NodeBinary:                nodeBinary,
+		DevcontainerCLIEntrypoint: cliEntrypoint,
 	})
 	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		runtime, runtimeErr := sandboxcontainer.ResolveRuntime(runtimeName)

@@ -196,13 +196,57 @@ func interactiveTTYRun(args []string) bool {
 	return false
 }
 
+// ManagedToolchain describes the resolved Aileron-managed Node + devcontainer
+// CLI paths the managed build branch invokes. NodeBinary is the absolute path
+// to the managed node executable; CLIEntrypoint is the absolute path to the
+// @devcontainers/cli JS entrypoint the managed node runs.
+type ManagedToolchain struct {
+	NodeBinary    string
+	CLIEntrypoint string
+}
+
+// toolchainProvisioner provisions (fetch + verify + cache) the managed Node and
+// pinned @devcontainers/cli on demand and returns their resolved paths. It is
+// the seam (ADR-0014 style) that keeps the container package Docker-free and
+// network-free in unit tests: the default-host-npx path never calls it, and the
+// managed path is exercised with a fake in tests. The real implementation lives
+// in internal/sandbox/toolchain.
+type toolchainProvisioner interface {
+	Provision(ctx context.Context) (ManagedToolchain, error)
+}
+
 // Builder builds the image required by a sandbox composition plan.
 type Builder struct {
 	Runtime string
 	Runner  Runner
 	Stdout  io.Writer
 	Stderr  io.Writer
+	// Provisioner supplies the managed toolchain when a Features build selects
+	// ToolchainModeManaged without the escape hatch. nil means "no managed
+	// provisioning wired": the default host-npx path never needs it, and a
+	// managed request with nil Provisioner and no escape hatch fails fast rather
+	// than silently falling back. Unit tests inject a fake to exercise the
+	// managed branch with no network or Docker.
+	Provisioner toolchainProvisioner
 }
+
+// Toolchain selection modes for a Features (Tier 1) devcontainer build. The
+// build needs a Node runtime plus @devcontainers/cli; ToolchainModeHostNPX (the
+// default) resolves both through the host's `npx`, while ToolchainModeManaged
+// provisions an Aileron-managed Node + pinned CLI so Docker is the only host
+// prerequisite (#1525). The default stays host-npx in this sub-issue; flipping
+// it to managed is #1530.
+const (
+	// ToolchainModeAuto is the empty/default selection: resolve the
+	// @devcontainers/cli invocation through the host `npx` prefix.
+	ToolchainModeAuto = ""
+	// ToolchainModeHostNPX explicitly selects the host-`npx` invocation.
+	ToolchainModeHostNPX = "host-npx"
+	// ToolchainModeManaged selects the Aileron-managed toolchain: a verified
+	// managed Node binary running the pinned @devcontainers/cli entrypoint, so
+	// the build needs no host Node/npx.
+	ToolchainModeManaged = "managed"
+)
 
 // BuildOptions configures a sandbox image build.
 type BuildOptions struct {
@@ -210,6 +254,18 @@ type BuildOptions struct {
 	Plan    composition.Plan
 	Tag     string
 	Policy  string
+	// ToolchainMode selects how a Features (Tier 1) devcontainer build
+	// resolves Node + @devcontainers/cli: ToolchainModeAuto/ToolchainModeHostNPX
+	// (default) use the host `npx`; ToolchainModeManaged provisions an
+	// Aileron-managed Node + pinned CLI. Ignored for every other tier.
+	ToolchainMode string
+	// NodeBinary and DevcontainerCLIEntrypoint are the managed-toolchain escape
+	// hatch: when both are set, the managed branch runs exactly those paths
+	// (`<NodeBinary> <DevcontainerCLIEntrypoint> build …`) and skips the
+	// provisioner entirely, so a hermetic/offline host can point at a
+	// pre-staged Node + CLI rather than fetching. Both must exist on disk.
+	NodeBinary                string
+	DevcontainerCLIEntrypoint string
 }
 
 // BuildResult reports the image selected or built for launch.
@@ -370,7 +426,11 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		// still resolved above so the Docker-only guard fires and the result
 		// reports the runtime, but the CLI executable is what we exec.
 		if useFeatures {
-			name, args, err := devcontainerCLIBuildArgs(workDir, opts.Plan, result.Image)
+			prefix, err := b.resolveDevcontainerCLI(ctx, opts)
+			if err != nil {
+				return BuildResult{}, err
+			}
+			name, args, err := devcontainerCLIBuildArgs(prefix, workDir, opts.Plan, result.Image)
 			if err != nil {
 				return BuildResult{}, err
 			}
@@ -1058,24 +1118,152 @@ func devcontainerBuildArgs(workDir string, plan composition.Plan, image string) 
 	return args, nil
 }
 
+// resolveDevcontainerCLI resolves the @devcontainers/cli invocation prefix for
+// a Features build, honoring the toolchain seam (#1525). The prefix is the
+// executable plus the leading arguments that precede the `build` subcommand. It
+// returns one of:
+//
+//   - the host-npx default (the devcontainerCLI package var) when the selection
+//     is ToolchainModeAuto/ToolchainModeHostNPX;
+//   - the managed escape-hatch prefix `[NodeBinary, DevcontainerCLIEntrypoint]`
+//     when the managed mode is selected and both override paths are set and
+//     exist on disk;
+//   - the provisioned managed prefix `[<managed node>, <CLI entrypoint>]` when
+//     managed is selected without the escape hatch, by invoking the Builder's
+//     Provisioner.
+//
+// A managed selection with no escape hatch and no Provisioner is a hard error —
+// the build never silently falls back to host-npx once managed is explicitly
+// requested (the escape hatch is the only offline path). The default selection
+// never touches the provisioner, preserving the Docker-only/no-network unit
+// tests for the host-npx path.
+func (b Builder) resolveDevcontainerCLI(ctx context.Context, opts BuildOptions) ([]string, error) {
+	switch resolveToolchainMode(opts.ToolchainMode) {
+	case ToolchainModeManaged:
+		// Escape hatch: both paths supplied → use them verbatim. Require both so
+		// a half-configured override (node without CLI, or vice versa) fails
+		// loudly rather than silently provisioning the missing half.
+		node := strings.TrimSpace(opts.NodeBinary)
+		cli := strings.TrimSpace(opts.DevcontainerCLIEntrypoint)
+		if node != "" || cli != "" {
+			if node == "" || cli == "" {
+				return nil, fmt.Errorf("managed toolchain escape hatch requires both a node binary and a devcontainer CLI entrypoint; got node=%q cli=%q", node, cli)
+			}
+			if err := statExisting(node, "managed node binary"); err != nil {
+				return nil, err
+			}
+			if err := statExisting(cli, "managed devcontainer CLI entrypoint"); err != nil {
+				return nil, err
+			}
+			return []string{node, cli}, nil
+		}
+		if b.Provisioner == nil {
+			return nil, fmt.Errorf("managed toolchain selected but no provisioner is configured and no escape-hatch paths were supplied; set the AILERON_SANDBOX_NODE/AILERON_DEVCONTAINER_CLI escape hatch or use the default host-npx toolchain")
+		}
+		managed, err := b.Provisioner.Provision(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("provision managed toolchain: %w", err)
+		}
+		return []string{managed.NodeBinary, managed.CLIEntrypoint}, nil
+	default:
+		// Host-npx default: the documented override point stays the package var.
+		if len(devcontainerCLI) == 0 {
+			return nil, fmt.Errorf("devcontainer CLI invocation is not configured")
+		}
+		return append([]string(nil), devcontainerCLI...), nil
+	}
+}
+
+// Toolchain selection environment variables. They mirror the --runtime →
+// AILERON_SANDBOX_RUNTIME convention: a flag takes precedence, then the env, then
+// the default (host-npx). The escape-hatch vars point at a pre-staged Node
+// binary and devcontainer CLI entrypoint so a hermetic/offline host can run the
+// managed branch without provisioning.
+const (
+	// ToolchainModeEnv selects the managed toolchain when set to "managed"
+	// (host-npx otherwise). Read by both `aileron sandbox` and launch.
+	ToolchainModeEnv = "AILERON_SANDBOX_TOOLCHAIN"
+	// NodeBinaryEnv is the managed-toolchain escape hatch for the Node binary.
+	NodeBinaryEnv = "AILERON_SANDBOX_NODE"
+	// DevcontainerCLIEnv is the managed-toolchain escape hatch for the
+	// @devcontainers/cli JS entrypoint.
+	DevcontainerCLIEnv = "AILERON_DEVCONTAINER_CLI"
+)
+
+// ResolveToolchainSelection computes the toolchain-related BuildOptions fields
+// from a flag value and the process environment, mirroring the
+// flag → env → default precedence the --runtime override uses. flagMode is the
+// raw --toolchain flag value (empty when unset); the escape-hatch flag values
+// (flagNode, flagCLI) likewise override the env vars. The default is host-npx
+// (#1530 flips it). It returns the (mode, nodeBinary, cliEntrypoint) triple a
+// caller copies into BuildOptions.
+func ResolveToolchainSelection(flagMode, flagNode, flagCLI string, getenv func(string) string) (mode, nodeBinary, cliEntrypoint string) {
+	if getenv == nil {
+		getenv = func(string) string { return "" }
+	}
+	mode = firstNonEmpty(flagMode, getenv(ToolchainModeEnv))
+	mode = resolveToolchainMode(mode)
+	nodeBinary = strings.TrimSpace(firstNonEmpty(flagNode, getenv(NodeBinaryEnv)))
+	cliEntrypoint = strings.TrimSpace(firstNonEmpty(flagCLI, getenv(DevcontainerCLIEnv)))
+	return mode, nodeBinary, cliEntrypoint
+}
+
+// IsManagedToolchain reports whether a resolved toolchain mode selects the
+// managed branch. Callers use it to decide whether to wire the real managed
+// provisioner into the Builder (the host-npx default needs none).
+func IsManagedToolchain(mode string) bool {
+	return resolveToolchainMode(mode) == ToolchainModeManaged
+}
+
+// resolveToolchainMode normalizes a raw toolchain-mode selection to one of the
+// recognized modes. An empty value or the explicit host-npx token both resolve
+// to host-npx; only the explicit managed token selects the managed branch. An
+// unrecognized value defers to host-npx (the safe default) rather than failing,
+// matching the --runtime/--sandbox-proxy tri-state convention where an unknown
+// value falls through to the default.
+func resolveToolchainMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case ToolchainModeManaged:
+		return ToolchainModeManaged
+	default:
+		return ToolchainModeHostNPX
+	}
+}
+
+// statExisting returns an actionable error when path does not exist, mirroring
+// how devcontainerCLIBuildArgs os.Stats the devcontainer.json before building.
+func statExisting(path, label string) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("%s %s: %w", label, path, err)
+	}
+	return nil
+}
+
 // devcontainerCLIBuildArgs assembles the executable and arguments for a
-// `devcontainer build` invocation that applies the plan's `features`.
+// `devcontainer build` invocation that applies the plan's `features`. The
+// invocation prefix (executable plus the arguments preceding the `build`
+// subcommand) is resolved by the caller via resolveDevcontainerCLI — either the
+// host-npx default (`npx --yes @devcontainers/cli@<pinned>`) or the managed
+// `[<node>, <CLI entrypoint>]` form — so this function is a pure argv-assembler
+// and the build path never reads global state.
+//
 // @devcontainers/cli reads `features` (and any base image / Dockerfile) from
 // the devcontainer.json under workDir, so the workspace folder is passed rather
-// than a Dockerfile. The returned name is devcontainerCLI[0]; args are the
-// remaining CLI prefix (e.g. `--yes @devcontainers/cli@<pinned>`) followed by
-// `build --workspace-folder <workDir> --image-name <image>` plus deterministic
-// (sorted) `--build-arg k=v` tokens mirroring devcontainerBuildArgs.
-func devcontainerCLIBuildArgs(workDir string, plan composition.Plan, image string) (string, []string, error) {
+// than a Dockerfile. The returned name is prefix[0]; args are the remaining
+// prefix tokens followed by `build --workspace-folder <workDir> --image-name
+// <image>` plus deterministic (sorted) `--build-arg k=v` tokens mirroring
+// devcontainerBuildArgs. The argv tail (everything after the prefix) is
+// byte-identical between the host-npx and managed branches.
+func devcontainerCLIBuildArgs(prefix []string, workDir string, plan composition.Plan, image string) (string, []string, error) {
 	devcontainerPath := filepath.Join(workDir, composition.DefaultDevcontainerPath)
 	if _, err := os.Stat(devcontainerPath); err != nil {
 		return "", nil, fmt.Errorf("devcontainer features build requires %s: %w", devcontainerPath, err)
 	}
-	if len(devcontainerCLI) == 0 {
+	if len(prefix) == 0 {
 		return "", nil, fmt.Errorf("devcontainer CLI invocation is not configured")
 	}
-	name := devcontainerCLI[0]
-	args := append([]string(nil), devcontainerCLI[1:]...)
+	name := prefix[0]
+	args := append([]string(nil), prefix[1:]...)
 	args = append(args, "build", "--workspace-folder", workDir, "--image-name", image)
 	keys := make([]string, 0, len(plan.BuildArgs))
 	for k := range plan.BuildArgs {

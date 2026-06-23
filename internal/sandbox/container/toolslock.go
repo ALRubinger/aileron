@@ -134,6 +134,14 @@ func FormatToolsLock(version string, checksums map[string]string) ([]byte, error
 	return append(data, '\n'), nil
 }
 
+// PinnedNodeVersion returns the Node.js version pinned in the committed
+// tools.lock.json (e.g. "22.14.0"). It is the single source of truth the
+// managed-toolchain provisioner (internal/sandbox/toolchain, #1525) reads so the
+// fetched Node version always matches the version the checksums are pinned for.
+func PinnedNodeVersion() string {
+	return pinnedNode.Version
+}
+
 // nodePlatformToken maps a Go GOOS/GOARCH pair to the Node distribution platform
 // token used in SHASUMS256.txt (and in the checksum map). It returns ok=false for
 // an OS/arch combination the managed toolchain does not support, so callers
