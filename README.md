@@ -21,6 +21,7 @@ Everything lives at **[docs.withaileron.ai](https://docs.withaileron.ai)**:
 - [API Reference](https://docs.withaileron.ai/api) — full OpenAPI specification
 - [Repository Layout](https://docs.withaileron.ai/development/repo-layout/) — how the source tree is organized
 - [Building from Source](https://docs.withaileron.ai/development/building-from-source/) — prerequisites and Taskfile entry points for contributors
+- [Running Tests](https://docs.withaileron.ai/development/running-tests/) — the test layers and how to run the by-hand black-box system-test suite
 
 ## License
 
