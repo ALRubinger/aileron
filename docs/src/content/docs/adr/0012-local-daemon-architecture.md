@@ -57,6 +57,8 @@ http://127.0.0.1:54321
 
 Clients (CLI and launch) read `daemon.url` to find the daemon. `AILERON_API_URL` overrides remain available as a developer/test escape hatch but are not the primary mechanism.
 
+On **Linux with Docker**, the daemon additionally binds the Docker bridge-gateway IP (the host end of `docker0`, what `host-gateway` resolves to) on the *same* ephemeral port, serving the same token-protected handler. Without it a sandbox container cannot reach the daemon: the launcher rewrites the loopback URL to `host.docker.internal`, which `--add-host host.docker.internal:host-gateway` resolves to the bridge-gateway IP rather than loopback, so a loopback-only daemon refuses the container's connection. The advertised `daemon.url` stays the `127.0.0.1` URL (the launcher does the loopback→`host.docker.internal` rewrite per runtime); the bridge listener is gated by the same daemon token, never bound on macOS/Windows (Docker Desktop forwards `host.docker.internal` to loopback) or on non-Docker Linux, and a failed gateway derivation is a hard startup error rather than a silent wider bind.
+
 Why TCP and not a unix socket:
 
 - **The browser cannot speak unix sockets.** The webapp — including the vault unlock modal ratified in #429 — is HTTP. The daemon must expose HTTP on a port a browser can navigate to.
