@@ -466,13 +466,13 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 		}
 	}
 	switch cred.Kind {
-	case "oauth2":
+	case cstore.CredentialKindOAuth2:
 		// RFC 6750 fixes OAuth2 access tokens as
 		// `Authorization: Bearer <token>`. The manifest's `header` and
 		// `format` fields are rejected at validation for oauth2 kind,
 		// so we never have to consult them here.
 		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
-	case "api_key":
+	case cstore.CredentialKindAPIKey:
 		header, format := apiKeyInjection(s.credentialHeader, s.credentialFormat)
 		req.Header.Set(header, strings.ReplaceAll(format, "{key}", string(cred.Value)))
 	case cstore.CredentialKindAWSSigV4:
