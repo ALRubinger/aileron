@@ -31,10 +31,10 @@ const (
 	// token value.
 	SchemeQueryParam Scheme = "query-param"
 
-	// SchemeSigV4Resign is enumerated for completeness but is not yet
-	// implemented; see [ErrSchemeNotImplemented]. No AWS-style consumer
-	// exists in this umbrella, so the re-signing logic (and its SDK
-	// dependency) is deferred until one appears.
+	// SchemeSigV4Resign re-signs the request with an AWS Signature
+	// Version 4 signature derived from the secret access key. The signing
+	// core is std-library-only (crypto/hmac + crypto/sha256); no AWS SDK
+	// dependency is pulled in.
 	SchemeSigV4Resign Scheme = "sigv4-resign"
 )
 
@@ -45,8 +45,9 @@ var (
 	ErrUnknownScheme = errors.New("inject: unknown injection scheme")
 
 	// ErrSchemeNotImplemented means the scheme is a recognized member of
-	// the closed set but its injection logic is deferred. Returned by
-	// [Inject] for [SchemeSigV4Resign].
+	// the closed set but its injection logic is deferred. It is retained
+	// as a sentinel for the closed-set contract; no current scheme is
+	// deferred, so [Inject] does not return it today.
 	ErrSchemeNotImplemented = errors.New("inject: injection scheme not implemented")
 
 	// ErrMissingParam means a scheme requires a [Params] field that was

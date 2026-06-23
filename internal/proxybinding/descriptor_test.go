@@ -77,6 +77,11 @@ func TestParse_EachSchemeValidates(t *testing.T) {
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: query-param\n    query_param: api_key\n",
 			want: binding.SchemeQueryParam,
 		},
+		{
+			name: "sigv4-resign",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n    service: s3\n",
+			want: binding.SchemeSigV4Resign,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,6 +183,18 @@ func TestParse_Errors(t *testing.T) {
 		{
 			name: "query-param missing param",
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: query-param\n",
+		},
+		{
+			name: "sigv4-resign missing access_key_id",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    region: us-east-1\n    service: s3\n",
+		},
+		{
+			name: "sigv4-resign missing region",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    service: s3\n",
+		},
+		{
+			name: "sigv4-resign missing service",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n",
 		},
 		{
 			name: "invalid credential_ref",

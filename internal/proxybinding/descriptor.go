@@ -143,6 +143,22 @@ type Entry struct {
 	// QueryParam is the query-parameter name to set, required only for the
 	// query-param scheme.
 	QueryParam string `yaml:"query_param"`
+
+	// AccessKeyID is the non-secret AWS access key ID, required only for the
+	// sigv4-resign scheme. It appears verbatim in the signed request's
+	// Credential= field; the secret access key travels in the resolved
+	// credential value, never here.
+	AccessKeyID string `yaml:"access_key_id"`
+
+	// Region is the non-secret AWS region (e.g. "us-east-1") used for the
+	// SigV4 credential scope, required only for the sigv4-resign scheme. It
+	// is never inferred from the host.
+	Region string `yaml:"region"`
+
+	// Service is the non-secret AWS service name (e.g. "s3") used for the
+	// SigV4 credential scope, required only for the sigv4-resign scheme. It
+	// is never inferred from the host.
+	Service string `yaml:"service"`
 }
 
 // Sentinel is the per-binding sentinel-swap placeholder declaration. It makes
@@ -278,6 +294,16 @@ func (e *Entry) Validate() error {
 	case string(inject.SchemeQueryParam):
 		if e.QueryParam == "" {
 			return fmt.Errorf("query-param scheme requires a query_param name")
+		}
+	case string(inject.SchemeSigV4Resign):
+		if e.AccessKeyID == "" {
+			return fmt.Errorf("sigv4-resign scheme requires an access_key_id")
+		}
+		if e.Region == "" {
+			return fmt.Errorf("sigv4-resign scheme requires a region")
+		}
+		if e.Service == "" {
+			return fmt.Errorf("sigv4-resign scheme requires a service")
 		}
 	}
 

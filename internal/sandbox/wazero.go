@@ -202,6 +202,9 @@ func (c *wazeroConnector) Invoke(ctx context.Context, call Call) (Result, error)
 		expectedCredentialKind: manifestCredentialKind(c.manifest),
 		credentialHeader:       manifestCredentialHeader(c.manifest),
 		credentialFormat:       manifestCredentialFormat(c.manifest),
+		credentialRegion:       manifestCredentialRegion(c.manifest),
+		credentialService:      manifestCredentialService(c.manifest),
+		credentialAccessKeyID:  manifestCredentialAccessKeyID(c.manifest),
 		credentialResolver:     call.CredentialResolver,
 		spawnPolicy:            c.spawnPolicy,
 		spawnExecutor:          c.runtime.spawnExecutor,
@@ -359,6 +362,37 @@ func manifestCredentialFormat(m *cstore.Manifest) string {
 		return ""
 	}
 	return m.Capabilities.Credential.Format
+}
+
+// manifestCredentialRegion safely returns the connector manifest's
+// optional `[capabilities.credential].region`. Empty string when the
+// connector did not declare a credential capability or is not aws_sigv4.
+func manifestCredentialRegion(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.Region
+}
+
+// manifestCredentialService safely returns the connector manifest's
+// optional `[capabilities.credential].service`. Empty string when the
+// connector did not declare a credential capability or is not aws_sigv4.
+func manifestCredentialService(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.Service
+}
+
+// manifestCredentialAccessKeyID safely returns the connector manifest's
+// optional `[capabilities.credential].access_key_id`. Empty string when
+// the connector did not declare a credential capability or is not
+// aws_sigv4.
+func manifestCredentialAccessKeyID(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.AccessKeyID
 }
 
 // toSet converts a slice of capability strings to a lookup set used by
