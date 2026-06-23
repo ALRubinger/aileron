@@ -126,6 +126,14 @@ func TestAuthSpecInContainerCredentialReadCapture(t *testing.T) {
 		}
 		defer prep.Cleanup()
 
+		// The chown is deferred (issue #1488): in production launchSandbox
+		// invokes prep.ChownFn AFTER placing the MCP config, just before
+		// running the container. Mirror that ordering here so the rendered
+		// credential is owned by the agent UID before the in-container read.
+		if err := prep.ChownFn(); err != nil {
+			t.Fatalf("prep.ChownFn: %v", err)
+		}
+
 		// The container asserts the read matches the seeded credential
 		// (proving the rendered file is readable at ContainerPath inside the
 		// sandbox), then rotates it via tmpfile + rename so capture has a
@@ -168,6 +176,12 @@ func TestAuthSpecInContainerCredentialReadCapture(t *testing.T) {
 			t.Fatalf("prepareAuthSpec: %v", err)
 		}
 		defer prep.Cleanup()
+
+		// Deferred chown (issue #1488): mirror launchSandbox's post-placement
+		// invocation so the agent can read the rendered credential.
+		if err := prep.ChownFn(); err != nil {
+			t.Fatalf("prep.ChownFn: %v", err)
+		}
 
 		script := containerReadAssertOnly(claudeCredsContainerPath)
 		env := map[string]string{"EXPECTED": string(seeded)}
