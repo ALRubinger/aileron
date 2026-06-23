@@ -135,7 +135,7 @@ The launch container path is not gated by the spawn-primitive availability probe
 
 v1 is portable and run by hand. `task test:system` is not wired into CI. The maintainer runs it on real hosts across the four OS families. CI-matrix automation, including self-hosted runners, cloud VMs, and secret injection, is deferred to a later initiative.
 
-For the human-driven manual runbook this suite complements, see the [v4 Manual Acceptance Runbook](/development/v4-acceptance/). The scenario bodies and the shared probe library are documented in `test/system/README.md` in the repository.
+The human-driven manual acceptance this suite complements is tracked in [issue #962](https://github.com/ALRubinger/aileron/issues/962). The scenario bodies and the shared probe library are documented in `test/system/README.md` in the repository.
 
 ## Testing philosophy
 
