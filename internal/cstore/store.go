@@ -308,7 +308,10 @@ func (s *Store) persistIndex() error {
 // is cleaned up afterward whether or not the rename succeeded.
 func (s *Store) commit(t *Tarball, ref Ref, hashHex string) error {
 	_, _, err := CommitDir(s.connectorsRoot(), hashHex, func(dir string) error {
-		return t.writeTo(dir)
+		// Wrap the tarball write's plain IO errors as store-unwritable to
+		// preserve commit's pre-refactor failure classification (CommitDir
+		// returns callback errors verbatim).
+		return wrapStoreErr(t.writeTo(dir))
 	})
 	if err != nil {
 		return err
@@ -384,12 +387,11 @@ func CommitDir(root, hashHex string, write func(dir string) error) (entryDir str
 	defer os.RemoveAll(tmp)
 
 	if err := write(tmp); err != nil {
-		// Preserve a structured error from the callback; wrap a plain one.
-		var sErr *Error
-		if errors.As(err, &sErr) {
-			return "", false, err
-		}
-		return "", false, wrapStoreErr(err)
+		// The callback owns its error semantics (it may classify unpack,
+		// validation, etc. failures in its own vocabulary). Return it
+		// verbatim so the caller can inspect it; CommitDir only wraps its
+		// own filesystem failures as store-unwritable.
+		return "", false, err
 	}
 
 	// If a parallel committer already won the race, dst exists. Both

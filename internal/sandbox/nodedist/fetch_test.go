@@ -213,6 +213,37 @@ func TestFetch_CacheShortCircuitSkipsArchive(t *testing.T) {
 	}
 }
 
+func TestFetch_UnpackFailurePropagates(t *testing.T) {
+	// A "valid" download: the bytes are not a real archive, but the signed
+	// checksum matches their sha256, so the flow reaches unpack and fails
+	// there. The error must surface as ErrUnpack (not reclassified as a
+	// store error) and nothing is committed.
+	sk, kr := matchedSigner(t)
+	bogus := []byte("this is not a gzip archive")
+	sum := sha256.Sum256(bogus)
+	bogusHash := hex.EncodeToString(sum[:])
+	archiveName, _ := nodedist.ArchiveName(fetchVersion, linuxTarget)
+	checksums := fmt.Sprintf("%s  %s\n", bogusHash, archiveName)
+	sig := sk.armoredDetachedSign(t, []byte(checksums))
+
+	urls, _ := nodedist.ResolveURLs(fetchVersion, linuxTarget)
+	ff := newFakeFetcher()
+	ff.bodies[urls.Archive] = bogus
+	ff.bodies[urls.Checksums] = []byte(checksums)
+	ff.bodies[urls.Signature] = sig
+
+	root := filepath.Join(t.TempDir(), "node")
+	f := &nodedist.Fetcher{HTTP: ff, Keyring: kr, Root: root}
+	_, err := f.Fetch(context.Background(), nodedist.Request{Version: fetchVersion, Target: linuxTarget})
+	var ndErr *nodedist.Error
+	if !errors.As(err, &ndErr) || ndErr.Kind != nodedist.ErrUnpack {
+		t.Fatalf("error = %v, want ErrUnpack", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "sha256", bogusHash)); statErr == nil {
+		t.Fatalf("an entry was committed despite an unpack failure")
+	}
+}
+
 func TestFetch_UnsupportedTarget(t *testing.T) {
 	ff, kr, _, _ := fixture(t, matchedSigner)
 	f := &nodedist.Fetcher{HTTP: ff, Keyring: kr, Root: t.TempDir()}

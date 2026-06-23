@@ -1,6 +1,7 @@
 package cstore_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -154,6 +155,11 @@ func TestCommitDir_CallbackErrorCommitsNothing(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("CommitDir with failing callback returned nil error")
+	}
+	// The callback's error is surfaced verbatim so the caller can classify
+	// it in its own vocabulary.
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("CommitDir did not return the callback error verbatim: %v", err)
 	}
 	present, hErr := cstore.HasDirHash(root, testHashA)
 	if hErr != nil {
