@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -384,16 +385,53 @@ var codexDeviceSleep = func(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// codexInterval is the poll interval (in seconds) advertised by the
+// usercode endpoint. Codex's upstream UserCodeResp deserializes interval
+// with a custom deserializer that accepts BOTH a JSON number and a
+// string-encoded number, and the live endpoint sends the string form
+// (e.g. "interval":"5"). Modeling the field as a plain Go int therefore
+// fails the device-code parse on the real wire format, killing host
+// credential capture. codexInterval tolerates a JSON number, a
+// string-encoded number, and absence/null (which yields 0, so the
+// launcher falls back to codexDeviceDefaultInterval).
+type codexInterval int
+
+// UnmarshalJSON accepts the interval as either a JSON number or a
+// string-encoded number, mirroring Codex's upstream custom deserializer.
+// A JSON null is treated as absence (0). A non-numeric string is a hard
+// parse error so a genuinely malformed response is still surfaced.
+func (ci *codexInterval) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		*ci = 0
+		return nil
+	}
+	// Strip surrounding quotes for the string-encoded form. strconv.Atoi
+	// then validates the numeric content of both the bare-number and the
+	// string-encoded number identically.
+	unquoted := strings.Trim(trimmed, `"`)
+	if unquoted == "" {
+		*ci = 0
+		return nil
+	}
+	n, err := strconv.Atoi(unquoted)
+	if err != nil {
+		return fmt.Errorf("interval: not a number: %q", unquoted)
+	}
+	*ci = codexInterval(n)
+	return nil
+}
+
 // codexDeviceUserCodeResponse is the JSON the usercode endpoint returns.
 // Field names mirror Codex's UserCodeResp (device_auth_id, user_code,
-// interval) in codex-rs/login/src/device_code_auth.rs. The upstream
-// struct accepts a string-encoded interval via a custom deserializer; we
-// model interval as a number here and tolerate its absence (the launcher
-// falls back to codexDeviceDefaultInterval).
+// interval) in codex-rs/login/src/device_code_auth.rs. interval is typed
+// as codexInterval to accept the string-encoded value the live endpoint
+// sends (see codexInterval); the launcher tolerates its absence by
+// falling back to codexDeviceDefaultInterval.
 type codexDeviceUserCodeResponse struct {
-	DeviceAuthID string `json:"device_auth_id"`
-	UserCode     string `json:"user_code"`
-	Interval     int    `json:"interval"`
+	DeviceAuthID string        `json:"device_auth_id"`
+	UserCode     string        `json:"user_code"`
+	Interval     codexInterval `json:"interval"`
 }
 
 // codexDevicePollResponse is the success body the deviceauth/token
