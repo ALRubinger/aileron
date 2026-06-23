@@ -577,13 +577,20 @@ tasks:
       - build:launch
     vars:
       SESSION: smoke-test
-      WORKSPACE:
-        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-smoke
+      # Pure-template temp path: go-task exposes env vars (TMPDIR/TEMP/TMP) as
+      # template vars, so this resolves a writable dir on Windows (TEMP/TMP set)
+      # and Unix (TMPDIR or /tmp) without `mktemp`, whose bundled-coreutils form
+      # can't resolve /tmp under go-task's embedded shell on Windows. `unixEpoch`
+      # + `randInt` replace `date +%s` and `$$` (no shell binary on PATH needed).
+      WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-smoke-{{now | unixEpoch}}-{{randInt 10000 99999}}'
     cmds:
       - task: _test:system:precond:docker
         vars:
           TARGET: test:system:smoke
       - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      # The template no longer creates the dir the way `mktemp -d` did; create it
+      # explicitly (mkdir is bundled in Task's coreutils, works cross-platform).
+      - mkdir -p "{{.WORKSPACE}}"
       - |
         set -u
         # Prove build:launch produced the launch binary.
@@ -631,10 +638,12 @@ tasks:
     deps:
       - build:launch
     vars:
-      SESSION:
-        sh: echo "codex-$(date +%s)-$$"
-      WORKSPACE:
-        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-codex
+      # Pure-template, no shell binary on PATH needed: `unixEpoch` + `randInt`
+      # replace `date +%s` and `$$` so SESSION/WORKSPACE resolve under go-task's
+      # embedded shell on Windows (no `date`, no usable `mktemp`). go-task exposes
+      # env vars (TMPDIR/TEMP/TMP) as template vars for a writable temp root.
+      SESSION: 'codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
+      WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it
@@ -647,9 +656,13 @@ tasks:
         sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
     cmds:
       # Register cleanup FIRST so a failed precondition (Docker down or codex
-      # auth absent) still removes the mktemp WORKSPACE created by the dynamic
-      # var above — a `defer` only registers once its line is reached.
+      # auth absent) still removes the WORKSPACE — a `defer` only registers once
+      # its line is reached.
       - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      # The WORKSPACE template no longer creates the dir the way `mktemp -d` did;
+      # create it explicitly (mkdir is bundled in Task's coreutils, cross-platform)
+      # before the scenario `cd`s into it and writes its sentinel.
+      - mkdir -p "{{.WORKSPACE}}"
       - task: _test:system:precond
         vars:
           AGENT: codex
@@ -671,10 +684,12 @@ tasks:
     deps:
       - build:launch
     vars:
-      SESSION:
-        sh: echo "claude-$(date +%s)-$$"
-      WORKSPACE:
-        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-claude
+      # Pure-template, no shell binary on PATH needed: `unixEpoch` + `randInt`
+      # replace `date +%s` and `$$` so SESSION/WORKSPACE resolve under go-task's
+      # embedded shell on Windows (no `date`, no usable `mktemp`). go-task exposes
+      # env vars (TMPDIR/TEMP/TMP) as template vars for a writable temp root.
+      SESSION: 'claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
+      WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it
@@ -687,9 +702,13 @@ tasks:
         sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
     cmds:
       # Register cleanup FIRST so a failed precondition (Docker down or claude
-      # auth absent) still removes the mktemp WORKSPACE created by the dynamic
-      # var above — a `defer` only registers once its line is reached.
+      # auth absent) still removes the WORKSPACE — a `defer` only registers once
+      # its line is reached.
       - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      # The WORKSPACE template no longer creates the dir the way `mktemp -d` did;
+      # create it explicitly (mkdir is bundled in Task's coreutils, cross-platform)
+      # before the scenario `cd`s into it and writes its sentinel.
+      - mkdir -p "{{.WORKSPACE}}"
       - task: _test:system:precond
         vars:
           AGENT: claude

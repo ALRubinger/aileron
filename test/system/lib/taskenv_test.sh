@@ -144,6 +144,114 @@ check_target() {
 check_target test:system:launch:codex
 check_target test:system:launch:claude
 
+# --- C. structural: SESSION/WORKSPACE vars are Unix-shell-free (#1547) --------
+# The three run-by-hand system-test targets must not derive SESSION/WORKSPACE via
+# `date +%s`, `$$`, `mktemp`, or a hardcoded `/tmp` LHS — go-task's embedded shell
+# has no `date` and a `mktemp` that can't resolve /tmp on Windows, so those forms
+# fail before any test logic. Portable forms use pure template funcs
+# (`now | unixEpoch`, `randInt`) and env-var-derived temp roots.
+vars_section_for() {
+	# $1 = task name. Isolates the lines under the task-level `vars:` key (its
+	# 6-space children), stopping at the next 4-space task key
+	# (cmds:/deps:/vars:/env:).
+	block_for "$1" | awk '
+		/^    vars:[[:space:]]*$/ { invars = 1; next }
+		invars && /^    [^ ]/ { invars = 0 }
+		invars { print }
+	'
+}
+
+# The default-chain temp root (`/tmp` only as the final `default` fallback) is
+# the one sanctioned literal `/tmp`; flag any OTHER `/tmp` (e.g. a hardcoded
+# `/tmp/aileron-...` LHS). Strip the sanctioned token before scanning.
+var_subblock_for() {
+	# $1 = task name, $2 = var key. Prints the var's definition sub-block: the
+	# `KEY:` line (6-space indent) plus any deeper-indented children (e.g. a
+	# legacy `sh:` line at 8-space indent), stopping at the next 6-space var key
+	# or any comment line. Catches both the inline form (`KEY: '...'`) and the
+	# old multi-line dynamic form (`KEY:` / `  sh: ...`).
+	vars_section_for "$1" | awk -v key="      $2:" '
+		index($0, key) == 1 { invar = 1; print; next }
+		invar && /^      [^ ]/ { invar = 0 }
+		invar && /^      #/ { invar = 0 }
+		invar { print }
+	'
+}
+
+forbidden_in_vars() {
+	# $1 = task name. Prints any offending var definition line, empty if clean.
+	# Scans the SESSION/WORKSPACE definition sub-blocks (inline value and any
+	# `sh:` children), never the explanatory comments around them. The sanctioned
+	# `default "/tmp"` fallback is stripped before scanning.
+	for k in SESSION WORKSPACE; do
+		var_subblock_for "$1" "$k"
+	done \
+		| sed 's#default "/tmp"##g' \
+		| grep -nE 'date \+%s|\$\$|mktemp|/tmp' || true
+}
+
+for t in test:system:smoke test:system:launch:codex test:system:launch:claude; do
+	offending="$(forbidden_in_vars "$t")"
+	if [ -z "$offending" ]; then
+		report "$t: SESSION/WORKSPACE vars use no date/\$\$/mktemp//tmp (portable)" 0
+	else
+		printf 'offending var line(s) in %s:\n%s\n' "$t" "$offending" >&2
+		report "$t: SESSION/WORKSPACE vars use no date/\$\$/mktemp//tmp (portable)" 1
+	fi
+done
+
+# --- D. behavioral: vars resolve with `date`+`mktemp` off PATH (#1547) --------
+# Simulates go-task's Windows embedded-shell condition (no `date`, no usable
+# `mktemp`) by extracting each target's real SESSION/WORKSPACE var lines into a
+# minimal Taskfile and resolving them under a PATH that contains the `task` and
+# `sh` binaries but NOT `date`/`mktemp`. Pure-template vars resolve regardless;
+# the old `sh:` dynamic vars would fail here (this case fails before the fix).
+TASK_BIN="$(command -v task)"
+SH_BIN="$(command -v sh)"
+SANDBOX_PATH="$WORK/nobins"
+mkdir -p "$SANDBOX_PATH"
+ln -s "$TASK_BIN" "$SANDBOX_PATH/task"
+ln -s "$SH_BIN" "$SANDBOX_PATH/sh"
+# Confirm the simulation is real: `date`/`mktemp` must be absent under this PATH.
+if PATH="$SANDBOX_PATH" command -v date >/dev/null 2>&1 ||
+	PATH="$SANDBOX_PATH" command -v mktemp >/dev/null 2>&1; then
+	report "sandbox PATH excludes date/mktemp (Windows embedded-shell sim)" 1
+else
+	report "sandbox PATH excludes date/mktemp (Windows embedded-shell sim)" 0
+fi
+
+resolve_var_under_sandbox() {
+	# $1 = task name, $2 = var key (SESSION|WORKSPACE). Echoes the resolved value.
+	# Pull the exact `KEY: '...'` line from the real Taskfile's vars block so the
+	# behavioral case tracks whatever the structural case pinned.
+	varline="$(vars_section_for "$1" | grep -E "^      $2:" | head -n1 | sed 's/^      //')"
+	[ -n "$varline" ] || { echo ""; return; }
+	gen="$WORK/Taskfile.$2.$(echo "$1" | tr ':' '_').yml"
+	{
+		echo "version: '3'"
+		echo "tasks:"
+		echo "  r:"
+		echo "    vars:"
+		echo "      $varline"
+		echo "    cmds:"
+		echo "      - 'echo RESOLVED=[{{.$2}}]'"
+	} >"$gen"
+	out="$(PATH="$SANDBOX_PATH" "$TASK_BIN" -t "$gen" r 2>/dev/null)"
+	# Extract the value inside RESOLVED=[...].
+	printf '%s\n' "$out" | sed -n 's/.*RESOLVED=\[\(.*\)\].*/\1/p' | head -n1
+}
+
+for t in test:system:smoke test:system:launch:codex test:system:launch:claude; do
+	for key in SESSION WORKSPACE; do
+		val="$(resolve_var_under_sandbox "$t" "$key")"
+		if [ -n "$val" ]; then
+			report "$t: $key resolves non-empty with date/mktemp off PATH" 0
+		else
+			report "$t: $key resolves non-empty with date/mktemp off PATH" 1
+		fi
+	done
+done
+
 if [ "$failures" -ne 0 ]; then
 	printf '\n%s task-env wiring case(s) FAILED\n' "$failures" >&2
 	exit 1
