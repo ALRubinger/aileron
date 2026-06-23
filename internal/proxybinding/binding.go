@@ -27,6 +27,8 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 		opts = append(opts, binding.WithHeaderTemplate(e.Header, e.Template))
 	case binding.SchemeQueryParam:
 		opts = append(opts, binding.WithQueryParam(e.QueryParam))
+	case binding.SchemeSigV4Resign:
+		opts = append(opts, binding.WithSigV4Resign(e.AccessKeyID, e.Region, e.Service))
 	}
 
 	if e.EmitMechanism == string(binding.EmitMechanismSentinelSwap) {

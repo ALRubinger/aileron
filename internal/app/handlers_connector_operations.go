@@ -570,11 +570,11 @@ func (s *apiServer) injectSandboxProxyHostBindingCredential(ctx context.Context,
 // over the #1194 scheme-keyed injector (internal/credential/inject):
 // the binding-match wiring is untouched and the injector owns the wire
 // shape of every scheme, so a header convention lives in exactly one
-// place. `bearer`, `basic`, `header-template`, and `query-param` are
-// implemented (each carries its non-secret params from the binding); the
-// remaining member of binding.HostBindingSchemes (sigv4-resign) is
-// accepted at config time but rejected here, which fails closed rather
-// than silently passing an un-injected request upstream.
+// place. All five members of binding.HostBindingSchemes (`bearer`,
+// `basic`, `header-template`, `query-param`, and `sigv4-resign`) are
+// injected, each carrying its non-secret params from the binding. A scheme
+// the dispatch does not recognize still fails closed (no upstream dial
+// with an un-injected request) rather than silently passing through.
 //
 // The resolved credential bytes flow only into [inject.Inject], which
 // writes them solely onto the request header or query parameter the
@@ -595,10 +595,10 @@ func applyHostBindingScheme(req *http.Request, hb binding.HostBinding, cred cred
 }
 
 // hostBindingInjectScheme maps a binding's scheme string and its
-// non-secret params onto the closed [inject.Scheme] set. It returns
-// ok=false for any scheme this proxy does not yet inject (a member of
-// binding.HostBindingSchemes whose wire shape is deferred), so the
-// caller fails closed instead of dialing upstream un-injected.
+// non-secret params onto the closed [inject.Scheme] set. Every member of
+// binding.HostBindingSchemes maps to a concrete injector. It returns
+// ok=false for any scheme outside that set, so the caller fails closed
+// instead of dialing upstream un-injected.
 func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Params, bool) {
 	switch hb.Scheme {
 	case binding.SchemeBearer:
@@ -609,6 +609,8 @@ func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Para
 		return inject.SchemeHeaderTemplate, inject.Params{HeaderName: hb.HeaderName, Template: hb.HeaderTemplate}, true
 	case binding.SchemeQueryParam:
 		return inject.SchemeQueryParam, inject.Params{ParamName: hb.QueryParamName}, true
+	case binding.SchemeSigV4Resign:
+		return inject.SchemeSigV4Resign, inject.Params{AccessKeyID: hb.AccessKeyID, Region: hb.Region, Service: hb.Service}, true
 	default:
 		return "", inject.Params{}, false
 	}
