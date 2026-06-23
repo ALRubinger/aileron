@@ -96,6 +96,20 @@ task generate:agent-digests
 
 The generator (`internal/tools/agentdigests`) resolves each published agent's manifest digest from the registry via `docker buildx imagetools inspect` and writes the lockfile in canonical form. Commit the result, then tag the release. Override the resolved tag with `TAG=<tag>` (default `latest`). The generated file is deterministic, so a regenerate with no registry change is a no-op diff. A test asserts the committed lockfile is canonical, so a hand-edit or a stale regenerate fails CI.
 
+## Reproducible Toolchains: Node Version + Checksum Pin
+
+The managed-toolchain devcontainer build ([#1525](https://github.com/ALRubinger/aileron/issues/1525)) installs a fixed Node.js into the sandbox. To keep that install reproducible it is pinned the same way images are: a committed lockfile, `internal/sandbox/container/tools.lock.json`, embedded into the binary via `go:embed`. It records the pinned Node version and, per supported platform (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win-x64`), the sha256 of that platform's distribution archive. The version pin lives alongside the `@devcontainers/cli` pin in `internal/sandbox/container/runtime.go`.
+
+`VerifyNodeChecksum` is the regression guard the toolchain fetcher calls at the network boundary. It looks up the pin for the requested version and the build platform's `GOOS/GOARCH` and rejects a downloaded archive whose sha256 disagrees, naming the platform and both hashes, so a tampered or drifted distribution fails the build rather than installing silently. Unlike the agent-images lock, the Node toolchain has no floating fallback: a version pin with no checksums is rejected at parse time.
+
+Regenerate the toolchain lock when bumping the pinned Node version:
+
+```bash
+task generate:tools-lock VERSION=22.14.0
+```
+
+The generator (`internal/tools/toolslock`) resolves each supported platform's archive sha256 from Node's published `SHASUMS256.txt` and writes the lockfile in canonical form. It does not verify the detached GPG signature on that file; the signature-verified fetch pipeline is a separate concern under #1525. The generated file is deterministic, so a regenerate with no version change is a no-op diff. A test asserts the committed lockfile is canonical, so a hand-edit or a stale regenerate fails CI.
+
 ## Claude Code Feature
 
 The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).

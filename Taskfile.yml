@@ -65,6 +65,22 @@ tasks:
     cmds:
       - go run ./tools/agentdigests -tag {{.TAG}} -out sandbox/composition/agent-images.lock.json
 
+  generate:tools-lock:
+    desc: >-
+      Regenerate the managed-toolchain lockfile that pins Node.js for reproducible
+      sandbox devcontainer builds (#1525). Resolves the per-platform sha256 of
+      each supported Node distribution archive from Node's published
+      SHASUMS256.txt and writes internal/sandbox/container/tools.lock.json so a
+      build verifies a fetched archive against the pin and rejects a tampered or
+      drifted distribution. Run when bumping the pinned Node version. Pass the
+      version with VERSION=<x.y.z> (default: the version already in the lock).
+      Requires network read access to nodejs.org.
+    dir: internal
+    vars:
+      VERSION: '{{.VERSION | default "22.14.0"}}'
+    cmds:
+      - go run ./tools/toolslock -version {{.VERSION}} -out sandbox/container/tools.lock.json
+
   build:
     desc: Build everything (containers, server, MCP, CLI, webapp, docs)
     cmds:
