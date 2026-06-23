@@ -70,15 +70,17 @@ probe_image() {
 	assert_eq "running" "$status" "R8.1 container .State.Status" || return 1
 }
 
-# probe_mcp <container> <agent_config_path> <mcp_block_marker>
-# R8.2 — MCP socket reachable. Asserts the in-container aileron-mcp binary
-# is present and executable (launcher.go:45 sandboxMCPBinPath), the agent's
-# MCP config file contains the aileron MCP block marker, and the daemon-
-# wiring env vars are all set in the container.
-probe_mcp() {
+# probe_mcp_runtime <container>
+# R8.2 (agent-agnostic core) — the in-container aileron-mcp binary is present
+# and executable (launcher.go:45 sandboxMCPBinPath) and the daemon-wiring env
+# vars are all set. These hold for EVERY agent regardless of how the agent is
+# pointed at the MCP server (Codex's config.toml, Claude's `--mcp-config`
+# flag), so both scenarios reuse this function verbatim. The agent-specific
+# proof that the agent is actually wired to aileron-mcp is the caller's job:
+# Codex asserts its config file with probe_mcp (which calls this first), Claude
+# asserts the `--mcp-config` flag with probe_mcp_cmdline.
+probe_mcp_runtime() {
 	container="$1"
-	config_path="$2"
-	mcp_marker="$3"
 
 	# aileron-mcp present and executable (test -x).
 	if ! docker exec "$container" test -x /usr/local/bin/aileron-mcp; then
@@ -86,11 +88,6 @@ probe_mcp() {
 		return 1
 	fi
 	log "ok: R8.2 /usr/local/bin/aileron-mcp present and executable"
-
-	# Agent MCP config contains the aileron server block.
-	config="$(docker exec "$container" cat "$config_path" 2>/dev/null)" ||
-		{ fail "R8.2 could not read $config_path in $container"; return 1; }
-	assert_contains "$config" "$mcp_marker" "R8.2 $config_path contains $mcp_marker" || return 1
 
 	# Daemon-wiring env vars (launcher.go:609-630). Each must be non-empty.
 	for var in AILERON_URL AILERON_COMMS_URL AILERON_SESSION_ID AILERON_APPROVAL_URL AILERON_TOKEN; do
@@ -102,6 +99,54 @@ probe_mcp() {
 		fi
 		log "ok: R8.2 env $var set"
 	done
+}
+
+# probe_mcp <container> <agent_config_path> <mcp_block_marker>
+# R8.2 (config-file agents, e.g. Codex) — the agent-agnostic core
+# (probe_mcp_runtime) PLUS the agent's MCP config file contains the aileron
+# MCP block marker. Codex writes /home/agent/.codex/config.toml via
+# ConfigureMCP; Claude does not write a config file (it passes `--mcp-config`
+# on the command line), so the claude scenario calls probe_mcp_cmdline instead
+# of this.
+probe_mcp() {
+	container="$1"
+	config_path="$2"
+	mcp_marker="$3"
+
+	probe_mcp_runtime "$container" || return 1
+
+	# Agent MCP config contains the aileron server block.
+	config="$(docker exec "$container" cat "$config_path" 2>/dev/null)" ||
+		{ fail "R8.2 could not read $config_path in $container"; return 1; }
+	assert_contains "$config" "$mcp_marker" "R8.2 $config_path contains $mcp_marker" || return 1
+}
+
+# probe_mcp_cmdline <container> <flag> <marker>
+# R8.2 (flag-config agents, e.g. Claude) — the agent-agnostic core
+# (probe_mcp_runtime) PLUS the agent's MCP wiring is present as a command-line
+# flag on the running container's process, not a config file. Claude's
+# ConfigureMCP returns `--mcp-config <json>` (claude.go:116-126), appended to
+# the container command (launcher.go:1082 `command = append(command,
+# extraArgs...)`), so the flag and the aileron MCP server marker both appear in
+# the container's `.Config.Cmd` / `.Args`. We assert both the flag and the
+# server-name marker so a stray `--mcp-config` with the wrong payload cannot
+# pass.
+probe_mcp_cmdline() {
+	container="$1"
+	flag="$2"
+	marker="$3"
+
+	probe_mcp_runtime "$container" || return 1
+
+	# The launcher appends extraArgs to the container command; both the entry
+	# point Cmd and the resolved Args carry it. Inspect both so we are robust
+	# to whichever Docker populates for this image's ENTRYPOINT/CMD shape.
+	cmdline="$(docker inspect \
+		-f '{{range .Config.Cmd}}{{.}} {{end}}{{range .Args}}{{.}} {{end}}' \
+		"$container" 2>/dev/null)" ||
+		{ fail "R8.2 docker inspect $container failed (probe_mcp_cmdline)"; return 1; }
+	assert_contains "$cmdline" "$flag" "R8.2 container command carries $flag" || return 1
+	assert_contains "$cmdline" "$marker" "R8.2 $flag payload references $marker" || return 1
 }
 
 # probe_credentials <container> <auth_path>
