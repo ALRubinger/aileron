@@ -63,7 +63,15 @@ func mustVaultWith(t *testing.T, name, kind string, value []byte) vault.Vault {
 
 func mustHostBindingTable(t *testing.T, host, ref, scheme string) binding.HostBindings {
 	t.Helper()
-	hb, err := binding.NewHostBinding(host, ref, scheme)
+	return mustHostBindingTableOpts(t, host, ref, scheme)
+}
+
+// mustHostBindingTableOpts builds a single-entry binding table, threading
+// scheme-specific construction options (e.g. binding.WithSigV4Resign) so a
+// scheme that carries non-secret params can be exercised end to end.
+func mustHostBindingTableOpts(t *testing.T, host, ref, scheme string, opts ...binding.HostBindingOption) binding.HostBindings {
+	t.Helper()
+	hb, err := binding.NewHostBinding(host, ref, scheme, opts...)
 	if err != nil {
 		t.Fatalf("NewHostBinding: %v", err)
 	}
@@ -304,41 +312,149 @@ func TestSandboxForwardProxy_HostBindingMissingCredentialFailsClosed(t *testing.
 	}
 }
 
-// TestSandboxForwardProxy_HostBindingUnsupportedSchemeFailsClosed
-// asserts a binding declaring a scheme in the closed set but not yet
-// injected by the proxy (e.g. `sigv4-resign`, which the #1194 injector
-// enumerates but defers) fails closed rather than dialing upstream with
-// an un-injected request.
-func TestSandboxForwardProxy_HostBindingUnsupportedSchemeFailsClosed(t *testing.T) {
+// TestSandboxForwardProxy_HostBindingSigV4ResignInjectsSignature is the
+// sigv4-resign happy path: a request whose host matches a sigv4-resign
+// binding is re-signed daemon-side with the resolved secret access key.
+// The upstream sees a well-formed AWS4-HMAC-SHA256 Authorization header
+// plus X-Amz-Date and X-Amz-Content-Sha256; the Credential= field carries
+// the non-secret access-key-id and credential scope, but the secret access
+// key never appears on any header, body, or audit surface, and a
+// binding_injected audit event is emitted with scheme sigv4-resign.
+func TestSandboxForwardProxy_HostBindingSigV4ResignInjectsSignature(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	const secretAccessKey = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
+	const accessKeyID = "AKIDEXAMPLE"
+	var upstreamAuth, upstreamDate, upstreamContentHash, upstreamURL string
+	srv := &apiServer{
+		auditStore:    auditStore,
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-sigv4" }),
+		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
+		vault:         mustVaultWith(t, "user/aws", "user", []byte(secretAccessKey)),
+		hostBindings: mustHostBindingTableOpts(t, "s3.amazonaws.test", "user/aws", "sigv4-resign",
+			binding.WithSigV4Resign(accessKeyID, "us-east-1", "s3")),
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			upstreamDate = req.Header.Get("X-Amz-Date")
+			upstreamContentHash = req.Header.Get("X-Amz-Content-Sha256")
+			upstreamURL = req.URL.String()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+	}
+	setup := newHostBindingProxySetup(t, srv)
+
+	resp, err := setup.client.Get("https://s3.amazonaws.test/bucket/key?q=1")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, string(body))
+	}
+	if !strings.HasPrefix(upstreamAuth, "AWS4-HMAC-SHA256 ") {
+		t.Fatalf("upstream Authorization = %q, want AWS4-HMAC-SHA256 prefix", upstreamAuth)
+	}
+	if !strings.Contains(upstreamAuth, "Credential="+accessKeyID+"/") {
+		t.Errorf("Authorization missing Credential=%s/...: %q", accessKeyID, upstreamAuth)
+	}
+	if !strings.Contains(upstreamAuth, "/us-east-1/s3/aws4_request") {
+		t.Errorf("Authorization missing credential scope: %q", upstreamAuth)
+	}
+	if !strings.Contains(upstreamAuth, "SignedHeaders=") || !strings.Contains(upstreamAuth, "Signature=") {
+		t.Errorf("Authorization missing SignedHeaders/Signature: %q", upstreamAuth)
+	}
+	if upstreamDate == "" {
+		t.Error("upstream X-Amz-Date is empty")
+	}
+	if upstreamContentHash == "" {
+		t.Error("upstream X-Amz-Content-Sha256 is empty")
+	}
+	if upstreamURL != "https://s3.amazonaws.test/bucket/key?q=1" {
+		t.Errorf("upstream URL = %q", upstreamURL)
+	}
+
+	// The secret access key must never appear on any observable surface:
+	// not in the signed Authorization header (it is only HMAC key material),
+	// nor in any response header or body.
+	if strings.Contains(upstreamAuth, secretAccessKey) {
+		t.Error("Authorization header leaked the secret access key")
+	}
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			if strings.Contains(v, secretAccessKey) {
+				t.Errorf("response header %s leaked credential: %q", k, v)
+			}
+		}
+	}
+	if strings.Contains(string(body), secretAccessKey) {
+		t.Error("response body leaked credential")
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	evt := events[0]
+	if evt.EventType != model.EventTypeSandboxProxyBindingInjected {
+		t.Fatalf("event type = %q, want %q", evt.EventType, model.EventTypeSandboxProxyBindingInjected)
+	}
+	if got := evt.Payload["aileron.proxy.binding.scheme"]; got != "sigv4-resign" {
+		t.Errorf("binding.scheme = %v, want sigv4-resign", got)
+	}
+	if got := evt.Payload["aileron.proxy.binding.host"]; got != "s3.amazonaws.test" {
+		t.Errorf("binding.host = %v, want s3.amazonaws.test", got)
+	}
+	sandboxProxyBindingInjectedShape.validate(t, evt.Payload)
+	payloadJSON, _ := json.Marshal(evt.Payload)
+	if strings.Contains(string(payloadJSON), secretAccessKey) {
+		t.Errorf("audit payload leaked the secret access key: %s", payloadJSON)
+	}
+}
+
+// TestSandboxForwardProxy_HostBindingSigV4MissingSecretFailsClosed asserts
+// a sigv4-resign binding whose vault secret is absent fails closed: no
+// upstream dial, a binding_credential_unavailable rejection, and not a
+// passthrough. The missing-required-param fail-closed mode is covered at
+// construction (NewHostBinding rejects it before the table is built).
+func TestSandboxForwardProxy_HostBindingSigV4MissingSecretFailsClosed(t *testing.T) {
 	auditStore := audit.NewMemStore()
 	srv := &apiServer{
 		auditStore:    auditStore,
-		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-scheme" }),
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-sigv4-missing" }),
 		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
-		vault:         mustVaultWith(t, "api_key/github/octocat", "api_key", []byte("hb_secret")),
-		hostBindings:  mustHostBindingTable(t, "api.example.test", "api_key/github/octocat", "sigv4-resign"),
+		vault:         vault.NewMemVault(), // empty: no entry at the ref path
+		hostBindings: mustHostBindingTableOpts(t, "s3.amazonaws.test", "user/aws", "sigv4-resign",
+			binding.WithSigV4Resign("AKIDEXAMPLE", "us-east-1", "s3")),
 		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-			t.Errorf("upstream must not be dialed for an unsupported scheme; got %s", req.URL)
+			t.Errorf("upstream must not be dialed when the secret is missing; got %s", req.URL)
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
 		})},
 	}
 	setup := newHostBindingProxySetup(t, srv)
 
-	resp, err := setup.client.Get("https://api.example.test/v1/resource")
+	resp, err := setup.client.Get("https://s3.amazonaws.test/bucket/key")
 	if err != nil {
 		t.Fatalf("GET through proxy: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode < 500 {
+		t.Fatalf("status = %d, want fail-closed 5xx", resp.StatusCode)
 	}
 	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != hostBindingRejectUnsupportedScheme {
-		t.Errorf("reject_reason = %v, want %q", got, hostBindingRejectUnsupportedScheme)
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != hostBindingRejectCredentialUnavailable {
+		t.Errorf("reject_reason = %v, want %q", got, hostBindingRejectCredentialUnavailable)
 	}
 }
 

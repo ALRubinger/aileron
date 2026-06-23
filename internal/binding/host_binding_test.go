@@ -188,6 +188,60 @@ func TestNewHostBinding_QueryParamRequiresName(t *testing.T) {
 	}
 }
 
+func TestNewHostBinding_SigV4ResignRequiresAllParams(t *testing.T) {
+	// A sigv4-resign binding needs an access key id, region, and service to
+	// produce a well-formed signature, so each missing individually is a
+	// construction error (the acceptance criterion: no invalid binding
+	// reaches the matcher). The secret access key is never a binding param;
+	// it travels in the resolved credential value.
+	missingCases := []struct {
+		name                         string
+		accessKeyID, region, service string
+	}{
+		{"missing access key id", "", "us-east-1", "s3"},
+		{"missing region", "AKIDEXAMPLE", "", "s3"},
+		{"missing service", "AKIDEXAMPLE", "us-east-1", ""},
+	}
+	for _, tc := range missingCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+				binding.WithSigV4Resign(tc.accessKeyID, tc.region, tc.service)); err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+	// Bare sigv4-resign with no options is also rejected.
+	if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign"); err == nil {
+		t.Fatal("expected error for sigv4-resign without params, got nil")
+	}
+
+	hb, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithSigV4Resign("AKIDEXAMPLE", "us-east-1", "s3"))
+	if err != nil {
+		t.Fatalf("unexpected error for valid sigv4-resign: %v", err)
+	}
+	if hb.Scheme != binding.SchemeSigV4Resign {
+		t.Errorf("Scheme = %q, want %q", hb.Scheme, binding.SchemeSigV4Resign)
+	}
+	if hb.AccessKeyID != "AKIDEXAMPLE" || hb.Region != "us-east-1" || hb.Service != "s3" {
+		t.Errorf("sigv4 params = (%q,%q,%q), want (AKIDEXAMPLE,us-east-1,s3)",
+			hb.AccessKeyID, hb.Region, hb.Service)
+	}
+}
+
+func TestWithSigV4Resign_IgnoredByNonSigV4Scheme(t *testing.T) {
+	// The sigv4 params are scheme-specific: a bearer binding that happens to
+	// carry them constructs fine and simply ignores them at egress.
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+		binding.WithSigV4Resign("AKIDEXAMPLE", "us-east-1", "s3"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.Scheme != binding.SchemeBearer {
+		t.Errorf("Scheme = %q, want bearer", hb.Scheme)
+	}
+}
+
 func TestNewHostBinding_RejectsInvalidCredentialRef(t *testing.T) {
 	for _, ref := range []string{"", "not-a-binding-name", "oauth2/github", "../escape/x"} {
 		if _, err := binding.NewHostBinding("api.example.com", ref, "bearer"); err == nil {

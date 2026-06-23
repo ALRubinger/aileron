@@ -87,7 +87,7 @@ The injection scheme set is closed. The five schemes are `bearer`, `basic`, `hea
 
 The concrete header shape is per service, not per scheme alone. The GitHub API takes `bearer`. Git over HTTPS takes `basic`. Linear takes `header-template` with its header written verbatim. The scheme names the mechanism; the service determines the exact wire form.
 
-The initial implementation lands four schemes fully (`bearer`, `basic`, `header-template`, `query-param`) plus `sigv4-resign` as a documented stub pending an AWS-style consumer. This is implementation staging, not a design gap. The design names all five and the stub is filled in when the first SigV4 consumer arrives.
+All five schemes are implemented. The SigV4 signing core is std-library-only, built on `crypto/hmac` and `crypto/sha256`, and pulls in no AWS SDK. A `sigv4-resign` binding carries three non-secret params: the access key id, the region, and the service. These are explicit binding fields and are never inferred from the request host. The bound credential value carries the AWS secret access key, which the signer consumes only as HMAC key material and never writes onto any header, error, or audit surface. Static keys are supported today. Session-token handling via `X-Amz-Security-Token` is a declared follow-up.
 
 #### Emit mechanisms
 
