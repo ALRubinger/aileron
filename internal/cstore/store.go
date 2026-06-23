@@ -298,49 +298,158 @@ func (s *Store) persistIndex() error {
 // commit writes a freshly-extracted tarball into the store at sha256/<hex>/
 // using atomic-rename semantics:
 //
-//   1. Make a unique temp directory under tmp/.
-//   2. Write the three files into it.
-//   3. Rename the temp directory to sha256/<hex>/.
+//  1. Make a unique temp directory under tmp/.
+//  2. Write the three files into it.
+//  3. Rename the temp directory to sha256/<hex>/.
 //
 // Concurrent installs of the same hash converge naturally: rename of a
 // directory onto a non-empty existing directory fails on every Unix, so
 // the loser observes the entry in place and proceeds. The temp directory
 // is cleaned up afterward whether or not the rename succeeded.
 func (s *Store) commit(t *Tarball, ref Ref, hashHex string) error {
-	if err := os.MkdirAll(s.tmpRoot(), 0o755); err != nil {
-		return wrapStoreErr(err)
+	_, _, err := CommitDir(s.connectorsRoot(), hashHex, func(dir string) error {
+		return t.writeTo(dir)
+	})
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(s.sha256Root(), 0o755); err != nil {
-		return wrapStoreErr(err)
+	return s.recordIndex(ref, "sha256:"+hashHex)
+}
+
+// CommitDir atomically publishes a content-addressed directory tree under
+// root at `sha256/<hashHex>/`, reusing the same temp-dir → write →
+// atomic-rename → race-reconcile discipline as the connector store's
+// commit. It is content-agnostic: the caller's write callback populates a
+// fresh temp directory with whatever tree it wants (a connector triple, an
+// unpacked Node distribution, etc.), and CommitDir renames that directory
+// into place.
+//
+// Layout produced under root:
+//
+//	<root>/
+//	  sha256/
+//	    <hashHex>/        (the committed tree)
+//	  tmp/
+//	    <random>/         (transient; renamed atomically into sha256/<hashHex>/)
+//
+// The caller chooses root so independent caches never collide — the
+// connector store passes `<store>/connectors` and the Node distribution
+// cache passes `<store>/node`, so their sha256/ trees stay disjoint.
+//
+// hashHex is the hex SHA-256 of the content being addressed (no `sha256:`
+// prefix). It MUST be a non-empty lowercase hex string with no path
+// separators; CommitDir rejects anything else so a caller can never write
+// outside `<root>/sha256/`.
+//
+// Returns:
+//
+//   - entryDir: the absolute path `<root>/sha256/<hashHex>/`, valid whether
+//     this call created it or found it already present.
+//   - alreadyPresent: true when an entry for hashHex already existed and the
+//     write callback's output was discarded (benign duplicate/concurrent
+//     commit). The store converges because two commits of the same hash
+//     produce identical content by definition.
+//   - err: a structured store-unwritable error on any filesystem failure,
+//     or the callback's own error wrapped the same way.
+//
+// Concurrent commits of the same hash converge naturally: rename of a
+// directory onto an existing non-empty directory fails on every Unix, so
+// the loser observes the entry in place and reports alreadyPresent=true.
+// The temp directory is cleaned up afterward whether or not the rename
+// succeeded.
+func CommitDir(root, hashHex string, write func(dir string) error) (entryDir string, alreadyPresent bool, err error) {
+	if err := validateHashHex(hashHex); err != nil {
+		return "", false, err
+	}
+	sha256Root := filepath.Join(root, "sha256")
+	tmpRoot := filepath.Join(root, "tmp")
+	dst := filepath.Join(sha256Root, hashHex)
+
+	// Fast path: entry already present, skip the write entirely.
+	if _, statErr := os.Stat(dst); statErr == nil {
+		return dst, true, nil
 	}
 
-	tmp, err := uniqueTempDir(s.tmpRoot())
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+		return "", false, wrapStoreErr(err)
+	}
+	if err := os.MkdirAll(sha256Root, 0o755); err != nil {
+		return "", false, wrapStoreErr(err)
+	}
+
+	tmp, err := uniqueTempDir(tmpRoot)
 	if err != nil {
-		return wrapStoreErr(err)
+		return "", false, wrapStoreErr(err)
 	}
 	defer os.RemoveAll(tmp)
 
-	if err := t.writeTo(tmp); err != nil {
-		return wrapStoreErr(err)
+	if err := write(tmp); err != nil {
+		// Preserve a structured error from the callback; wrap a plain one.
+		var sErr *Error
+		if errors.As(err, &sErr) {
+			return "", false, err
+		}
+		return "", false, wrapStoreErr(err)
 	}
 
-	dst := filepath.Join(s.sha256Root(), hashHex)
-	// If a parallel installer already won the race, dst exists. That's
-	// fine — both produced identical bytes (same hash). We can drop our
-	// temp directory and update the index.
+	// If a parallel committer already won the race, dst exists. Both
+	// produced identical bytes (same hash), so we drop our temp directory.
 	if _, err := os.Stat(dst); err == nil {
-		return s.recordIndex(ref, "sha256:"+hashHex)
+		return dst, true, nil
 	}
 	if err := os.Rename(tmp, dst); err != nil {
-		// Concurrent install may have raced and won between the Stat and
+		// Concurrent commit may have raced and won between the Stat and
 		// the Rename. Re-stat: if dst now exists, treat that as a benign
 		// race; otherwise surface the rename error.
 		if _, sErr := os.Stat(dst); sErr == nil {
-			return s.recordIndex(ref, "sha256:"+hashHex)
+			return dst, true, nil
 		}
-		return wrapStoreErr(err)
+		return "", false, wrapStoreErr(err)
 	}
-	return s.recordIndex(ref, "sha256:"+hashHex)
+	return dst, false, nil
+}
+
+// HasDirHash reports whether a content-addressed directory entry for
+// hashHex already exists under root (the companion lookup to CommitDir).
+// hashHex is the hex SHA-256 with no `sha256:` prefix.
+func HasDirHash(root, hashHex string) (bool, error) {
+	if err := validateHashHex(hashHex); err != nil {
+		return false, err
+	}
+	_, err := os.Stat(filepath.Join(root, "sha256", hashHex))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
+// DirEntryDir returns the path `<root>/sha256/<hashHex>/` where a
+// content-addressed directory entry lives, without checking existence.
+func DirEntryDir(root, hashHex string) (string, error) {
+	if err := validateHashHex(hashHex); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "sha256", hashHex), nil
+}
+
+// validateHashHex rejects any hashHex that is empty, non-hex, or contains
+// path separators so a content-addressed commit can never escape its
+// sha256/ subtree.
+func validateHashHex(hashHex string) error {
+	if hashHex == "" {
+		return wrapStoreErr(fmt.Errorf("empty content hash"))
+	}
+	for i := 0; i < len(hashHex); i++ {
+		c := hashHex[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			return wrapStoreErr(fmt.Errorf("invalid content hash %q: expected lowercase hex", hashHex))
+		}
+	}
+	return nil
 }
 
 // uniqueTempDir creates and returns a fresh subdirectory of parent.
