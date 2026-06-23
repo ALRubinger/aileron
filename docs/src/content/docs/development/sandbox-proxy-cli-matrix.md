@@ -25,6 +25,8 @@ Each CLI has two properties that govern how Aileron seals its traffic. These are
 - The `inject` mechanism: the launcher plants no token. The client emits an unauthenticated request, and the proxy injects the bound credential unconditionally at egress. `curl` issues the request with no token. `git`-over-HTTPS issues an unauthenticated request because the launcher mounts a no-op credential helper.
 - The `sentinel-swap` mechanism: the launcher plants a non-secret, format-mimicking sentinel token. Some clients short-circuit locally when they hold no token, so they never issue the request and there is nothing for the proxy to seal. The sentinel makes the client treat itself as authenticated and issue the request. The proxy then swaps the sentinel for the real credential at egress. The proxy swaps only the sentinel it itself planted. A foreign token on a `sentinel-swap` host is forwarded unchanged. See [ADR-0019](/adr/0019-v4-https-data-plane/).
 
+Note: `aws`'s `emit-mechanism` is placeholder-plant plus `sigv4-resign`. The launcher plants placeholder static credentials so botocore signs locally, then the proxy strips that signature and re-signs with the real secret at egress. This is distinct from the unauthenticated-emit `inject` case above, where the client emits no token at all. The table marks `aws` as `inject` to keep the column to two canonical values, and the `aws` section below documents the `sigv4-resign` scheme in full.
+
 ## What the proxy guarantees
 
 When you call an installed connector operation through the proxy:
@@ -262,7 +264,7 @@ The target is fail-fast and requires both `curl` and `aws` on PATH. It does not 
 
 A `curl`-driven Go integration test lives at `internal/app/sandbox_proxy_curl_integration_test.go`. The test stands up a fake HTTPS upstream, runs `curl` as a host subprocess pointed at the in-process proxy with a generated session CA, and asserts:
 
-1. `curl` honors the `HTTPS_PROXY` env var (proves env-driven configuration works for the canonical case).
+1. `curl` performs CONNECT-based HTTPS interception through the proxy. The test runs `curl` with the `--proxy` flag and an empty environment (no `HTTPS_PROXY` set), so it proves the proxy intercepts a CONNECT tunnel and seals the TLS stream. The env-driven `HTTPS_PROXY` + `AWS_CA_BUNDLE` configuration path is proven separately by the `aws` test below.
 2. The proxy injects the credential at the boundary (the fake upstream sees `Authorization: Bearer <secret>`, never the `curl` invocation).
 3. The container's `curl` invocation does not carry the credential (proves credential isolation).
 4. A `connector.proxy.proxied` audit event is emitted with the matched connector FQN, tool, operation, upstream host (not URL), and `aileron.connector.boundary: https_proxy`.
