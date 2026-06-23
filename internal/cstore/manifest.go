@@ -124,12 +124,24 @@ type ManifestNetwork struct {
 // placeholder is substituted with the bound credential's value. Only
 // consulted when `Kind == "api_key"` (OAuth2 access tokens have an RFC-
 // fixed `Bearer` wire format and ignore these fields).
+//
+// `Region`, `Service`, and `AccessKeyID` are optional, aws_sigv4-specific
+// knobs that supply the non-secret inputs to AWS Signature Version 4
+// request signing (`internal/credential/inject`). They are required when
+// `Kind == "aws_sigv4"` and rejected on every other kind. None of the
+// three is secret: AccessKeyID appears verbatim in the `Credential=`
+// field of the signed `Authorization` header, and Region/Service form the
+// public credential scope. The bound vault credential's value is the AWS
+// secret access key and is never named in the manifest.
 type ManifestCredential struct {
-	Kind   string          `toml:"kind"`
-	Scope  string          `toml:"scope"`
-	Header string          `toml:"header,omitempty"`
-	Format string          `toml:"format,omitempty"`
-	OAuth2 *ManifestOAuth2 `toml:"oauth2,omitempty"`
+	Kind        string          `toml:"kind"`
+	Scope       string          `toml:"scope"`
+	Header      string          `toml:"header,omitempty"`
+	Format      string          `toml:"format,omitempty"`
+	Region      string          `toml:"region,omitempty"`
+	Service     string          `toml:"service,omitempty"`
+	AccessKeyID string          `toml:"access_key_id,omitempty"`
+	OAuth2      *ManifestOAuth2 `toml:"oauth2,omitempty"`
 }
 
 // ManifestOAuth2 is `[capabilities.credential.oauth2]` — the OAuth
@@ -448,6 +460,11 @@ const CredentialKindOAuth2 = "oauth2"
 // CredentialKindAPIKey names the API-key credential kind.
 const CredentialKindAPIKey = "api_key"
 
+// CredentialKindAWSSigV4 names the AWS Signature Version 4 credential
+// kind. The bound vault value is the secret access key; the non-secret
+// inputs (region, service, access key id) come from the manifest.
+const CredentialKindAWSSigV4 = "aws_sigv4"
+
 // validateCredential enforces the v1 closed set of credential kinds
 // and the kind-specific manifest requirements documented in ADR-0002.
 //
@@ -457,8 +474,12 @@ const CredentialKindAPIKey = "api_key"
 //     required and must declare authorize_url, token_url, client_id,
 //     and at least one scope. URL fields must be valid `https://`
 //     URLs.
+//   - kind = "aws_sigv4": `region`, `service`, and `access_key_id` are
+//     all required (they are the non-secret SigV4 signing inputs); the
+//     api_key-only `header`/`format` knobs and the
+//     `[capabilities.credential.oauth2]` table must be absent.
 //
-// Other kinds are rejected at install time. Kinds outside the v1 set
+// Other kinds are rejected at install time. Kinds outside the closed set
 // (basic, x509, etc.) are post-MVP and require an ADR amendment.
 func validateCredential(c *ManifestCredential, file string) error {
 	switch c.Kind {
@@ -518,10 +539,62 @@ func validateCredential(c *ManifestCredential, file string) error {
 				"[capabilities.credential].format is only valid when kind = %q", CredentialKindAPIKey)
 		}
 		return validateOAuth2(c.OAuth2, file)
+	case CredentialKindAWSSigV4:
+		// `region`, `service`, and `access_key_id` are the non-secret
+		// inputs to SigV4 signing. All three are required: signing fails
+		// without any of them, so reject at install rather than at the
+		// first signed request. The secret access key is bound from the
+		// vault, never declared here.
+		if strings.TrimSpace(c.Region) == "" {
+			return newValidationErr(file,
+				"[capabilities.credential].region is required when kind = %q", c.Kind)
+		}
+		if strings.TrimSpace(c.Service) == "" {
+			return newValidationErr(file,
+				"[capabilities.credential].service is required when kind = %q", c.Kind)
+		}
+		if strings.TrimSpace(c.AccessKeyID) == "" {
+			return newValidationErr(file,
+				"[capabilities.credential].access_key_id is required when kind = %q", c.Kind)
+		}
+		// region, service, and access_key_id are emitted verbatim into the
+		// SigV4 `Authorization` header (the credential scope and
+		// `Credential=` field). A CR/LF in any of them would corrupt HTTP
+		// framing or smuggle a header once injected — net/http's
+		// Header.Set does not sanitize the value. Fail closed at install,
+		// mirroring the api_key `format` newline check.
+		for _, f := range []struct {
+			name, value string
+		}{
+			{"region", c.Region},
+			{"service", c.Service},
+			{"access_key_id", c.AccessKeyID},
+		} {
+			if strings.ContainsAny(f.value, "\r\n") {
+				return newValidationErr(file,
+					"[capabilities.credential].%s must not contain newline characters", f.name)
+			}
+		}
+		// `header`/`format` are api_key-specific and the oauth2 table is
+		// oauth2-specific; none shapes the SigV4 wire format. Reject them
+		// so a manifest can't imply a knob that the SigV4 path ignores.
+		if c.Header != "" {
+			return newValidationErr(file,
+				"[capabilities.credential].header is only valid when kind = %q", CredentialKindAPIKey)
+		}
+		if c.Format != "" {
+			return newValidationErr(file,
+				"[capabilities.credential].format is only valid when kind = %q", CredentialKindAPIKey)
+		}
+		if c.OAuth2 != nil {
+			return newValidationErr(file,
+				"[capabilities.credential.oauth2] must be absent when kind = %q", c.Kind)
+		}
+		return nil
 	default:
 		return newValidationErr(file,
-			"[capabilities.credential].kind %q is not in the v1 closed set (%q, %q)",
-			c.Kind, CredentialKindAPIKey, CredentialKindOAuth2)
+			"[capabilities.credential].kind %q is not in the closed set (%q, %q, %q)",
+			c.Kind, CredentialKindAPIKey, CredentialKindOAuth2, CredentialKindAWSSigV4)
 	}
 }
 

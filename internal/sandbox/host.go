@@ -16,6 +16,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 
 	"github.com/ALRubinger/aileron/internal/credential"
+	"github.com/ALRubinger/aileron/internal/credential/inject"
+	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
 // HTTPDoer is the narrow HTTP-client surface the sandbox needs. It
@@ -70,6 +72,16 @@ type hostState struct {
 	// wire format.
 	credentialHeader string
 	credentialFormat string
+
+	// credentialRegion, credentialService, and credentialAccessKeyID are
+	// the manifest's `[capabilities.credential].region` / `.service` /
+	// `.access_key_id` fields, only consulted for aws_sigv4 credentials.
+	// They are the non-secret SigV4 signing inputs; the secret access key
+	// arrives separately from the credential resolver. Empty for every
+	// other kind.
+	credentialRegion      string
+	credentialService     string
+	credentialAccessKeyID string
 
 	// credentialResolver is the per-Invoke handle the host uses to
 	// fetch a bound credential when the connector's http_request
@@ -463,6 +475,35 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 	case "api_key":
 		header, format := apiKeyInjection(s.credentialHeader, s.credentialFormat)
 		req.Header.Set(header, strings.ReplaceAll(format, "{key}", string(cred.Value)))
+	case cstore.CredentialKindAWSSigV4:
+		// Re-sign the request with AWS Signature Version 4 via the shared
+		// signer. The signer buffers and restores req.Body for the payload
+		// hash, so the body survives to the outbound dial; the host must
+		// not consume it beforehand (the request was built with a
+		// re-readable bytes.Reader over the envelope body). The secret
+		// access key (cred.Value) is used only as HMAC key material and
+		// never appears in the resulting header — nor in any error below.
+		params := inject.Params{
+			AccessKeyID: s.credentialAccessKeyID,
+			Region:      s.credentialRegion,
+			Service:     s.credentialService,
+		}
+		if injErr := inject.Inject(req, inject.SchemeSigV4Resign, cred.Value, params); injErr != nil {
+			// Fail closed. A missing required param is a manifest/runtime
+			// configuration defect (capability_denied); anything else is a
+			// signing-time runtime failure. Neither path echoes cred.Value.
+			if errors.Is(injErr, inject.ErrMissingParam) {
+				return newCapabilityDenied(
+					"http_request: aws_sigv4 signing inputs incomplete (region, service, and access_key_id are required)",
+					map[string]any{
+						"connector":       s.connectorFQN,
+						"capability_kind": cred.Kind,
+						"boundary_detail": "connector_manifest",
+					})
+			}
+			return newConnectorRuntimeError(fmt.Sprintf(
+				"http_request: aws_sigv4 sign: %s", injErr.Error()))
+		}
 	default:
 		return newCapabilityDenied(
 			"http_request: unsupported credential kind for v1 injection",

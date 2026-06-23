@@ -1,8 +1,12 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -289,21 +293,135 @@ func TestInjectCredential_OAuth2IgnoresFormatOverride(t *testing.T) {
 }
 
 func TestInjectCredential_UnsupportedKindIsDenied(t *testing.T) {
-	// A vault entry whose kind passed validation but isn't in the v1
-	// closed set ("oauth2"/"api_key") cannot be wired into a request —
-	// return capability_denied rather than silently dropping or
-	// guessing the header. SigV4 etc. land in a follow-up issue.
+	// A vault entry whose kind isn't in the host-injection closed set
+	// ("oauth2"/"api_key"/"aws_sigv4") cannot be wired into a request —
+	// return capability_denied rather than silently dropping or guessing
+	// the header. "basic" is a recognized post-MVP kind that the host
+	// injection path does not yet implement, so it exercises the
+	// default-arm denial without colliding with a supported kind.
 	st := &hostState{
 		connectorFQN:           "github://x/y",
-		expectedCredentialKind: "sigv4",
+		expectedCredentialKind: "basic",
 		credentialResolver: &stubResolver{
-			cred: credential.Credential{Kind: "sigv4", Value: []byte("AKIA...")},
+			cred: credential.Credential{Kind: "basic", Value: []byte("user:pass")},
 		},
 	}
 	req, _ := http.NewRequest("GET", "https://example.com", nil)
-	err := injectCredential(context.Background(), st, req, "sigv4")
+	err := injectCredential(context.Background(), st, req, "basic")
 	if err == nil {
 		t.Fatal("expected denial for unsupported kind")
+	}
+	if err.Class != ClassCapabilityDenied {
+		t.Errorf("class = %s, want capability_denied", err.Class)
+	}
+}
+
+func TestInjectCredential_AWSSigV4SignsRequest(t *testing.T) {
+	// aws_sigv4 with valid params and a bound secret access key produces
+	// a structurally valid SigV4 Authorization header plus the canonical
+	// X-Amz-Date / X-Amz-Content-Sha256 headers. Exact-vector signing is
+	// covered by the inject package's own tests; here we assert the host
+	// dispatch routes through the shared signer.
+	st := &hostState{
+		connectorFQN:           "github://acme/s3",
+		expectedCredentialKind: cstore.CredentialKindAWSSigV4,
+		credentialRegion:       "us-east-1",
+		credentialService:      "s3",
+		credentialAccessKeyID:  "AKIAIOSFODNN7EXAMPLE",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{
+				Kind:  cstore.CredentialKindAWSSigV4,
+				Value: []byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+			},
+		},
+	}
+	req, _ := http.NewRequest("GET", "https://s3.amazonaws.com/bucket/key", nil)
+	if err := injectCredential(context.Background(), st, req, cstore.CredentialKindAWSSigV4); err != nil {
+		t.Fatalf("expected success; got %v", err)
+	}
+	auth := req.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256") {
+		t.Errorf("Authorization = %q, want AWS4-HMAC-SHA256 prefix", auth)
+	}
+	if !strings.Contains(auth, "Credential=AKIAIOSFODNN7EXAMPLE/") {
+		t.Errorf("Authorization = %q, want it to carry the access key id in Credential=", auth)
+	}
+	if req.Header.Get("X-Amz-Date") == "" {
+		t.Error("X-Amz-Date header not set")
+	}
+	if req.Header.Get("X-Amz-Content-Sha256") == "" {
+		t.Error("X-Amz-Content-Sha256 header not set")
+	}
+}
+
+func TestInjectCredential_AWSSigV4DeniedOnMissingParams(t *testing.T) {
+	// When a required signing input is empty at injection time the host
+	// fails closed with capability_denied, and the secret access key must
+	// never appear in the error message or details.
+	const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	cases := []struct {
+		name        string
+		region      string
+		service     string
+		accessKeyID string
+	}{
+		{"missing region", "", "s3", "AKIA"},
+		{"missing service", "us-east-1", "", "AKIA"},
+		{"missing access key id", "us-east-1", "s3", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &hostState{
+				connectorFQN:           "github://acme/s3",
+				expectedCredentialKind: cstore.CredentialKindAWSSigV4,
+				credentialRegion:       tc.region,
+				credentialService:      tc.service,
+				credentialAccessKeyID:  tc.accessKeyID,
+				credentialResolver: &stubResolver{
+					cred: credential.Credential{
+						Kind:  cstore.CredentialKindAWSSigV4,
+						Value: []byte(secret),
+					},
+				},
+			}
+			req, _ := http.NewRequest("GET", "https://s3.amazonaws.com/bucket/key", nil)
+			err := injectCredential(context.Background(), st, req, cstore.CredentialKindAWSSigV4)
+			if err == nil {
+				t.Fatalf("expected denial for %s", tc.name)
+			}
+			if err.Class != ClassCapabilityDenied {
+				t.Errorf("class = %s, want capability_denied", err.Class)
+			}
+			if strings.Contains(err.Message, secret) {
+				t.Errorf("error message leaked the secret access key: %q", err.Message)
+			}
+			for k, v := range err.Details {
+				if s, ok := v.(string); ok && strings.Contains(s, secret) {
+					t.Errorf("error detail %q leaked the secret access key: %q", k, s)
+				}
+			}
+			// The request must be left unsigned on failure.
+			if req.Header.Get("Authorization") != "" {
+				t.Errorf("Authorization set on failed signing: %q", req.Header.Get("Authorization"))
+			}
+		})
+	}
+}
+
+func TestInjectCredential_AWSSigV4KindMismatchDenied(t *testing.T) {
+	// The manifest declares aws_sigv4 but the envelope asks for a
+	// different kind — the pre-switch guard denies before any signing.
+	st := &hostState{
+		connectorFQN:           "github://acme/s3",
+		expectedCredentialKind: cstore.CredentialKindAWSSigV4,
+		credentialRegion:       "us-east-1",
+		credentialService:      "s3",
+		credentialAccessKeyID:  "AKIA",
+	}
+	req, _ := http.NewRequest("GET", "https://s3.amazonaws.com", nil)
+	err := injectCredential(context.Background(), st, req, "oauth2")
+	if err == nil {
+		t.Fatal("expected denial on kind mismatch")
 	}
 	if err.Class != ClassCapabilityDenied {
 		t.Errorf("class = %s, want capability_denied", err.Class)
@@ -350,13 +468,94 @@ func TestHostHTTPRequest_CredentialInjectionEndToEnd(t *testing.T) {
 	}
 }
 
+// TestHostHTTPRequest_AWSSigV4BodySurvivesRewind is the rewind
+// regression for the WASM connector SigV4 path. The shared signer reads
+// req.Body fully to compute the payload hash, then restores it; this test
+// proves (a) the upstream still receives the complete body after signing
+// and (b) the X-Amz-Content-Sha256 the signer set equals SHA-256 of the
+// body the upstream actually read — i.e. rewind happened and the payload
+// hash is over the real bytes. Mirrors how hostHTTPRequest builds the
+// request: a POST with a non-empty body via a re-readable bytes.Reader.
+func TestHostHTTPRequest_AWSSigV4BodySurvivesRewind(t *testing.T) {
+	const body = `{"Bucket":"my-bucket","Key":"objects/report.json"}`
+
+	var (
+		gotBody       []byte
+		gotContentSha string
+		gotAuth       string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotContentSha = r.Header.Get("X-Amz-Content-Sha256")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	host := httpHostFromURL(srv.URL)
+	manifest := &cstore.Manifest{
+		Connector: cstore.ManifestConnector{Name: "github://acme/s3", Version: "1.0.0"},
+		Capabilities: cstore.ManifestCapabilities{
+			Network: &cstore.ManifestNetwork{Hosts: []string{host}},
+			Credential: &cstore.ManifestCredential{
+				Kind:        cstore.CredentialKindAWSSigV4,
+				Region:      "us-east-1",
+				Service:     "s3",
+				AccessKeyID: "AKIAIOSFODNN7EXAMPLE",
+			},
+		},
+	}
+	st := &hostState{
+		policy:                 NewHostPolicy(manifest),
+		doer:                   srv.Client(),
+		connectorFQN:           manifest.Connector.Name,
+		expectedCredentialKind: cstore.CredentialKindAWSSigV4,
+		credentialRegion:       "us-east-1",
+		credentialService:      "s3",
+		credentialAccessKeyID:  "AKIAIOSFODNN7EXAMPLE",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{
+				Kind:  cstore.CredentialKindAWSSigV4,
+				Value: []byte("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+			},
+		},
+	}
+
+	if err := callHTTPRequestBodyForTest(st, http.MethodPost, srv.URL+"/bucket", body, cstore.CredentialKindAWSSigV4); err != nil {
+		t.Fatalf("http_request: %v", err)
+	}
+
+	if string(gotBody) != body {
+		t.Errorf("upstream body = %q, want %q (body did not survive signing rewind)", string(gotBody), body)
+	}
+	wantSha := fmt.Sprintf("%x", sha256.Sum256(gotBody))
+	if gotContentSha != wantSha {
+		t.Errorf("X-Amz-Content-Sha256 = %q, want sha256(body) = %q", gotContentSha, wantSha)
+	}
+	if !strings.HasPrefix(gotAuth, "AWS4-HMAC-SHA256") {
+		t.Errorf("upstream Authorization = %q, want AWS4-HMAC-SHA256 prefix", gotAuth)
+	}
+}
+
 // callHTTPRequestForTest mimics what hostHTTPRequest does after
 // envelope decoding, so the test can drive the credential-injection
 // branch without the WASM round-trip. Centralising the dialing path
 // here keeps the assertion focused on whether the header reaches the
 // upstream.
 func callHTTPRequestForTest(s *hostState, url, credentialKind string) *Error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	return callHTTPRequestBodyForTest(s, http.MethodGet, url, "", credentialKind)
+}
+
+// callHTTPRequestBodyForTest is callHTTPRequestForTest with an explicit
+// method and request body, built the same way hostHTTPRequest builds it
+// (a re-readable bytes.Reader over the body) so the credential-injection
+// branch sees a body it can buffer and restore.
+func callHTTPRequestBodyForTest(s *hostState, method, url, body, credentialKind string) *Error {
+	var reqBody io.Reader
+	if body != "" {
+		reqBody = bytes.NewReader([]byte(body))
+	}
+	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
 		return newConnectorRuntimeError(err.Error())
 	}
