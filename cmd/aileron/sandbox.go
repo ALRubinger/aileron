@@ -15,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	sandboxtoolchain "github.com/ALRubinger/aileron/internal/sandbox/toolchain"
 	"github.com/ALRubinger/aileron/internal/version"
 )
 
@@ -213,11 +214,14 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
 	tag := flags.String("tag", "", "Override the image tag to build")
+	toolchain := flags.String("toolchain", sandboxcontainer.ToolchainModeAuto, "Features-build toolchain: host-npx (default) or managed")
+	node := flags.String("node", "", "Managed-toolchain escape hatch: path to a Node binary (with --devcontainer-cli)")
+	devcontainerCLI := flags.String("devcontainer-cli", "", "Managed-toolchain escape hatch: path to the @devcontainers/cli entrypoint (with --node)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>] [--toolchain=host-npx|managed] [--node=<path> --devcontainer-cli=<path>]")
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -230,10 +234,14 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	toolchainMode, nodeBinary, cliEntrypoint := sandboxcontainer.ResolveToolchainSelection(*toolchain, *node, *devcontainerCLI, os.Getenv)
 	result, err := sandboxBuildFn(context.Background(), *runtimeName, stdout, stderr, sandboxcontainer.BuildOptions{
-		WorkDir: cwd,
-		Plan:    plan,
-		Tag:     *tag,
+		WorkDir:                   cwd,
+		Plan:                      plan,
+		Tag:                       *tag,
+		ToolchainMode:             toolchainMode,
+		NodeBinary:                nodeBinary,
+		DevcontainerCLIEntrypoint: cliEntrypoint,
 	})
 	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		fmt.Fprintf(stdout, "tier: %s\n", result.Tier)
@@ -258,11 +266,14 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
 	buildPolicy := flags.String("build", sandboxcontainer.BuildPolicyAuto, "Build policy: auto, always, or never")
 	agent := flags.String("agent", "", "Agent command to validate in the sandbox image")
+	toolchain := flags.String("toolchain", sandboxcontainer.ToolchainModeAuto, "Features-build toolchain: host-npx (default) or managed")
+	node := flags.String("node", "", "Managed-toolchain escape hatch: path to a Node binary (with --devcontainer-cli)")
+	devcontainerCLI := flags.String("devcontainer-cli", "", "Managed-toolchain escape hatch: path to the @devcontainers/cli entrypoint (with --node)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() > 1 || (*agent != "" && flags.NArg() != 0) {
-		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [command]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [--toolchain=host-npx|managed] [--node=<path> --devcontainer-cli=<path>] [command]")
 		return 1
 	}
 	command := *agent
@@ -296,10 +307,14 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	toolchainMode, nodeBinary, cliEntrypoint := sandboxcontainer.ResolveToolchainSelection(*toolchain, *node, *devcontainerCLI, os.Getenv)
 	result, err := sandboxCheckBuildFn(context.Background(), *runtimeName, stdout, stderr, sandboxcontainer.BuildOptions{
-		WorkDir: cwd,
-		Plan:    plan,
-		Policy:  *buildPolicy,
+		WorkDir:                   cwd,
+		Plan:                      plan,
+		Policy:                    *buildPolicy,
+		ToolchainMode:             toolchainMode,
+		NodeBinary:                nodeBinary,
+		DevcontainerCLIEntrypoint: cliEntrypoint,
 	})
 	if err != nil && !errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		fmt.Fprintf(stderr, "error: %s\n", sandboxCheckError(err))
@@ -351,11 +366,20 @@ func sandboxCheckError(err error) string {
 }
 
 var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stderr io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
-	return sandboxcontainer.Builder{
+	builder := sandboxcontainer.Builder{
 		Runtime: runtimeName,
 		Stdout:  stdout,
 		Stderr:  stderr,
-	}.Build(ctx, opts)
+	}
+	// Attach the real managed-toolchain provisioner only when the build selects
+	// the managed toolchain, so the host-npx default never carries a provisioner
+	// (preserving its no-network/no-provision contract). The container Builder
+	// consults the provisioner only on the managed branch and only when the
+	// escape hatch is absent.
+	if sandboxcontainer.IsManagedToolchain(opts.ToolchainMode) {
+		builder.Provisioner = sandboxtoolchain.Provisioner{}
+	}
+	return builder.Build(ctx, opts)
 }
 
 var sandboxCheckBuildFn = sandboxBuildFn

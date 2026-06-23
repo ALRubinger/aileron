@@ -110,6 +110,31 @@ task generate:tools-lock VERSION=22.14.0
 
 The generator (`internal/tools/toolslock`) resolves each supported platform's archive sha256 from Node's published `SHASUMS256.txt` and writes the lockfile in canonical form. It does not verify the detached GPG signature on that file; the signature-verified fetch pipeline is a separate concern under #1525. The generated file is deterministic, so a regenerate with no version change is a no-op diff. A test asserts the committed lockfile is canonical, so a hand-edit or a stale regenerate fails CI.
 
+## Managed Toolchain Build
+
+A Tier 1 devcontainer that declares `features` cannot be built with raw `docker build`, so Aileron routes it through `@devcontainers/cli`, which needs a Node runtime. By default Aileron resolves both through the host's `npx` (`npx --yes @devcontainers/cli@<pinned>`), so the host must have Node installed. The managed toolchain removes that host prerequisite: Aileron provisions a verified, pinned Node and the pinned CLI itself, leaving Docker as the only host prerequisite for a Features build.
+
+Select the managed toolchain on a Features build with the `--toolchain` flag:
+
+```bash
+aileron sandbox build --toolchain=managed
+aileron sandbox check --toolchain=managed --agent=claude
+```
+
+The same selection is available through the `AILERON_SANDBOX_TOOLCHAIN` environment variable, which `aileron launch` also reads. Precedence is flag, then environment, then the default. The default is host-npx in this release; a later change flips the default to managed ([#1530](https://github.com/ALRubinger/aileron/issues/1530)).
+
+On first managed build Aileron fetches the pinned Node distribution into a content-addressed cache, verifies it against `tools.lock.json` at the network boundary, and installs the pinned `@devcontainers/cli` into the same cache. Both steps are keyed by their pins, so subsequent builds reuse the cache without re-downloading. Only the host-npx and managed argv prefixes differ between the two paths; the `build --workspace-folder … --image-name … --build-arg …` tail is identical.
+
+For a hermetic or offline host, point Aileron at a pre-staged Node binary and CLI entrypoint with the escape hatch, which skips provisioning entirely:
+
+```bash
+aileron sandbox build --toolchain=managed \
+  --node=/opt/node/bin/node \
+  --devcontainer-cli=/opt/devcontainer-cli/devcontainer.js
+```
+
+The escape hatch is also available through `AILERON_SANDBOX_NODE` and `AILERON_DEVCONTAINER_CLI`. Both paths must be supplied together and must exist on disk; a half-configured escape hatch is rejected rather than partially provisioned.
+
 ## Claude Code Feature
 
 The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
