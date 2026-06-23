@@ -1,18 +1,18 @@
 ---
 title: "v4 Manual Acceptance Runbook"
-description: "The hands-on steps a person runs to confirm Aileron's containerized runtime works end to end on macOS and Windows: launch an agent in the sandbox and watch it use a real Aileron tool."
+description: "The hands-on steps a person runs to confirm Aileron's containerized runtime works end to end on macOS, Windows, and Linux (Fedora): launch an agent in the sandbox and watch it use a real Aileron tool."
 order: 11
 ---
 
 This is the checklist a person runs by hand to confirm v4 works end to end. v4 ships Aileron as a containerized runtime: the AI agent runs inside a Docker sandbox, and Aileron mediates every real-world action it takes (approvals, credentials, audit) at the edge of that container.
 
-We prove this automatically on Linux in CI, so you never run the Linux column by hand. GitHub's macOS and Windows runners can't run Linux Docker containers, so a person has to confirm those two by hand. That's what this page is for.
+v4 supports two agents — Claude and Codex — on three host targets: macOS, Windows, and Linux (Fedora). Each of those three is confirmed by hand. CI exercises the container path on Ubuntu Linux, but that does not cover Fedora, and GitHub's macOS and Windows runners can't run Linux Docker containers at all. That's what this page is for.
 
 The full "is v4 done?" picture lives in [issue #747](https://github.com/ALRubinger/aileron/issues/747); you record the results of this runbook in [issue #962](https://github.com/ALRubinger/aileron/issues/962).
 
 ## What you're checking, in one sentence
 
-For each agent on macOS and on Windows: **the agent launches inside the Docker sandbox and can see the `aileron` tool, including `draft_email`.**
+For each agent on macOS, on Windows, and on Linux (Fedora): **the agent launches inside the Docker sandbox and can see the `aileron` tool, including `draft_email`.**
 
 If it sees the tool, the whole runtime is wired: the container started, Aileron is reachable from inside it, and the agent's tool catalog is coming from Aileron. That single check is the bar for a cell.
 
@@ -22,7 +22,7 @@ Once per operating system, on at least one agent, also run the optional full rou
 
 You need:
 
-- **Docker** installed and running. Docker Desktop on both macOS and Windows runs the same Linux sandbox image (Windows uses its WSL2 backend), so the steps are identical on both.
+- **Docker** installed and running. Docker Desktop on macOS and Windows runs the same Linux sandbox image (Windows uses its WSL2 backend), and Fedora runs it natively via the Docker Engine, so the steps are identical on all three.
 - A build of the `aileron` CLI on your `PATH` (see [Step 1](#step-1-build-and-install-aileron)).
 - A Google account, for the action the smoke uses.
 - `jq` on your `PATH`, only if you run the optional round-trip in Step 6.
@@ -57,7 +57,7 @@ On a fresh machine this prompts you to create a vault passphrase, trust the publ
 `aileron launch` runs the agent inside a Docker sandbox by default. Pick the agent you're checking and launch it:
 
 ```bash
-AGENT=claude   # one of: claude | pi | goose | opencode | codex
+AGENT=claude   # one of: claude | codex
 aileron launch "$AGENT"
 ```
 
@@ -73,9 +73,6 @@ This is the check. How you list tools depends on the agent:
 |---|---|
 | Claude | Type `/mcp`. Expect one server named `aileron`. Look for `draft_email`. |
 | Codex | Type `/mcp`. Same as Claude. |
-| Pi | Ask the agent to list its available tools, or just make a draft request (Step 6) and confirm it uses the Aileron tool. |
-| Goose | Same as Pi. |
-| OpenCode | Same as Pi. |
 
 If the agent lists `aileron` with `draft_email`, **this cell passes.** Exit the agent.
 
@@ -87,15 +84,12 @@ Record each agent you checked, per operating system, in [issue #962](https://git
 
 The matrix you're filling:
 
-| Agent ↓ / OS → | macOS (by hand) | Linux (automatic, CI) | Windows (by hand) |
+| Agent ↓ / OS → | macOS | Linux (Fedora) | Windows |
 |---|---|---|---|
-| Claude | ☐ | ✅ CI | ☐ |
-| Pi | ☐ | ✅ CI | ☐ |
-| Goose | ☐ | ✅ CI | ☐ |
-| OpenCode | ☐ | ✅ CI | ☐ |
-| Codex | ☐ | ✅ CI | ☐ |
+| Claude | ☐ | ☐ | ☐ |
+| Codex | ☐ | ☐ | ☐ |
 
-The Linux column is green whenever CI is green; you never fill it by hand.
+Every cell is filled by hand. CI's Ubuntu run does not stand in for any of these three columns.
 
 ## Step 6 (optional): prove a real action end to end
 
@@ -125,11 +119,11 @@ If the draft appears in Gmail and the audit log shows the approval and execution
 
 ## Current status
 
-**v4 is not yet fully delivered.** Everything in the v4 bar is built and the Linux column is automated and green. What remains is the hands-on confirmation on macOS and Windows (this runbook) plus the demo recording, both tracked under [#747](https://github.com/ALRubinger/aileron/issues/747):
+**v4 is not yet fully delivered.** Everything in the v4 bar is built and CI's Ubuntu container run is green. What remains is the hands-on confirmation of Claude and Codex on macOS, Windows, and Linux (Fedora) (this runbook) plus the demo recording, both tracked under [#747](https://github.com/ALRubinger/aileron/issues/747):
 
 | Remaining item | Status |
 |---|---|
-| macOS + Windows manual smoke, per agent ([#962](https://github.com/ALRubinger/aileron/issues/962)) | In progress. Claude on macOS has a full round-trip done; the rest are pending. |
+| macOS, Windows, and Linux (Fedora) manual smoke, for Claude and Codex ([#962](https://github.com/ALRubinger/aileron/issues/962)) | In progress. Linux (Fedora) is confirmed for both agents, and Claude on macOS has a full round-trip done; Codex on macOS and both agents on Windows are pending. |
 | Demo script + recorded walkthrough ([#852](https://github.com/ALRubinger/aileron/issues/852)) | Pending. |
 
 ## Related pages
