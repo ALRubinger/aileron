@@ -333,8 +333,8 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if err != nil {
 			return BuildResult{}, err
 		}
-		if err := runner.Run(ctx, runtimeName, args, stdout, stderr); err != nil {
-			return BuildResult{}, fmt.Errorf("%s %s: %w", runtimeName, strings.Join(args, " "), err)
+		if err := runBuildStep(ctx, runner, runtimeName, args, stdout, stderr); err != nil {
+			return BuildResult{}, err
 		}
 		result.Built = true
 		return result, nil
@@ -374,8 +374,8 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			if err != nil {
 				return BuildResult{}, err
 			}
-			if err := runner.Run(ctx, name, args, stdout, stderr); err != nil {
-				return BuildResult{}, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+			if err := runBuildStep(ctx, runner, name, args, stdout, stderr); err != nil {
+				return BuildResult{}, err
 			}
 			result.Built = true
 			return result, nil
@@ -384,8 +384,8 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if err != nil {
 			return BuildResult{}, err
 		}
-		if err := runner.Run(ctx, runtimeName, args, stdout, stderr); err != nil {
-			return BuildResult{}, fmt.Errorf("%s %s: %w", runtimeName, strings.Join(args, " "), err)
+		if err := runBuildStep(ctx, runner, runtimeName, args, stdout, stderr); err != nil {
+			return BuildResult{}, err
 		}
 		result.Built = true
 		return result, nil
@@ -420,8 +420,8 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		}
 		// BuildPolicyAuto with the image absent, or BuildPolicyAlways: pull it.
 		pullArgs := []string{"pull", result.Image}
-		if err := runner.Run(ctx, runtimeName, pullArgs, stdout, stderr); err != nil {
-			return BuildResult{}, fmt.Errorf("%s %s: %w", runtimeName, strings.Join(pullArgs, " "), err)
+		if err := runBuildStep(ctx, runner, runtimeName, pullArgs, stdout, stderr); err != nil {
+			return BuildResult{}, err
 		}
 		return result, nil
 	case composition.TierBYOImage:
@@ -430,6 +430,56 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	default:
 		return BuildResult{}, fmt.Errorf("unsupported sandbox composition tier %q", opts.Plan.Tier)
 	}
+}
+
+// daemonUnreachableMessage is the friendly headline surfaced when a sandbox
+// build/pull fails because the container daemon could not be reached (Docker
+// Desktop not running, the npipe/socket absent). The underlying technical
+// error is still chained via %w so the raw transport diagnostic remains
+// available for deeper troubleshooting; it is just no longer the headline.
+const daemonUnreachableMessage = "Docker isn't reachable; make sure Docker Desktop is running and available, then try again"
+
+// runBuildStep runs a single container build/pull command and translates a
+// daemon-unreachable failure into a friendly headline. It mirrors the
+// tee-and-translate convention StopContainer and Validate already use: the
+// runtime's stderr is teed into a buffer so the failure cause can be inspected
+// without swallowing the live output the user sees. On a daemon-unreachable
+// signature the returned error leads with daemonUnreachableMessage while still
+// chaining the original `<runtime> <args>: <exit>` error via %w, so
+// errors.Is/Unwrap continue to expose the underlying diagnostic. All other
+// failures keep the established `%s %s: %w` framing verbatim.
+func runBuildStep(ctx context.Context, runner Runner, runtimeName string, args []string, stdout, stderr io.Writer) error {
+	var stderrBuf bytes.Buffer
+	teedStderr := io.MultiWriter(stderr, &stderrBuf)
+	err := runner.Run(ctx, runtimeName, args, stdout, teedStderr)
+	if err == nil {
+		return nil
+	}
+	wrapped := fmt.Errorf("%s %s: %w", runtimeName, strings.Join(args, " "), err)
+	if detectDaemonUnreachable(stderrBuf.String()) {
+		return fmt.Errorf("%s: %w", daemonUnreachableMessage, wrapped)
+	}
+	return wrapped
+}
+
+// detectDaemonUnreachable reports whether a container build/pull error's stderr
+// indicates the container daemon could not be reached. Matched
+// case-insensitively against the signatures the Docker CLI emits on each
+// platform: Windows npipe (`failed to connect to the docker API`, `the system
+// cannot find the file specified`) and macOS/Linux (`cannot connect to the
+// docker daemon`). See runBuildStep and issue #1496.
+func detectDaemonUnreachable(stderr string) bool {
+	lowered := strings.ToLower(stderr)
+	for _, signature := range []string{
+		"cannot connect to the docker daemon",
+		"failed to connect to the docker api",
+		"the system cannot find the file specified",
+	} {
+		if strings.Contains(lowered, signature) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeBuildPolicy(policy string) (string, error) {

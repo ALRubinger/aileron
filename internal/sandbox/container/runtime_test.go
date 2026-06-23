@@ -633,6 +633,108 @@ func TestBuildPublishedAlwaysPullsRegardlessOfPresence(t *testing.T) {
 	}
 }
 
+func TestDetectDaemonUnreachable(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"empty", "", false},
+		{"macos linux daemon", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.", true},
+		{"lowercase daemon", "cannot connect to the docker daemon", true},
+		{"windows npipe api", "failed to connect to the docker API at npipe:////./pipe/docker_engine", true},
+		{"windows file not found", "open //./pipe/docker_engine: The system cannot find the file specified.", true},
+		{"manifest unknown is not unreachable", "Error response from daemon: manifest unknown", false},
+		{"permission denied is not unreachable", "Got permission denied while trying to connect to the Docker daemon socket", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detectDaemonUnreachable(tc.stderr); got != tc.want {
+				t.Fatalf("detectDaemonUnreachable(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildPullDaemonUnreachableFriendlyHeadline asserts that when a pull
+// fails because the container daemon is unreachable, Build leads with the
+// friendly "Docker isn't reachable" headline rather than the raw `exit status
+// 1` transport error, while still chaining the underlying error so
+// errors.Is/Unwrap exposes it for deeper diagnosis. Regression for #1496.
+func TestBuildPullDaemonUnreachableFriendlyHeadline(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{
+			name:   "windows npipe",
+			stderr: "error during connect: Get \"http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.45/...\": open //./pipe/docker_engine: The system cannot find the file specified.\nfailed to connect to the docker API at npipe:////./pipe/docker_engine\n",
+		},
+		{
+			name:   "macos linux daemon",
+			stderr: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			underlying := errors.New("exit status 1")
+			runner := &stderrWritingRunner{stderrText: tc.stderr, errReturn: underlying}
+			_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+				WorkDir: t.TempDir(),
+				Policy:  BuildPolicyAlways,
+				Plan: composition.Plan{
+					Tier:  composition.TierPublished,
+					Image: publishedImage,
+				},
+			})
+			if err == nil {
+				t.Fatal("Build returned nil error, want daemon-unreachable failure")
+			}
+			if !strings.HasPrefix(err.Error(), daemonUnreachableMessage) {
+				t.Fatalf("error headline = %q, want it to lead with %q", err.Error(), daemonUnreachableMessage)
+			}
+			if strings.HasPrefix(err.Error(), "exit status 1") {
+				t.Fatalf("error leads with raw transport error: %q", err.Error())
+			}
+			// The technical error stays chained as a deeper diagnostic.
+			if !errors.Is(err, underlying) {
+				t.Fatalf("errors.Is(err, underlying) = false; underlying error not chained: %q", err.Error())
+			}
+			if !strings.Contains(err.Error(), "docker pull "+publishedImage) {
+				t.Fatalf("error %q dropped the underlying `docker pull` framing", err.Error())
+			}
+		})
+	}
+}
+
+// TestBuildPullErrorNotDaemonUnreachableKeepsVerbatimWrap asserts that a pull
+// failure whose stderr does NOT match a daemon-unreachable signature keeps the
+// established `<runtime> <args>: <err>` framing without the friendly headline.
+func TestBuildPullErrorNotDaemonUnreachableKeepsVerbatimWrap(t *testing.T) {
+	underlying := errors.New("exit status 1")
+	runner := &stderrWritingRunner{
+		stderrText: "Error response from daemon: manifest unknown\n",
+		errReturn:  underlying,
+	}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyAlways,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err == nil {
+		t.Fatal("Build returned nil error, want pull failure")
+	}
+	if strings.Contains(err.Error(), daemonUnreachableMessage) {
+		t.Fatalf("non-daemon error gained the friendly headline: %q", err.Error())
+	}
+	if !errors.Is(err, underlying) {
+		t.Fatalf("underlying error not chained: %q", err.Error())
+	}
+}
+
 func TestBuildDevcontainerImageDoesNotRequireRuntime(t *testing.T) {
 	result, err := Builder{Runtime: "definitely-not-a-runtime"}.Build(context.Background(), BuildOptions{
 		WorkDir: t.TempDir(),
