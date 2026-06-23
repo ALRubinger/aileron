@@ -123,7 +123,7 @@ aileron sandbox check --toolchain=managed --agent=claude
 
 The same selection is available through the `AILERON_SANDBOX_TOOLCHAIN` environment variable, which `aileron launch` also reads. Precedence is flag, then environment, then the default. The default is host-npx in this release; a later change flips the default to managed ([#1530](https://github.com/ALRubinger/aileron/issues/1530)).
 
-On first managed build Aileron fetches the pinned Node distribution into a content-addressed cache, verifies it against `tools.lock.json` at the network boundary, and installs the pinned `@devcontainers/cli` into the same cache. Both steps are keyed by their pins, so subsequent builds reuse the cache without re-downloading. Only the host-npx and managed argv prefixes differ between the two paths; the `build --workspace-folder … --image-name … --build-arg …` tail is identical.
+On first managed build Aileron fetches the pinned Node distribution into a content-addressed cache keyed by the distribution's verified sha256, and verifies it against `tools.lock.json` at the network boundary. It then installs the pinned `@devcontainers/cli` into a separate cache directory keyed by the CLI version. Both caches short-circuit on a warm hit, so subsequent builds reuse them without re-downloading. The two build paths differ only in the invocation prefix that precedes the `build` subcommand (`npx --yes @devcontainers/cli@<pinned>` for host-npx versus the managed node binary plus the CLI's JS entrypoint for managed); the `build --workspace-folder … --image-name … --build-arg …` tail is identical.
 
 For a hermetic or offline host, point Aileron at a pre-staged Node binary and CLI entrypoint with the escape hatch, which skips provisioning entirely:
 
