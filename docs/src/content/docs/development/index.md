@@ -13,7 +13,7 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Repo Layout](/development/repo-layout/) — the directory tree, where each concern lives, and how the workspace is wired.
 - [Binary Architecture](/development/binary-architecture/) — the four binaries Aileron ships, who calls whom, and which process owns which trust boundary.
 - [Building from Source](/development/building-from-source/) — prerequisites, the Taskfile entry points, and how the embedded assets (webapp, forwarder WASM) get folded in.
-- [Running Tests](/development/running-tests/) — unit, integration, race, coverage. What CI runs, and how to reproduce a CI failure locally.
+- [Running Tests](/development/running-tests/) — unit, integration, race, coverage, and the by-hand black-box system suite. What CI runs, how to reproduce a CI failure locally, and how to run the manual system suite.
 - [Sandbox Composition](/development/sandbox-composition/) — how Aileron uses devcontainer.json, `ghcr.io/alrubinger/aileron-sandbox-base`, and `aileron sandbox` to define the agent container image.
 - [Sandbox Agent Images](/development/sandbox-agent-images/) — which agent commands are supported by the selected sandbox image and how to check them before launch.
 - [Sandbox Connector Specs](/development/sandbox-connector-specs/) — how installed connector specs drive data-plane operation validation in sandboxed launch sessions.

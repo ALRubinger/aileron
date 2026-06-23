@@ -137,3 +137,4 @@ If the draft appears in Gmail and the audit log shows the approval and execution
 - [Sandbox MCP — Manual Verification Walkthrough](/development/sandbox-mcp-walkthrough/) — the detailed round-trip, per-agent registration detail, and troubleshooting.
 - [Sandbox Agent Auth](/development/sandbox-agent-auth/) — signing an agent in ahead of time.
 - [Sandbox Composition](/development/sandbox-composition/) — how `aileron sandbox` builds and checks the image.
+- [Running Tests: System tests](/development/running-tests/#system-tests-black-box-cli) — the automated by-hand equivalent of this runbook, driven through `task test:system`.
