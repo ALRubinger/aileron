@@ -14,7 +14,7 @@ order: 27
 
 ## Context
 
-Aileron carried two framings for the same idea. One framing called the unit a Flight Plan, a named composition that runs above actions and produces a reproducible result. The other framing called it a skill, the agentskills.io `SKILL.md` document extended with an Aileron-specific dependency declaration. These two framings described one construct viewed at two points in its lifecycle. This ADR reconciles them under one vocabulary and one format.
+Aileron carried two framings for the same idea. One framing called the unit a Flight Plan, a named composition that runs above actions as a repeatable, audited unit. The other framing called it a skill, the agentskills.io `SKILL.md` document extended with an Aileron-specific dependency declaration. These two framings described one construct viewed at two points in its lifecycle. This ADR reconciles them under one vocabulary and one format.
 
 A Flight Plan composes primitives that other ADRs already define. It does not redefine them. It calls actions as defined in [ADR-0003](/adr/0003-action-model), where each action is an atomic unit with an explicit version, hash, and capability subset. It runs inside the sandbox of [ADR-0005](/adr/0005-sandbox-choice), where the runtime mediates credential use so the composed code never holds a raw credential. Its per-action effects surface to the user through the out-of-band approval channel of [ADR-0009](/adr/0009-user-channel), where the agent is structurally never in the approval trust path. Its credentialed calls flow through the data-plane injection of [ADR-0019](/adr/0019-v4-https-data-plane), where credentials are injected at the proxy boundary. This ADR composes those four primitives. It does not supersede any of them.
 
@@ -41,6 +41,18 @@ A Flight Plan carries two distinct determinism guarantees.
 The first is environmental reproducibility. Every image reference is pinned to a digest at freeze. The same Flight Plan resolves the same images on every run. The lockfile is the record of those pins.
 
 The second is behavioral determinism. No LLM runs at Flight Plan runtime by default. An LLM runs only at a single seam that is explicitly marked in the skill and structurally enforced by the runtime. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside the marked seam fails freeze and never becomes a Flight Plan. The marked seam is the one place where non-deterministic reasoning is allowed, and everything outside it is deterministic by construction.
+
+### Inputs, resolution, and the audit boundary
+
+Behavioral determinism is a property of the function, not of the output. A Flight Plan is a pinned, agent-invariant function over its declared inputs. Given the same resolved inputs, a Flight Plan produces the same output, and that is the property a freeze verification checks: pin the inputs as fixtures and the output is identical. A Flight Plan that depended on no inputs and always produced the same output would be a constant, and a constant is cached rather than run. The point of running a Flight Plan again is that its inputs, or the data in the systems it reads, have moved. Results therefore vary across runs, and that variance is expected rather than a determinism violation.
+
+Inputs are declared. The manifest declares every input the Flight Plan depends on, and each input carries a resolution rule. A resolution rule is a literal value passed at launch, a dynamic value such as the launch time or launch date, or a read from a live source. A value that varies by use case, such as a time window, is a declared input rather than a constant baked into the composition, so one composition serves many operators rather than overfitting to one.
+
+Inputs resolve once, at a boundary. At launch the runtime resolves all declared inputs one time into a concrete resolved-input set, and the composition runs against that set. Resolving once gives internal consistency, because two steps that read the same moving value such as the wall clock see one resolved value rather than two readings taken moments apart. The resolved-input set is the single recorded binding for the run.
+
+The audit records resolved inputs and outputs. Each launch records the resolved value of every input and the outputs the run produced. A scalar input is recorded by value, so a launch-time clock input is recorded as the concrete timestamp it resolved to. A data read is recorded by its resolved binding, which is the parameters, the query, and a result or snapshot identifier with a summary, rather than the full dataset inline. The dataset is the run's recorded output, and the audit references it rather than duplicating it. The recorded binding is what makes a past run explainable without reconstructing it from a moving source.
+
+The no-LLM-at-runtime rule seals the agent and the LLM out of the function, not the data out of the inputs. An LLM in the runtime loop is forbidden because it injects non-determinism into the function itself. A live or time-relative data read is an input, and an input is allowed. The line is between the logic, which is sealed and fixed, and the inputs, which are declared, resolved, and recorded.
 
 ### Execution rungs
 
@@ -110,6 +122,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 - A Flight Plan is reproducible. Every image reference is pinned to a digest at freeze, so the same plan resolves the same environment on every run.
 - A Flight Plan is auditable. The per-action trust contract records the credential, the network reach, the effect, and the audit-record structure for every action the plan calls.
 - A Flight Plan is behaviorally deterministic. No LLM runs at runtime outside the single marked seam, and the freeze-time lint rejects any unmarked LLM call before the plan is sealed.
+- A Flight Plan is deterministic given its resolved inputs. Inputs are declared with resolution rules, resolved once at launch, and recorded with the outputs. Results vary only with declared, resolved inputs, so every run is explainable from its recorded binding rather than reconstructed from a moving source.
 - One format spans authoring and sealing. A skill and a Flight Plan share the `SKILL.md` format, and the extension is lossless if stripped.
 - The trust contract is human-attested. The detached signature over the manifest plus lockfile records a human's confirmation that the contract is correct.
 - The layer composes existing primitives. It reuses the action model, the sandbox, the approval channel, and the data plane rather than redefining them.
