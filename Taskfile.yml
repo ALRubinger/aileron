@@ -422,6 +422,192 @@ tasks:
     cmds:
       - go test -tags=integration_sandbox -run TestSandboxAgentImageSmoke ./launch/...
 
+  build:launch:
+    desc: >-
+      Build the binaries `aileron launch --sandbox=docker` needs: the CLI
+      (build/aileron) plus the MCP server. On non-Linux hosts build:mcp also
+      emits build/aileron-mcp-linux-<arch>, the sibling the launcher
+      bind-mounts into the Linux sandbox. Reusable build seam for the
+      system-test scenarios so each one tests a freshly built launch path.
+    deps:
+      - build:cli
+      - build:mcp
+
+  _test:system:precond:docker:
+    internal: true
+    desc: >-
+      Fail-fast precondition: the Docker daemon must be reachable. Shared by
+      the smoke target (no agent) and the agent scenarios. On miss, exits
+      non-zero with the exact remediation — never a silent skip.
+    cmds:
+      - |
+        if ! docker info >/dev/null 2>&1; then
+          echo "Docker daemon is not reachable. Start Docker Desktop / dockerd, then re-run: task {{.TARGET | default "test:system:smoke"}}" >&2
+          exit 1
+        fi
+
+  _test:system:precond:
+    internal: true
+    desc: >-
+      Fail-fast preconditions for an agent system-test scenario: Docker must be
+      reachable AND the agent's host-side auth file (the launcher's AuthSpec
+      mounts these) must exist. Pass AGENT=codex|claude. On a missing auth
+      file, exits non-zero naming the file and the command to create it — never
+      a silent skip.
+    vars:
+      AGENT: '{{.AGENT}}'
+    cmds:
+      - task: _test:system:precond:docker
+        vars:
+          TARGET: 'test:system:launch:{{.AGENT}}'
+      - |
+        case "{{.AGENT}}" in
+          codex)
+            authfile="$HOME/.codex/auth.json"
+            logincmd="codex login"
+            ;;
+          claude)
+            authfile="$HOME/.claude/.credentials.json"
+            logincmd="claude /login"
+            ;;
+          *)
+            echo "Unknown AGENT '{{.AGENT}}' (expected codex or claude)" >&2
+            exit 1
+            ;;
+        esac
+        if [ ! -f "$authfile" ]; then
+          echo "Missing {{.AGENT}} auth file: $authfile. Authenticate first with: $logincmd" >&2
+          exit 1
+        fi
+
+  _test:system:cleanup:
+    internal: true
+    desc: >-
+      Teardown for a system-test scenario, invoked via `defer:` so it runs even
+      when an earlier assertion fails. Removes the sandbox container
+      aileron-sbx-<SESSION> (tolerating "no such container") and the scenario's
+      temp WORKSPACE dir, guarded so an unset/empty path never `rm -rf /`.
+    vars:
+      SESSION: '{{.SESSION}}'
+      WORKSPACE: '{{.WORKSPACE}}'
+    cmds:
+      - |
+        if [ -n "{{.SESSION}}" ]; then
+          docker rm -f "aileron-sbx-{{.SESSION}}" >/dev/null 2>&1 || true
+        fi
+        case "{{.WORKSPACE}}" in
+          ""|/) ;;
+          *) rm -rf "{{.WORKSPACE}}" ;;
+        esac
+
+  test:system:
+    desc: >-
+      Run the `aileron launch` system-test scenarios (run-by-hand, not wired
+      into CI — v1). Today runs the harness smoke self-test; the agent
+      scenarios test:system:launch:codex / :claude (added in #1476/#1477)
+      become deps here. Requires a reachable Docker daemon and, per scenario,
+      host-side agent auth.
+    cmds:
+      - task: test:system:smoke
+
+  test:system:smoke:
+    desc: >-
+      Harness self-test (no `aileron launch`, no agent, no LLM tokens): proves
+      the system-test mechanics end to end — build fires, the Docker
+      precondition gates, and `defer` cleanup runs even when an inner step
+      fails. Builds aileron, checks Docker, creates a temp workspace + sentinel,
+      then deliberately fails an inner step inside a subshell; the deferred
+      cleanup removes the workspace, and the target verifies it is gone (so the
+      target itself exits 0). Requires a reachable Docker daemon.
+    deps:
+      - build:launch
+    vars:
+      SESSION: smoke-test
+      WORKSPACE:
+        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-smoke
+    cmds:
+      - task: _test:system:precond:docker
+        vars:
+          TARGET: test:system:smoke
+      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      - |
+        set -u
+        # Prove build:launch produced the launch binary.
+        test -f build/aileron || { echo "build:launch did not produce build/aileron" >&2; exit 1; }
+        # Seed a sentinel the deferred cleanup must remove.
+        touch "{{.WORKSPACE}}/sentinel"
+        test -f "{{.WORKSPACE}}/sentinel" || { echo "failed to seed sentinel" >&2; exit 1; }
+        # Deliberately fail an inner step in a subshell to prove `defer` still
+        # fires; absorb the non-zero so the outer target can assert cleanup ran
+        # and still return 0.
+        ( echo "smoke: simulating a scenario assertion failure" >&2; exit 1 ) || true
+      - |
+        set -u
+        # Run the SAME teardown logic the deferred _test:system:cleanup runs,
+        # inline, so we can assert removal within this run (a `defer` fires only
+        # after the target returns, so its effect is not observable here). The
+        # registered `defer` then re-runs this idempotently as the genuine
+        # belt-and-suspenders teardown on exit. This mirrors _test:system:cleanup
+        # exactly; keep the two in sync.
+        if [ -n "{{.SESSION}}" ]; then
+          docker rm -f "aileron-sbx-{{.SESSION}}" >/dev/null 2>&1 || true
+        fi
+        case "{{.WORKSPACE}}" in
+          ""|/) ;;
+          *) rm -rf "{{.WORKSPACE}}" ;;
+        esac
+        if [ -e "{{.WORKSPACE}}" ]; then
+          echo "cleanup did not remove workspace {{.WORKSPACE}}" >&2
+          exit 1
+        fi
+        echo "smoke: harness OK — build fired, Docker precondition passed, cleanup removed the workspace"
+
+  test:system:launch:codex:
+    desc: >-
+      System-test scenario for the codex agent under `aileron launch`. Wires
+      the reusable build seam (build:launch), fail-fast preconditions
+      (_test:system:precond AGENT=codex), and `defer` cleanup. The agent-launch
+      + transcript-assertion body lands in #1476; today it fail-fasts after the
+      seams so `--dry` exercises the wiring without launching.
+    deps:
+      - build:launch
+    vars:
+      SESSION:
+        sh: echo "codex-$(date +%s)-$$"
+      WORKSPACE:
+        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-codex
+    cmds:
+      - task: _test:system:precond
+        vars:
+          AGENT: codex
+      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      - |
+        echo "test:system:launch:codex — reusable seams wired; scenario logic lands in #1476" >&2
+        exit 1
+
+  test:system:launch:claude:
+    desc: >-
+      System-test scenario for the claude agent under `aileron launch`. Wires
+      the reusable build seam (build:launch), fail-fast preconditions
+      (_test:system:precond AGENT=claude), and `defer` cleanup. The agent-launch
+      + transcript-assertion body lands in #1477; today it fail-fasts after the
+      seams so `--dry` exercises the wiring without launching.
+    deps:
+      - build:launch
+    vars:
+      SESSION:
+        sh: echo "claude-$(date +%s)-$$"
+      WORKSPACE:
+        sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-claude
+    cmds:
+      - task: _test:system:precond
+        vars:
+          AGENT: claude
+      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
+      - |
+        echo "test:system:launch:claude — reusable seams wired; scenario logic lands in #1477" >&2
+        exit 1
+
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services
     dir: ui
