@@ -335,12 +335,69 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		return fmt.Errorf("listen %s: %w", bindAddr, err)
 	}
 
-	url := "http://" + listener.Addr().String()
-	var daemonToken string
-	if shouldProtectLocalDaemon(listener.Addr()) {
-		daemonToken, err = generateDaemonToken()
+	// On Linux+Docker the daemon ALWAYS additionally binds the Docker
+	// bridge-gateway IP at startup (issue #1471, Q2 Option A). Without it
+	// a sandbox container cannot reach the daemon: the launcher rewrites
+	// the loopback daemon URL to host.docker.internal, which
+	// `--add-host host.docker.internal:host-gateway` resolves to the
+	// bridge-gateway IP (~172.17.0.1), NOT loopback — so a loopback-only
+	// daemon gets a kernel RST (ConnectionRefused) on every API call.
+	// This single bind covers BOTH routed paths the issue names: the
+	// ANTHROPIC_BASE_URL gateway and the HTTPS_PROXY sandbox egress proxy,
+	// because both target the same daemon via host.docker.internal.
+	//
+	// macOS / Windows Docker Desktop forward host.docker.internal to the
+	// host loopback, so no second listener is needed there; bridgeBindNeeded
+	// gates this to Linux+Docker only. A failed gateway derivation is a
+	// hard, actionable error rather than a silent wider bind.
+	var bridgeListener net.Listener
+	if bridgeBindNeeded() {
+		bridgeIP, derr := deriveDockerBridgeGatewayIP(ctx)
+		if derr != nil {
+			_ = listener.Close()
+			return fmt.Errorf("bind docker bridge-gateway listener: %w", derr)
+		}
+		// Bind the bridge IP on the SAME port the OS assigned the primary
+		// loopback listener, so the host.docker.internal:<port> the
+		// launcher advertises lands on this listener.
+		_, primaryPort, err := net.SplitHostPort(listener.Addr().String())
 		if err != nil {
 			_ = listener.Close()
+			return fmt.Errorf("read primary listener port: %w", err)
+		}
+		bridgeAddr := net.JoinHostPort(bridgeIP, primaryPort)
+		bridgeListener, err = net.Listen("tcp", bridgeAddr)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("listen %s (docker bridge-gateway): %w", bridgeAddr, err)
+		}
+	}
+
+	// closeListeners closes both the primary and (if bound) bridge
+	// listeners. Used on every early-return error path between here and
+	// the point where srv.Serve takes ownership, so a startup failure
+	// never leaks a bound socket.
+	closeListeners := func() {
+		_ = listener.Close()
+		if bridgeListener != nil {
+			_ = bridgeListener.Close()
+		}
+	}
+
+	url := "http://" + listener.Addr().String()
+	var daemonToken string
+	// The daemon is protected when the primary listener is loopback OR
+	// when a bridge listener is bound: the daemon token is daemon-wide
+	// (cfg.LocalDaemonToken) and both listeners share one handler, so the
+	// wider bridge listener must never ship UNAUTHENTICATED. Without the
+	// bridgeListener clause a loopback primary + bridge pair would still
+	// mint a token (loopback is protected), but making the dependency
+	// explicit keeps the bridge listener token-gated even if the primary
+	// bind classification ever changes.
+	if shouldProtectLocalDaemon(listener.Addr()) || bridgeListener != nil {
+		daemonToken, err = generateDaemonToken()
+		if err != nil {
+			closeListeners()
 			return fmt.Errorf("generate daemon token: %w", err)
 		}
 		cfg.LocalDaemonToken = daemonToken
@@ -351,7 +408,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		// lifetime, so a fresh key on each restart is acceptable.
 		caveatKey, err := auth.GenerateCaveatSigningKey()
 		if err != nil {
-			_ = listener.Close()
+			closeListeners()
 			return fmt.Errorf("generate caveat signing key: %w", err)
 		}
 		cfg.CaveatSigningKey = caveatKey
@@ -376,7 +433,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		Token:     daemonToken,
 	}
 	if err := discovery.Write(opts.StateDir, info); err != nil {
-		_ = listener.Close()
+		closeListeners()
 		return fmt.Errorf("publish discovery: %w", err)
 	}
 	// skipDiscoveryRemove gates the deferred discovery.Remove. The
@@ -397,7 +454,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 
 	handler, err := app.NewHandlerWithConfig(log, cfg)
 	if err != nil {
-		_ = listener.Close()
+		closeListeners()
 		return err
 	}
 
@@ -416,7 +473,9 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	serveErr := make(chan error, 1)
+	// serveErr is buffered for both listeners so neither serve goroutine
+	// blocks on send when run() has already returned via another branch.
+	serveErr := make(chan error, 2)
 	go func() {
 		log.Info("daemon listening", "url", url, "pid", info.PID, "version", info.Version)
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -425,6 +484,23 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		}
 		serveErr <- nil
 	}()
+
+	// Second listener on the Docker bridge-gateway IP, serving the SAME
+	// handler so in-container clients (reaching the daemon via
+	// host.docker.internal) hit the identical app — auth, vault, actions,
+	// and proxy endpoints all included. srv.Shutdown closes every
+	// listener srv.Serve has registered, so the deferred shutdown below
+	// tears this down too; no separate close is needed on the happy path.
+	if bridgeListener != nil {
+		go func() {
+			log.Info("daemon listening on docker bridge-gateway", "addr", bridgeListener.Addr().String(), "pid", info.PID)
+			if err := srv.Serve(bridgeListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serveErr <- err
+				return
+			}
+			serveErr <- nil
+		}()
+	}
 
 	// Lock-inode watcher. Closes inodeMismatch when the daemon.lock
 	// path's inode changes from originalLockInode (or the file is
