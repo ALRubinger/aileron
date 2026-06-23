@@ -124,8 +124,20 @@ func hashPayload(req *http.Request) (string, error) {
 
 // canonicalURI returns the URI-encoded absolute path per the SigV4
 // canonical-request rules. The path is split on "/" and each segment is
-// RFC 3986 percent-encoded (the non-S3 single-encoding rule the published
-// aws-sig-v4-test-suite expects). An empty path canonicalizes to "/".
+// RFC 3986 percent-encoded once (single-encoding), which is what the
+// published aws-sig-v4-test-suite (service "service") and S3 expect.
+// An empty path canonicalizes to "/".
+//
+// Note on the double-encoding services: a handful of AWS services (e.g.
+// API Gateway) expect the path to be percent-encoded a second time in the
+// canonical request, and some expect RFC 3986 path normalization
+// (collapsing "//" and resolving "." / ".." segments) first. This core
+// deliberately implements only the single-encoding form to match the
+// ratified test vectors; per-service encoding variance is the concern of
+// the proxy/WASM consumers that wire a concrete Service in, not of this
+// shared signer. If a double-encoding service is targeted later, the
+// extra encode pass belongs at that call site (or behind a Service-keyed
+// switch here) rather than changing the verified default.
 func canonicalURI(req *http.Request) string {
 	path := req.URL.EscapedPath()
 	if path == "" {
