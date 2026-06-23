@@ -73,10 +73,12 @@ session id at runtime, so the exact name is discovered, not predicted).
   proof.
 - **R8 — wiring invariants** (shared `lib/probes.sh`, designed so the claude
   scenario #1477 can reuse every function verbatim once it lands):
-  1. **Image** — `.Config.Image` is
-     `ghcr.io/alrubinger/aileron-sandbox-codex:edge` for a dev build
-     (`imageTag` → `edge`), `:latest` for a release; `.State.Running == true`.
-     Override with `EXPECTED_IMAGE=…` to assert a release tag or a digest pin.
+  1. **Image** — `.Config.Image` references the
+     `ghcr.io/alrubinger/aileron-sandbox-codex` repo with either a floating tag
+     (`:edge` for a dev build, `:latest` for a release) or an `@sha256:` digest
+     pin (the reproducible-release path resolves the floating ref to a digest),
+     and `.State.Running == true`. Override with `EXPECTED_IMAGE=…` to assert a
+     specific ref exactly.
   2. **MCP** — `/usr/local/bin/aileron-mcp` present + executable; the codex MCP
      config at `/home/agent/.codex/config.toml` contains
      `[mcp_servers.aileron]`; the daemon-wiring env vars `AILERON_URL`,
@@ -125,8 +127,10 @@ The claude scenario (`test/system/claude.sh`) is the sibling of the codex one
 and reuses the same shared R8 probes. It differs only in the claude-specific
 bindings (issue #1477):
 
-- **Image** — `.Config.Image` is `ghcr.io/alrubinger/aileron-sandbox-claude:edge`
-  for a dev build, `:latest` for a release (`EXPECTED_IMAGE=…` to override).
+- **Image** — `.Config.Image` references the
+  `ghcr.io/alrubinger/aileron-sandbox-claude` repo with a floating tag
+  (`:edge` dev, `:latest` release) or an `@sha256:` digest pin
+  (`EXPECTED_IMAGE=…` to assert a specific ref exactly).
 - **MCP** — claude is wired via the `--mcp-config <json>` CLI flag
   (`internal/launch/agents/claude.go` `ConfigureMCP`), **not** a `config.toml`.
   The probe asserts the `--mcp-config` flag and the `"aileron"` server marker on
