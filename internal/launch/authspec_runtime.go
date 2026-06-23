@@ -69,6 +69,20 @@ type authSpecPrep struct {
 	// into launchSandbox's existing defer because the order matters.
 	Cleanup func()
 
+	// ChownFn, when non-nil, recursively chowns the transient auth tree
+	// to the resolved in-container agent UID. It is invoked by the
+	// launcher AFTER the agent's MCP config has been placed into the
+	// tree (collapseNestedMCPMounts) so the single delegated chown
+	// re-owns config.toml alongside auth.json. Running the chown earlier
+	// (e.g. at the tail of prepareAuthSpec) re-owned the tree to the
+	// foreign agent UID with mode 0700 before the unprivileged host
+	// launcher placed the nested MCP config, so the MkdirAll/WriteFile
+	// in collapseNestedMCPMounts failed with EPERM on rootful Docker
+	// Linux (issue #1488). A nil ChownFn (no chown hook supplied, or a
+	// non-Linux host) is a safe no-op. The launcher must invoke it
+	// exactly once before the container starts.
+	ChownFn func() error
+
 	// HasBindings reports whether the prep produced any auth-spec
 	// state. False means the agent shipped an empty AuthSpec{} and
 	// the launcher should treat the prep as a no-op (Goose, Pi,
@@ -119,23 +133,29 @@ type authSpecPrep struct {
 // race because both writers exchanged the same upstream token).
 // Agents that rotate their credential in-container (Claude, Codex)
 // supply a Fresher so a stale capture cannot clobber a newer entry.
-// chownTransientDir, when non-nil, is invoked once after every
-// FileBinding and StaticFile has been written to the transient host
-// directory and before the mount list is returned. It receives
-// hostRoot and is expected to recursively change ownership of the tree
-// to the resolved in-container agent UID. On rootful-Docker Linux the
-// host operator's UID owns the transient dir, but the container runs as
-// the image's `agent` system user; a writable bind mount preserves host
-// ownership, so the agent's mid-session credential rewrite (Claude's
-// tmpfile+rename of .credentials.json) fails with EPERM without this
-// chown. The launcher supplies a Linux-only closure; on macOS/Windows
-// (where the Docker Desktop file-sharing shim translates UIDs) it is
-// nil and the chown is skipped. A nil hook is a no-op.
+// chownTransientDir, when non-nil, recursively changes ownership of the
+// transient tree (hostRoot) to the resolved in-container agent UID. On
+// rootful-Docker Linux the host operator's UID owns the transient dir,
+// but the container runs as the image's `agent` system user; a writable
+// bind mount preserves host ownership, so the agent's mid-session
+// credential rewrite (Claude's tmpfile+rename of .credentials.json)
+// fails with EPERM without this chown. The launcher supplies a
+// Linux-only closure; on macOS/Windows (where the Docker Desktop
+// file-sharing shim translates UIDs) it is nil and the chown is skipped.
+//
+// prepareAuthSpec does NOT invoke chownTransientDir directly. It wraps it
+// in prep.ChownFn (a no-op when the hook is nil) and the launcher invokes
+// that closure AFTER it has placed the agent's MCP config into the tree
+// (collapseNestedMCPMounts), so the single delegated chown re-owns
+// config.toml alongside auth.json. Invoking it here at prep time would
+// re-own the tree to the foreign agent UID with mode 0700 before the
+// unprivileged host launcher placed the nested MCP config, and that
+// host-side write would then fail with EPERM (issue #1488).
 //
 // Resolver failures are surfaced as a non-fatal warning and launch
 // proceeds (the prior behavior); the hook returns an error only so the
-// launcher can decide warn-vs-abort. prepareAuthSpec treats a hook
-// error as non-fatal.
+// closure can decide warn-vs-abort. prep.ChownFn treats a hook error as
+// non-fatal and never propagates it.
 func prepareAuthSpec(
 	ctx context.Context,
 	agentName string,
@@ -151,6 +171,7 @@ func prepareAuthSpec(
 		EnvAdditions: map[string]string{},
 		Cleanup:      func() {},
 		CaptureFn:    func(context.Context) {},
+		ChownFn:      func() error { return nil },
 	}
 
 	if len(spec.EnvBindings) == 0 && len(spec.FileBindings) == 0 && len(spec.StaticFiles) == 0 {
@@ -532,17 +553,34 @@ func prepareAuthSpec(
 		}
 	}
 
-	// Chown the transient tree to the in-container agent UID now that
-	// every file is written and before the dir is mounted. On Linux
-	// rootful Docker this is the fix that lets the agent rewrite its
-	// credentials through the writable bind mount; on other platforms
-	// the hook is nil. A resolver/chown failure is non-fatal: warn with
-	// a permanent diagnostic naming the UID mismatch and the chown fix,
-	// then proceed so a transient lookup hiccup never aborts a launch.
+	// Defer the chown of the transient tree to the in-container agent
+	// UID into a closure the launcher invokes AFTER it has placed the
+	// agent's MCP config into the tree (collapseNestedMCPMounts). On
+	// Linux rootful Docker this is the fix that lets the agent rewrite
+	// its credentials through the writable bind mount; on other
+	// platforms the hook is nil and the closure is a no-op.
+	//
+	// Ordering matters (issue #1488): Codex's MCP config.toml nests
+	// under the AuthSpec's /home/agent/.codex/ directory mount, so the
+	// launcher's collapse step does an unprivileged host-side
+	// MkdirAll+WriteFile into this tree. If the chown ran here (at prep
+	// time) it would re-own the whole tree to the foreign agent UID with
+	// mode 0700 first, and that later host-side write would fail with
+	// EPERM. Running the chown after the placement lets the single
+	// delegated chown re-own config.toml alongside auth.json. A
+	// resolver/chown failure is non-fatal: warn with a permanent
+	// diagnostic naming the UID mismatch and the chown fix, then proceed
+	// so a transient lookup hiccup never aborts a launch.
 	if chownTransientDir != nil {
-		if err := chownTransientDir(hostRoot); err != nil {
-			captureWarn(sessionLog, stderr, agentName, hostRoot,
-				fmt.Errorf("chown transient auth dir to image agent UID: %w; the agent runs as a non-root system user while the host operator owns this bind-mounted dir (host UID vs resolved agent UID mismatch), so in-container credential rotation may fail with EPERM — the remedy is the chown-to-agent-UID fix on the AuthSpec bind mount", err))
+		prep.ChownFn = func() error {
+			if err := chownTransientDir(hostRoot); err != nil {
+				captureWarn(sessionLog, stderr, agentName, hostRoot,
+					fmt.Errorf("chown transient auth dir to image agent UID: %w; the agent runs as a non-root system user while the host operator owns this bind-mounted dir (host UID vs resolved agent UID mismatch), so in-container credential rotation may fail with EPERM — the remedy is the chown-to-agent-UID fix on the AuthSpec bind mount", err))
+			}
+			// The warning above is the user-facing surface; a chown hiccup
+			// is non-fatal, so the launcher treats this as best-effort and
+			// the closure never returns an error.
+			return nil
 		}
 	}
 

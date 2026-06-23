@@ -14,6 +14,7 @@ import (
 
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 )
 
@@ -170,7 +171,7 @@ func TestHostMCPEnvOmitsEmptyToken(t *testing.T) {
 func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	_, err := launchSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: emptyBinaryAgent{},
-	}, nil, "aileron-sbx-test", func() {}, nil)
+	}, nil, "aileron-sbx-test", func() {}, nil, nil)
 	if err == nil {
 		t.Fatal("expected missing container command error")
 	}
@@ -375,7 +376,7 @@ func launchSandboxCapturedVolumes(t *testing.T) []sandboxcontainer.Volume {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, err := launchSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: namedBinaryAgent{name: "claude"},
-	}, map[string]string{}, "aileron-sbx-test", func() {}, logger)
+	}, map[string]string{}, "aileron-sbx-test", func() {}, nil, logger)
 	if err != nil {
 		t.Fatalf("launchSandbox: %v", err)
 	}
@@ -1097,5 +1098,120 @@ func TestEnclosingDirMount_IdentityTargetNotEnclosing(t *testing.T) {
 	}
 	if got := enclosingDirMount(mounts, "/home/agent/.codex/config.toml"); got == nil {
 		t.Fatal("enclosingDirMount returned nil for nested target, want the dir mount")
+	}
+}
+
+// codexNestedMCPMount returns a Codex-shaped AuthSpec whose single
+// FileBinding produces a directory mount at /home/agent/.codex/
+// (MountAsFile=false), mirroring the real Codex AuthSpec the launcher
+// materializes. With an empty vault the no-creds path runs ensureGroup
+// and keeps the .codex dir mounted because MountAsFile is false, exactly
+// the shape that triggered issue #1488.
+func codexNestedMCPSpec() AuthSpec {
+	return AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/codex/oauth",
+			ContainerPath: "/home/agent/.codex/auth.json",
+			Mode:          0o600,
+			Required:      false,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+}
+
+// TestChownAfterMCPPlacement_CodexOrdering is the #1488 regression. The
+// chown that re-owns the AuthSpec transient tree to the foreign agent UID
+// (mode 0700) must run AFTER the launcher places Codex's config.toml into
+// the .codex directory mount, otherwise the unprivileged host-side write
+// in collapseNestedMCPMounts fails with EPERM ("permission denied").
+//
+// The test drives the production ordering: prepareAuthSpec renders the
+// AuthSpec (deferring the chown into prep.ChownFn), collapseNestedMCPMounts
+// places config.toml into the .codex dir mount source, THEN prep.ChownFn
+// runs. The chown hook emulates the foreign-UID 0700 state by stripping
+// write permission from the group dir; because the placement already ran,
+// it succeeds. A control assertion shows the inverse ordering (chown then
+// place) fails — proving the test would catch a regression that re-ordered
+// the chown back before the placement.
+func TestChownAfterMCPPlacement_CodexOrdering(t *testing.T) {
+	daemon := newFakeDaemon() // empty vault: no-creds path, .codex still mounted
+
+	// The chown hook emulates the EPERM the real chown-to-foreign-UID-0700
+	// causes for an unprivileged host process: it removes write permission
+	// from the .codex group dir so any later host-side write fails.
+	var chowned bool
+	hook := func(dir string) error {
+		chowned = true
+		codexDir := filepath.Join(dir, "home", "agent", ".codex")
+		if err := os.Chmod(codexDir, 0o500); err != nil {
+			return err
+		}
+		// Restore at cleanup so prep.Cleanup's RemoveAll can recurse.
+		t.Cleanup(func() { _ = os.Chmod(codexDir, 0o700) })
+		return nil
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "codex", codexNestedMCPSpec(),
+		daemon, newTestLogger(), nil, hook, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// The chown must be deferred, not run at prep time.
+	if chowned {
+		t.Fatal("chown ran during prepareAuthSpec; #1488 requires it to be deferred so the MCP config is placed first")
+	}
+	if len(prep.Mounts) != 1 || prep.Mounts[0].Target != "/home/agent/.codex" {
+		t.Fatalf("expected one /home/agent/.codex dir mount, got %+v", prep.Mounts)
+	}
+
+	// Build the sandbox mount list as launchSandbox does and run the
+	// nested-collapse placement BEFORE the chown.
+	cfgSource := filepath.Join(t.TempDir(), "config.toml")
+	cfgBody := []byte("[mcp_servers.aileron]\ncommand = \"/usr/local/bin/aileron-mcp\"\n")
+	if err := os.WriteFile(cfgSource, cfgBody, 0o600); err != nil {
+		t.Fatalf("seed config.toml: %v", err)
+	}
+	mcp := []MCPMount{{Source: cfgSource, Target: "/home/agent/.codex/config.toml", ReadOnly: true}}
+
+	collapsed, err := collapseNestedMCPMounts(prep.Mounts, mcp)
+	if err != nil {
+		t.Fatalf("collapseNestedMCPMounts (placement must succeed before chown): %v", err)
+	}
+	// config.toml must now live inside the .codex dir mount source.
+	placed := filepath.Join(prep.Mounts[0].Source, "config.toml")
+	if data, err := os.ReadFile(placed); err != nil {
+		t.Fatalf("config.toml not placed into .codex dir mount: %v", err)
+	} else if string(data) != string(cfgBody) {
+		t.Errorf("placed config.toml = %q, want %q", data, cfgBody)
+	}
+	if n := nestedMountTarget(collapsed); n != "" {
+		t.Fatalf("nested bind mount survived collapse: %q", n)
+	}
+
+	// Now the chown runs (deferred). It must not error out of ChownFn.
+	if err := prep.ChownFn(); err != nil {
+		t.Fatalf("prep.ChownFn: %v", err)
+	}
+	if !chowned {
+		t.Fatal("prep.ChownFn did not invoke the chown hook")
+	}
+
+	// Control: prove the bug the ordering prevents. Once the dir is
+	// chowned (0500 here), a fresh placement into it fails with EPERM —
+	// which is exactly what the old "chown during prep" ordering caused.
+	cfg2 := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfg2, cfgBody, 0o600); err != nil {
+		t.Fatalf("seed second config.toml: %v", err)
+	}
+	if os.Geteuid() != 0 { // root bypasses DAC, so the control only holds unprivileged
+		if _, err := collapseNestedMCPMounts(
+			[]sandboxcontainer.Volume{{Source: prep.Mounts[0].Source, Target: "/home/agent/.codex"}},
+			[]MCPMount{{Source: cfg2, Target: "/home/agent/.codex/sub/config.toml"}},
+		); err == nil {
+			t.Fatal("placement into a chowned (write-denied) dir unexpectedly succeeded; the control proves the ordering matters")
+		}
 	}
 }
