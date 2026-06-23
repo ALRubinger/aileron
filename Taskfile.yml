@@ -503,14 +503,18 @@ tasks:
   test:system:
     desc: >-
       Run the `aileron launch` system-test scenarios (run-by-hand, not wired
-      into CI — v1). Today runs the harness smoke self-test plus the shared
-      scenario-library contract tests; the agent scenarios
-      test:system:launch:codex / :claude (added in #1476/#1477) become deps
-      here. Requires a reachable Docker daemon and, per scenario, host-side
-      agent auth.
+      into CI — v1). Runs the harness smoke self-test and the shared
+      scenario-library contract tests, then the per-agent scenarios codex
+      (#1476) and claude (#1477) end to end. Requires a reachable Docker daemon
+      and, per scenario, host-side agent auth — each scenario fail-fasts with
+      the exact remediation if its auth is missing, never a silent skip. To run
+      a single agent without the other, invoke its leaf directly
+      (e.g. `task test:system:launch:claude`).
     cmds:
       - task: test:system:lib
       - task: test:system:smoke
+      - task: test:system:launch:codex
+      - task: test:system:launch:claude
 
   test:system:lib:
     desc: >-
@@ -613,11 +617,17 @@ tasks:
 
   test:system:launch:claude:
     desc: >-
-      System-test scenario for the claude agent under `aileron launch`. Wires
-      the reusable build seam (build:launch), fail-fast preconditions
-      (_test:system:precond AGENT=claude), and `defer` cleanup. The agent-launch
-      + transcript-assertion body lands in #1477; today it fail-fasts after the
-      seams so `--dry` exercises the wiring without launching.
+      System-test scenario for the claude agent under `aileron launch` (#1477).
+      Wires the reusable build seam (build:launch), fail-fast preconditions
+      (_test:system:precond AGENT=claude), and `defer` cleanup (#1475), then
+      runs test/system/claude.sh: it drives `aileron launch claude -- -p "…"`
+      once (never `docker run` directly), runs the shared R8 wiring-invariant
+      probes against the live container, asserts R7a arg-forwarding, the R9
+      sentinel, and the R10 audit round-trip. STATIC GATE — a live run needs a
+      real Claude login (vault-captured, ADR-0025) and LLM tokens, so it is run
+      BY HAND on a real host; the headless path validates wiring with
+      `task --dry test:system:launch:claude`, which compiles the target without
+      executing the scenario. See test/system/README.md.
     deps:
       - build:launch
     vars:
@@ -626,13 +636,20 @@ tasks:
       WORKSPACE:
         sh: mktemp -d 2>/dev/null || mktemp -d -t aileron-claude
     cmds:
+      # Register cleanup FIRST so a failed precondition (Docker down or claude
+      # auth absent) still removes the mktemp WORKSPACE created by the dynamic
+      # var above — a `defer` only registers once its line is reached.
+      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
       - task: _test:system:precond
         vars:
           AGENT: claude
-      - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
-      - |
-        echo "test:system:launch:claude — reusable seams wired; scenario logic lands in #1477" >&2
-        exit 1
+      - cmd: sh "{{.ROOT_DIR}}/test/system/claude.sh"
+        env:
+          AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+          AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
+          WORKSPACE: '{{.WORKSPACE}}'
+          AILERON_STATE_DIR:
+            sh: echo "${AILERON_STATE_DIR:-$HOME/.aileron}"
 
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services

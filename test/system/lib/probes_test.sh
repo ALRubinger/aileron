@@ -32,15 +32,31 @@ check() {
 	fi
 }
 
-# Stub `docker` so `docker ps ...` emits whatever DOCKER_PS_OUTPUT holds.
+# Stub `docker` so the host-verifiable probes can run with no daemon:
+#   docker ps ...        -> DOCKER_PS_OUTPUT (discover_container)
+#   docker exec ... test  -> DOCKER_EXEC_TEST_RC (probe_mcp_runtime: -x checks)
+#   docker exec ... printenv -> DOCKER_EXEC_PRINTENV_RC (env-var checks)
+#   docker inspect -f ... -> DOCKER_INSPECT_OUTPUT (probe_mcp_cmdline cmdline)
 # The stub dir goes on the front of PATH for the duration of the test.
 STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR"' EXIT INT TERM
 cat >"$STUB_DIR/docker" <<'STUB'
 #!/bin/sh
-# Minimal docker stub: only `docker ps ...` is used by discover_container.
+# Minimal docker stub for the host-verifiable probe contract tests.
 case "$1" in
 ps) printf '%s' "${DOCKER_PS_OUTPUT:-}" ;;
+inspect) printf '%s' "${DOCKER_INSPECT_OUTPUT:-}" ;;
+exec)
+	# Args after `exec` are: <container> <cmd> [args...]. Route on <cmd>.
+	shift
+	container="$1"
+	cmd="$2"
+	case "$cmd" in
+	test) exit "${DOCKER_EXEC_TEST_RC:-0}" ;;
+	printenv) exit "${DOCKER_EXEC_PRINTENV_RC:-0}" ;;
+	*) exit 0 ;;
+	esac
+	;;
 *) exit 0 ;;
 esac
 STUB
@@ -70,6 +86,51 @@ probe_exit_code 0 0 >/dev/null 2>&1
 check "probe_exit_code returns 0 when codes match" "$?" 0
 probe_exit_code 1 0 >/dev/null 2>&1
 check "probe_exit_code returns non-zero when codes differ" "$?" 1
+
+# --- probe_mcp_runtime: the agent-agnostic R8.2 core (binary + env) ----------
+# All sub-checks green: aileron-mcp present (test -x rc 0) and every daemon env
+# var set (printenv rc 0) -> returns 0.
+DOCKER_EXEC_TEST_RC=0 DOCKER_EXEC_PRINTENV_RC=0 \
+	probe_mcp_runtime 'c' >/dev/null 2>&1
+check "probe_mcp_runtime returns 0 when binary present and env set" "$?" 0
+
+# aileron-mcp missing/not executable (test -x rc 1) -> non-zero, before env.
+DOCKER_EXEC_TEST_RC=1 DOCKER_EXEC_PRINTENV_RC=0 \
+	probe_mcp_runtime 'c' >/dev/null 2>&1
+check "probe_mcp_runtime returns non-zero when aileron-mcp missing" "$?" 1
+
+# Binary present but a daemon-wiring env var unset (printenv rc 1) -> non-zero.
+DOCKER_EXEC_TEST_RC=0 DOCKER_EXEC_PRINTENV_RC=1 \
+	probe_mcp_runtime 'c' >/dev/null 2>&1
+check "probe_mcp_runtime returns non-zero when a daemon env var is unset" "$?" 1
+
+# --- probe_mcp_cmdline: claude's --mcp-config flag on the container command ---
+# The agent-agnostic core passes (binary + env), and the inspected command line
+# carries both the flag and the aileron server marker -> returns 0.
+DOCKER_EXEC_TEST_RC=0 DOCKER_EXEC_PRINTENV_RC=0 \
+	DOCKER_INSPECT_OUTPUT='claude --mcp-config {"mcpServers":{"aileron":{}}} -p hi ' \
+	probe_mcp_cmdline 'c' '--mcp-config' '"aileron"' >/dev/null 2>&1
+check "probe_mcp_cmdline returns 0 when flag and marker both present" "$?" 0
+
+# Flag present but the payload does NOT reference the aileron server marker
+# (e.g. a stray --mcp-config with the wrong server) -> non-zero.
+DOCKER_EXEC_TEST_RC=0 DOCKER_EXEC_PRINTENV_RC=0 \
+	DOCKER_INSPECT_OUTPUT='claude --mcp-config {"mcpServers":{"other":{}}} -p hi ' \
+	probe_mcp_cmdline 'c' '--mcp-config' '"aileron"' >/dev/null 2>&1
+check "probe_mcp_cmdline returns non-zero when marker absent from payload" "$?" 1
+
+# No --mcp-config flag on the command at all -> non-zero.
+DOCKER_EXEC_TEST_RC=0 DOCKER_EXEC_PRINTENV_RC=0 \
+	DOCKER_INSPECT_OUTPUT='claude -p hi ' \
+	probe_mcp_cmdline 'c' '--mcp-config' '"aileron"' >/dev/null 2>&1
+check "probe_mcp_cmdline returns non-zero when --mcp-config flag absent" "$?" 1
+
+# Command line is right but the agent-agnostic core fails first (binary
+# missing) -> non-zero, proving the core gates before the cmdline check.
+DOCKER_EXEC_TEST_RC=1 DOCKER_EXEC_PRINTENV_RC=0 \
+	DOCKER_INSPECT_OUTPUT='claude --mcp-config {"mcpServers":{"aileron":{}}} -p hi ' \
+	probe_mcp_cmdline 'c' '--mcp-config' '"aileron"' >/dev/null 2>&1
+check "probe_mcp_cmdline returns non-zero when the runtime core fails" "$?" 1
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%s probe contract case(s) FAILED\n' "$failures" >&2

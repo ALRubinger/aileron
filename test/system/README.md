@@ -15,6 +15,7 @@ shared scenario library.
 test/system/
   README.md            this file
   codex.sh             the codex scenario body (#1476)
+  claude.sh            the claude scenario body (#1477)
   lib/
     assert.sh          generic assert/log helpers (sourced)
     probes.sh          agent-agnostic R8 wiring-invariant probes (sourced)
@@ -27,8 +28,9 @@ test/system/
 | Layer | Command | Needs | Runs in CI / headless? |
 | --- | --- | --- | --- |
 | Library contract tests | `task test:system:lib` | nothing | yes — pure POSIX shell, `docker` stubbed |
-| Scenario wiring compile | `task --dry test:system:launch:codex` | nothing | yes — compiles the target, does not launch |
+| Scenario wiring compile | `task --dry test:system:launch:codex` / `:claude` | nothing | yes — compiles the target, does not launch |
 | Live codex scenario | `task test:system:launch:codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
+| Live claude scenario | `task test:system:launch:claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
 
 The headless path validates the **wiring** (the target compiles, the build
 dependency and preconditions resolve, the shell library passes its contracts)
@@ -117,6 +119,51 @@ session id at runtime, so the exact name is discovered, not predicted).
     "$HOME/.aileron/traces/spans-$(date +%F).jsonl"
   ```
 
+## Run the claude scenario by hand
+
+The claude scenario (`test/system/claude.sh`) is the sibling of the codex one
+and reuses the same shared R8 probes. It differs only in the claude-specific
+bindings (issue #1477):
+
+- **Image** — `.Config.Image` is `ghcr.io/alrubinger/aileron-sandbox-claude:edge`
+  for a dev build, `:latest` for a release (`EXPECTED_IMAGE=…` to override).
+- **MCP** — claude is wired via the `--mcp-config <json>` CLI flag
+  (`internal/launch/agents/claude.go` `ConfigureMCP`), **not** a `config.toml`.
+  The probe asserts the `--mcp-config` flag and the `"aileron"` server marker on
+  the running container's command line (`probe_mcp_cmdline`), plus the shared
+  agent-agnostic core (`aileron-mcp` present + executable, daemon-wiring env
+  vars set).
+- **Credentials** — `/home/agent/.claude/.credentials.json`, mode `0600`, with
+  its parent dir bind-mounted writable (claude rotates the token in-session).
+- **Batch flag** — claude's non-interactive flag is `-p`, so the scenario
+  drives `aileron launch claude -- -p "<prompt>"`.
+
+The container name prefix, daemon-reachability, teardown, R9 sentinel, and R10
+audit round-trip are identical to codex and reuse the shared probes unchanged.
+
+Prerequisites (the scenario fail-fasts with the exact remediation if missing):
+
+1. A reachable Docker daemon (`docker info`).
+2. A host-side Claude login. Claude's credentials are vault-captured on first
+   launch (ADR-0025), not a plain creds file you write directly: run
+   `aileron launch claude` once and complete the in-flow login (or
+   `claude /login`) so `~/.claude/.credentials.json` is populated.
+3. A running Aileron daemon if you want the R10 audit assertion to read real
+   records (`AILERON_STATE_DIR` defaults to `~/.aileron`).
+
+Then:
+
+```sh
+task test:system:launch:claude
+```
+
+> **Cross-OS note.** On Windows there is no Unix PTY, so `aileron launch` uses
+> the stdio exec path rather than the container PTY; run the by-hand scenario on
+> macOS or Linux for the full container path. This headless authoring host has
+> no Claude vault auth, so the scenario here is statically validated only
+> (`task --dry`, `shellcheck`); a green live run is verified by hand on a
+> claude-authed host.
+
 ## Editing the shared library
 
 `lib/assert.sh` and `lib/probes.sh` are **agent-agnostic**. Codex-specific
@@ -126,5 +173,5 @@ claude scenario (#1477) reuses every function verbatim. After any change, run:
 
 ```sh
 task test:system:lib                 # contract tests (CI-safe)
-shellcheck -x -s sh test/system/lib/*.sh test/system/codex.sh
+shellcheck -x -s sh test/system/lib/*.sh test/system/codex.sh test/system/claude.sh
 ```
