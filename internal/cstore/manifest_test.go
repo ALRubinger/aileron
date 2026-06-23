@@ -475,8 +475,170 @@ func TestValidateManifest_RejectsUnknownKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown kind")
 	}
-	if !strings.Contains(err.Error(), "v1 closed set") {
+	if !strings.Contains(err.Error(), "closed set") {
 		t.Errorf("err = %v", err)
+	}
+	// The rejection message must enumerate every valid kind so operators
+	// can see what they may use, including the aws_sigv4 kind.
+	for _, want := range []string{CredentialKindAPIKey, CredentialKindOAuth2, CredentialKindAWSSigV4} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name valid kind %q", err, want)
+		}
+	}
+}
+
+// --- aws_sigv4 credential validation tests (#1504) ---
+
+func TestValidateManifest_AcceptsAWSSigV4Kind(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:        CredentialKindAWSSigV4,
+		Scope:       "Read your S3 buckets",
+		Region:      "us-east-1",
+		Service:     "s3",
+		AccessKeyID: "AKIAIOSFODNN7EXAMPLE",
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsAWSSigV4MissingFields(t *testing.T) {
+	// Each of region/service/access_key_id is required for signing. A
+	// manifest missing any one must fail closed at install with a
+	// field-named message, not at the first signed request.
+	cases := []struct {
+		name string
+		cred *ManifestCredential
+		want string
+	}{
+		{
+			name: "missing region",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Service: "s3", AccessKeyID: "AKIA"},
+			want: "region",
+		},
+		{
+			name: "missing service",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", AccessKeyID: "AKIA"},
+			want: "service",
+		},
+		{
+			name: "missing access_key_id",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", Service: "s3"},
+			want: "access_key_id",
+		},
+		{
+			name: "blank region",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "   ", Service: "s3", AccessKeyID: "AKIA"},
+			want: "region",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			m.Capabilities.Credential = tc.cred
+			err := ValidateManifest(m, "ok.toml")
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want mention of %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsAWSSigV4WithHeaderOrFormat(t *testing.T) {
+	// header/format are api_key-specific; they do not shape the SigV4
+	// wire format. Reject so a manifest can't imply an ignored knob.
+	cases := []struct {
+		name string
+		cred *ManifestCredential
+	}{
+		{
+			name: "header",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", Service: "s3", AccessKeyID: "AKIA", Header: "X-API-Key"},
+		},
+		{
+			name: "format",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", Service: "s3", AccessKeyID: "AKIA", Format: "{key}"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			m.Capabilities.Credential = tc.cred
+			err := ValidateManifest(m, "ok.toml")
+			if err == nil {
+				t.Fatalf("expected error for %s on aws_sigv4", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.name) {
+				t.Errorf("err = %v, want mention of %q", err, tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsAWSSigV4FieldsWithNewline(t *testing.T) {
+	// region/service/access_key_id are interpolated verbatim into the
+	// SigV4 Authorization header. A CR/LF would corrupt HTTP framing or
+	// smuggle a header; reject at install.
+	base := func() *ManifestCredential {
+		return &ManifestCredential{
+			Kind:        CredentialKindAWSSigV4,
+			Region:      "us-east-1",
+			Service:     "s3",
+			AccessKeyID: "AKIA",
+		}
+	}
+	cases := []struct {
+		name  string
+		mutfn func(*ManifestCredential)
+		want  string
+	}{
+		{"region CRLF", func(c *ManifestCredential) { c.Region = "us-east-1\r\nX: y" }, "region"},
+		{"service LF", func(c *ManifestCredential) { c.Service = "s3\ninjected" }, "service"},
+		{"access_key_id CR", func(c *ManifestCredential) { c.AccessKeyID = "AKIA\rX" }, "access_key_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			cred := base()
+			tc.mutfn(cred)
+			m.Capabilities.Credential = cred
+			err := ValidateManifest(m, "ok.toml")
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "newline") {
+				t.Errorf("err = %v, want mention of %q and newline", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsAWSSigV4WithOAuth2Table(t *testing.T) {
+	// The oauth2 table is oauth2-specific; rejecting it keeps the closed
+	// set's kind/table pairing one-to-one.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:        CredentialKindAWSSigV4,
+		Region:      "us-east-1",
+		Service:     "s3",
+		AccessKeyID: "AKIA",
+		OAuth2: &ManifestOAuth2{
+			AuthorizeURL: "https://example.com/authorize",
+			TokenURL:     "https://example.com/token",
+			ClientID:     "abc",
+			Scopes:       []string{"x"},
+		},
+	}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error for oauth2 table on aws_sigv4")
+	}
+	if !strings.Contains(err.Error(), "oauth2") {
+		t.Errorf("err = %v, want mention of oauth2", err)
 	}
 }
 
