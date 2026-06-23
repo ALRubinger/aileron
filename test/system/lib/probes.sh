@@ -52,16 +52,71 @@ discover_container() {
 	printf '%s\n' "$match"
 }
 
+# image_repo <image_ref>
+# Echoes the repository portion of an image ref — everything before the `:tag`
+# or `@sha256:` digest suffix. `:edge`, `:latest`, and `@sha256:abc…` all strip
+# to the same repo. A bare repo (no tag, no digest) echoes unchanged.
+# Pure string logic (no docker), so it is host-verifiable in the contract test.
+image_repo() {
+	ref="$1"
+	# Strip an `@…` digest suffix first (a digest ref never also carries `:tag`
+	# after the `@`, and the repo's registry `host:port` colon precedes the `@`).
+	case "$ref" in
+	*@*) ref="${ref%@*}" ;;
+	esac
+	# Strip a trailing `:tag`. Guard against a registry `host:port` with no tag
+	# (e.g. `localhost:5000/x`) by only stripping when the final path segment
+	# (after the last `/`) contains the colon.
+	last="${ref##*/}"
+	case "$last" in
+	*:*) ref="${ref%:*}" ;;
+	esac
+	printf '%s' "$ref"
+}
+
+# image_ref_matches <expected_ref> <actual_ref>
+# R8.1 image-equality with digest tolerance. The launcher resolves the
+# expected floating ref (e.g. ghcr.io/alrubinger/aileron-sandbox-codex:edge)
+# to whatever it pulled: the same floating tag on a dev build, or a
+# `…-codex@sha256:…` digest pin on a reproducible release (scaffold.go
+# PublishedAgentImage, #1233). A match requires the SAME repository plus
+# either a floating tag (`:edge`/`:latest`) or an `@sha256:` digest — so a
+# pinned release no longer fails this probe, while a wrong repo/agent (e.g.
+# the claude image) still does. Pure string logic; host-verifiable.
+image_ref_matches() {
+	expected="$1"
+	actual="$2"
+	exp_repo="$(image_repo "$expected")"
+	act_repo="$(image_repo "$actual")"
+	[ "$exp_repo" = "$act_repo" ] || return 1
+	# Accept a floating tag or an @sha256: digest on the matched repo.
+	case "$actual" in
+	"${act_repo}:edge" | "${act_repo}:latest") return 0 ;;
+	"${act_repo}@sha256:"*) return 0 ;;
+	esac
+	# Exact match against the expected ref (covers a caller-supplied digest or
+	# any other explicit EXPECTED_IMAGE override).
+	[ "$expected" = "$actual" ]
+}
+
 # probe_image <container> <expected_image>
-# R8.1 — correct image pulled & running. Asserts .Config.Image equals the
-# expected ref (caller passes :edge for a dev build, :latest for a release,
-# or a digest pin) and the container is running.
+# R8.1 — correct image pulled & running. Asserts .Config.Image references the
+# same repository as the expected ref and carries either a floating tag
+# (`:edge`/`:latest`) or an `@sha256:` digest pin (release reproducibility),
+# and that the container is running. An explicit EXPECTED_IMAGE that names a
+# digest or other ref still matches exactly.
 probe_image() {
 	container="$1"
 	expected_image="$2"
 	actual_image="$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null)" ||
 		{ fail "docker inspect $container failed (probe_image)"; return 1; }
-	assert_eq "$expected_image" "$actual_image" "R8.1 container image is $expected_image" || return 1
+	if image_ref_matches "$expected_image" "$actual_image"; then
+		log "ok: R8.1 container image matches $expected_image (actual: $actual_image)"
+	else
+		printf 'systest: FAIL: R8.1 container image\n  expected: %s (or its @sha256 digest on the same repo)\n  actual:   %s\n' \
+			"$expected_image" "$actual_image" >&2
+		return 1
+	fi
 
 	running="$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)"
 	assert_eq "true" "$running" "R8.1 container .State.Running" || return 1

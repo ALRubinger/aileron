@@ -87,6 +87,52 @@ check "probe_exit_code returns 0 when codes match" "$?" 0
 probe_exit_code 1 0 >/dev/null 2>&1
 check "probe_exit_code returns non-zero when codes differ" "$?" 1
 
+# --- image_repo / image_ref_matches: R8.1 digest-tolerant image equality -----
+# These are pure string helpers (no docker), so they are host-verifiable here.
+
+# image_repo strips a floating tag, a digest, or a bare ref to the same repo.
+out="$(image_repo 'ghcr.io/alrubinger/aileron-sandbox-codex:edge')"
+assert_eq "ghcr.io/alrubinger/aileron-sandbox-codex" "$out" "image_repo strips :edge" >/dev/null 2>&1
+check "image_repo strips a floating tag" "$?" 0
+out="$(image_repo 'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:abc123')"
+assert_eq "ghcr.io/alrubinger/aileron-sandbox-codex" "$out" "image_repo strips @sha256 digest" >/dev/null 2>&1
+check "image_repo strips an @sha256 digest" "$?" 0
+out="$(image_repo 'localhost:5000/aileron-sandbox-codex')"
+assert_eq "localhost:5000/aileron-sandbox-codex" "$out" "image_repo keeps a registry host:port with no tag" >/dev/null 2>&1
+check "image_repo keeps a registry host:port when there is no tag" "$?" 0
+
+# A floating-tag expected ref matches the same floating tag.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex:edge' \
+	'ghcr.io/alrubinger/aileron-sandbox-codex:edge' >/dev/null 2>&1
+check "image_ref_matches accepts the same floating tag" "$?" 0
+
+# THE REGRESSION: a floating expected ref matches the digest the launcher
+# actually pulled on a reproducible release (#1233). Strict assert_eq failed
+# here; image_ref_matches must accept it.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex:edge' \
+	'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:deadbeef' >/dev/null 2>&1
+check "image_ref_matches accepts a digest pin on the same repo (release path)" "$?" 0
+
+# A :latest expected ref also matches a digest on the same repo.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex:latest' \
+	'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:deadbeef' >/dev/null 2>&1
+check "image_ref_matches accepts a digest pin against a :latest expectation" "$?" 0
+
+# A DIFFERENT repo/agent (claude image) must still fail even via a digest.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex:edge' \
+	'ghcr.io/alrubinger/aileron-sandbox-claude@sha256:deadbeef' >/dev/null 2>&1
+check "image_ref_matches rejects a digest pin on a different agent repo" "$?" 1
+
+# A wrong (non-floating, non-digest) tag on the right repo must still fail.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex:edge' \
+	'ghcr.io/alrubinger/aileron-sandbox-codex:v0.0.1' >/dev/null 2>&1
+check "image_ref_matches rejects an unexpected tag on the right repo" "$?" 1
+
+# An explicit EXPECTED_IMAGE digest override matches exactly.
+image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:abc' \
+	'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:abc' >/dev/null 2>&1
+check "image_ref_matches accepts an exact digest override" "$?" 0
+
 # --- probe_mcp_runtime: the agent-agnostic R8.2 core (binary + env) ----------
 # All sub-checks green: aileron-mcp present (test -x rc 0) and every daemon env
 # var set (printenv rc 0) -> returns 0.
