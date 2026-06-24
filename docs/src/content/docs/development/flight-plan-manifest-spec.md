@@ -1,6 +1,6 @@
 ---
 title: "Flight Plan Manifest Spec"
-description: "The SKILL.md frontmatter extension that declares a Flight Plan's requires block, per-action trust contract, inputs, outputs, and frozen lock section."
+description: "The SKILL.md frontmatter extension that declares a Flight Plan's requires block, per-action trust contract, inputs, outputs, deterministic step graph, and frozen lock section."
 order: 9
 ---
 
@@ -37,6 +37,7 @@ aileron:
     executionEnvironment: {}  # the rung-1 or rung-2 execution image
   inputs: []             # declared inputs with resolution rules
   outputs: []            # declared output artifacts
+  steps: []              # the deterministic step graph, optional
   # lock: produced by freeze, absent before freeze
 ---
 ```
@@ -53,6 +54,7 @@ The tables below give every field's type, required-ness, and semantics. Field na
 | `requires` | object | Yes | The action and execution-environment dependencies. |
 | `inputs` | array | Yes | The declared inputs, each with a resolution rule. |
 | `outputs` | array | Yes | The declared output artifacts. |
+| `steps` | array | No | The deterministic step graph. The composition that wires actions and transforms into a directed acyclic graph. Absent when the skill is instruction-only. |
 | `lock` | object | No | The frozen lock and digest section. Absent before freeze. |
 
 ### `requires`
@@ -144,6 +146,46 @@ The closed `audit.fields` set is `connector-hash`, `action-manifest-version`, `c
 | `mimeType` | string | Yes | The artifact media type. |
 | `encoding` | string | Yes | One of `utf-8`, `base64`. `base64` is reserved. v1 implements `utf-8` only. |
 | `publish` | object | Yes | The publish target. `target` is `file` or `none`; `path` is required and names the output file when `target` is `file`. |
+
+### `steps[]`
+
+Every step carries an `id` unique within the graph and a `kind`. The remaining fields depend on the kind.
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `id` | string | Yes | The step id, unique within the step graph. Later steps reference this step's outputs as `steps.<id>.<outputName>`. |
+| `kind` | string | Yes | One of `action-call`, `transform`, `llm-seam`. A closed enum. |
+| `actionRef` | string | Yes for `action-call` | The action this step invokes, in the form `aileron:<connector>.<action>`. Must match a declared `requires.actions[].ref`. |
+| `args` | object | No (`action-call` only) | The action arguments. Each value is a binding reference, never a value. |
+| `bindings` | object | No (`transform`, `llm-seam`) | The named inputs to the step. Each value is a binding reference. |
+| `outputs` | array | Yes for `transform` and `llm-seam`, No for `action-call` | The named results the step produces. |
+| `materializesOutput` | string | No | Names a declared `outputs[].name` artifact this step's result materializes into. |
+
+## Composition and the step graph
+
+The `steps` block is the deterministic composition ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)). It wires declared actions and deterministic transforms into a directed acyclic graph. The block is optional. A skill with no `steps` block is instruction-only and still a valid manifest.
+
+There are three step kinds.
+
+| `kind` | Reaches an LLM | Semantics |
+|---|---|---|
+| `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
+| `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
+| `llm-seam` | Yes | The single marked non-deterministic seam. The only kind that reaches an LLM. |
+
+The `kind` enum is closed. By construction no kind other than `llm-seam` can reach an LLM, so the no-LLM guarantee is structurally checkable. The `kind: llm-seam` value is the first-class mark the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces that only that one seam reaches an LLM. A `transform` is the structural guarantee that intermediate logic stays deterministic.
+
+A step reads its data through bindings. A binding is a reference, never a value. An `action-call` step binds its `args`; a `transform` and an `llm-seam` step bind their `bindings`. A binding takes one of two forms. `inputs.<name>` references a declared input resolved once at the launch boundary ([#1523](https://github.com/ALRubinger/aileron/issues/1523)). `steps.<stepId>.<outputName>` references a named output of a prior step. The references make the wiring a graph.
+
+The step graph is a directed acyclic graph. The runtime executes it in deterministic topological order. A JSON Schema cannot express acyclicity, so the schema does not enforce it. The acyclicity rule and the topological-order rule are stated here as invariants, the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks them, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces them. The drift-guard test asserts the worked example's references resolve and are acyclic.
+
+An `action-call` step's `actionRef` must match a declared `requires.actions[].ref`. A JSON Schema cannot express cross-array membership, so this too is a stated invariant the lint step checks and the drift-guard asserts on the example.
+
+A step result wires to a declared output artifact through `materializesOutput`. The value names a declared `outputs[].name`. This is how a step result reaches the declared outputs contract that the runtime materializes through the file-map transport. The split between the declared outputs contract and the file-map transport is unchanged. See the [Outputs contract versus file-map transport](#outputs-contract-versus-file-map-transport) section. v1 materializes `utf-8` artifacts only and `base64` stays reserved.
+
+No step field may hold a secret. This extends the credential-sealing invariant. A step binds references, never values. Every step kind is a closed object, so an `additionalProperties` key carrying a value is rejected. The `args` and `bindings` values are binding references whose grammar is closed to `inputs.<name>` and `steps.<id>.<output>`, so a literal secret cannot be embedded in the wiring.
+
+The composition lives under the `aileron` block, so it is lossless if stripped. Removing the block removes the `steps` graph with it and leaves a valid instruction-only skill.
 
 ## Lossless if stripped
 

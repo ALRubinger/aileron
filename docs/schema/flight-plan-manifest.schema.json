@@ -35,6 +35,12 @@
           "description": "Declared outputs (REQUIRED). The outputs contract names each artifact, its mimeType, its encoding, and its publish target. This is the declared INTERFACE the runtime materializes and distribution publishes. The audit references artifacts by name. The outputs contract is distinct from the file-map transport. See #1519.",
           "items": { "$ref": "#/$defs/output" }
         },
+        "steps": {
+          "type": "array",
+          "$comment": "OPTIONAL. `steps` is the deterministic no-LLM composition (the step graph). It is optional so a manifest without a composition still validates and stays lossless-if-stripped: the whole `aileron` block remains removable, and within the block a manifest that only declares requires/inputs/outputs is still complete. When present, `steps` wires declared actions and deterministic transforms into a directed acyclic graph. The single ADR-0027-permitted non-deterministic seam is the `llm-seam` kind; no other kind can reach an LLM, which makes the no-LLM guarantee structurally checkable because `kind` is a closed enum. Cross-step references (a binding to a prior step's output) and acyclicity are graph properties a JSON Schema cannot express; the prose states them as invariants, the freeze/lint step (#1509) checks them, and the runtime (#1511) enforces them.",
+          "description": "The deterministic step graph (OPTIONAL). Wires declared actions and deterministic transforms into a directed acyclic graph. Bindings reference resolved inputs and prior step outputs by name, never by value. The only non-deterministic seam is the marked `llm-seam` kind.",
+          "items": { "$ref": "#/$defs/step" }
+        },
         "lock": {
           "$ref": "#/$defs/lock"
         }
@@ -441,6 +447,113 @@
             }
           }
         }
+      }
+    },
+    "binding": {
+      "type": "string",
+      "description": "A data-flow binding. A binding is a REFERENCE, never a value: it names where a step reads its data from. `inputs.<name>` references a declared input resolved at the launch boundary (#1523). `steps.<stepId>.<outputName>` references a named output of a prior step. A binding never carries a literal secret; secret material is mediated at the data-plane proxy boundary (ADR-0005, ADR-0019). The closed reference grammar is the structural guarantee that step args are wiring, not embedded values.",
+      "pattern": "^(inputs\\.[a-zA-Z0-9_-]+|steps\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+)$"
+    },
+    "stepOutputs": {
+      "type": "array",
+      "description": "The named results a step produces. Each name is referenced by a later step as `steps.<thisStepId>.<name>` or wired to a declared output artifact by name. Names are unique within the step.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "description": "A named result this step produces.",
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      }
+    },
+    "materializesOutput": {
+      "type": "string",
+      "description": "OPTIONAL. Names a declared `outputs[].name` artifact that this step's result materializes into. This wires a step result to the declared outputs contract, which the runtime materializes through the typed file-map transport {path, mimeType, encoding, content} (#1519). The schema cannot enforce that the value matches a declared output name (cross-array membership); the prose states it as an invariant and the drift-guard asserts it on the example.",
+      "pattern": "^[a-zA-Z0-9_.-]+$"
+    },
+    "step": {
+      "type": "object",
+      "description": "One step in the deterministic step graph. Discriminated by `kind`. The closed `kind` enum is the structural no-LLM guarantee: an `action-call` invokes a declared action, a `transform` runs deterministic no-LLM logic, and the single `llm-seam` is the only kind that reaches an LLM (ADR-0027). Every step kind is a closed object (additionalProperties:false), so no step field may carry a secret; a step binds references, never values.",
+      "required": ["id", "kind"],
+      "oneOf": [
+        { "$ref": "#/$defs/actionCallStep" },
+        { "$ref": "#/$defs/transformStep" },
+        { "$ref": "#/$defs/llmSeamStep" }
+      ]
+    },
+    "actionCallStep": {
+      "type": "object",
+      "description": "A step that invokes a declared action. Its `actionRef` MUST match a `requires.actions[].ref` (cross-array membership a JSON Schema cannot enforce; stated as a prose invariant, checked by #1509 lint, asserted by the drift-guard). Args bind to resolved inputs or prior step outputs by reference, never by value.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "actionRef"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph. Prior steps reference this step's outputs as `steps.<id>.<outputName>`.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "action-call",
+          "description": "Invokes a declared action."
+        },
+        "actionRef": {
+          "type": "string",
+          "description": "The action this step invokes, in the form aileron:<connector>.<action>. MUST match a declared requires.actions[].ref.",
+          "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+        },
+        "args": {
+          "type": "object",
+          "description": "The action arguments. Each value is a binding REFERENCE, never a literal value or secret. The argument name is per-action; the value is a binding to a resolved input or a prior step output.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
+    "transformStep": {
+      "type": "object",
+      "description": "A step that runs deterministic no-LLM logic. It has no host, network, or credential surface: a transform reshapes data already in the graph. The closed `kind` enum and the closed object guarantee a transform cannot reach an LLM or carry a credential. Bindings reference resolved inputs or prior step outputs by name, never by value.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "outputs"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "transform",
+          "description": "Deterministic no-LLM logic over data already in the graph."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "The named inputs to the transform. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
+    "llmSeamStep": {
+      "type": "object",
+      "description": "The single ADR-0027-permitted non-deterministic seam. The `kind: llm-seam` value is the first-class mark #1509 lint checks; by construction no other step kind reaches an LLM, so the no-LLM guarantee is structurally checkable because `kind` is a closed enum and only this one value reaches an LLM. Bindings reference resolved inputs or prior step outputs by name, never by value; the seam holds no credential and binds no secret.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "outputs"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "llm-seam",
+          "description": "The single marked non-deterministic seam. The only kind that reaches an LLM."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "The named inputs to the seam. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
       }
     },
     "lock": {
