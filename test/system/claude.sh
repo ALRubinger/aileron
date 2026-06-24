@@ -58,11 +58,18 @@ AUTH_PATH='/home/agent/.claude/.credentials.json'
 WORKSPACE_CONTAINER_PATH='/home/agent/workspace'
 SENTINEL_NAME='.aileron-systest-sentinel'
 
-# Image tag: a dev/empty version build pulls :edge, a release pulls :latest
-# (internal/sandbox/composition/composition.go imageTag). The system test
-# targets dev builds, so :edge is the default; override with EXPECTED_IMAGE
-# to assert a release image or a digest pin.
-EXPECTED_IMAGE="${EXPECTED_IMAGE:-ghcr.io/alrubinger/aileron-sandbox-${IMAGE_SUFFIX}:edge}"
+# Image: claude is recipe'd-but-NOT-publishable (#1451/#1585), so Discover's
+# no-.devcontainer branch resolves a LOCAL Feature build via
+# LocalAgentImageTag(agent, version) = `aileron/sandbox-agent-claude:<tag>`
+# (internal/sandbox/composition/composition.go:188-198, scaffold.go:106-108) —
+# a local-daemon-only repo with no registry host, NOT the GHCR published
+# convention. A dev/empty-version build resolves :edge and a release resolves
+# :latest (both via the shared imageTag()), on that same local repo. claude
+# never has a GHCR-published digest, so the digest-pin path (which applies to
+# publishable agents like codex via PublishedAgentImage) does not apply to it.
+# The system test targets dev builds, so :edge on the local repo is the
+# default; an explicit EXPECTED_IMAGE override still works for a pinned ref.
+EXPECTED_IMAGE="${EXPECTED_IMAGE:-aileron/sandbox-agent-${IMAGE_SUFFIX}:edge}"
 
 : "${AILERON_BIN:?AILERON_BIN must point at the built aileron binary}"
 : "${AILERON_SYSTEST_LIB:?AILERON_SYSTEST_LIB must point at test/system/lib}"
