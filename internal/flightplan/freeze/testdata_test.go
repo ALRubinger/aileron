@@ -42,6 +42,19 @@ func exampleSkillMD(t *testing.T) []byte {
 	return raw
 }
 
+// exampleRung1SkillMD reads the committed rung-1 worked example SKILL.md: a
+// skill naming a whole prebuilt image (rung1Image.ref) with no capability
+// units to compose. It is the living-documentation parallel to the rung-2
+// example.
+func exampleRung1SkillMD(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.rung1.skill.md"))
+	if err != nil {
+		t.Fatalf("read rung-1 worked example: %v", err)
+	}
+	return raw
+}
+
 // instructionOnlyMD is a SKILL.md with no aileron block.
 const instructionOnlyMD = `---
 name: rubber-duck
@@ -108,6 +121,40 @@ aileron:
 ---
 
 # No Exec Env
+`
+
+// rung3MD declares only the reserved, build-deferred rung-3 slot
+// (rung3PerStepImages) with neither rung-1 nor rung-2. The schema permits a
+// rung-3-only declaration and freeze parses it, builds no image, and reports
+// it as deferred (ADR-0027).
+const rung3MD = `---
+name: rung3-skill
+description: A skill declaring only the reserved rung-3 slot.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1
+  inputs: []
+  outputs: []
+---
+
+# Rung 3 Skill
 `
 
 // genSigningKey returns a fresh ed25519 private key and writes its PKCS#8

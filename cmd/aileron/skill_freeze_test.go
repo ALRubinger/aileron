@@ -270,6 +270,81 @@ aileron:
 	}
 }
 
+func TestRunSkillFreeze_Rung3ReportedDeferred(t *testing.T) {
+	storeDir := withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	// A skill declaring only the reserved rung-3 slot. Freeze must succeed,
+	// pin no image, and tell the operator the rung is build-deferred.
+	const rung3MD = `---
+name: rung3-skill
+description: Reserved rung-3 declaration.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:x.y
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1
+  inputs: []
+  outputs: []
+---
+
+# Rung 3
+`
+	dir := filepath.Join(storeDir, "rung3-skill")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(rung3MD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "rung3-skill"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a rung-3 freeze must succeed (build-deferred, not an error), exit=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Rung 3 declared: build-deferred") {
+		t.Errorf("operator must be told rung-3 is build-deferred, stdout=%q", out)
+	}
+	if !strings.Contains(out, "ADR-0027") {
+		t.Errorf("the deferred line should cite ADR-0027, stdout=%q", out)
+	}
+
+	// The frozen lockfile pins no image (nothing was built).
+	s := store.New(storeDir)
+	ids, err := s.FrozenVersions("rung3-skill")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("FrozenVersions = %v, %v", ids, err)
+	}
+	v, err := s.ReadFrozen("rung3-skill", ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(v.Lockfile), "resolvedImages:") {
+		t.Errorf("a rung-3 freeze must pin no image, lockfile:\n%s", v.Lockfile)
+	}
+	if len(v.Signature) == 0 {
+		t.Error("a rung-3 freeze must still be signed")
+	}
+}
+
 func TestRunSkillFreeze_FromPath(t *testing.T) {
 	withTempStore(t)
 	stubFreezeResolvers(t, fakeFreezeDigest)

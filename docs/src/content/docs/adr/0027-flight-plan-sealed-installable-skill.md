@@ -64,7 +64,7 @@ Rung one pins a whole prebuilt image. The skill names an image, and freeze resol
 
 Rung two declares capability units, and Aileron composes them. The skill declares the units it requires on top of a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features onto that base and pins the result. The capability-unit shape is the one defined in [ADR-0026](/adr/0026-cli-capability-units).
 
-The MVP ships rungs one and two. Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Rung three is designed as a manifest slot so a later build can fill it without a format change. Rung three is build-deferred and out of scope here.
+The MVP ships rungs one and two. Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Rung three is designed as a manifest slot so a later build can fill it without a format change. Rung three is build-deferred and out of scope here. A manifest may declare the `rung3PerStepImages` slot alone. Freeze parses that declaration, builds no image, and reports the rung as build-deferred to the operator, so a rung-three-only Flight Plan is a told outcome rather than a parse failure or a silent pass.
 
 The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 

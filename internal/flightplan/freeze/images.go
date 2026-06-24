@@ -56,72 +56,90 @@ func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, features []strin
 	return f(ctx, features)
 }
 
+// rung3Name is the rung label recorded in Result.DeferredRungs when a
+// manifest declares the reserved, build-deferred rung-3 slot.
+const rung3Name = "rung3PerStepImages"
+
 // resolveImages resolves a manifest's execution environment to the pinned
 // image set and resolved capability set, returning the data the lockfile
-// records. The four cases:
+// records plus the rungs that were declared but intentionally not built. The
+// cases:
 //
 //   - instruction-only / no executionEnvironment: empty pins, no error
 //     (the skill still gets a contentHash and signature);
 //   - rung-1 (rung1Image.ref): resolve the named image to a digest pin;
 //   - rung-2 (rung2CapabilityUnits.features): compose the Features and pin
 //     the built image's digest plus the resolved capability set;
-//   - both rungs present, or neither: a malformed manifest the schema
+//   - rung-3 (rung3PerStepImages, no rung-1/rung-2): a reserved,
+//     build-deferred slot (ADR-0027). It parses to an empty image set and is
+//     reported as deferred, never built. This is a first-class outcome, not
+//     an error;
+//   - both rung-1 and rung-2 present, or an executionEnvironment naming
+//     neither an image rung nor rung-3: a malformed manifest the schema
 //     already rejects; guarded here defensively.
 //
 // Every resolved digest is checked against digestPattern: a resolver that
 // yields a tag rather than a digest is rejected (pin by digest, never tag).
-func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer) (pins []ImagePin, capSet []string, err error) {
+func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer) (pins []ImagePin, capSet []string, deferred []string, err error) {
 	if m == nil || m.InstructionOnly {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	env := m.Aileron.Requires.ExecutionEnvironment
 	if len(env) == 0 {
 		// No execution environment declared: an instruction/composition-only
 		// skill freezes with an empty resolvedImages set.
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	rung1, hasRung1 := env["rung1Image"]
 	rung2, hasRung2 := env["rung2CapabilityUnits"]
+	_, hasRung3 := env[rung3Name]
 	switch {
 	case hasRung1 && hasRung2:
-		return nil, nil, fmt.Errorf("freeze: executionEnvironment declares both rung1Image and rung2CapabilityUnits; exactly one is permitted")
+		return nil, nil, nil, fmt.Errorf("freeze: executionEnvironment declares both rung1Image and rung2CapabilityUnits; exactly one is permitted")
 	case hasRung1:
 		ref, err := rung1ImageRef(rung1)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if dr == nil {
-			return nil, nil, fmt.Errorf("freeze: rung-1 image %q requires a digest resolver", ref)
+			return nil, nil, nil, fmt.Errorf("freeze: rung-1 image %q requires a digest resolver", ref)
 		}
 		digest, err := dr.ResolveDigest(ctx, ref)
 		if err != nil {
-			return nil, nil, fmt.Errorf("freeze: resolve rung-1 image %q: %w", ref, err)
+			return nil, nil, nil, fmt.Errorf("freeze: resolve rung-1 image %q: %w", ref, err)
 		}
 		if err := requireDigest(ref, digest); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return []ImagePin{{Ref: ref, Digest: digest}}, nil, nil
+		return []ImagePin{{Ref: ref, Digest: digest}}, nil, nil, nil
 	case hasRung2:
 		features, err := rung2Features(rung2)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if fc == nil {
-			return nil, nil, fmt.Errorf("freeze: rung-2 capability units require a feature composer")
+			return nil, nil, nil, fmt.Errorf("freeze: rung-2 capability units require a feature composer")
 		}
 		digest, err := fc.ComposeDigest(ctx, features)
 		if err != nil {
-			return nil, nil, fmt.Errorf("freeze: compose rung-2 capability units: %w", err)
+			return nil, nil, nil, fmt.Errorf("freeze: compose rung-2 capability units: %w", err)
 		}
 		if err := requireDigest("rung2:"+joinFeatures(features), digest); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		// The pre-freeze "ref" for a composed image is the feature set; the
 		// resolved capability set is the same features, pinned.
-		return []ImagePin{{Ref: composedRef(features), Digest: digest}}, append([]string(nil), features...), nil
+		return []ImagePin{{Ref: composedRef(features), Digest: digest}}, append([]string(nil), features...), nil, nil
+	case hasRung3:
+		// Rung-3 (per-step sibling-image dispatch) is a reserved,
+		// build-deferred slot (ADR-0027). Freeze parses it and reports it as
+		// deferred: no image is built, the resolved image set is empty, and
+		// the rung is recorded as intentionally not built. This is a normal
+		// freeze outcome, not an error.
+		return nil, nil, []string{rung3Name}, nil
 	default:
-		return nil, nil, fmt.Errorf("freeze: executionEnvironment declares neither rung1Image nor rung2CapabilityUnits")
+		return nil, nil, nil, fmt.Errorf("freeze: executionEnvironment declares neither rung1Image nor rung2CapabilityUnits")
 	}
 }
 

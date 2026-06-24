@@ -77,7 +77,7 @@ An unsatisfied `requires:` entry is a missing-requirement signal the runtime sur
 
 ### `requires.executionEnvironment`
 
-The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). The MVP ships rung one and rung two. When `executionEnvironment` is declared it carries exactly one of `rung1Image` or `rung2CapabilityUnits`.
+The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). The MVP ships rung one and rung two. When `executionEnvironment` declares an image rung it carries at most one of `rung1Image` or `rung2CapabilityUnits`; the two are mutually exclusive. The reserved `rung3PerStepImages` slot may be declared alone. Freeze parses a rung-three declaration and reports it as build-deferred (it pins no image), so a rung-three-only manifest is valid and is told to the operator rather than failing.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
@@ -85,7 +85,7 @@ The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-se
 | `rung1Image.ref` | string | Yes within `rung1Image` | An OCI image reference. Freeze resolves a tag to an `image@sha256:` digest pin. |
 | `rung2CapabilityUnits` | object | No | Rung two. Declares capability units composed onto the Aileron agent-free base image. |
 | `rung2CapabilityUnits.features` | array | Yes within `rung2CapabilityUnits` | The capability-unit devcontainer Feature references ([ADR-0026](/adr/0026-cli-capability-units)). |
-| `rung3PerStepImages` | object | No | RESERVED and build-deferred. The rung-three per-step sibling-image dispatch slot. Designed as a manifest slot only. Not implemented in v1. |
+| `rung3PerStepImages` | object | No | RESERVED and build-deferred. The rung-three per-step sibling-image dispatch slot. Designed as a manifest slot only. Not implemented in v1. May be declared alone: freeze parses it and reports it as build-deferred rather than building anything. |
 
 ### `requires.actions[].trustContract`
 

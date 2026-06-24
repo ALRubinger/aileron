@@ -114,3 +114,84 @@ func TestStrippedTopLevelStillValid(t *testing.T) {
 		t.Fatalf("a stripped manifest must validate, got: %v", err)
 	}
 }
+
+// execEnvFrontmatter wraps an executionEnvironment block body into a complete,
+// otherwise-valid aileron frontmatter so a test exercises only the
+// executionEnvironment validity rules. envBlock is the YAML for the
+// executionEnvironment value, indented to sit under requires.
+func execEnvFrontmatter(envBlock string) []byte {
+	return []byte(`name: s
+description: d
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+` + envBlock + `
+  inputs: []
+  outputs: []
+`)
+}
+
+// TestExecutionEnvironmentRungValidity locks the rung composition rules at the
+// schema boundary: rung-1-only and rung-2-only are valid, declaring both
+// rung-1 and rung-2 is rejected (the existing exclusivity guarantee), and a
+// rung-3-only declaration is now valid (a reserved, build-deferred slot it is
+// freeze's job to report, not the schema's job to forbid). rung-3 alongside
+// rung-1 is also permitted: rung-3 is a reserved slot and does not weaken the
+// rung-1/rung-2 exclusivity.
+func TestExecutionEnvironmentRungValidity(t *testing.T) {
+	valid := map[string]string{
+		"rung1 only": `      rung1Image:
+        ref: registry.example.com/runner:1.4`,
+		"rung2 only": `      rung2CapabilityUnits:
+        features:
+          - ghcr.io/example/aileron-feature-metrics-cli:1`,
+		"rung3 only (reserved, build-deferred)": `      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1`,
+		"rung3 alongside rung1": `      rung1Image:
+        ref: registry.example.com/runner:1.4
+      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1`,
+	}
+	for name, env := range valid {
+		t.Run("valid/"+name, func(t *testing.T) {
+			if err := validateFrontmatter(execEnvFrontmatter(env)); err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+		})
+	}
+
+	invalid := map[string]string{
+		"rung1 and rung2 together rejected": `      rung1Image:
+        ref: registry.example.com/runner:1.4
+      rung2CapabilityUnits:
+        features:
+          - ghcr.io/example/aileron-feature-metrics-cli:1`,
+	}
+	for name, env := range invalid {
+		t.Run("invalid/"+name, func(t *testing.T) {
+			err := validateFrontmatter(execEnvFrontmatter(env))
+			if err == nil {
+				t.Fatalf("expected validation error for %q, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "schema validation") {
+				t.Errorf("error should cite schema validation, got: %v", err)
+			}
+		})
+	}
+}
