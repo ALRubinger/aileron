@@ -1163,6 +1163,13 @@ func appendSkillsMount(existing []sandboxcontainer.Volume, agent Agent, storeDir
 	// content into that mount's host-side source under the relative subpath
 	// rather than creating a nested bind. The agent reads the same files at
 	// the same in-container path; nesting is avoided.
+	//
+	// Read-only semantics in the nested case: the enclosing AuthSpec mount
+	// may be writable (Claude's /home/agent/.claude/ is, for credential
+	// rotation), so the copied skills are not RO at the mount level. The
+	// canonical store is still protected because this is a per-launch COPY,
+	// not a bind back to ~/.aileron/skills: any in-container edit dies with
+	// the ephemeral container and never reaches the canonical store.
 	rel := strings.TrimPrefix(target, parent.Target)
 	rel = strings.TrimPrefix(rel, "/")
 	dst := filepath.Join(parent.Source, rel)

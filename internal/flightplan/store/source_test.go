@@ -85,6 +85,11 @@ func TestInstallGitURLViaLocalBareRepo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(res.Dir, "SKILL.md")); err != nil {
 		t.Errorf("git-cloned skill not written: %v", err)
 	}
+	// Regression: the store must hold skill content only, never the clone's
+	// .git directory.
+	if _, err := os.Stat(filepath.Join(res.Dir, ".git")); !os.IsNotExist(err) {
+		t.Errorf("install copied the clone's .git into the store (err=%v)", err)
+	}
 }
 
 func TestInstallGitURLCloneFailureSurfaces(t *testing.T) {

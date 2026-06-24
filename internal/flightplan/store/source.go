@@ -147,6 +147,13 @@ func copyTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
+		// Skip a .git directory entirely. A git-URL install clones into a
+		// working tree whose root carries .git; the store holds skill
+		// content only, not version-control metadata, so copying it in
+		// would bloat the store with the whole history.
+		if info.IsDir() && info.Name() == ".git" {
+			return filepath.SkipDir
+		}
 		target := filepath.Join(dst, rel)
 		switch {
 		case info.IsDir():
