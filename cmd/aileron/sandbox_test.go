@@ -278,6 +278,60 @@ func captureSandboxCheckPlan(t *testing.T) *sandboxcomposition.Plan {
 	return &gotPlan
 }
 
+// captureSandboxCheckBuildOpts swaps the check build/baked/validate seams and
+// returns a pointer to the BuildOptions runSandboxCheck assembles, so a test can
+// assert how check flags thread into the toolchain selection without a real
+// build. It swaps sandboxCheckBuildFn specifically (the check path's seam, a
+// separate value from sandboxBuildFn), so this asserts the check entrypoint
+// threads --offline rather than relying on the build-path test.
+func captureSandboxCheckBuildOpts(t *testing.T) *sandboxcontainer.BuildOptions {
+	t.Helper()
+	origBuild := sandboxCheckBuildFn
+	origBaked := sandboxCheckBakedVersionFn
+	origValidate := sandboxCheckValidateFn
+	t.Cleanup(func() {
+		sandboxCheckBuildFn = origBuild
+		sandboxCheckBakedVersionFn = origBaked
+		sandboxCheckValidateFn = origValidate
+	})
+	var got sandboxcontainer.BuildOptions
+	sandboxCheckBuildFn = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		got = opts
+		return sandboxcontainer.BuildResult{Runtime: "docker", Image: opts.Plan.Image, Tier: opts.Plan.Tier}, nil
+	}
+	sandboxCheckBakedVersionFn = func(context.Context, string, string) string { return "" }
+	sandboxCheckValidateFn = func(context.Context, string, string, string, string, bool) error { return nil }
+	return &got
+}
+
+func TestRunSandboxCheckOfflineFlagThreads(t *testing.T) {
+	// --offline must surface on the check path's BuildOptions.Offline so the CLI
+	// layer constructs an offline provisioner. This mirrors
+	// TestRunSandboxBuildOfflineFlagThreads but for runSandboxCheck, whose build
+	// seam (sandboxCheckBuildFn) is a separate value from sandboxBuildFn.
+	t.Chdir(t.TempDir())
+	got := captureSandboxCheckBuildOpts(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxCheck([]string{"--offline", "--agent=claude"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if !got.Offline {
+		t.Fatal("BuildOptions.Offline = false, want true with --offline on check")
+	}
+}
+
+func TestRunSandboxCheckOfflineDefaultsFalse(t *testing.T) {
+	t.Chdir(t.TempDir())
+	got := captureSandboxCheckBuildOpts(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxCheck([]string{"--agent=claude"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if got.Offline {
+		t.Fatal("BuildOptions.Offline = true without --offline on check, want false")
+	}
+}
+
 func TestRunSandboxCheckPublishedAgentResolvesPerAgentImage(t *testing.T) {
 	t.Chdir(t.TempDir())
 	plan := captureSandboxCheckPlan(t)

@@ -119,5 +119,5 @@ func offlineMissingCLIError(cliVersion string) error {
 // offline path probes this without running npm; it must match the layout
 // npmCLIInstaller.Install writes (see cli_install.go).
 func cliEntrypointForCache(cacheRoot, cliVersion string) string {
-	return filepath.Join(cacheRoot, "devcontainer-cli", cliVersion, cliEntrypointRelPath)
+	return filepath.Join(cliCachePrefix(cacheRoot, cliVersion), cliEntrypointRelPath)
 }

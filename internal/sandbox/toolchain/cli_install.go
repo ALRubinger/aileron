@@ -19,6 +19,14 @@ const devcontainerCLIPackage = "@devcontainers/cli"
 // "bin" points at devcontainer.js under its bin/ directory.
 var cliEntrypointRelPath = filepath.Join("lib", "node_modules", "@devcontainers", "cli", "devcontainer.js")
 
+// cliCachePrefix is the version-keyed npm install prefix the CLI installer
+// writes into: <cacheRoot>/devcontainer-cli/<cliVersion>. It is the single
+// source of truth for that layout, reused by the offline resolver (via
+// cliEntrypointForCache) so the offline probe and the installer can never drift.
+func cliCachePrefix(cacheRoot, cliVersion string) string {
+	return filepath.Join(cacheRoot, "devcontainer-cli", cliVersion)
+}
+
 // npmCLIInstaller is the production cliInstaller: it runs the managed node's
 // bundled npm to install the pinned @devcontainers/cli into a version-keyed
 // cache prefix, then resolves the CLI's JS entrypoint. The install is keyed by
@@ -32,7 +40,7 @@ type npmCLIInstaller struct{}
 // otherwise npm installs the pinned package into the prefix and the entrypoint is
 // returned with fromCache=false.
 func (npmCLIInstaller) Install(ctx context.Context, nodeBinary, cliVersion, cacheRoot string) (string, bool, error) {
-	prefix := filepath.Join(cacheRoot, "devcontainer-cli", cliVersion)
+	prefix := cliCachePrefix(cacheRoot, cliVersion)
 	entrypoint := filepath.Join(prefix, cliEntrypointRelPath)
 	if fileExists(entrypoint) {
 		return entrypoint, true, nil
