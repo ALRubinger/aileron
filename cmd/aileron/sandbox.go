@@ -211,6 +211,22 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// rejectOfflineWithEscapeHatch fails fast when --offline is combined with the
+// managed-toolchain escape hatch (--node/--devcontainer-cli). The two express
+// conflicting intents: --offline asks to resolve the managed toolchain from the
+// warm cache, while the escape hatch points the build at a pre-staged
+// Node + CLI and skips the provisioner entirely (so Offline would be a silent
+// no-op). Rather than dropping the offline intent, name both flags so the
+// operator picks one. It returns a non-nil error when the combination is
+// present (the message is already written to stderr).
+func rejectOfflineWithEscapeHatch(offline bool, node, devcontainerCLI string, stderr io.Writer) error {
+	if !offline || (node == "" && devcontainerCLI == "") {
+		return nil
+	}
+	fmt.Fprintln(stderr, "error: --offline cannot be combined with the --node/--devcontainer-cli escape hatch; --offline resolves the managed toolchain from the warm cache, while --node/--devcontainer-cli skip the provisioner entirely. Pick one.")
+	return errors.New("offline conflicts with escape hatch")
+}
+
 func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sandbox build", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -225,6 +241,9 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>] [--toolchain=managed|host-npx] [--offline] [--node=<path> --devcontainer-cli=<path>]")
+		return 1
+	}
+	if err := rejectOfflineWithEscapeHatch(*offline, *node, *devcontainerCLI, stderr); err != nil {
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -279,6 +298,9 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() > 1 || (*agent != "" && flags.NArg() != 0) {
 		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [--toolchain=managed|host-npx] [--offline] [--node=<path> --devcontainer-cli=<path>] [command]")
+		return 1
+	}
+	if err := rejectOfflineWithEscapeHatch(*offline, *node, *devcontainerCLI, stderr); err != nil {
 		return 1
 	}
 	command := *agent

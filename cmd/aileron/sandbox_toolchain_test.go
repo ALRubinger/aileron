@@ -140,6 +140,46 @@ func TestRunSandboxBuildOfflineDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestRunSandboxBuildOfflineRejectsEscapeHatch(t *testing.T) {
+	// --offline and the --node/--devcontainer-cli escape hatch express
+	// conflicting intents; combining them must fail before any build runs, and
+	// the error must name both flags so the operator's offline intent is not
+	// silently dropped.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"node only", []string{"--offline", "--node=/opt/node/bin/node"}},
+		{"cli only", []string{"--offline", "--devcontainer-cli=/opt/cli/devcontainer.js"}},
+		{"both", []string{"--offline", "--node=/opt/node/bin/node", "--devcontainer-cli=/opt/cli/devcontainer.js"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			calls := 0
+			orig := sandboxBuildFn
+			t.Cleanup(func() { sandboxBuildFn = orig })
+			sandboxBuildFn = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+				calls++
+				return sandboxcontainer.BuildResult{Runtime: "docker", Image: opts.Plan.Image, Tier: opts.Plan.Tier}, nil
+			}
+			var out, errb bytes.Buffer
+			if code := runSandboxBuild(tc.args, &out, &errb); code != 1 {
+				t.Fatalf("exit = %d, want 1 for --offline + escape hatch", code)
+			}
+			if calls != 0 {
+				t.Fatalf("build ran (%d calls) for rejected combination; want 0", calls)
+			}
+			msg := errb.String()
+			for _, want := range []string{"--offline", "--node", "--devcontainer-cli"} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("stderr = %q, want it to name %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
 // captureSandboxWarm swaps sandboxWarmFn so a test exercises the warm command
 // surface without network, returning a pointer to a call counter.
 func captureSandboxWarm(t *testing.T, managed sandboxcontainer.ManagedToolchain, err error) *int {

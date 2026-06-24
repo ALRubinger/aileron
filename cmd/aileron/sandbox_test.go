@@ -332,6 +332,53 @@ func TestRunSandboxCheckOfflineDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestRunSandboxCheckOfflineRejectsEscapeHatch(t *testing.T) {
+	// As with build, --offline and the --node/--devcontainer-cli escape hatch
+	// conflict; check must reject the combination before building and name both
+	// flags so the offline intent is not silently dropped.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"node only", []string{"--offline", "--node=/opt/node/bin/node", "--agent=claude"}},
+		{"cli only", []string{"--offline", "--devcontainer-cli=/opt/cli/devcontainer.js", "--agent=claude"}},
+		{"both", []string{"--offline", "--node=/opt/node/bin/node", "--devcontainer-cli=/opt/cli/devcontainer.js", "--agent=claude"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			calls := 0
+			origBuild := sandboxCheckBuildFn
+			origBaked := sandboxCheckBakedVersionFn
+			origValidate := sandboxCheckValidateFn
+			t.Cleanup(func() {
+				sandboxCheckBuildFn = origBuild
+				sandboxCheckBakedVersionFn = origBaked
+				sandboxCheckValidateFn = origValidate
+			})
+			sandboxCheckBuildFn = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+				calls++
+				return sandboxcontainer.BuildResult{Runtime: "docker", Image: opts.Plan.Image, Tier: opts.Plan.Tier}, nil
+			}
+			sandboxCheckBakedVersionFn = func(context.Context, string, string) string { return "" }
+			sandboxCheckValidateFn = func(context.Context, string, string, string, string, bool) error { return nil }
+			var out, errb bytes.Buffer
+			if code := runSandboxCheck(tc.args, &out, &errb); code != 1 {
+				t.Fatalf("exit = %d, want 1 for --offline + escape hatch", code)
+			}
+			if calls != 0 {
+				t.Fatalf("check build ran (%d calls) for rejected combination; want 0", calls)
+			}
+			msg := errb.String()
+			for _, want := range []string{"--offline", "--node", "--devcontainer-cli"} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("stderr = %q, want it to name %q", msg, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRunSandboxCheckPublishedAgentResolvesPerAgentImage(t *testing.T) {
 	t.Chdir(t.TempDir())
 	plan := captureSandboxCheckPlan(t)

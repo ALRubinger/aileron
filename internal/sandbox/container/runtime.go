@@ -272,7 +272,9 @@ type BuildOptions struct {
 	// that constructs the toolchain Provisioner carries it into
 	// toolchain.Options.Offline, so a build with --offline fails fast with a
 	// `run aileron sandbox warm` hint on a cold cache instead of fetching. It is
-	// ignored when ToolchainMode is host-npx or when the escape hatch is set.
+	// ignored when ToolchainMode is host-npx; the CLI rejects combining --offline
+	// with the --node/--devcontainer-cli escape hatch up front, so the escape
+	// hatch never reaches a build with Offline set.
 	Offline bool
 }
 
