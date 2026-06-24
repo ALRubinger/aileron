@@ -280,6 +280,98 @@ func TestBuildDevcontainerWithoutFeaturesUsesDockerBuild(t *testing.T) {
 	}
 }
 
+// synthesizedReadingRunner records the build args and, when a --workspace-folder
+// is present, reads the devcontainer.json under it AT RUN TIME so the test can
+// prove the synthesized config was materialized before the build dispatched (and
+// is therefore gone after, once the deferred cleanup fires).
+type synthesizedReadingRunner struct {
+	name           string
+	args           []string
+	workspaceFlag  string
+	devcontainerOK bool
+	devcontainer   string
+}
+
+func (r *synthesizedReadingRunner) Run(_ context.Context, name string, args []string, _, _ io.Writer) error {
+	r.name = name
+	r.args = append([]string(nil), args...)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--workspace-folder" {
+			r.workspaceFlag = args[i+1]
+			b, err := os.ReadFile(filepath.Join(args[i+1], composition.DefaultDevcontainerPath))
+			if err == nil {
+				r.devcontainerOK = true
+				r.devcontainer = string(b)
+			}
+		}
+	}
+	return nil
+}
+
+// TestBuildSynthesizedDevcontainerLocalAgentBuild is the #1451 regression: a
+// Discover-synthesized plan (no .devcontainer on disk, a recipe'd-but-not-
+// publishable agent like claude) must build LOCALLY via @devcontainers/cli from
+// a materialized temp workspace folder — never the user's workDir — using the
+// plan's deterministic local image tag rather than ProjectImageTag(workDir), and
+// must leave the user's workDir untouched.
+func TestBuildSynthesizedDevcontainerLocalAgentBuild(t *testing.T) {
+	workDir := t.TempDir()
+	const localTag = "aileron/sandbox-agent-claude:edge"
+	synth := `{"name":"Aileron sandbox","image":"ghcr.io/alrubinger/aileron-sandbox-base:edge","features":{"ghcr.io/alrubinger/aileron-features/claude:0":{}}}`
+	runner := &synthesizedReadingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir:       workDir,
+		ToolchainMode: ToolchainModeHostNPX,
+		Plan: composition.Plan{
+			Tier:                    composition.TierDevcontainer,
+			Image:                   localTag,
+			Features:                map[string]json.RawMessage{"ghcr.io/alrubinger/aileron-features/claude:0": json.RawMessage("{}")},
+			SynthesizedDevcontainer: synth,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Built locally via the CLI, not pulled.
+	if !result.Built {
+		t.Fatalf("result.Built = false, want true (a local Feature build)")
+	}
+	if runner.name != devcontainerCLI[0] {
+		t.Fatalf("runner.name = %q, want the devcontainer CLI %q", runner.name, devcontainerCLI[0])
+	}
+	// Image is the deterministic local tag, NOT ProjectImageTag(workDir).
+	if result.Image != localTag {
+		t.Fatalf("result.Image = %q, want the plan's local tag %q", result.Image, localTag)
+	}
+	if result.Image == ProjectImageTag(workDir) {
+		t.Fatalf("result.Image must not be the workDir-keyed project tag")
+	}
+	if strings.Contains(result.Image, "aileron-sandbox-claude") {
+		t.Fatalf("result.Image = %q must not reference a published claude image", result.Image)
+	}
+	// The build read a temp workspace folder, never the user's workDir.
+	if runner.workspaceFlag == "" {
+		t.Fatalf("no --workspace-folder passed to the CLI build")
+	}
+	if runner.workspaceFlag == workDir {
+		t.Fatalf("--workspace-folder = workDir %q, want a managed temp folder", workDir)
+	}
+	if !runner.devcontainerOK {
+		t.Fatalf("synthesized devcontainer.json was not materialized under the build workspace folder")
+	}
+	if runner.devcontainer != synth {
+		t.Fatalf("materialized devcontainer = %q, want %q", runner.devcontainer, synth)
+	}
+	// The user's workDir must be untouched: no .devcontainer written there.
+	if _, err := os.Stat(filepath.Join(workDir, composition.DefaultDevcontainerPath)); !os.IsNotExist(err) {
+		t.Fatalf("user workDir was polluted with a .devcontainer (stat err=%v)", err)
+	}
+	// The temp workspace folder is cleaned up after Build returns.
+	if _, err := os.Stat(runner.workspaceFlag); !os.IsNotExist(err) {
+		t.Fatalf("temp build workspace %q was not cleaned up (stat err=%v)", runner.workspaceFlag, err)
+	}
+}
+
 func TestBuildBYOImageWithFeaturesNoBuild(t *testing.T) {
 	// Features on a BYO (Tier 2) image are inert; the build still short-circuits
 	// to ErrNoBuildRequired with no CLI invocation.

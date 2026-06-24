@@ -19,8 +19,8 @@ The check uses the same composition plan and minimal launch validation as `ailer
 
 | Agent | Command | Sandbox image support | MCP under `--sandbox=docker` | Notes |
 |---|---|---|---|---|
-| Claude Code | `claude` | Agent Feature | ✓ via `--mcp-config` | First-class Feature below. Use `sandbox check --agent=claude` before launch. |
-| Codex | `codex` | Agent Feature | ✓ via bind-mounted `config.toml` | Feature below. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` ([ADR-0024](/adr/0024-sandbox-mcp-parity/)). Host `~/.codex/config.toml` is never touched. |
+| Claude Code | `claude` | Agent Feature (local build) | ✓ via `--mcp-config` | First-class Feature below. The build-free path builds the image **locally** from the Feature, because `@anthropic-ai/claude-code` is all-rights-reserved and cannot be redistributed as a published image ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). Use `sandbox check --agent=claude` before launch. |
+| Codex | `codex` | Agent Feature (published image) | ✓ via bind-mounted `config.toml` | Feature below. `@openai/codex` is Apache-2.0, so its per-agent image is published and pulled build-free. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` ([ADR-0024](/adr/0024-sandbox-mcp-parity/)). Host `~/.codex/config.toml` is never touched. |
 | Goose | `goose` | Command contract only | ✓ via `--with-extension` | List the agent Feature in Tier 1, or install the CLI in a BYO image; no maintained Feature yet. |
 | OpenCode | `opencode` | Command contract only | ✓ via workspace `opencode.json` | Launcher writes `opencode.json` into the launch directory; the workspace bind-mount makes it readable in-container. |
 | Pi | `pi` | Command contract only | ✓ via `--mcp-config` | Shares Claude's MCP wiring. |
@@ -32,24 +32,29 @@ Docker is the only supported sandbox runtime in v4. Podman is planned but not ye
 
 The harness-free `ghcr.io/alrubinger/aileron-sandbox-base` intentionally does not include agent CLIs ([ADR-0017](/adr/0017-sandbox-composition/)). Each agent install is authored once as a devcontainer Feature, the single source of truth that Aileron CI bakes into prebuilt per-agent images and that customers compose for Tier 1. The prebuilt per-agent image is the zero-build Tier 0 default, owned by [#965](https://github.com/ALRubinger/aileron/issues/965). Use Tier 1 when you want Aileron's base runtime plus an agent plus your own tools, or Tier 2 when your team owns the full image.
 
-## Build-Free Default
+## Default Launch Paths
 
-With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>` is build-free for a published agent. The launcher resolves the prebuilt per-agent image `ghcr.io/alrubinger/aileron-sandbox-<agent>` and pulls it. There is no `sandbox init`, no Dockerfile, and no local image build. The published agents today are `claude` and `codex`.
+With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>` resolves one of three default paths from the requested agent:
 
-`sandbox check --agent=<agent>` resolves the same image, so a passing check matches what launch will run.
+- **Published agent (build-free):** the launcher resolves the prebuilt per-agent image `ghcr.io/alrubinger/aileron-sandbox-<agent>` and pulls it. There is no `sandbox init`, no Dockerfile, and no local image build. The published agent today is `codex`, whose `@openai/codex` CLI is Apache-2.0 and so redistributable.
+- **Recipe'd-but-not-publishable agent (local build):** the launcher composes the base image with the agent Feature and builds the image **locally** on your host through `@devcontainers/cli`, then launches it. `claude` takes this path: `@anthropic-ai/claude-code` is all-rights-reserved with no redistribution grant, so Aileron never bakes it into a published image ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). The build needs only Docker on the host (the managed toolchain provisions Node and the CLI; see [Managed Toolchain Build](#managed-toolchain-build)). Aileron synthesizes the composed `devcontainer.json` into a managed temp workspace folder for the build, so your working directory is never written to. The resulting image is tagged locally and reused across launches, so only the first launch builds.
+- **Empty or unsupported agent (local base):** `sandbox plan`/`build` (which pass no agent) and agents with no recipe keep the local agent-less base.
 
-The launcher resolves the image for this build-free default in two ways. A release build with a recorded digest pin pulls a fixed image by `@sha256` (see [Reproducible releases](#reproducible-releases-digest-pinning) below). Otherwise it resolves a floating tag: a release build with no recorded pin pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (republished on every merge to `main` that touches the image source, and on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the fallback when no digest is pinned. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
+`sandbox check --agent=<agent>` resolves the same path, so a passing check matches what launch will run.
 
-When the requested agent has no published image, launch falls back to the customization tier. The image validation then emits the actionable message to install the agent CLI in the sandbox image or launch with `--local`.
+For a **published** agent, the launcher resolves the image in two ways. A release build with a recorded digest pin pulls a fixed image by `@sha256` (see [Reproducible releases](#reproducible-releases-digest-pinning) below). Otherwise it resolves a floating tag: a release build with no recorded pin pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (republished on every merge to `main` that touches the image source, and on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the fallback when no digest is pinned. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
+
+Credential sealing is runtime-side and image-provenance-agnostic ([ADR-0025](/adr/0025-vault-backed-agent-auth/)), so a locally-built Claude image launches with credentials sealed exactly as a published image would.
 
 ## Prebuilt Per-Agent Images
 
-Aileron CI publishes one multi-arch image per agent to GHCR. Each image is baked from the GHCR sandbox base plus that agent's devcontainer Feature install script, so the Feature stays the single source of truth.
+Aileron CI publishes one multi-arch image per **publishable** agent to GHCR. Each image is baked from the GHCR sandbox base plus that agent's devcontainer Feature install script, so the Feature stays the single source of truth. The published set is computed from `composition.PublishedAgents` (the publishable agents), so an agent whose CLI license forbids redistribution is never published.
 
 | Agent | Image |
 |---|---|
-| Claude Code | `ghcr.io/alrubinger/aileron-sandbox-claude` |
 | Codex | `ghcr.io/alrubinger/aileron-sandbox-codex` |
+
+Claude Code is **not** published: `@anthropic-ai/claude-code` is all-rights-reserved with no redistribution grant, so its image is built locally from the Feature at launch instead ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). See the [Claude Code Feature](#claude-code-feature) section.
 
 Each image is built for `linux/amd64` and `linux/arm64`, so a `docker pull` resolves the manifest for your platform automatically.
 
@@ -62,21 +67,20 @@ The tag scheme is `<aileron-version>-<agent-cli-version>` plus two floating tags
 Pull the most recent release (`latest`), or the latest dev publish off `main` (`edge`):
 
 ```bash
-docker pull ghcr.io/alrubinger/aileron-sandbox-claude:latest
 docker pull ghcr.io/alrubinger/aileron-sandbox-codex:latest
 # tip of main, republished on every image-affecting merge to main:
-docker pull ghcr.io/alrubinger/aileron-sandbox-claude:edge
+docker pull ghcr.io/alrubinger/aileron-sandbox-codex:edge
 ```
 
-Pull a pinned version, for example Aileron `0.0.1` with the Claude CLI at `2.1.179`:
+Pull a pinned version, for example Aileron `0.0.1` with the Codex CLI at `0.2.0`:
 
 ```bash
-docker pull ghcr.io/alrubinger/aileron-sandbox-claude:0.0.1-2.1.179
+docker pull ghcr.io/alrubinger/aileron-sandbox-codex:0.0.1-0.2.0
 ```
 
 CI smoke-tests every published image for launchability before it ships. The smoke asserts the agent CLI resolves on `PATH` and that the launcher's image validation succeeds.
 
-A daily watcher workflow (`sandbox-agents-watch.yml`) keeps the `edge` images fresh against upstream agent-CLI releases. It polls npm for the latest `@anthropic-ai/claude-code` and `@openai/codex` versions. It compares each against the CLI version baked into the `edge` image, recovered from the `dev-<cli-version>` tag co-located on the `edge` manifest digest. On drift it re-triggers `sandbox-agents.yml`, which rebuilds from the unpinned Feature install scripts and so bakes the latest CLI. The refreshed build publishes `edge` and `dev-<cli-version>`. Dev and main consumers pull `edge`, so they pick up new agent CLIs automatically without a release.
+A daily watcher workflow (`sandbox-agents-watch.yml`) keeps the `edge` images fresh against upstream agent-CLI releases. It watches the publishable agents (computed from `composition.PublishedAgents`, so a non-publishable agent like Claude Code is never watched) by polling npm for each agent's latest CLI version, for example `@openai/codex`. It compares each against the CLI version baked into the `edge` image, recovered from the `dev-<cli-version>` tag co-located on the `edge` manifest digest. On drift it re-triggers `sandbox-agents.yml`, which rebuilds from the unpinned Feature install scripts and so bakes the latest CLI. The refreshed build publishes `edge` and `dev-<cli-version>`. Dev and main consumers pull `edge`, so they pick up new agent CLIs automatically without a release.
 
 `latest` and the release-pinned `<aileron-version>-<agent-cli-version>` tags move on `v*` releases only, by design. A released user on `latest` stays pinned to that release's CLI version until the next release. This is intentional. A release is an immutable point and `latest` names the most-recent release, so a background job must never clobber it. Keeping `latest` fresh between releases is an accepted gap, not a bug.
 
@@ -184,9 +188,11 @@ This is distinct from the escape hatch above. The escape hatch points at pre-sta
 
 ## Claude Code Feature
 
-The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
+The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth you compose for Tier 1, and the recipe Aileron builds **locally** on your host for the default launch path. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
 
-For the Tier 0 zero-build path, launch the prebuilt image directly:
+Claude Code is not redistributed as a published image: `@anthropic-ai/claude-code` is all-rights-reserved with no redistribution grant, so Aileron never bakes it into a GHCR image ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). The default launch path therefore builds the image locally from the Feature instead of pulling one. The build needs only Docker on the host; the managed toolchain provisions Node and `@devcontainers/cli` (see [Managed Toolchain Build](#managed-toolchain-build)). The composed `devcontainer.json` is synthesized into a managed temp workspace folder, so your working directory is never written to, and the locally-tagged image is reused across launches so only the first launch builds.
+
+For the default local-build path, launch directly with no `.devcontainer` in your project:
 
 ```bash
 aileron launch --sandbox=docker claude
@@ -204,7 +210,7 @@ Claude Code still owns its own authentication flow. Do not bake Claude, Anthropi
 
 ## Codex Feature
 
-The Codex agent Feature installs the `codex` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base. Like the Claude Feature, it is baked into the prebuilt Codex image and composable for Tier 1. The Feature lives at `images/sandbox-features/codex/` (`devcontainer-feature.json` plus `install.sh`).
+The Codex agent Feature installs the `codex` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base. `@openai/codex` is Apache-2.0, so unlike Claude its image is baked into the prebuilt, published Codex image; it is also composable for Tier 1. The Feature lives at `images/sandbox-features/codex/` (`devcontainer-feature.json` plus `install.sh`).
 
 For the Tier 0 zero-build path:
 

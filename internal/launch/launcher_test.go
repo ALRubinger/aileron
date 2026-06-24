@@ -1164,10 +1164,12 @@ func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	}
 }
 
-// publishedAgent reports a Name() that has a published per-agent sandbox image
-// (claude/codex), so the no-.devcontainer launch path resolves the build-free
+// publishedAgent reports a Name() that has a publishable per-agent sandbox image
+// (codex), so the no-.devcontainer launch path resolves the build-free
 // TierPublished default and pulls the per-agent image instead of building the
-// local base.
+// local base. Claude is no longer publishable (#1451), so it would take the
+// local-build path instead and is covered by
+// TestLaunch_SandboxNoDevcontainerNonPublishableAgentBuildsLocally.
 type publishedAgent struct {
 	scriptAgent
 	name string
@@ -1193,7 +1195,7 @@ func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
-		Agent:              publishedAgent{scriptAgent: scriptAgent{script: "claude"}, name: "claude"},
+		Agent:              publishedAgent{scriptAgent: scriptAgent{script: "codex"}, name: "codex"},
 		Dir:                dir,
 		Args:               []string{"--dangerously-skip-permissions"},
 		SandboxRuntime:     "docker",
@@ -1207,13 +1209,13 @@ func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing
 		t.Fatalf("read docker args: %v", err)
 	}
 	args := string(data)
-	const image = "ghcr.io/alrubinger/aileron-sandbox-claude:edge"
+	const image = "ghcr.io/alrubinger/aileron-sandbox-codex:edge"
 	for _, want := range []string{
 		"pull\n" + image + "\n",
 		"run\n--rm\n-i\n",
 		"--env\nAILERON_SANDBOX_IMAGE=" + image + "\n",
 		"--env\nAILERON_SANDBOX_TIER=published\n",
-		image + "\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
+		image + "\naileron-run-with-proxy-ca\ncodex\n--dangerously-skip-permissions\n",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("expected %q in docker args:\n%s", want, args)
@@ -1222,6 +1224,94 @@ func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing
 	// The published path must not build the local base image.
 	if strings.Contains(args, "build\n-t\nghcr.io/alrubinger/aileron-sandbox-base") {
 		t.Errorf("published launch unexpectedly built the local base image:\n%s", args)
+	}
+}
+
+// TestLaunch_SandboxNoDevcontainerNonPublishableAgentBuildsLocally is the #1451
+// launch-level regression: with no .devcontainer and a recipe'd-but-not-
+// publishable agent (claude), launch must NOT pull a published
+// aileron-sandbox-claude image. It must build the agent image LOCALLY via
+// @devcontainers/cli from a synthesized devcontainer materialized into a managed
+// temp workspace folder (never the user's workDir), then run that local image.
+func TestLaunch_SandboxNoDevcontainerNonPublishableAgentBuildsLocally(t *testing.T) {
+	launch.PinWorkspaceUIDRemapForTest(t, false)
+	// Pin host-npx so the build path execs `npx @devcontainers/cli` hermetically;
+	// the managed default would provision a real Node, out of place in a unit
+	// test (the managed build is proven in the integration-sandbox-managed job).
+	t.Setenv(sandboxcontainer.ToolchainModeEnv, sandboxcontainer.ToolchainModeHostNPX)
+
+	dir := t.TempDir() // no .devcontainer, no images/sandbox-base context
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	npxArgsFile := filepath.Join(dir, "npx-args.txt")
+	writeStub := func(name, dest string) {
+		script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + dest + "\nprintf '%s\\n' \"$@\" >> " + dest + "\n"
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStub("docker", argsFile)
+	writeStub("npx", npxArgsFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:              publishedAgent{scriptAgent: scriptAgent{script: "claude"}, name: "claude"},
+		Dir:                dir,
+		Args:               []string{"--dangerously-skip-permissions"},
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "always",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+
+	// The image is built LOCALLY via @devcontainers/cli, not pulled.
+	npxData, err := os.ReadFile(npxArgsFile)
+	if err != nil {
+		t.Fatalf("read npx args: %v", err)
+	}
+	localTag := sandboxcomposition.LocalAgentImageTag("claude", "dev")
+	for _, want := range []string{
+		"@devcontainers/cli@",
+		"build\n",
+		"--image-name\n" + localTag + "\n",
+	} {
+		if !strings.Contains(string(npxData), want) {
+			t.Fatalf("local devcontainers/cli build call missing %q:\n%s", want, npxData)
+		}
+	}
+	// The build never references a published claude image.
+	if strings.Contains(string(npxData), "aileron-sandbox-claude") {
+		t.Fatalf("local build unexpectedly referenced a published claude image:\n%s", npxData)
+	}
+	// The --workspace-folder is a managed temp dir, NOT the user's workDir.
+	if strings.Contains(string(npxData), "--workspace-folder\n"+dir+"\n") {
+		t.Fatalf("build used the user's workDir as --workspace-folder; want a managed temp folder:\n%s", npxData)
+	}
+	if !strings.Contains(string(npxData), "--workspace-folder\n") {
+		t.Fatalf("build did not pass a --workspace-folder:\n%s", npxData)
+	}
+	// The user's workDir must be left untouched: no .devcontainer written there.
+	if _, statErr := os.Stat(filepath.Join(dir, sandboxcomposition.DefaultDevcontainerPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("user workDir was polluted with a .devcontainer (stat err=%v)", statErr)
+	}
+
+	// docker is used for validate + run, never to pull a published claude image.
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	if strings.Contains(string(data), "pull\nghcr.io/alrubinger/aileron-sandbox-claude") {
+		t.Fatalf("launch pulled a published claude image; want a local build:\n%s", data)
+	}
+	for _, want := range []string{
+		"--env\nAILERON_SANDBOX_IMAGE=" + localTag + "\n",
+		"--env\nAILERON_SANDBOX_TIER=devcontainer\n",
+		localTag + "\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("docker run call missing %q:\n%s", want, data)
+		}
 	}
 }
 
