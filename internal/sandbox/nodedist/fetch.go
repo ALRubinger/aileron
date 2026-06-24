@@ -206,6 +206,15 @@ func (f *Fetcher) download(ctx context.Context, url string) ([]byte, error) {
 	return data, nil
 }
 
+// NodeBinaryPath returns the absolute path to the node executable inside an
+// unpacked entry for the given target. It is the exported wrapper the managed
+// toolchain's offline resolver (internal/sandbox/toolchain, #1531) calls so it
+// reuses this package's single rule for the `bin/node` (Unix) vs `node.exe`
+// (Windows) layout rather than re-deriving it.
+func NodeBinaryPath(entryDir string, target Target) string {
+	return nodeBinaryPath(entryDir, target)
+}
+
 // nodeBinaryPath returns the absolute path to the node executable inside an
 // unpacked entry for the given target.
 func nodeBinaryPath(entryDir string, target Target) string {

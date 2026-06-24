@@ -69,6 +69,16 @@ type Options struct {
 
 	// CLIInstaller acquires the pinned CLI. Defaults to the npm-based installer.
 	CLIInstaller cliInstaller
+
+	// Offline resolves the managed toolchain from the warm content-addressed
+	// cache with zero network access (#1531). When true, Provision computes the
+	// Node cache key from the committed tools.lock pin (the pinned sha256 is the
+	// cache key), serves the cached Node tree and the cached CLI entrypoint
+	// directly, and never calls the HTTP fetcher or the CLI installer. A cold
+	// cache (Node tree or CLI entrypoint absent) fails with an actionable error
+	// naming `aileron sandbox warm`. The zero value (false) preserves the
+	// network-backed default exactly.
+	Offline bool
 }
 
 // nodedistKeyring is the keyring type Options.Keyring carries. It is an alias of
@@ -89,6 +99,10 @@ func Provision(ctx context.Context, opts Options) (container.ManagedToolchain, e
 	resolved, err := opts.resolve()
 	if err != nil {
 		return container.ManagedToolchain{}, err
+	}
+
+	if resolved.Offline {
+		return provisionOffline(resolved)
 	}
 
 	keyring, err := resolved.keyring()
@@ -155,6 +169,7 @@ type resolvedOptions struct {
 	GOARCH       string
 	CLIVersion   string
 	CLIInstaller cliInstaller
+	Offline      bool
 }
 
 func (o Options) resolve() (resolvedOptions, error) {
@@ -167,6 +182,7 @@ func (o Options) resolve() (resolvedOptions, error) {
 		GOARCH:       o.GOARCH,
 		CLIVersion:   o.CLIVersion,
 		CLIInstaller: o.CLIInstaller,
+		Offline:      o.Offline,
 	}
 	if r.CacheRoot == "" {
 		r.CacheRoot = filepath.Join(cstore.DefaultRoot(), "toolchain")

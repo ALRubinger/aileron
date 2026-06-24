@@ -170,6 +170,18 @@ func nodePlatformToken(goos, goarch string) (string, bool) {
 	return os + "-" + arch, true
 }
 
+// PinnedNodeChecksum returns the recorded sha256 for the requested Node version
+// on the given GOOS/GOARCH and whether a pin applies. ok is false when version
+// is not the pinned version, when the GOOS/GOARCH pair is unsupported, or when no
+// checksum is recorded for the resolved platform. It is the exported wrapper the
+// managed-toolchain provisioner's offline path (internal/sandbox/toolchain, #1531)
+// reads to compute the content-addressed cache key from the pin alone, with no
+// network: the pinned sha256 is exactly the cstore cache key for the Node tree.
+// It keeps the committed tools.lock the single source of truth for that mapping.
+func PinnedNodeChecksum(version, goos, goarch string) (string, bool) {
+	return pinnedNodeChecksum(version, goos, goarch)
+}
+
 // pinnedNodeChecksum returns the recorded sha256 for the requested Node version
 // on the given GOOS/GOARCH and whether a pin applies. ok is false when version
 // is not the pinned version, when the GOOS/GOARCH pair is unsupported, or when no

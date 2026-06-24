@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
@@ -106,6 +108,108 @@ func TestRunSandboxBuildEscapeHatchEnvThreaded(t *testing.T) {
 	}
 	if got.DevcontainerCLIEntrypoint != "/opt/cli/devcontainer.js" {
 		t.Fatalf("DevcontainerCLIEntrypoint = %q, want env value", got.DevcontainerCLIEntrypoint)
+	}
+}
+
+func TestRunSandboxBuildOfflineFlagThreads(t *testing.T) {
+	// --offline must surface on BuildOptions.Offline so the CLI layer constructs
+	// an offline provisioner for a managed build.
+	t.Chdir(t.TempDir())
+	got := captureSandboxBuildOpts(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxBuild([]string{"--offline"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if !got.Offline {
+		t.Fatal("BuildOptions.Offline = false, want true with --offline")
+	}
+	if !sandboxcontainer.IsManagedToolchain(got.ToolchainMode) {
+		t.Fatalf("default ToolchainMode = %q, want managed", got.ToolchainMode)
+	}
+}
+
+func TestRunSandboxBuildOfflineDefaultsFalse(t *testing.T) {
+	t.Chdir(t.TempDir())
+	got := captureSandboxBuildOpts(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxBuild(nil, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if got.Offline {
+		t.Fatal("BuildOptions.Offline = true without --offline, want false")
+	}
+}
+
+// captureSandboxWarm swaps sandboxWarmFn so a test exercises the warm command
+// surface without network, returning a pointer to a call counter.
+func captureSandboxWarm(t *testing.T, managed sandboxcontainer.ManagedToolchain, err error) *int {
+	t.Helper()
+	orig := sandboxWarmFn
+	t.Cleanup(func() { sandboxWarmFn = orig })
+	calls := 0
+	sandboxWarmFn = func(_ context.Context) (sandboxcontainer.ManagedToolchain, error) {
+		calls++
+		return managed, err
+	}
+	return &calls
+}
+
+func TestRunSandboxWarmDispatchesAndPrints(t *testing.T) {
+	calls := captureSandboxWarm(t, sandboxcontainer.ManagedToolchain{
+		NodeBinary:    "/cache/node/sha256/abc/bin/node",
+		CLIEntrypoint: "/cache/devcontainer-cli/1.0.0/devcontainer.js",
+	}, nil)
+	var out, errb bytes.Buffer
+	if code := runSandboxWarm(nil, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if *calls != 1 {
+		t.Fatalf("warm provision calls = %d, want 1", *calls)
+	}
+	got := out.String()
+	for _, want := range []string{"node: /cache/node/sha256/abc/bin/node", "devcontainer-cli: /cache/devcontainer-cli/1.0.0/devcontainer.js", "warmed: ok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warm output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunSandboxWarmRejectsHostNPX(t *testing.T) {
+	calls := captureSandboxWarm(t, sandboxcontainer.ManagedToolchain{}, nil)
+	var out, errb bytes.Buffer
+	if code := runSandboxWarm([]string{"--toolchain=host-npx"}, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1 for host-npx warm", code)
+	}
+	if *calls != 0 {
+		t.Fatalf("warm provision ran (%d calls) for host-npx; want 0", *calls)
+	}
+	if !strings.Contains(errb.String(), "host-npx") {
+		t.Fatalf("stderr = %q, want a host-npx rejection message", errb.String())
+	}
+}
+
+func TestRunSandboxWarmRejectsUnknownArgs(t *testing.T) {
+	calls := captureSandboxWarm(t, sandboxcontainer.ManagedToolchain{}, nil)
+	var out, errb bytes.Buffer
+	if code := runSandboxWarm([]string{"extra"}, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1 for unexpected args", code)
+	}
+	if *calls != 0 {
+		t.Fatalf("warm provision ran (%d calls) with bad args; want 0", *calls)
+	}
+	if !strings.Contains(errb.String(), "usage: aileron sandbox warm") {
+		t.Fatalf("stderr = %q, want usage", errb.String())
+	}
+}
+
+func TestRunSandboxWarmSurfacesProvisionError(t *testing.T) {
+	captureSandboxWarm(t, sandboxcontainer.ManagedToolchain{}, errors.New("warm boom"))
+	var out, errb bytes.Buffer
+	if code := runSandboxWarm(nil, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1 on provision error", code)
+	}
+	if !strings.Contains(errb.String(), "warm boom") {
+		t.Fatalf("stderr = %q, want the provision error surfaced", errb.String())
 	}
 }
 
