@@ -7,4 +7,5 @@ use (
 	./sdk/go
 	./test/integration
 	./test/system/lib
+	./test/system/scenario
 )
