@@ -17,9 +17,10 @@ test/system/
   codex.sh             the codex scenario body (#1476)
   claude.sh            the claude scenario body (#1477)
   scenario/            shell-free Go scenario driver (#1624), its own module,
-                       run by hand with `go run ./test/system/scenario codex`;
-                       NOT in GO_TEST_PACKAGES, so the live path never runs in CI
-    main.go            agent-name dispatch (codex today; claude in #1625)
+                       run by hand with `go run ./test/system/scenario codex`
+                       (or `claude`); NOT in GO_TEST_PACKAGES, so the live path
+                       never runs in CI
+    main.go            agent-name dispatch (codex and claude)
     scenario.go        the live orchestration (background launch, reap,
                        discovery poll, probes, sentinel read, R10 audit)
     docker.go          thin docker ps/inspect/exec shellouts returning raw facts
@@ -55,7 +56,8 @@ path, excluded from CI).
 | Go scenario driver compile | `go build ./test/system/scenario` | Go toolchain | yes — compiles the driver; its own module, not in GO_TEST_PACKAGES |
 | Live codex scenario (shell) | `task test:system:launch:codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
 | Live codex scenario (Go) | `go run ./test/system/scenario codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
-| Live claude scenario | `task test:system:launch:claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
+| Live claude scenario (shell) | `task test:system:launch:claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
+| Live claude scenario (Go) | `go run ./test/system/scenario claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
 
 The headless path validates the **wiring** (the target compiles, the build
 dependency and preconditions resolve, the scenario library passes its Go
@@ -222,6 +224,33 @@ task test:system:launch:claude
 > no Claude vault auth, so the scenario here is statically validated only
 > (`task --dry`, `shellcheck`); a green live run is verified by hand on a
 > claude-authed host.
+
+## Run the claude scenario by hand (shell-free Go)
+
+`go run ./test/system/scenario claude` is the shell-free Go equivalent of
+`claude.sh`. It reuses the same shared runner body as the codex Go path and
+differs only in the claude bindings and the R8.2 MCP probe. It needs the same
+prerequisites as the shell claude scenario above (Docker, a Claude login the
+launcher's AuthSpec resolves, and optionally a running daemon for R10). Build an
+`aileron` first and point the driver at it:
+
+```sh
+task build                                  # produces build/aileron
+AILERON_BIN="$PWD/build/aileron" \
+WORKSPACE="$(mktemp -d)" \
+AILERON_STATE_DIR="$HOME/.aileron" \
+  go run ./test/system/scenario claude
+```
+
+The default `EXPECTED_IMAGE` is the LOCAL `aileron/sandbox-agent-claude:edge` ref
+(no registry host, no digest pin), because the claude sandbox image is built
+locally from the devcontainer Feature rather than published to a registry. An
+explicit `EXPECTED_IMAGE` override is honored the same way the shell scenario does.
+
+The R8.2 MCP probe is the flag-mode probe. The driver asserts the `--mcp-config`
+flag and the `"aileron"` server marker on the running container's command line
+(not a config file), plus the shared agent-agnostic core (`aileron-mcp` present
+and executable, the daemon-wiring env vars set).
 
 ## Editing the shared library
 
