@@ -96,24 +96,25 @@ func frontmatter(t *testing.T, mdPath string) map[string]any {
 }
 
 // splitFrontmatter splits a Markdown document into its YAML frontmatter block
-// and the remaining body. It expects the document to open with a `---` fence.
+// and the remaining body. It expects the document to open with a `---` fence and
+// closes on the first standalone `---` line, so a body line that merely starts
+// with three dashes (a thematic break, for example) is not mistaken for the
+// closing fence.
 func splitFrontmatter(raw []byte) (front, body []byte, ok bool) {
 	const fence = "---"
-	text := string(raw)
-	// Normalize to avoid CRLF surprises.
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	if !strings.HasPrefix(text, fence+"\n") {
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 || lines[0] != fence {
 		return nil, nil, false
 	}
-	rest := text[len(fence)+1:]
-	idx := strings.Index(rest, "\n"+fence)
-	if idx < 0 {
-		return nil, nil, false
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == fence {
+			front = []byte(strings.Join(lines[1:i], "\n"))
+			body = []byte(strings.Join(lines[i+1:], "\n"))
+			return front, body, true
+		}
 	}
-	front = []byte(rest[:idx])
-	afterFence := rest[idx+1+len(fence):]
-	afterFence = strings.TrimPrefix(afterFence, "\n")
-	return front, []byte(afterFence), true
+	return nil, nil, false
 }
 
 // jsonifyMap round-trips a YAML-decoded value through JSON so that the schema
@@ -284,5 +285,95 @@ func TestNoSecretValueField(t *testing.T) {
 	cred["value"] = "super-secret-token"
 	if err := sch.Validate(inst); err == nil {
 		t.Fatal("the credential block must reject any secret-bearing field; additionalProperties is closed")
+	}
+}
+
+// TestExecutionEnvironmentRequiresExactlyOneRung: an execution environment that
+// declares both rung1Image and rung2CapabilityUnits, or neither, fails. The
+// prose states exactly one rung is declared (ADR-0027 execution rungs).
+func TestExecutionEnvironmentRequiresExactlyOneRung(t *testing.T) {
+	sch := compileSchema(t)
+
+	bothRungs := func(env map[string]any) {
+		env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
+		env["rung2CapabilityUnits"] = map[string]any{"features": []any{"ghcr.io/example/feature:1"}}
+	}
+	emptyEnv := func(env map[string]any) {
+		delete(env, "rung1Image")
+		delete(env, "rung2CapabilityUnits")
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"both rungs": bothRungs,
+		"no rung":    emptyEnv,
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := validExampleInstance(t)
+			blk := aileronBlock(t, inst)
+			requires := blk["requires"].(map[string]any)
+			env := requires["executionEnvironment"].(map[string]any)
+			mutate(env)
+			if err := sch.Validate(inst); err == nil {
+				t.Fatalf("an execution environment with %q must be rejected", name)
+			}
+		})
+	}
+}
+
+// TestOAuthRequiredForOAuth2Credential: an oauth2 credential without its oauth
+// block fails. The prose couples the two.
+func TestOAuthRequiredForOAuth2Credential(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	actions := blk["requires"].(map[string]any)["actions"].([]any)
+	// The second action carries the oauth2 credential in the worked example.
+	var found bool
+	for _, a := range actions {
+		tc := a.(map[string]any)["trustContract"].(map[string]any)
+		cred := tc["credential"].(map[string]any)
+		if cred["kind"] == "oauth2" {
+			delete(tc, "oauth")
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected the worked example to carry an oauth2 credential")
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("an oauth2 credential without an oauth block must be rejected")
+	}
+}
+
+// TestFilePublishTargetRequiresPath: a file publish target without a path fails.
+func TestFilePublishTargetRequiresPath(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	outputs := blk["outputs"].([]any)
+	first := outputs[0].(map[string]any)
+	publish := first["publish"].(map[string]any)
+	if publish["target"] != "file" {
+		t.Fatal("expected the first output to publish to a file target")
+	}
+	delete(publish, "path")
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("a file publish target without a path must be rejected")
+	}
+}
+
+// TestNoneCredentialNeedsNoPlacement: a credential of kind none validates without
+// a placement, because an unauthenticated call has no wire placement.
+func TestNoneCredentialNeedsNoPlacement(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	actions := blk["requires"].(map[string]any)["actions"].([]any)
+	tc := actions[0].(map[string]any)["trustContract"].(map[string]any)
+	// Replace the first action's credential with a placement-free `none` kind.
+	tc["credential"] = map[string]any{"kind": "none"}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("a credential of kind none must validate without a placement:\n%v", err)
 	}
 }

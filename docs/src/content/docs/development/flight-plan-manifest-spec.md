@@ -73,7 +73,7 @@ An unsatisfied `requires:` entry is a missing-requirement signal the runtime sur
 
 ### `requires.executionEnvironment`
 
-The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). The MVP ships rung one and rung two.
+The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). The MVP ships rung one and rung two. When `executionEnvironment` is declared it carries exactly one of `rung1Image` or `rung2CapabilityUnits`.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
@@ -90,7 +90,7 @@ The trust contract is the field set absorbed from #925, quoted here as context r
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `credential` | object | Yes | The credential kind and placement. Never a credential value. |
-| `oauth` | object | No | OAuth scopes, endpoints, and refresh behavior. Declared for an `oauth2` credential. |
+| `oauth` | object | Required when `credential.kind` is `oauth2` | OAuth scopes, endpoints, and refresh behavior. |
 | `hosts` | array | Yes | The expected upstream hosts. The access-scope declaration IS the security boundary. The runtime grants nothing undeclared. |
 | `paths` | array | No | The expected request paths on the declared hosts. Part of the access-scope declaration. |
 | `effect` | string | Yes | One of `read`, `write`, `delete`, `spend`, `external-send`. Aligned to [ADR-0003](/adr/0003-action-model). Drives default approval routing through [ADR-0009](/adr/0009-user-channel). |
@@ -104,8 +104,10 @@ The `credential` block:
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `kind` | string | Yes | One of `none`, `api-key`, `oauth2`, `aws-sigv4`. |
-| `placement` | string | Yes | One of `header`, `query`, `cookie`, `body`, `signing`, `session`. Maps 1:1 to the closed [ADR-0019](/adr/0019-v4-https-data-plane) injection-scheme set. |
+| `placement` | string | Yes unless `kind` is `none` | One of `header`, `query`, `cookie`, `body`, `signing`, `session`. Maps 1:1 to the closed [ADR-0019](/adr/0019-v4-https-data-plane) injection-scheme set. A `none` credential has no wire placement. |
 | `identityLabel` | string | No | A subject or account identity label for multi-tenant binding. A non-secret label. |
+
+An `oauth2` credential must declare the `oauth` block. An `aws-sigv4` credential is always placed via `signing`, and an `oauth2` credential is always placed in a `header`.
 
 The placement values map to the [ADR-0019](/adr/0019-v4-https-data-plane) wire mechanisms. `header` is a bearer or templated header (`bearer` or `header-template`). `query` is `query-param`. `signing` is AWS SigV4, which maps to `sigv4-resign` and is sealed by [#1501](https://github.com/ALRubinger/aileron/issues/1501). `session` is the cookie or session-token wire form for a session-authenticated upstream. `body` carries the credential in the request body. The exact header or wire shape is per service, not per placement alone.
 
@@ -141,7 +143,7 @@ The closed `audit.fields` set is `connector-hash`, `action-manifest-version`, `c
 | `name` | string | Yes | The artifact name, unique within the manifest. The audit references artifacts by this name. |
 | `mimeType` | string | Yes | The artifact media type. |
 | `encoding` | string | Yes | One of `utf-8`, `base64`. `base64` is reserved. v1 implements `utf-8` only. |
-| `publish` | object | Yes | The publish target. `target` is `file` or `none`; `path` names the output file when `target` is `file`. |
+| `publish` | object | Yes | The publish target. `target` is `file` or `none`; `path` is required and names the output file when `target` is `file`. |
 
 ## Lossless if stripped
 

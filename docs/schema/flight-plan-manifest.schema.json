@@ -75,6 +75,10 @@
       "type": "object",
       "description": "The execution-environment dependency. Exactly one of rung-1 (a pinned prebuilt image) or rung-2 (composed capability units on the Aileron base) is declared per ADR-0027 execution rungs. Rung-3 per-step sibling-image dispatch is a reserved, build-deferred slot.",
       "additionalProperties": false,
+      "oneOf": [
+        { "required": ["rung1Image"], "not": { "required": ["rung2CapabilityUnits"] } },
+        { "required": ["rung2CapabilityUnits"], "not": { "required": ["rung1Image"] } }
+      ],
       "properties": {
         "rung1Image": {
           "type": "object",
@@ -119,6 +123,13 @@
       "description": "The per-action trust contract. Records the credential kind and placement, OAuth detail where applicable, the expected network reach, the operation effect, idempotency, redaction, a verification probe, and the audit-record structure. Freeze attaches this contract and the detached signature is the human attestation that it is correct (ADR-0027). No field in this contract may carry a credential value; the contract declares credential kind and placement only (ADR-0005, ADR-0019).",
       "additionalProperties": false,
       "required": ["credential", "hosts", "effect", "idempotency", "audit"],
+      "allOf": [
+        {
+          "$comment": "An oauth2 credential MUST declare its oauth block.",
+          "if": { "properties": { "credential": { "properties": { "kind": { "const": "oauth2" } } } } },
+          "then": { "required": ["oauth"] }
+        }
+      ],
       "properties": {
         "credential": { "$ref": "#/$defs/credential" },
         "oauth": { "$ref": "#/$defs/oauth" },
@@ -160,7 +171,7 @@
       "type": "object",
       "description": "The credential KIND and PLACEMENT this action uses. It never holds a credential VALUE. The runtime mediates credential use at the data-plane proxy boundary (ADR-0019) so the composed code never holds a raw credential (ADR-0005).",
       "additionalProperties": false,
-      "required": ["kind", "placement"],
+      "required": ["kind"],
       "properties": {
         "kind": {
           "type": "string",
@@ -179,6 +190,11 @@
         }
       },
       "allOf": [
+        {
+          "$comment": "A placement is required for every credential kind except `none`.",
+          "if": { "properties": { "kind": { "not": { "const": "none" } } } },
+          "then": { "required": ["placement"] }
+        },
         {
           "$comment": "An oauth2 credential is placed in a header, never via signing/query/cookie/body/session.",
           "if": { "properties": { "kind": { "const": "oauth2" } } },
@@ -406,6 +422,13 @@
           "description": "The publish target for this artifact. Where the runtime materializes and distribution publishes it.",
           "additionalProperties": false,
           "required": ["target"],
+          "allOf": [
+            {
+              "$comment": "A file publish target MUST name the output path.",
+              "if": { "properties": { "target": { "const": "file" } } },
+              "then": { "required": ["path"] }
+            }
+          ],
           "properties": {
             "target": {
               "type": "string",

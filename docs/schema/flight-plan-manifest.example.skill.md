@@ -147,4 +147,4 @@ This skill reads a recent metrics window, writes a short digest, and files a tra
 
 Binary outputs (for example a rendered chart image) are a deferred follow-up. v1 materializes text artifacts only. When binary outputs land, they will declare `encoding: base64` and ride the mount / run-and-collect boundary.
 
-This skill is not yet a Flight Plan. It carries no `lock` section because it has not been frozen. Freeze (tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509)) resolves the rung-2 capability-unit Features to image digests, pins the resolved capability set, attaches the per-action trust contract above, and signs the result. After freeze the `aileron.lock` section is present and immutable for that version.
+This skill is not yet a Flight Plan. It carries no `lock` section because it has not been frozen. Freeze (tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509)) resolves the rung-2 capability-unit `features` to image digests, pins the resolved capability set, attaches the per-action trust contract above, and signs the result. After freeze the `aileron.lock` section is present and immutable for that version.
