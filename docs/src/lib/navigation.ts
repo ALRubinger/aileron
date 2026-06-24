@@ -94,6 +94,7 @@ export const navigation: NavItem[] = [
       { label: 'Sandbox Composition', href: '/development/sandbox-composition/' },
       { label: 'Sandbox Agent Images', href: '/development/sandbox-agent-images/' },
       { label: 'Sandbox Connector Specs', href: '/development/sandbox-connector-specs/' },
+      { label: 'Flight Plan Manifest Spec', href: '/development/flight-plan-manifest-spec/' },
       { label: 'Submitting Changes', href: '/development/submitting-changes/' }
     ]
   },
