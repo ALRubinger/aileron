@@ -355,3 +355,94 @@ func TestDecode_UnknownStepFieldRefused(t *testing.T) {
 		t.Fatal("a step with an unknown field must be refused (strict decode)")
 	}
 }
+
+func TestDecode_DuplicateOutputRefused(t *testing.T) {
+	out := func() any {
+		return map[string]any{"name": "dup.csv", "mimeType": "text/csv", "encoding": "utf-8",
+			"publish": map[string]any{"target": "none"}}
+	}
+	m := rawManifest(nil, []any{out(), out()},
+		[]any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a duplicate output name must be refused")
+	}
+}
+
+func TestDecode_UnknownEncodingRefused(t *testing.T) {
+	m := rawManifest(nil, []any{map[string]any{
+		"name": "o", "mimeType": "text/csv", "encoding": "rot13",
+		"publish": map[string]any{"target": "none"},
+	}}, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an unknown output encoding must be refused")
+	}
+}
+
+func TestDecode_FilePublishNeedsPath(t *testing.T) {
+	m := rawManifest(nil, []any{map[string]any{
+		"name": "o", "mimeType": "text/csv", "encoding": "utf-8",
+		"publish": map[string]any{"target": "file"},
+	}}, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a file publish target without a path must be refused")
+	}
+}
+
+func TestDecode_UnknownInputTypeRefused(t *testing.T) {
+	m := rawManifest([]any{map[string]any{
+		"name": "i", "type": "quaternion", "resolution": map[string]any{"rule": "literal"},
+	}}, nil, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an unknown input type must be refused")
+	}
+}
+
+func TestDecode_UnknownResolutionRuleRefused(t *testing.T) {
+	m := rawManifest([]any{map[string]any{
+		"name": "i", "type": "string", "resolution": map[string]any{"rule": "telepathy"},
+	}}, nil, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an unknown resolution rule must be refused")
+	}
+}
+
+func TestDecode_DynamicValueValidated(t *testing.T) {
+	m := rawManifest([]any{map[string]any{
+		"name": "i", "type": "timestamp",
+		"resolution": map[string]any{"rule": "dynamic", "value": "yesterday"},
+	}}, nil, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a dynamic value other than now/today must be refused")
+	}
+}
+
+func TestDecode_SourceWithoutActionRefRefused(t *testing.T) {
+	m := rawManifest([]any{map[string]any{
+		"name": "i", "type": "array",
+		"resolution": map[string]any{"rule": "source", "source": map[string]any{"select": "x"}},
+	}}, nil, []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a source resolution without an actionRef must be refused")
+	}
+}
+
+func TestDecode_UnknownEffectRefused(t *testing.T) {
+	ar := readActionReq()
+	ar.TrustContract["effect"] = "teleport"
+	m := &manifest.Manifest{Name: "t", Aileron: manifest.AileronBlock{
+		Requires: manifest.Requires{Actions: []manifest.ActionRequirement{ar}},
+		Steps:    []any{step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x"}})},
+	}}
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an unknown trust-contract effect must be refused")
+	}
+}
+
+func TestDecode_DuplicateStepOutputRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{"id": "s", "kind": "transform", "outputs": []any{"x", "x"}}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a step with duplicate output names must be refused")
+	}
+}

@@ -130,3 +130,20 @@ func TestResolveInputs_SourceUndeclaredActionErrors(t *testing.T) {
 		t.Fatal("a source input naming an undeclared action must error")
 	}
 }
+
+func TestResolveInputs_FrozenFromLaunchArgMutation(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "obj", Type: "object", Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+	arg := map[string]any{"k": "v"}
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"obj": arg}, FixedClock{}, &enforcer{})
+	if err != nil {
+		t.Fatalf("resolveInputs: %v", err)
+	}
+	// Mutating the launch arg after resolution must not change the frozen set.
+	arg["k"] = "tampered"
+	got := ri.Values["obj"].(map[string]any)
+	if got["k"] != "v" {
+		t.Error("resolved inputs must be frozen against later launch-arg mutation")
+	}
+}

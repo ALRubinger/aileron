@@ -60,7 +60,10 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 			if err != nil {
 				return ResolvedInputs{}, err
 			}
-			ri.Values[in.Name] = val
+			// Deep-copy so the frozen resolved set never aliases the caller's
+			// launch args or the declared default: a downstream step that
+			// mutates an input value can never reach back into the source.
+			ri.Values[in.Name] = deepCopyValue(val)
 		case ResolutionDynamic:
 			ri.Values[in.Name] = resolveDynamic(in, launchTime)
 		case ResolutionSource:
@@ -68,7 +71,8 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 			if err != nil {
 				return ResolvedInputs{}, err
 			}
-			ri.Values[in.Name] = val
+			// Deep-copy so the resolved set does not alias the dispatch result.
+			ri.Values[in.Name] = deepCopyValue(val)
 			ri.SourceBindings[in.Name] = sb
 		default:
 			return ResolvedInputs{}, fmt.Errorf("input %q: unhandled resolution rule %q", in.Name, in.Resolution.Rule)

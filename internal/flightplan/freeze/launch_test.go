@@ -95,7 +95,7 @@ func TestVerifyFrozen_RejectsTamperedManifestLockBlock(t *testing.T) {
 	swapped := "sha256:" + strings.Repeat("b", 64)
 	tampered := bytes.Replace(res.FrozenManifest, []byte(orig), []byte(swapped), 1)
 	if bytes.Equal(tampered, res.FrozenManifest) {
-		t.Skip("worked example lock digest not found to tamper")
+		t.Fatal("test setup: worked example lock digest not found in the frozen manifest to tamper")
 	}
 	if _, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey); err == nil {
 		t.Fatal("a tampered manifest lock block must refuse to verify")
