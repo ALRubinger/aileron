@@ -113,7 +113,7 @@ func resolveSource(ctx context.Context, p *Plan, in Input, e *enforcer) (any, So
 	if !ok {
 		return nil, SourceBinding{}, fmt.Errorf("input %q: source action %q is not declared in requires.actions", in.Name, ref)
 	}
-	out, err := e.dispatch(ctx, action, map[string]any{}, 1)
+	out, err := e.dispatch(ctx, "input:"+in.Name, action, map[string]any{}, 1)
 	if err != nil {
 		return nil, SourceBinding{}, fmt.Errorf("input %q: resolve from source %q: %w", in.Name, ref, err)
 	}

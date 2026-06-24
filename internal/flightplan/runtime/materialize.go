@@ -95,9 +95,11 @@ func materialize(p *Plan, step Step, outputs map[string]any) (Artifact, error) {
 // the step emitted; both decode to a fileMapEntry.
 func fileMapFor(step Step, outputs map[string]any) (fileMapEntry, error) {
 	var carrier any
-	// Prefer an output whose name matches the materialized output, else the
-	// step's first declared output.
-	if len(step.Outputs) > 0 {
+	// Prefer an output whose name matches the materialized output, then fall
+	// back to the step's first declared output.
+	if c, ok := outputs[step.MaterializesOutput]; ok {
+		carrier = c
+	} else if len(step.Outputs) > 0 {
 		carrier = outputs[step.Outputs[0]]
 	}
 	if carrier == nil {

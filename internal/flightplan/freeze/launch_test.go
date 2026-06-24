@@ -82,3 +82,37 @@ func TestVerifyFrozen_RejectsMissingLockBlock(t *testing.T) {
 		t.Fatal("VerifyFrozen accepted an unfrozen manifest")
 	}
 }
+
+func TestVerifyFrozen_RejectsTamperedManifestLockBlock(t *testing.T) {
+	res := freezeExample(t)
+	// The worked example is rung-2: its lock pins a resolved image digest.
+	// Swap that digest inside the frozen manifest's lock block while leaving
+	// the standalone lockfile and the recorded contentHash untouched. The
+	// reconstruction rebuilds the manifest region from the manifest's OWN lock,
+	// so the recomputed hash diverges and verification must refuse. A rebuild
+	// that healed the manifest from the lockfile would wrongly accept this.
+	orig := fakeDigest
+	swapped := "sha256:" + strings.Repeat("b", 64)
+	tampered := bytes.Replace(res.FrozenManifest, []byte(orig), []byte(swapped), 1)
+	if bytes.Equal(tampered, res.FrozenManifest) {
+		t.Skip("worked example lock digest not found to tamper")
+	}
+	if _, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey); err == nil {
+		t.Fatal("a tampered manifest lock block must refuse to verify")
+	}
+}
+
+func TestVerifyFrozen_DefensiveCopyOfSkillMD(t *testing.T) {
+	res := freezeExample(t)
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen: %v", err)
+	}
+	// Mutating the caller's slice must not change the verified bytes.
+	if len(res.FrozenManifest) > 0 {
+		res.FrozenManifest[0] ^= 0xFF
+	}
+	if bytes.Equal(v.SkillMD, res.FrozenManifest) {
+		t.Error("VerifiedFrozen.SkillMD must be a defensive copy, not alias the caller's slice")
+	}
+}

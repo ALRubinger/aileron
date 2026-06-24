@@ -41,10 +41,12 @@ type dispatchOutcome struct {
 }
 
 // dispatch runs one action through the enforcement pipeline. action is the
-// decoded trust contract; args are the resolved binding values. attempt is the
-// 1-based call attempt so a retry of a non-idempotent action is refused rather
-// than silently re-issued.
-func (e *enforcer) dispatch(ctx context.Context, action Action, args map[string]any, attempt int) (dispatchOutcome, error) {
+// decoded trust contract; args are the resolved binding values. callID
+// identifies this specific call site (the step id, or a source-input marker)
+// so the idempotency key is stable per call and never collides when the same
+// action ref runs at two call sites. attempt is the 1-based call attempt so a
+// retry of a non-idempotent action is refused rather than silently re-issued.
+func (e *enforcer) dispatch(ctx context.Context, callID string, action Action, args map[string]any, attempt int) (dispatchOutcome, error) {
 	tc := action.TrustContract
 
 	// Idempotency: a retried dispatch of an action declared not safe-to-retry
@@ -81,7 +83,7 @@ func (e *enforcer) dispatch(ctx context.Context, action Action, args map[string]
 	// and never carries a secret.
 	dispatchArgs := args
 	if tc.Idempotency.IdempotencyKey {
-		dispatchArgs = withIdempotencyKey(args, action.Ref)
+		dispatchArgs = withIdempotencyKey(args, callID, action.Ref)
 	}
 
 	res, err := e.dispatcher.Dispatch(ctx, action.Ref, dispatchArgs)
@@ -107,13 +109,14 @@ func approvalArgsSummary(args map[string]any) map[string]any {
 const idempotencyKeyField = "idempotencyKey"
 
 // withIdempotencyKey returns a copy of args with a stable idempotency key
-// added, derived from the action ref. The key lets the upstream deduplicate a
-// retried write. It is deterministic for a given action so a retry threads the
-// same key.
-func withIdempotencyKey(args map[string]any, ref string) map[string]any {
+// added, derived from the call site (callID) and the action ref. The key lets
+// the upstream deduplicate a retried write. It is deterministic for a given
+// call so a retry of that call threads the same key, while two distinct call
+// sites of the same action ref get distinct keys (no cross-call collision).
+func withIdempotencyKey(args map[string]any, callID, ref string) map[string]any {
 	out := deepCopyMap(args)
 	if _, present := out[idempotencyKeyField]; !present {
-		out[idempotencyKeyField] = "aileron-idem-" + ref
+		out[idempotencyKeyField] = "aileron-idem-" + callID + "-" + ref
 	}
 	return out
 }

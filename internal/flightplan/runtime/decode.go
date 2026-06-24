@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
@@ -58,16 +59,22 @@ func Decode(m *manifest.Manifest) (*Plan, error) {
 }
 
 // remarshal round-trips a YAML-decoded `any` (already a map[string]any from
-// the manifest decode) back through YAML into a strict typed struct. The
-// destination structs set yaml tags and the wire DTOs use closed shapes so an
-// unexpected field surfaces as a decode mismatch where the typed model
-// requires it.
+// the manifest decode) back through YAML into a strict typed struct. Decode is
+// strict (KnownFields): the DTOs model the schema's full closed shapes, so an
+// unexpected field is a decode error rather than a silently-dropped typo. This
+// is the runtime's structural defense-in-depth over the loosely-typed manifest
+// []any blocks.
 func remarshal(v any, dst any) error {
 	raw, err := yaml.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(raw, dst)
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	return nil
 }
 
 func decodeActions(m *manifest.Manifest, p *Plan) error {

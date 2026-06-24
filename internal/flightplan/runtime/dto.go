@@ -14,10 +14,17 @@ type trustContractDTO struct {
 		Placement     string `yaml:"placement"`
 		IdentityLabel string `yaml:"identityLabel"`
 	} `yaml:"credential"`
-	Hosts       []string `yaml:"hosts"`
-	Paths       []string `yaml:"paths"`
-	Effect      string   `yaml:"effect"`
-	Idempotency struct {
+	// OAuth and Verification are modeled (but not consumed by the runtime) so
+	// strict decode does not reject a manifest that legitimately declares
+	// them. The schema's full trustContract shape is represented here; the
+	// runtime enforces effect/idempotency/redaction/audit and the access
+	// scope, and the host injects credentials at the boundary.
+	OAuth        map[string]any `yaml:"oauth"`
+	Verification map[string]any `yaml:"verification"`
+	Hosts        []string       `yaml:"hosts"`
+	Paths        []string       `yaml:"paths"`
+	Effect       string         `yaml:"effect"`
+	Idempotency  struct {
 		SafeToRetry    bool `yaml:"safeToRetry"`
 		IdempotencyKey bool `yaml:"idempotencyKey"`
 	} `yaml:"idempotency"`
@@ -206,6 +213,12 @@ func (d stepDTO) toStep() (Step, error) {
 		if d.ActionRef == "" {
 			return Step{}, decodeErrf("step %q: action-call has no actionRef", d.ID)
 		}
+		// An action-call carries args, not bindings: a stray bindings block is
+		// a malformed step (the closed schema forbids it), refused rather than
+		// silently ignored.
+		if len(d.Bindings) != 0 {
+			return Step{}, decodeErrf("step %q: action-call must not declare bindings (use args)", d.ID)
+		}
 		step.ActionRef = d.ActionRef
 		args, err := parseBindings(d.ID, d.Args)
 		if err != nil {
@@ -215,6 +228,11 @@ func (d stepDTO) toStep() (Step, error) {
 	} else {
 		if d.ActionRef != "" {
 			return Step{}, decodeErrf("step %q: kind %q must not declare an actionRef", d.ID, d.Kind)
+		}
+		// A transform / llm-seam carries bindings, not args: a stray args block
+		// is a malformed step, refused rather than silently ignored.
+		if len(d.Args) != 0 {
+			return Step{}, decodeErrf("step %q: kind %q must not declare args (use bindings)", d.ID, d.Kind)
 		}
 		binds, err := parseBindings(d.ID, d.Bindings)
 		if err != nil {

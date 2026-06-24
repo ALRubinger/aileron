@@ -317,3 +317,41 @@ func TestDecodeError_Type(t *testing.T) {
 		t.Fatalf("error %v is not a *DecodeError", err)
 	}
 }
+
+func TestDecode_ActionCallWithBindingsRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "s1", "kind": "action-call", "actionRef": "aileron:metrics.query_series",
+			"bindings": map[string]any{"v": "inputs.x"},
+			"outputs":  []any{"o"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an action-call carrying bindings must be refused")
+	}
+}
+
+func TestDecode_TransformWithArgsRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "s1", "kind": "transform",
+			"args":    map[string]any{"v": "inputs.x"},
+			"outputs": []any{"o"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a transform carrying args must be refused")
+	}
+}
+
+func TestDecode_UnknownStepFieldRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "s1", "kind": "transform", "outputs": []any{"o"},
+			"bogusTypo": true,
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a step with an unknown field must be refused (strict decode)")
+	}
+}

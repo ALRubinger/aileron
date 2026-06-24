@@ -65,3 +65,14 @@ func TestApplyRedaction_MissingFieldIsNoOp(t *testing.T) {
 		t.Errorf("a non-matching path must be a no-op, got %v", out)
 	}
 }
+
+func TestApplyRedaction_HashDistinguishesTypes(t *testing.T) {
+	rules := []RedactionRule{{Field: "v", Rule: RedactHash}}
+	// The number 7 and the string "7" must hash to different values: a
+	// type-collapsing stringify would make them collide.
+	a := applyRedaction(map[string]any{"v": 7}, rules)
+	b := applyRedaction(map[string]any{"v": "7"}, rules)
+	if a["v"] == b["v"] {
+		t.Error("hash must distinguish a number from its string form")
+	}
+}

@@ -62,7 +62,7 @@ func TestDispatch_ReadRunsWithoutApproval(t *testing.T) {
 	disp := &fakeDispatcher{}
 	app := &fakeApprover{}
 	e := &enforcer{dispatcher: disp, approver: app}
-	out, err := e.dispatch(context.Background(), readAction("aileron:m.read"), map[string]any{"a": 1}, 1)
+	out, err := e.dispatch(context.Background(), "test", readAction("aileron:m.read"), map[string]any{"a": 1}, 1)
 	if err != nil {
 		t.Fatalf("read dispatch: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestDispatch_WriteBlocksThenProceedsOnApprove(t *testing.T) {
 	disp := &fakeDispatcher{}
 	app := &fakeApprover{decision: Decision{Approved: true}}
 	e := &enforcer{dispatcher: disp, approver: app}
-	out, err := e.dispatch(context.Background(), writeAction("aileron:t.write", false, false), nil, 1)
+	out, err := e.dispatch(context.Background(), "test", writeAction("aileron:t.write", false, false), nil, 1)
 	if err != nil {
 		t.Fatalf("write dispatch: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestDispatch_DeleteAbortsOnDeny(t *testing.T) {
 	app := &fakeApprover{decision: Decision{Approved: false, Reason: "no"}}
 	del := Action{Ref: "aileron:t.delete", TrustContract: TrustContract{Effect: EffectDelete, Hosts: []string{"h"}}}
 	e := &enforcer{dispatcher: disp, approver: app}
-	_, err := e.dispatch(context.Background(), del, nil, 1)
+	_, err := e.dispatch(context.Background(), "test", del, nil, 1)
 	var de *DenyError
 	if !errors.As(err, &de) {
 		t.Fatalf("a denied delete must return a *DenyError, got %v", err)
@@ -113,7 +113,7 @@ func TestDispatch_NonRetryableNotReissued(t *testing.T) {
 	app := &fakeApprover{decision: Decision{Approved: true}}
 	e := &enforcer{dispatcher: disp, approver: app}
 	// attempt 2 of a safeToRetry:false action must be refused.
-	_, err := e.dispatch(context.Background(), writeAction("aileron:t.write", false, false), nil, 2)
+	_, err := e.dispatch(context.Background(), "test", writeAction("aileron:t.write", false, false), nil, 2)
 	if err == nil {
 		t.Fatal("retry of a non-idempotent action must be refused")
 	}
@@ -126,7 +126,7 @@ func TestDispatch_IdempotencyKeyThreaded(t *testing.T) {
 	disp := &fakeDispatcher{}
 	app := &fakeApprover{decision: Decision{Approved: true}}
 	e := &enforcer{dispatcher: disp, approver: app}
-	_, err := e.dispatch(context.Background(), writeAction("aileron:t.write", true, true), map[string]any{"body": "x"}, 1)
+	_, err := e.dispatch(context.Background(), "test", writeAction("aileron:t.write", true, true), map[string]any{"body": "x"}, 1)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestDispatch_IdempotencyKeyThreaded(t *testing.T) {
 
 func TestDispatch_NoApproverForWriteErrors(t *testing.T) {
 	e := &enforcer{dispatcher: &fakeDispatcher{}, approver: nil}
-	if _, err := e.dispatch(context.Background(), writeAction("aileron:t.write", true, false), nil, 1); err == nil {
+	if _, err := e.dispatch(context.Background(), "test", writeAction("aileron:t.write", true, false), nil, 1); err == nil {
 		t.Fatal("a write with no approver configured must error, not run unattended")
 	}
 }
@@ -149,7 +149,7 @@ func TestDispatch_RedactsBeforeSurfacing(t *testing.T) {
 	act := readAction("aileron:m.read")
 	act.TrustContract.Redaction = []RedactionRule{{Field: "email", Rule: RedactDrop}}
 	e := &enforcer{dispatcher: disp, approver: app}
-	out, err := e.dispatch(context.Background(), act, nil, 1)
+	out, err := e.dispatch(context.Background(), "test", act, nil, 1)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -158,5 +158,23 @@ func TestDispatch_RedactsBeforeSurfacing(t *testing.T) {
 	}
 	if out.Result["id"] != 7 {
 		t.Error("non-redacted fields must survive")
+	}
+}
+
+func TestDispatch_IdempotencyKeyDistinctPerCallSite(t *testing.T) {
+	disp := &fakeDispatcher{}
+	app := &fakeApprover{decision: Decision{Approved: true}}
+	e := &enforcer{dispatcher: disp, approver: app}
+	act := writeAction("aileron:t.write", true, true)
+	if _, err := e.dispatch(context.Background(), "step:a", act, map[string]any{}, 1); err != nil {
+		t.Fatalf("dispatch a: %v", err)
+	}
+	if _, err := e.dispatch(context.Background(), "step:b", act, map[string]any{}, 1); err != nil {
+		t.Fatalf("dispatch b: %v", err)
+	}
+	ka := disp.calls[0].args[idempotencyKeyField]
+	kb := disp.calls[1].args[idempotencyKeyField]
+	if ka == kb {
+		t.Error("two call sites of the same action ref must get distinct idempotency keys")
 	}
 }

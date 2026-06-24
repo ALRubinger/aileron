@@ -3,7 +3,7 @@ package runtime
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"strconv"
+	"encoding/json"
 	"strings"
 )
 
@@ -113,14 +113,22 @@ func applyRule(m map[string]any, key string, rule RedactionKind) {
 	}
 }
 
-// redactValue returns the redacted form of a scalar value. drop is handled by
-// the caller (it removes the key); mask and hash transform the value.
+// redactValue returns the redacted form of a value. drop is handled by the
+// caller (it removes the key); mask and hash transform the value.
 func redactValue(v any, rule RedactionKind) any {
 	switch rule {
 	case RedactMask:
 		return "***"
 	case RedactHash:
-		sum := sha256.Sum256([]byte(stringify(v)))
+		// Hash a canonical, type-preserving JSON encoding so distinct inputs
+		// (a number vs the string of that number, or two different objects)
+		// never collide to the same hash. A value that cannot encode falls
+		// back to the mask so a redacted field is never surfaced in the clear.
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return "***"
+		}
+		sum := sha256.Sum256(encoded)
 		return "sha256:" + hex.EncodeToString(sum[:])
 	case RedactDrop:
 		// In an array context drop replaces the element with nil since a slice
@@ -128,24 +136,6 @@ func redactValue(v any, rule RedactionKind) any {
 		return nil
 	default:
 		return v
-	}
-}
-
-// stringify renders a scalar deterministically for hashing.
-func stringify(v any) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case bool:
-		return strconv.FormatBool(t)
-	case int:
-		return strconv.Itoa(t)
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64)
-	default:
-		return ""
 	}
 }
 

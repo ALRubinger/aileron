@@ -102,7 +102,7 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 // outputs: each declared output name reads from the redacted result by name.
 func (x *executor) runActionCall(ctx context.Context, step Step, args map[string]any, st *execState) (map[string]any, error) {
 	action := x.plan.Actions[step.ActionRef]
-	outcome, err := x.enforcer.dispatch(ctx, action, args, 1)
+	outcome, err := x.enforcer.dispatch(ctx, "step:"+step.ID, action, args, 1)
 	// Record the dispatch even on a deny so the audit reflects the denial.
 	rec := actionDispatch{
 		StepID:            step.ID,
@@ -127,8 +127,15 @@ func (x *executor) runActionCall(ctx context.Context, step Step, args map[string
 		outputs[step.Outputs[0]] = outcome.Result
 		return outputs, nil
 	}
+	// A multi-output action-call reads each declared output from the redacted
+	// result by name. A missing key is a hard error so a nil never slips
+	// through to bypass the downstream presence check.
 	for _, name := range step.Outputs {
-		outputs[name] = outcome.Result[name]
+		v, ok := outcome.Result[name]
+		if !ok {
+			return nil, fmt.Errorf("flightplan: action %q (step %q) result has no declared output %q", step.ActionRef, step.ID, name)
+		}
+		outputs[name] = v
 	}
 	return outputs, nil
 }
