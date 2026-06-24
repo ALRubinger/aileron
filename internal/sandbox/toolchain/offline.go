@@ -34,8 +34,8 @@ func provisionOffline(resolved resolvedOptions) (container.ManagedToolchain, err
 		return container.ManagedToolchain{}, err
 	}
 
-	entrypoint := cliEntrypointForCache(resolved.CacheRoot, resolved.CLIVersion)
-	if !fileExists(entrypoint) {
+	entrypoint, found := cliEntrypointForCache(resolved.CacheRoot, resolved.CLIVersion)
+	if !found {
 		return container.ManagedToolchain{}, offlineMissingCLIError(resolved.CLIVersion)
 	}
 
@@ -116,10 +116,12 @@ func offlineMissingCLIError(cliVersion string) error {
 	return fmt.Errorf("managed @devcontainers/cli@%s is not in the offline cache; run `aileron sandbox warm` with network access first", cliVersion)
 }
 
-// cliEntrypointForCache returns the absolute path the npm installer would place
-// the @devcontainers/cli entrypoint at for cliVersion under cacheRoot. The
-// offline path probes this without running npm; it must match the layout
+// cliEntrypointForCache returns the @devcontainers/cli entrypoint the npm
+// installer would place for cliVersion under cacheRoot, probing both the Unix
+// and Windows install layouts. found is true when the entrypoint exists; when it
+// is false the returned path is the canonical Unix path (for error messages).
+// The offline path probes this without running npm; it must match the layout
 // npmCLIInstaller.Install writes (see cli_install.go).
-func cliEntrypointForCache(cacheRoot, cliVersion string) string {
-	return filepath.Join(cliCachePrefix(cacheRoot, cliVersion), cliEntrypointRelPath)
+func cliEntrypointForCache(cacheRoot, cliVersion string) (string, bool) {
+	return cliEntrypointForPrefix(cliCachePrefix(cacheRoot, cliVersion))
 }
