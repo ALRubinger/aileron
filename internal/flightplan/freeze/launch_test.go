@@ -116,3 +116,24 @@ func TestVerifyFrozen_DefensiveCopyOfSkillMD(t *testing.T) {
 		t.Error("VerifiedFrozen.SkillMD must be a defensive copy, not alias the caller's slice")
 	}
 }
+
+func TestVerifyFrozen_RejectsInconsistentLockfileHash(t *testing.T) {
+	res := freezeExample(t)
+	// Alter the standalone lockfile's recorded contentHash so it disagrees with
+	// the manifest's recorded hash. The two artifacts are inconsistent and
+	// verification must refuse.
+	bad := "sha256:" + strings.Repeat("c", 64)
+	tampered := bytes.Replace(res.Lockfile, []byte(res.ContentHash), []byte(bad), 1)
+	if bytes.Equal(tampered, res.Lockfile) {
+		t.Fatal("test setup: contentHash not found in the lockfile")
+	}
+	if _, err := VerifyFrozen(res.FrozenManifest, tampered, res.Signature, res.PublicKey); err == nil {
+		t.Fatal("a lockfile whose recorded hash disagrees with the manifest must refuse")
+	}
+}
+
+func TestVerifyFrozen_RejectsNoFrontmatter(t *testing.T) {
+	if _, err := VerifyFrozen([]byte("no frontmatter here\n"), []byte("{}\n"), []byte("s"), []byte("p")); err == nil {
+		t.Fatal("a manifest with no frontmatter must refuse")
+	}
+}

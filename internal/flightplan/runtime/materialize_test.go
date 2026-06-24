@@ -72,3 +72,43 @@ func TestMaterialize_TargetNoneRecordedNotWritten(t *testing.T) {
 		t.Errorf("artifact name = %q", art.Name)
 	}
 }
+
+func TestMaterialize_CarrierFromJSONString(t *testing.T) {
+	p := planWithOutput(Output{Name: "d.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "d.json"})
+	step := fileMapStep("d.json")
+	// The carrier is a JSON string the step emitted, not a decoded map.
+	outputs := map[string]any{"file": `{"encoding":"utf-8","content":"{}","mimeType":"application/json"}`}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if string(art.Content) != "{}" {
+		t.Errorf("content = %q", art.Content)
+	}
+}
+
+func TestMaterialize_NonObjectCarrierRefused(t *testing.T) {
+	p := planWithOutput(Output{Name: "d.csv", MimeType: "text/csv", Encoding: EncodingUTF8, Target: PublishNone})
+	step := fileMapStep("d.csv")
+	outputs := map[string]any{"file": 42} // not a map or JSON string
+	if _, err := materialize(p, step, outputs); err == nil {
+		t.Fatal("a non-object, non-JSON-string carrier must be refused")
+	}
+}
+
+func TestMaterialize_NoCarrierRefused(t *testing.T) {
+	p := planWithOutput(Output{Name: "d.csv", MimeType: "text/csv", Encoding: EncodingUTF8, Target: PublishNone})
+	step := Step{ID: "s", Kind: KindTransform, Outputs: nil, MaterializesOutput: "d.csv"}
+	if _, err := materialize(p, step, map[string]any{}); err == nil {
+		t.Fatal("a step with no carrier output must be refused")
+	}
+}
+
+func TestMaterialize_MalformedJSONCarrierRefused(t *testing.T) {
+	p := planWithOutput(Output{Name: "d.csv", MimeType: "text/csv", Encoding: EncodingUTF8, Target: PublishNone})
+	step := fileMapStep("d.csv")
+	outputs := map[string]any{"file": "{not json"}
+	if _, err := materialize(p, step, outputs); err == nil {
+		t.Fatal("a malformed JSON carrier must be refused")
+	}
+}

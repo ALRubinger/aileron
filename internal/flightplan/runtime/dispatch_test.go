@@ -178,3 +178,11 @@ func TestDispatch_IdempotencyKeyDistinctPerCallSite(t *testing.T) {
 		t.Error("two call sites of the same action ref must get distinct idempotency keys")
 	}
 }
+
+func TestDispatch_DispatcherErrorSurfaces(t *testing.T) {
+	disp := &fakeDispatcher{failErr: errors.New("boom")}
+	e := &enforcer{dispatcher: disp, approver: &fakeApprover{}}
+	if _, err := e.dispatch(context.Background(), "test", readAction("aileron:m.read"), nil, 1); err == nil {
+		t.Fatal("a dispatcher error must surface")
+	}
+}

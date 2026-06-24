@@ -147,3 +147,40 @@ func TestResolveInputs_FrozenFromLaunchArgMutation(t *testing.T) {
 		t.Error("resolved inputs must be frozen against later launch-arg mutation")
 	}
 }
+
+func TestApplySelect_EmptyReturnsWholeResult(t *testing.T) {
+	res := map[string]any{"a": 1}
+	got := applySelect(res, "")
+	if m, ok := got.(map[string]any); !ok || m["a"] != 1 {
+		t.Errorf("empty select must return the whole result, got %v", got)
+	}
+}
+
+func TestApplySelect_MissingPathReturnsNil(t *testing.T) {
+	if got := applySelect(map[string]any{"a": 1}, "b.c"); got != nil {
+		t.Errorf("a select that matches nothing must return nil, got %v", got)
+	}
+}
+
+func TestApplySelect_NestedScalar(t *testing.T) {
+	res := map[string]any{"meta": map[string]any{"id": "x"}}
+	if got := applySelect(res, "meta.id"); got != "x" {
+		t.Errorf("nested select = %v, want x", got)
+	}
+}
+
+func TestResolveInputs_SourceSelectMissingYieldsNil(t *testing.T) {
+	ref := "aileron:m.read"
+	actions := map[string]Action{ref: {Ref: ref, TrustContract: TrustContract{Effect: EffectRead, Hosts: []string{"h"}}}}
+	p := planWithInputs([]Input{
+		{Name: "x", Type: "string", Resolution: Resolution{Rule: ResolutionSource, SourceActionRef: ref, SourceSelect: "missing.path"}},
+	}, actions)
+	enf := &enforcer{dispatcher: &fakeDispatcher{result: map[string]any{"present": 1}}, approver: &fakeApprover{}}
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf)
+	if err != nil {
+		t.Fatalf("resolveInputs: %v", err)
+	}
+	if ri.Values["x"] != nil {
+		t.Errorf("a select that matches nothing must resolve to nil, got %v", ri.Values["x"])
+	}
+}

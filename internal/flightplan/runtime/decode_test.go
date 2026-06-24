@@ -112,11 +112,21 @@ func TestDecode_WorkedExample(t *testing.T) {
 	if p.Steps[p.Order[3]].ID != "file_issue" {
 		t.Errorf("last step = %q, want file_issue", p.Steps[p.Order[3]].ID)
 	}
-	// Trust contract decoded: tracker.create_issue is a write.
-	if p.Actions["aileron:tracker.create_issue"].TrustContract.Effect != EffectWrite {
+	// Trust contract decoded: assert the action exists before inspecting its
+	// effect, so a missing decode entry fails loudly rather than passing on a
+	// zero-valued Effect.
+	tracker, ok := p.Actions["aileron:tracker.create_issue"]
+	if !ok {
+		t.Fatal("tracker.create_issue must decode into the action set")
+	}
+	if tracker.TrustContract.Effect != EffectWrite {
 		t.Error("tracker.create_issue effect must decode to write")
 	}
-	if p.Actions["aileron:metrics.query_series"].TrustContract.Effect != EffectRead {
+	metrics, ok := p.Actions["aileron:metrics.query_series"]
+	if !ok {
+		t.Fatal("metrics.query_series must decode into the action set")
+	}
+	if metrics.TrustContract.Effect != EffectRead {
 		t.Error("metrics.query_series effect must decode to read")
 	}
 }

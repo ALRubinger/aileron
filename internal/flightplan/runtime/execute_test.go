@@ -161,3 +161,39 @@ func TestExecute_WriteThreadsIdempotencyKey(t *testing.T) {
 		t.Error("the write action (idempotencyKey:true) must thread a stable key")
 	}
 }
+
+func TestExecute_MultiOutputActionMissingFieldErrors(t *testing.T) {
+	p := &Plan{
+		Name:    "t",
+		Actions: map[string]Action{"aileron:m.read": readAction("aileron:m.read")},
+		Outputs: map[string]Output{},
+		Steps: []Step{
+			{ID: "s", Kind: KindActionCall, ActionRef: "aileron:m.read", Outputs: []string{"a", "b"}},
+		},
+	}
+	p.Order = []int{0}
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: &fakeDispatcher{result: map[string]any{"a": 1}}, approver: &fakeApprover{}},
+		transform: NewTransformRegistry(),
+	}
+	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
+		t.Fatal("a multi-output action result missing a declared output must error")
+	}
+}
+
+func TestExecute_TransformMissingDeclaredOutputErrors(t *testing.T) {
+	p := &Plan{
+		Name: "t", Actions: map[string]Action{}, Outputs: map[string]Output{},
+		Steps: []Step{{ID: "s", Kind: KindTransform, Outputs: []string{"a", "b"}}},
+	}
+	p.Order = []int{0}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(_ map[string]any, _ []string) (map[string]any, error) {
+		return map[string]any{"a": 1}, nil // omits "b"
+	})
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: reg}
+	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
+		t.Fatal("a transform that omits a declared output must error")
+	}
+}
