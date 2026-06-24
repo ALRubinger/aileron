@@ -16,6 +16,11 @@ import (
 // discovers the container by this prefix rather than predicting the full name.
 const sbxPrefix = "aileron-sbx-"
 
+// reapGracePeriod is how long reap waits for the `aileron launch` process to exit
+// after a graceful SIGINT (so the launcher's `docker stop` handler can tear the
+// sandbox down) before escalating to SIGKILL.
+const reapGracePeriod = 10 * time.Second
+
 // env holds the validated environment the scenario reads, mirroring the bash
 // `: "${VAR:?...}"` preconditions. AILERON_SYSTEST_LIB is intentionally absent:
 // the lib is now an imported Go package, so that var is vestigial for this path.
@@ -140,7 +145,25 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 			return
 		}
 		reaped = true
-		_ = cmd.Process.Kill()
+		// Graceful stop first, mirroring the bash trap's `kill` (SIGTERM): the
+		// launcher installs a SIGINT/SIGTERM handler that runs `docker stop` on
+		// the `docker run --rm` sandbox, so a graceful signal is what tears the
+		// container down and lets R8.5 (probe_teardown: no `aileron-sbx-*`
+		// survives) hold on the mid-probe abort path. A bare SIGKILL bypasses
+		// that handler and can leave a stray container. os.Interrupt maps to
+		// SIGINT on Unix; on Windows it cannot be delivered to another process,
+		// so Signal returns an error and we fall straight through to Kill.
+		// Either way we escalate to SIGKILL if the launch has not exited within
+		// the grace window, so reap never blocks indefinitely.
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			_ = cmd.Process.Kill()
+		} else {
+			select {
+			case <-waitDone:
+			case <-time.After(reapGracePeriod):
+				_ = cmd.Process.Kill()
+			}
+		}
 		<-waitDone
 	}
 	defer reap()
