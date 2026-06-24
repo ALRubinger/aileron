@@ -196,6 +196,11 @@ func gooseConfigDir() (string, error) {
 // nothing to snapshot back) and no PreLaunchRefresh (a static API key
 // does not rotate). Required is false so an unseeded vault falls through
 // to Goose's normal provider-key resolution instead of hard-failing.
+// SkillsPath returns "" because Goose's Agent Skills directory under the
+// sandbox is not yet grounded; the launcher skips the skills mount for it.
+// Wiring Goose's skills path is deferred until its layout is confirmed.
+func (g Goose) SkillsPath() string { return "" }
+
 func (g Goose) AuthSpec() launch.AuthSpec {
 	return launch.AuthSpec{
 		EnvBindings: []launch.EnvBinding{{

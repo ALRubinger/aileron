@@ -22,6 +22,7 @@ func (a claudeModeAgent) ConfigureMCP(string, map[string]string, string, Mode) (
 	return nil, nil, nil
 }
 func (a claudeModeAgent) AuthSpec() AuthSpec               { return AuthSpec{} }
+func (a claudeModeAgent) SkillsPath() string               { return "" }
 func (a claudeModeAgent) AuthModeDisplay() AuthModeDisplay { return a.mode }
 
 func TestPrintClaudeAuthBanner_SandboxClaude(t *testing.T) {
@@ -92,3 +93,4 @@ func (emptyClaudeAgent) ConfigureMCP(string, map[string]string, string, Mode) ([
 	return nil, nil, nil
 }
 func (emptyClaudeAgent) AuthSpec() AuthSpec { return AuthSpec{} }
+func (emptyClaudeAgent) SkillsPath() string { return "" }

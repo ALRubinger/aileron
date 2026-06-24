@@ -23,6 +23,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
+	skillstore "github.com/ALRubinger/aileron/internal/flightplan/store"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	sandboxtoolchain "github.com/ALRubinger/aileron/internal/sandbox/toolchain"
@@ -1115,6 +1116,102 @@ func enclosingDirMount(mounts []sandboxcontainer.Volume, target string) *sandbox
 	return nil
 }
 
+// skillStoreDir is a package-level seam so tests can point the skills
+// projection at a temp store instead of the user's ~/.aileron/skills.
+var skillStoreDir = skillstore.DefaultDir
+
+// skillsStoreNonEmpty reports whether the canonical skill store at dir
+// holds at least one installed skill. An absent or empty store means
+// nothing to project.
+func skillsStoreNonEmpty(dir string) bool {
+	names, err := skillstore.New(dir).List()
+	return err == nil && len(names) > 0
+}
+
+// appendSkillsMount projects the canonical skill store read-only at the
+// agent's skills path. It is a no-op when the agent declares no skills path
+// (SkillsPath() == "") or the store is empty.
+//
+// When the agent's skills target is NOT nested inside an existing mount,
+// the store is added as a single read-only directory bind mount. When the
+// target nests inside an existing (AuthSpec) directory mount, the store
+// content is copied into that mount's host-side source so no nested bind
+// mount is created — the same hazard avoidance collapseNestedMCPMounts
+// applies for MCP config files (issue #1143: nested binds are rejected by
+// runc on macOS Docker Desktop virtiofs). The copy lands under the relative
+// subpath the target sits at within the parent mount.
+func appendSkillsMount(existing []sandboxcontainer.Volume, agent Agent, storeDir string) ([]sandboxcontainer.Volume, error) {
+	target := agent.SkillsPath()
+	if target == "" {
+		return existing, nil
+	}
+	if !skillsStoreNonEmpty(storeDir) {
+		return existing, nil
+	}
+
+	parent := enclosingDirMount(existing, target)
+	if parent == nil {
+		// No enclosing mount: a plain read-only directory bind is safe.
+		return append(existing, sandboxcontainer.Volume{
+			Source:   storeDir,
+			Target:   target,
+			ReadOnly: true,
+		}), nil
+	}
+
+	// The target nests inside an existing directory mount. Copy the store
+	// content into that mount's host-side source under the relative subpath
+	// rather than creating a nested bind. The agent reads the same files at
+	// the same in-container path; nesting is avoided.
+	//
+	// Read-only semantics in the nested case: the enclosing AuthSpec mount
+	// may be writable (Claude's /home/agent/.claude/ is, for credential
+	// rotation), so the copied skills are not RO at the mount level. The
+	// canonical store is still protected because this is a per-launch COPY,
+	// not a bind back to ~/.aileron/skills: any in-container edit dies with
+	// the ephemeral container and never reaches the canonical store.
+	rel := strings.TrimPrefix(target, parent.Target)
+	rel = strings.TrimPrefix(rel, "/")
+	dst := filepath.Join(parent.Source, rel)
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return nil, fmt.Errorf("create skills dir %s: %w", dst, err)
+	}
+	if err := copySkillTree(storeDir, dst); err != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+// copySkillTree recursively copies the regular files and subdirectories
+// under src into dst. Symlinks and other non-regular files are skipped.
+func copySkillTree(src, dst string) error {
+	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		switch {
+		case info.IsDir():
+			return os.MkdirAll(target, 0o755)
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, info.Mode().Perm())
+		default:
+			return nil
+		}
+	})
+}
+
 // chownAuthTree, when non-nil, recursively chowns the AuthSpec transient
 // tree to the resolved in-container agent UID. The launcher invokes it
 // AFTER collapseNestedMCPMounts has placed the agent's MCP config into
@@ -1181,6 +1278,18 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return LaunchResult{}, fmt.Errorf("placing MCP config for %s: %w", config.Agent.Name(), err)
 	}
 	mounts = collapsed
+
+	// Project the canonical skill store read-only at the agent's skills
+	// path (install-once / launch-anywhere, #1508). This runs BEFORE the
+	// chown for the same reason the MCP collapse does: when the skills
+	// target nests inside an AuthSpec directory mount (Claude's writable
+	// /home/agent/.claude/), the store content is copied into that mount's
+	// host-side source and must be in place before the tree is re-owned to
+	// the foreign agent UID.
+	mounts, err = appendSkillsMount(mounts, config.Agent, skillStoreDir())
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("projecting skills for %s: %w", config.Agent.Name(), err)
+	}
 
 	// Chown the AuthSpec transient tree to the in-container agent UID now
 	// that the MCP config has been placed into it (issue #1488). The chown

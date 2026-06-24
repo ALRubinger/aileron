@@ -29,6 +29,7 @@ func (emptyBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([
 	return nil, nil, nil
 }
 func (emptyBinaryAgent) AuthSpec() AuthSpec { return AuthSpec{} }
+func (emptyBinaryAgent) SkillsPath() string { return "" }
 
 type namedBinaryAgent struct{ name string }
 
@@ -41,6 +42,7 @@ func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) 
 	return nil, nil, nil
 }
 func (a namedBinaryAgent) AuthSpec() AuthSpec { return AuthSpec{} }
+func (a namedBinaryAgent) SkillsPath() string { return "" }
 
 // publishedNameAgent reports its name as a published agent id (e.g. "claude")
 // so Discover/EnrichValidateError treat it as having a published per-agent
@@ -56,6 +58,7 @@ func (a publishedNameAgent) ConfigureMCP(string, map[string]string, string, Mode
 	return nil, nil, nil
 }
 func (a publishedNameAgent) AuthSpec() AuthSpec { return AuthSpec{} }
+func (a publishedNameAgent) SkillsPath() string { return "" }
 
 func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {
 	if got := firstAgentBinary(emptyBinaryAgent{}); got != "" {

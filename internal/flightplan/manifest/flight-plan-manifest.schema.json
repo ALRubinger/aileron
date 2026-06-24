@@ -1,0 +1,599 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://withaileron.ai/schema/flight-plan-manifest.schema.json",
+  "title": "Aileron Flight Plan Manifest",
+  "description": "JSON Schema for the Aileron-specific block carried in a SKILL.md frontmatter. This block extends the agentskills.io SKILL.md format. It is lossless if stripped: a host without Aileron reads a valid skill and treats this block as inert. Authoritative model: ADR-0027 (Flight Plan = Sealed Installable Skill). This schema validates the `aileron` top-level block only. The skill keys it sits beside (name, description, and so on) are governed by the agentskills.io format and are not constrained here.",
+  "type": "object",
+  "properties": {
+    "aileron": {
+      "$ref": "#/$defs/aileronBlock"
+    }
+  },
+  "$comment": "The `aileron` block is optional at this top level so that a stripped manifest (the block removed) still validates. This encodes the lossless-if-stripped guarantee: the Aileron block is purely additive. An unsatisfied `requires:` is a missing-requirement signal resolved by the runtime, never a schema parse failure.",
+  "$defs": {
+    "aileronBlock": {
+      "type": "object",
+      "description": "The single namespaced top-level key that holds every Aileron-specific field. Namespacing under one key keeps the extension lossless if stripped.",
+      "additionalProperties": false,
+      "required": ["requires", "inputs", "outputs"],
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "description": "The manifest schema version. Optional. When present, identifies the Aileron block contract this manifest was authored against.",
+          "const": "aileron.flightplan.v1"
+        },
+        "requires": {
+          "$ref": "#/$defs/requires"
+        },
+        "inputs": {
+          "type": "array",
+          "description": "Declared inputs (REQUIRED). Every input the Flight Plan depends on is declared here, each with a resolution rule. A value that varies by use case (for example a time window) is a declared input rather than a constant baked into the composition, so one composition serves many operators. See ADR-0027 inputs/resolution and the determinism correction in #1523.",
+          "items": { "$ref": "#/$defs/input" }
+        },
+        "outputs": {
+          "type": "array",
+          "description": "Declared outputs (REQUIRED). The outputs contract names each artifact, its mimeType, its encoding, and its publish target. This is the declared INTERFACE the runtime materializes and distribution publishes. The audit references artifacts by name. The outputs contract is distinct from the file-map transport. See #1519.",
+          "items": { "$ref": "#/$defs/output" }
+        },
+        "steps": {
+          "type": "array",
+          "$comment": "OPTIONAL. `steps` is the deterministic no-LLM composition (the step graph). It is optional so a manifest without a composition still validates and stays lossless-if-stripped: the whole `aileron` block remains removable, and within the block a manifest that only declares requires/inputs/outputs is still complete. When present, `steps` wires declared actions and deterministic transforms into a directed acyclic graph. The single ADR-0027-permitted non-deterministic seam is the `llm-seam` kind; no other kind can reach an LLM, which makes the no-LLM guarantee structurally checkable because `kind` is a closed enum. Cross-step references (a binding to a prior step's output) and acyclicity are graph properties a JSON Schema cannot express; the prose states them as invariants, the freeze/lint step (#1509) checks them, and the runtime (#1511) enforces them.",
+          "description": "The deterministic step graph (OPTIONAL). Wires declared actions and deterministic transforms into a directed acyclic graph. Bindings reference resolved inputs and prior step outputs by name, never by value. The only non-deterministic seam is the marked `llm-seam` kind.",
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "lock": {
+          "$ref": "#/$defs/lock"
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "description": "Dependency declaration. Lists both the actions the Flight Plan calls and the execution-environment dependencies it runs in. An unsatisfied entry is a missing-requirement signal the runtime surfaces, never a parse failure.",
+      "additionalProperties": false,
+      "required": ["actions"],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "description": "The actions the Flight Plan calls. Each entry attaches to the action model of ADR-0003 and carries a per-action trust contract.",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/actionRequirement" }
+        },
+        "executionEnvironment": {
+          "$ref": "#/$defs/executionEnvironment"
+        }
+      }
+    },
+    "actionRequirement": {
+      "type": "object",
+      "description": "One required action plus its per-action trust contract. The trust contract is the #925 field set, absorbed here.",
+      "additionalProperties": false,
+      "required": ["ref", "trustContract"],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "The action reference in the form aileron:<connector>.<action> (for example aileron:metrics.query_series).",
+          "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+        },
+        "trustContract": { "$ref": "#/$defs/trustContract" }
+      }
+    },
+    "executionEnvironment": {
+      "type": "object",
+      "description": "The execution-environment dependency. Exactly one of rung-1 (a pinned prebuilt image) or rung-2 (composed capability units on the Aileron base) is declared per ADR-0027 execution rungs. Rung-3 per-step sibling-image dispatch is a reserved, build-deferred slot.",
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["rung1Image"], "not": { "required": ["rung2CapabilityUnits"] } },
+        { "required": ["rung2CapabilityUnits"], "not": { "required": ["rung1Image"] } }
+      ],
+      "properties": {
+        "rung1Image": {
+          "type": "object",
+          "description": "Rung one. The skill names a whole prebuilt image and freeze resolves it to a digest. The operator owns the image.",
+          "additionalProperties": false,
+          "required": ["ref"],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "description": "An OCI image reference. Pre-freeze this may be a tag (for example registry.example.com/runner:1.4). Freeze resolves it to an image@sha256: digest pin recorded in the lock section.",
+              "minLength": 1
+            }
+          }
+        },
+        "rung2CapabilityUnits": {
+          "type": "object",
+          "description": "Rung two. The skill declares capability units to compose onto a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features and pins the result. The capability-unit shape is ADR-0026.",
+          "additionalProperties": false,
+          "required": ["features"],
+          "properties": {
+            "features": {
+              "type": "array",
+              "description": "The capability-unit devcontainer Feature references composed onto the base image.",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "description": "A devcontainer Feature reference for a capability unit (ADR-0026).",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "rung3PerStepImages": {
+          "$comment": "RESERVED, BUILD-DEFERRED. Rung three is per-step sealed sibling-image dispatch with mount and run-and-collect I/O. ADR-0027 defines it as a manifest slot only so a later build can fill it without a format change. It is intentionally typed loosely here and MUST NOT be relied on by v1 tooling.",
+          "type": "object",
+          "description": "RESERVED and build-deferred. Per-step sibling-image dispatch (ADR-0027 rung three). Designed as a manifest slot only; not implemented in v1. Do not author this field expecting runtime support."
+        }
+      }
+    },
+    "trustContract": {
+      "type": "object",
+      "description": "The per-action trust contract. Records the credential kind and placement, OAuth detail where applicable, the expected network reach, the operation effect, idempotency, redaction, a verification probe, and the audit-record structure. Freeze attaches this contract and the detached signature is the human attestation that it is correct (ADR-0027). No field in this contract may carry a credential value; the contract declares credential kind and placement only (ADR-0005, ADR-0019).",
+      "additionalProperties": false,
+      "required": ["credential", "hosts", "effect", "idempotency", "audit"],
+      "allOf": [
+        {
+          "$comment": "An oauth2 credential MUST declare its oauth block.",
+          "if": { "properties": { "credential": { "properties": { "kind": { "const": "oauth2" } } } } },
+          "then": { "required": ["oauth"] }
+        }
+      ],
+      "properties": {
+        "credential": { "$ref": "#/$defs/credential" },
+        "oauth": { "$ref": "#/$defs/oauth" },
+        "hosts": {
+          "type": "array",
+          "description": "The expected upstream hosts the action reaches. The access-scope declaration IS the security boundary: the runtime grants nothing undeclared. Each entry is a host, with an optional port, and carries no URL scheme or path. Reuses the connector-spec `hosts` vocabulary.",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
+            "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+          }
+        },
+        "paths": {
+          "type": "array",
+          "description": "The expected request paths the action reaches on the declared hosts. Part of the access-scope declaration. The runtime grants nothing undeclared.",
+          "items": {
+            "type": "string",
+            "description": "A request path, optionally a prefix (for example /v2/metrics or /v2/metrics/*).",
+            "minLength": 1
+          }
+        },
+        "effect": {
+          "type": "string",
+          "description": "The operation effect, aligned to ADR-0003. Drives default approval routing through the out-of-band channel of ADR-0009. `read` observes state; `write` creates or mutates state; `delete` removes state; `spend` commits money; `external-send` sends a message or artifact to a third party.",
+          "enum": ["read", "write", "delete", "spend", "external-send"]
+        },
+        "idempotency": { "$ref": "#/$defs/idempotency" },
+        "redaction": {
+          "type": "array",
+          "description": "Redaction rules applied to the operation's response fields before they reach the agent or author. Each rule names a field path and how it is redacted.",
+          "items": { "$ref": "#/$defs/redactionRule" }
+        },
+        "verification": { "$ref": "#/$defs/verification" },
+        "audit": { "$ref": "#/$defs/auditStructure" }
+      }
+    },
+    "credential": {
+      "type": "object",
+      "description": "The credential KIND and PLACEMENT this action uses. It never holds a credential VALUE. The runtime mediates credential use at the data-plane proxy boundary (ADR-0019) so the composed code never holds a raw credential (ADR-0005).",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "The credential kind. `none` for an unauthenticated call; `api-key` for a static key or token; `oauth2` for an OAuth 2 access token (declare the `oauth` block alongside); `aws-sigv4` for an AWS request-signing credential.",
+          "enum": ["none", "api-key", "oauth2", "aws-sigv4"]
+        },
+        "placement": {
+          "type": "string",
+          "description": "Where the credential is placed on the wire. Maps 1:1 to the closed ADR-0019 injection-scheme set. `header` -> a bearer or templated header (ADR-0019 `bearer` or `header-template`); `query` -> ADR-0019 `query-param`; `body` -> the credential is carried in the request body; `cookie` -> the credential rides as a cookie; `signing` -> AWS SigV4, mapping to ADR-0019 `sigv4-resign` (sealed by #1501); `session` -> the cookie/session-token wire form for a session-authenticated upstream. The exact header or wire shape is per service, not per placement alone.",
+          "enum": ["header", "query", "cookie", "body", "signing", "session"]
+        },
+        "identityLabel": {
+          "type": "string",
+          "description": "A subject or account identity label for multi-tenant binding (for example the workspace or account the credential authenticates as). A non-secret label, never a credential value.",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "A placement is required for every credential kind except `none`.",
+          "if": { "properties": { "kind": { "not": { "const": "none" } } } },
+          "then": { "required": ["placement"] }
+        },
+        {
+          "$comment": "An oauth2 credential is placed in a header, never via signing/query/cookie/body/session.",
+          "if": { "properties": { "kind": { "const": "oauth2" } } },
+          "then": { "properties": { "placement": { "const": "header" } } }
+        },
+        {
+          "$comment": "An aws-sigv4 credential is always placed via request signing.",
+          "if": { "properties": { "kind": { "const": "aws-sigv4" } } },
+          "then": { "properties": { "placement": { "const": "signing" } } }
+        }
+      ]
+    },
+    "oauth": {
+      "type": "object",
+      "description": "OAuth detail for an oauth2 credential. Records the scopes, endpoints, and refresh behavior. Declared alongside a credential of kind oauth2. Holds no token value.",
+      "additionalProperties": false,
+      "properties": {
+        "scopes": {
+          "type": "array",
+          "description": "The OAuth scopes the action requires.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "endpoints": {
+          "type": "object",
+          "description": "The OAuth endpoints. Non-secret URLs.",
+          "additionalProperties": false,
+          "properties": {
+            "authorization": { "type": "string", "description": "The authorization endpoint URL.", "format": "uri" },
+            "token": { "type": "string", "description": "The token endpoint URL.", "format": "uri" }
+          }
+        },
+        "refresh": {
+          "type": "string",
+          "description": "The refresh behavior. `refresh-token` uses a stored refresh token; `none` requires re-auth on expiry.",
+          "enum": ["refresh-token", "none"]
+        }
+      }
+    },
+    "idempotency": {
+      "type": "object",
+      "description": "Idempotency declaration, aligned to ADR-0003. Records whether the operation is safe to retry and whether it supports an idempotency key.",
+      "additionalProperties": false,
+      "required": ["safeToRetry"],
+      "properties": {
+        "safeToRetry": {
+          "type": "boolean",
+          "description": "True when re-running the operation with the same inputs produces no additional effect."
+        },
+        "idempotencyKey": {
+          "type": "boolean",
+          "description": "True when the operation accepts a client-supplied idempotency key that the upstream uses to deduplicate retried writes. Defaults to false.",
+          "default": false
+        }
+      }
+    },
+    "redactionRule": {
+      "type": "object",
+      "description": "One redaction rule. Names a response field and how it is redacted before reaching the agent or author.",
+      "additionalProperties": false,
+      "required": ["field", "rule"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "The response field path to redact (for example data[].email).",
+          "minLength": 1
+        },
+        "rule": {
+          "type": "string",
+          "description": "How the field is redacted. `drop` removes it; `mask` replaces its value with a fixed mask; `hash` replaces it with a stable hash.",
+          "enum": ["drop", "mask", "hash"]
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "description": "A verification probe. A no-op or read-only call the runtime can issue to confirm the credential still works for this action.",
+      "additionalProperties": false,
+      "required": ["method", "path"],
+      "properties": {
+        "method": {
+          "type": "string",
+          "description": "The HTTP method of the probe. Read-only methods only.",
+          "enum": ["GET", "HEAD"]
+        },
+        "path": {
+          "type": "string",
+          "description": "The probe request path on one of the declared hosts.",
+          "minLength": 1
+        }
+      }
+    },
+    "auditStructure": {
+      "type": "object",
+      "description": "The structure of the audit record this operation emits. The audit records resolved inputs to outputs: scalars by value, data reads by their resolved binding (parameters, query, result or snapshot identifier, summary), never the full dataset inline (ADR-0027 audit boundary, #1523). The sink is customer-owned. The fields below enumerate the record's shape; this block declares which fields the operation's audit record carries.",
+      "additionalProperties": false,
+      "required": ["fields"],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "description": "The audit-record fields this operation emits. Closed enum of the record shape. `connector-hash` the connector content hash; `action-manifest-version` the resolved action version; `credential-binding` the credential binding reference used (never the credential bytes); `identity-label` the subject/account identity; `approved-input` the resolved input that was approved; `approval-decision` the approval outcome; `network-target` the upstream host and path reached; `operation-effect` the recorded effect; `request-summary` a redacted request summary; `response-summary` a redacted response summary; `result` a result or snapshot identifier with a summary.",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "connector-hash",
+              "action-manifest-version",
+              "credential-binding",
+              "identity-label",
+              "approved-input",
+              "approval-decision",
+              "network-target",
+              "operation-effect",
+              "request-summary",
+              "response-summary",
+              "result"
+            ]
+          }
+        },
+        "sink": {
+          "type": "string",
+          "description": "A reference to the customer-owned audit sink (for example a log stream or table name). A non-secret reference, never credentials for the sink.",
+          "minLength": 1
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "description": "One declared input with its resolution rule. Inputs resolve once, at the launch boundary, into a concrete resolved-input set (ADR-0027, #1523).",
+      "additionalProperties": false,
+      "required": ["name", "type", "resolution"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The input name, unique within the manifest.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "type": {
+          "type": "string",
+          "description": "The input value type.",
+          "enum": ["string", "number", "boolean", "timestamp", "object", "array"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable semantics of the input."
+        },
+        "resolution": { "$ref": "#/$defs/resolution" }
+      }
+    },
+    "resolution": {
+      "type": "object",
+      "description": "An input resolution rule. Exactly one of three rules: `literal` (a value passed at launch), `dynamic` (a launch-relative value such as now or today), or `source` (a read from a live source). Discriminated by `rule`.",
+      "required": ["rule"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["rule"],
+          "properties": {
+            "rule": { "const": "literal", "description": "A literal value passed at launch." },
+            "default": {
+              "description": "An optional default value applied when no value is passed at launch."
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["rule", "value"],
+          "properties": {
+            "rule": { "const": "dynamic", "description": "A launch-relative dynamic value resolved once at launch." },
+            "value": {
+              "type": "string",
+              "description": "The dynamic value to resolve. `now` resolves to the launch timestamp; `today` resolves to the launch date.",
+              "enum": ["now", "today"]
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["rule", "source"],
+          "properties": {
+            "rule": { "const": "source", "description": "A read from a live source resolved once at launch." },
+            "source": {
+              "type": "object",
+              "description": "The live source to read. References a declared action and records the read by its resolved binding in the audit, never the full dataset inline.",
+              "additionalProperties": false,
+              "required": ["actionRef"],
+              "properties": {
+                "actionRef": {
+                  "type": "string",
+                  "description": "The action reference whose result resolves this input, in the form aileron:<connector>.<action>.",
+                  "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+                },
+                "select": {
+                  "type": "string",
+                  "description": "An optional selector identifying which part of the source result resolves this input."
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "output": {
+      "type": "object",
+      "description": "One declared output artifact. Names the artifact, its mimeType, its encoding, and its publish target. This is the declared INTERFACE, distinct from the file-map transport. The transport is a typed JSON file-map of {path, mimeType, encoding, content} entries the runtime materializes into files (#1519); this outputs block is the contract that names what those files are.",
+      "additionalProperties": false,
+      "required": ["name", "mimeType", "encoding", "publish"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The output artifact name, unique within the manifest. The audit references artifacts by this name.",
+          "pattern": "^[a-zA-Z0-9_.-]+$"
+        },
+        "mimeType": {
+          "type": "string",
+          "description": "The artifact media type (for example text/csv or application/json).",
+          "minLength": 1
+        },
+        "encoding": {
+          "type": "string",
+          "description": "The artifact content encoding. `utf-8` is the v1 implementation. `base64` is RESERVED for binary outputs and is a deferred follow-up blocked on a host-ABI binary-body field; the mount / run-and-collect boundary (#1510) is the escape hatch for large or binary artifacts later. The enum value `base64` is present so the declared INTERFACE is binary-ready, but v1 implements `utf-8` only. Text-only is the v1 IMPLEMENTATION, never the declared INTERFACE.",
+          "enum": ["utf-8", "base64"]
+        },
+        "publish": {
+          "type": "object",
+          "description": "The publish target for this artifact. Where the runtime materializes and distribution publishes it.",
+          "additionalProperties": false,
+          "required": ["target"],
+          "allOf": [
+            {
+              "$comment": "A file publish target MUST name the output path.",
+              "if": { "properties": { "target": { "const": "file" } } },
+              "then": { "required": ["path"] }
+            }
+          ],
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "The publish target kind. `file` writes the artifact to the run's output file set; `none` retains the artifact in the run record without external publication.",
+              "enum": ["file", "none"]
+            },
+            "path": {
+              "type": "string",
+              "description": "The output file path when target is `file` (for example report.csv)."
+            }
+          }
+        }
+      }
+    },
+    "binding": {
+      "type": "string",
+      "description": "A data-flow binding. A binding is a REFERENCE, never a value: it names where a step reads its data from. `inputs.<name>` references a declared input resolved at the launch boundary (#1523). `steps.<stepId>.<outputName>` references a named output of a prior step. A binding never carries a literal secret; secret material is mediated at the data-plane proxy boundary (ADR-0005, ADR-0019). The closed reference grammar is the structural guarantee that step args are wiring, not embedded values.",
+      "pattern": "^(inputs\\.[a-zA-Z0-9_-]+|steps\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+)$"
+    },
+    "stepOutputs": {
+      "type": "array",
+      "description": "The named results a step produces. Each name is referenced by a later step as `steps.<thisStepId>.<name>` or wired to a declared output artifact by name. Names are unique within the step.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "description": "A named result this step produces.",
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      }
+    },
+    "materializesOutput": {
+      "type": "string",
+      "description": "OPTIONAL. Names a declared `outputs[].name` artifact that this step's result materializes into. This wires a step result to the declared outputs contract, which the runtime materializes through the typed file-map transport {path, mimeType, encoding, content} (#1519). The schema cannot enforce that the value matches a declared output name (cross-array membership); the prose states it as an invariant and the drift-guard asserts it on the example.",
+      "pattern": "^[a-zA-Z0-9_.-]+$"
+    },
+    "step": {
+      "type": "object",
+      "description": "One step in the deterministic step graph. Discriminated by `kind`. The closed `kind` enum is the structural no-LLM guarantee: an `action-call` invokes a declared action, a `transform` runs deterministic no-LLM logic, and the single `llm-seam` is the only kind that reaches an LLM (ADR-0027). Every step kind is a closed object (additionalProperties:false), so no step field may carry a secret; a step binds references, never values.",
+      "required": ["id", "kind"],
+      "oneOf": [
+        { "$ref": "#/$defs/actionCallStep" },
+        { "$ref": "#/$defs/transformStep" },
+        { "$ref": "#/$defs/llmSeamStep" }
+      ]
+    },
+    "actionCallStep": {
+      "type": "object",
+      "description": "A step that invokes a declared action. Its `actionRef` MUST match a `requires.actions[].ref` (cross-array membership a JSON Schema cannot enforce; stated as a prose invariant, checked by #1509 lint, asserted by the drift-guard). Args bind to resolved inputs or prior step outputs by reference, never by value.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "actionRef"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph. Prior steps reference this step's outputs as `steps.<id>.<outputName>`.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "action-call",
+          "description": "Invokes a declared action."
+        },
+        "actionRef": {
+          "type": "string",
+          "description": "The action this step invokes, in the form aileron:<connector>.<action>. MUST match a declared requires.actions[].ref.",
+          "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+        },
+        "args": {
+          "type": "object",
+          "description": "The action arguments. Each value is a binding REFERENCE, never a literal value or secret. The argument name is per-action; the value is a binding to a resolved input or a prior step output.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
+    "transformStep": {
+      "type": "object",
+      "description": "A step that runs deterministic no-LLM logic. It has no host, network, or credential surface: a transform reshapes data already in the graph. The closed `kind` enum and the closed object guarantee a transform cannot reach an LLM or carry a credential. Bindings reference resolved inputs or prior step outputs by name, never by value.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "outputs"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "transform",
+          "description": "Deterministic no-LLM logic over data already in the graph."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "The named inputs to the transform. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
+    "llmSeamStep": {
+      "type": "object",
+      "description": "The single ADR-0027-permitted non-deterministic seam. The `kind: llm-seam` value is the first-class mark #1509 lint checks; by construction no other step kind reaches an LLM, so the no-LLM guarantee is structurally checkable because `kind` is a closed enum and only this one value reaches an LLM. Bindings reference resolved inputs or prior step outputs by name, never by value; the seam holds no credential and binds no secret.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "outputs"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "llm-seam",
+          "description": "The single marked non-deterministic seam. The only kind that reaches an LLM."
+        },
+        "bindings": {
+          "type": "object",
+          "description": "The named inputs to the seam. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
+    "lock": {
+      "type": "object",
+      "description": "The lock and digest section. Produced by freeze (#1509): pins the resolved image digests and the resolved capability set, and records the manifest content hash plus semver label. ABSENT before freeze; this schema specifies its shape as freeze's target only. When present, every image reference is a content-addressed digest.",
+      "additionalProperties": false,
+      "properties": {
+        "resolvedImages": {
+          "type": "array",
+          "description": "The resolved image digest pins. Each entry pairs the pre-freeze reference with its resolved image@sha256: digest.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref", "digest"],
+            "properties": {
+              "ref": { "type": "string", "description": "The pre-freeze image reference.", "minLength": 1 },
+              "digest": {
+                "type": "string",
+                "description": "The resolved content-addressed digest.",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "resolvedCapabilitySet": {
+          "type": "array",
+          "description": "The resolved capability set the freeze pinned.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "contentHash": {
+          "type": "string",
+          "description": "The content hash identifying the exact frozen manifest bytes.",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "version": {
+          "type": "string",
+          "description": "The human-facing semver label for this frozen version.",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

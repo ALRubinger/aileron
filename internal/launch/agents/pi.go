@@ -56,6 +56,11 @@ func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ la
 // clean exit. MountAsFile is false (the default): Pi's ConfigureMCP
 // passes MCP config via a CLI flag, not a file mount, so no sibling
 // mount needs to coexist with auth.json.
+// SkillsPath returns "" because Pi's Agent Skills directory under the
+// sandbox is not yet grounded; the launcher skips the skills mount for it.
+// Wiring Pi's skills path is deferred until its layout is confirmed.
+func (p Pi) SkillsPath() string { return "" }
+
 func (p Pi) AuthSpec() launch.AuthSpec {
 	return launch.AuthSpec{
 		FileBindings: []launch.FileBinding{{

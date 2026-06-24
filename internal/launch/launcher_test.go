@@ -134,6 +134,7 @@ func (a scriptAgent) ConfigureMCP(string, map[string]string, string, launch.Mode
 	return a.mcpArgs, nil, nil
 }
 func (a scriptAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (a scriptAgent) SkillsPath() string        { return "" }
 
 func TestLaunch_AgentEnvVarsFlowThrough(t *testing.T) {
 	dir := t.TempDir()
@@ -1714,6 +1715,7 @@ func (claudeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ s
 	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
 }
 func (claudeTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (claudeTestAgent) SkillsPath() string        { return "" }
 
 type piTestAgent struct{}
 
@@ -1727,6 +1729,7 @@ func (piTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ strin
 	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
 }
 func (piTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (piTestAgent) SkillsPath() string        { return "" }
 
 type gooseTestAgent struct{}
 
@@ -1750,6 +1753,7 @@ func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ st
 	return []string{"--with-extension", strings.Join(parts, " ")}, nil, nil
 }
 func (gooseTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (gooseTestAgent) SkillsPath() string        { return "" }
 
 type openCodeTestAgent struct{}
 
@@ -1768,6 +1772,7 @@ func (openCodeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, d
 	return nil, nil, os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(body), 0o644)
 }
 func (openCodeTestAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (openCodeTestAgent) SkillsPath() string        { return "" }
 
 // t1 is a tiny *testing.T-shaped stand-in used by the test stubs above
 // to forward fatal failures. The real agent definitions use t.Fatal

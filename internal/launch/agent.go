@@ -104,6 +104,21 @@ type Agent interface {
 	// Agents that have no vault-backed credentials return the zero
 	// value AuthSpec{}; the launcher treats that as a no-op.
 	AuthSpec() AuthSpec
+	// SkillsPath returns the container-side directory the agent reads
+	// installed Agent Skills from (e.g. "/home/agent/.claude/skills" for
+	// Claude Code). At sandbox launch the launcher bind-mounts the
+	// canonical host-side skill store read-only at this path, so a skill
+	// installed once via `aileron skill install` is visible to the agent
+	// wherever it launches (the install-once / launch-anywhere projection,
+	// #1508). Per-agent path differences are absorbed here, not by
+	// transpiling SKILL.md.
+	//
+	// An agent whose skills directory is not yet grounded returns "", and
+	// the launcher skips the skills mount for it. Projection is a v4
+	// container-model behavior: host launch (--local) lets the agent read
+	// its own native skills directory and the launcher does not mount over
+	// it.
+	SkillsPath() string
 }
 
 // Registry maps agent names to their definitions.
