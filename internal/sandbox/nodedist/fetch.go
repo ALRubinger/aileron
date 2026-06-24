@@ -23,7 +23,7 @@ import (
 // substitute an in-memory fetcher with no network, exactly as the connector
 // install pipeline does.
 type Fetcher struct {
-	// HTTP downloads the archive, SHASUMS256.txt, and SHASUMS256.txt.asc.
+	// HTTP downloads the archive and the clearsigned SHASUMS256.txt.asc.
 	// Required.
 	HTTP cstore.Fetcher
 
@@ -78,9 +78,9 @@ type NodeDist struct {
 // entry. The pipeline:
 //
 //  1. Resolve archive/checksums/signature URLs for version+target.
-//  2. Download SHASUMS256.txt and SHASUMS256.txt.asc.
-//  3. Verify the detached signature against the keyring, then parse the
-//     verified checksums. A bad signature aborts here — no archive is
+//  2. Download the clearsigned SHASUMS256.txt.asc.
+//  3. Verify the clearsigned message against the keyring, then parse the
+//     embedded verified checksums. A bad signature aborts here — no archive is
 //     fetched and nothing is committed.
 //  4. Look up the selected archive's verified SHA-256.
 //  5. Cache short-circuit: if a tree for that hash is already stored, return
@@ -123,16 +123,15 @@ func (f *Fetcher) Fetch(ctx context.Context, req Request) (NodeDist, error) {
 		return NodeDist{}, err
 	}
 
-	// Fetch + signature-verify + parse the checksums.
-	checksumsBytes, err := f.download(ctx, urls.Checksums)
+	// Fetch + signature-verify + parse the checksums. Node's
+	// SHASUMS256.txt.asc is clearsigned (it embeds the checksum lines inside
+	// the signed message), so it is the single source of truth — there is no
+	// separate unsigned SHASUMS256.txt to download.
+	ascBytes, err := f.download(ctx, urls.Signature)
 	if err != nil {
 		return NodeDist{}, err
 	}
-	sigBytes, err := f.download(ctx, urls.Signature)
-	if err != nil {
-		return NodeDist{}, err
-	}
-	sums, err := ChecksumVerifier{Keyring: f.Keyring}.VerifyAndParse(checksumsBytes, sigBytes)
+	sums, err := ChecksumVerifier{Keyring: f.Keyring}.VerifyAndParse(ascBytes)
 	if err != nil {
 		return NodeDist{}, err
 	}

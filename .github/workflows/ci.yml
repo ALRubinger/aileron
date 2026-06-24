@@ -823,6 +823,71 @@ jobs:
       - name: Build sandbox Features and verify CLIs on PATH (#1082, #1083)
         run: task test:integration:sandbox-features
 
+  integration-sandbox-managed:
+    # The #1530 acceptance gate: a real `devcontainer build` driven through the
+    # Aileron-MANAGED toolchain (the Builder is wired with the real provisioner,
+    # so Node + @devcontainers/cli are fetched + verified + cached by Aileron, not
+    # taken from the host's npx). Docker is the host build prerequisite and the
+    # managed Node fetch needs network/registry access (https://nodejs.org). Host
+    # Node/npx is NOT required by the toolchain under test; setup-node is here only
+    # so the Go module cache and Task install behave like the other jobs.
+    name: Integration Tests (Sandbox Managed)
+    # Linux (ubuntu-latest) is the single REQUIRED, blocking leg: it is the
+    # fail-fast acceptance environment with first-class Docker. macOS-arm64
+    # (macos-latest) and Windows run non-blocking via continue-on-error below —
+    # they report best-effort nested-Docker signal but do NOT gate the flip. Do
+    # not add continue-on-error to the Linux leg. (macOS amd64 / macos-13 /
+    # self-hosted Intel are explicitly out of scope.)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            required: true
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    # Only the Linux leg can fail the workflow; macOS/Windows are best-effort.
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            internal/go.mod
+            test/integration/go.mod
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # Pin the CLI to the version the Go source pins
+      # (container.DevcontainerCLIVersion) for parity with the host-npx Features
+      # job, even though the managed toolchain provisions its own pinned CLI: a
+      # mismatch here would be a confusing signal. The managed build under test
+      # does not consult this global install.
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli@0.87.0
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds the aileron-sandbox-base image from images/sandbox-base (the task
+      # target sets AILERON_SANDBOX_BASE_CONTEXT), then composes the Claude
+      # Feature through Aileron's composition.Discover -> Builder.Build path with
+      # the managed provisioner wired and asserts `command -v claude`. The Linux
+      # runner has Docker and network access for the managed Node fetch; this is
+      # the fail-fast acceptance environment. The test FAILS (no self-skip) if
+      # Docker, the base image, or the managed Node/CLI is unavailable.
+      - name: Build sandbox Feature via managed toolchain and verify CLI on PATH (#1530)
+        run: task test:integration:sandbox-managed
+
   integration-e2e:
     name: Integration Tests (E2E)
     runs-on: ubuntu-latest

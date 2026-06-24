@@ -136,16 +136,18 @@ Refresh the asset by hand when Node rotates a release signer (for example when a
 
 ## Managed Toolchain Build
 
-A Tier 1 devcontainer that declares `features` cannot be built with raw `docker build`, so Aileron routes it through `@devcontainers/cli`, which needs a Node runtime. By default Aileron resolves both through the host's `npx` (`npx --yes @devcontainers/cli@<pinned>`), so the host must have Node installed. The managed toolchain removes that host prerequisite: Aileron provisions a verified, pinned Node and the pinned CLI itself, leaving Docker as the only host prerequisite for a Features build.
+A Tier 1 devcontainer that declares `features` cannot be built with raw `docker build`, so Aileron routes it through `@devcontainers/cli`, which needs a Node runtime. The managed toolchain is the default. Aileron provisions a verified, pinned Node and the pinned CLI itself, so Docker is the only host prerequisite for a Features build on Linux. The host does not need Node installed.
 
-Select the managed toolchain on a Features build with the `--toolchain` flag:
+The host-npx toolchain is the opt-out. It resolves both Node and the CLI through the host's `npx` (`npx --yes @devcontainers/cli@<pinned>`), so the host must have Node installed when you select it. Opt out on a Features build with the `--toolchain` flag:
 
 ```bash
-aileron sandbox build --toolchain=managed
-aileron sandbox check --toolchain=managed --agent=claude
+aileron sandbox build --toolchain=host-npx
+aileron sandbox check --toolchain=host-npx --agent=claude
 ```
 
-The same selection is available through the `AILERON_SANDBOX_TOOLCHAIN` environment variable, which `aileron launch` also reads. Precedence is flag, then environment, then the default. The default is host-npx in this release; a later change flips the default to managed ([#1530](https://github.com/ALRubinger/aileron/issues/1530)).
+The same selection is available through the `AILERON_SANDBOX_TOOLCHAIN` environment variable, which `aileron launch` also reads. Precedence is flag, then environment, then the default. The default is the managed toolchain ([#1530](https://github.com/ALRubinger/aileron/issues/1530)); pass `--toolchain=host-npx` or set `AILERON_SANDBOX_TOOLCHAIN=host-npx` to opt out.
+
+The managed toolchain is the required, gating CI environment on Linux. On macOS and Windows the host-npx path remains the documented escape hatch until those legs are promoted to required. Set `AILERON_SANDBOX_TOOLCHAIN=host-npx` on those hosts if the managed Node fetch is not available to you.
 
 On first managed build Aileron fetches the pinned Node distribution into a content-addressed cache keyed by the distribution's verified sha256, and verifies it against `tools.lock.json` at the network boundary. It then installs the pinned `@devcontainers/cli` into a separate cache directory keyed by the CLI version. Both caches short-circuit on a warm hit, so subsequent builds reuse them without re-downloading. The two build paths differ only in the invocation prefix that precedes the `build` subcommand (`npx --yes @devcontainers/cli@<pinned>` for host-npx versus the managed node binary plus the CLI's JS entrypoint for managed); the `build --workspace-folder … --image-name … --build-arg …` tail is identical.
 

@@ -24,18 +24,32 @@ func captureSandboxBuildOpts(t *testing.T) *sandboxcontainer.BuildOptions {
 	return &got
 }
 
-func TestRunSandboxBuildDefaultsToHostNPX(t *testing.T) {
+func TestRunSandboxBuildDefaultsToManaged(t *testing.T) {
+	// #1530: the default selection (no flag, no env) now resolves to managed.
 	t.Chdir(t.TempDir())
 	got := captureSandboxBuildOpts(t)
 	var out, errb bytes.Buffer
 	if code := runSandboxBuild(nil, &out, &errb); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
 	}
-	if sandboxcontainer.IsManagedToolchain(got.ToolchainMode) {
-		t.Fatalf("default ToolchainMode = %q resolved managed; want host-npx", got.ToolchainMode)
+	if !sandboxcontainer.IsManagedToolchain(got.ToolchainMode) {
+		t.Fatalf("default ToolchainMode = %q resolved host-npx; want managed", got.ToolchainMode)
 	}
 	if got.NodeBinary != "" || got.DevcontainerCLIEntrypoint != "" {
 		t.Fatalf("default escape hatch non-empty: node=%q cli=%q", got.NodeBinary, got.DevcontainerCLIEntrypoint)
+	}
+}
+
+func TestRunSandboxBuildHostNPXFlagOptsOut(t *testing.T) {
+	// The explicit host-npx flag is the opt-out from the managed default.
+	t.Chdir(t.TempDir())
+	got := captureSandboxBuildOpts(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxBuild([]string{"--toolchain=host-npx"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if sandboxcontainer.IsManagedToolchain(got.ToolchainMode) {
+		t.Fatalf("host-npx flag resolved managed: %q", got.ToolchainMode)
 	}
 }
 

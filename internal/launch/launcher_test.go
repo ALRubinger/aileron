@@ -1008,6 +1008,12 @@ func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Pin the host-npx toolchain opt-out: this test asserts the `npx
+	// @devcontainers/cli` build argv hermetically via stubs. The managed default
+	// (#1530) would provision a real Node, which has no place in a unit test; the
+	// managed build is proven in the dedicated integration-sandbox-managed job.
+	t.Setenv(sandboxcontainer.ToolchainModeEnv, sandboxcontainer.ToolchainModeHostNPX)
+
 	dir := t.TempDir()
 	if _, err := sandboxcomposition.Init(sandboxcomposition.InitOptions{WorkDir: dir, Version: "test"}); err != nil {
 		t.Fatalf("init scaffold: %v", err)

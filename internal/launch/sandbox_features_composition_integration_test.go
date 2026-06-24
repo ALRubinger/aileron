@@ -117,6 +117,11 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 		WorkDir: workspace,
 		Plan:    plan,
 		Policy:  sandboxcontainer.BuildPolicyAlways,
+		// This test exercises Feature composition, not toolchain provisioning;
+		// pin host-npx so it keeps its pre-#1530 behavior now that the default
+		// is managed. The managed path has its own coverage in the Sandbox
+		// Managed integration matrix.
+		ToolchainMode: sandboxcontainer.ToolchainModeHostNPX,
 	})
 	if err != nil {
 		t.Fatalf("Builder.Build via @devcontainers/cli: %v", err)
@@ -239,6 +244,11 @@ func TestGHFeatureComposesViaAileron(t *testing.T) {
 		WorkDir: workspace,
 		Plan:    plan,
 		Policy:  sandboxcontainer.BuildPolicyAlways,
+		// This test exercises Feature composition, not toolchain provisioning;
+		// pin host-npx so it keeps its pre-#1530 behavior now that the default
+		// is managed. The managed path has its own coverage in the Sandbox
+		// Managed integration matrix.
+		ToolchainMode: sandboxcontainer.ToolchainModeHostNPX,
 	})
 	if err != nil {
 		t.Fatalf("Builder.Build via @devcontainers/cli: %v", err)

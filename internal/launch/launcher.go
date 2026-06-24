@@ -471,9 +471,10 @@ func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolic
 	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
-	// Launch opts into the managed toolchain via env only (no flag); the default
-	// stays host-npx until #1530 flips it. The flag value is always empty here, so
-	// resolution is env → default.
+	// Launch resolves the toolchain via env only (no flag); the default is the
+	// managed toolchain (#1530), with AILERON_SANDBOX_TOOLCHAIN=host-npx as the
+	// opt-out. The flag value is always empty here, so resolution is env → default,
+	// which wires the managed provisioner by default below.
 	toolchainMode, nodeBinary, cliEntrypoint := sandboxcontainer.ResolveToolchainSelection("", "", "", os.Getenv)
 	builder := sandboxcontainer.Builder{
 		Runtime: runtimeName,

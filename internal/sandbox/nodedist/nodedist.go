@@ -108,10 +108,12 @@ type URLs struct {
 	// Archive is the platform-specific distribution archive.
 	Archive string
 	// Checksums is the SHASUMS256.txt covering every artifact for the
-	// version.
+	// version. Resolved for reference; verification uses the clearsigned
+	// Signature below, which embeds these checksums.
 	Checksums string
-	// Signature is the detached PGP signature (SHASUMS256.txt.asc) over
-	// Checksums.
+	// Signature is the clearsigned SHASUMS256.txt.asc — a PGP "SIGNED MESSAGE"
+	// that embeds the checksum lines inside the signed body (not a detached
+	// signature over a separate file).
 	Signature string
 }
 

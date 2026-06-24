@@ -208,9 +208,9 @@ type ManagedToolchain struct {
 // toolchainProvisioner provisions (fetch + verify + cache) the managed Node and
 // pinned @devcontainers/cli on demand and returns their resolved paths. It is
 // the seam (ADR-0014 style) that keeps the container package Docker-free and
-// network-free in unit tests: the default-host-npx path never calls it, and the
-// managed path is exercised with a fake in tests. The real implementation lives
-// in internal/sandbox/toolchain.
+// network-free in unit tests: the host-npx opt-out path never calls it, and the
+// managed path (the default) is exercised with a fake in tests. The real
+// implementation lives in internal/sandbox/toolchain.
 type toolchainProvisioner interface {
 	Provision(ctx context.Context) (ManagedToolchain, error)
 }
@@ -222,8 +222,8 @@ type Builder struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	// Provisioner supplies the managed toolchain when a Features build selects
-	// ToolchainModeManaged without the escape hatch. nil means "no managed
-	// provisioning wired": the default host-npx path never needs it, and a
+	// ToolchainModeManaged (the default) without the escape hatch. nil means "no
+	// managed provisioning wired": the host-npx opt-out path never needs it, and a
 	// managed request with nil Provisioner and no escape hatch fails fast rather
 	// than silently falling back. Unit tests inject a fake to exercise the
 	// managed branch with no network or Docker.
@@ -231,16 +231,16 @@ type Builder struct {
 }
 
 // Toolchain selection modes for a Features (Tier 1) devcontainer build. The
-// build needs a Node runtime plus @devcontainers/cli; ToolchainModeHostNPX (the
-// default) resolves both through the host's `npx`, while ToolchainModeManaged
-// provisions an Aileron-managed Node + pinned CLI so Docker is the only host
-// prerequisite (#1525). The default stays host-npx in this sub-issue; flipping
-// it to managed is #1530.
+// build needs a Node runtime plus @devcontainers/cli; ToolchainModeManaged (the
+// default) provisions an Aileron-managed Node + pinned CLI so Docker is the only
+// host prerequisite (#1525), while ToolchainModeHostNPX resolves both through the
+// host's `npx`. The default is managed (#1530); host-npx is the explicit opt-out.
 const (
-	// ToolchainModeAuto is the empty/default selection: resolve the
-	// @devcontainers/cli invocation through the host `npx` prefix.
+	// ToolchainModeAuto is the empty/default selection: it resolves to the
+	// managed toolchain.
 	ToolchainModeAuto = ""
-	// ToolchainModeHostNPX explicitly selects the host-`npx` invocation.
+	// ToolchainModeHostNPX explicitly selects the host-`npx` invocation (the
+	// opt-out from the managed default).
 	ToolchainModeHostNPX = "host-npx"
 	// ToolchainModeManaged selects the Aileron-managed toolchain: a verified
 	// managed Node binary running the pinned @devcontainers/cli entrypoint, so
@@ -255,9 +255,9 @@ type BuildOptions struct {
 	Tag     string
 	Policy  string
 	// ToolchainMode selects how a Features (Tier 1) devcontainer build
-	// resolves Node + @devcontainers/cli: ToolchainModeAuto/ToolchainModeHostNPX
-	// (default) use the host `npx`; ToolchainModeManaged provisions an
-	// Aileron-managed Node + pinned CLI. Ignored for every other tier.
+	// resolves Node + @devcontainers/cli: ToolchainModeAuto/ToolchainModeManaged
+	// (default) provision an Aileron-managed Node + pinned CLI; ToolchainModeHostNPX
+	// uses the host `npx`. Ignored for every other tier.
 	ToolchainMode string
 	// NodeBinary and DevcontainerCLIEntrypoint are the managed-toolchain escape
 	// hatch: when both are set, the managed branch runs exactly those paths
@@ -1123,20 +1123,19 @@ func devcontainerBuildArgs(workDir string, plan composition.Plan, image string) 
 // executable plus the leading arguments that precede the `build` subcommand. It
 // returns one of:
 //
-//   - the host-npx default (the devcontainerCLI package var) when the selection
-//     is ToolchainModeAuto/ToolchainModeHostNPX;
+//   - the host-npx prefix (the devcontainerCLI package var) when the selection
+//     is the explicit ToolchainModeHostNPX opt-out;
 //   - the managed escape-hatch prefix `[NodeBinary, DevcontainerCLIEntrypoint]`
-//     when the managed mode is selected and both override paths are set and
-//     exist on disk;
+//     when the managed mode (the default) is selected and both override paths are
+//     set and exist on disk;
 //   - the provisioned managed prefix `[<managed node>, <CLI entrypoint>]` when
 //     managed is selected without the escape hatch, by invoking the Builder's
 //     Provisioner.
 //
 // A managed selection with no escape hatch and no Provisioner is a hard error —
-// the build never silently falls back to host-npx once managed is explicitly
-// requested (the escape hatch is the only offline path). The default selection
-// never touches the provisioner, preserving the Docker-only/no-network unit
-// tests for the host-npx path.
+// the build never silently falls back to host-npx once managed is selected (the
+// escape hatch is the only offline path). The host-npx opt-out never touches the
+// provisioner, preserving the Docker-only/no-network unit tests for that path.
 func (b Builder) resolveDevcontainerCLI(ctx context.Context, opts BuildOptions) ([]string, error) {
 	switch resolveToolchainMode(opts.ToolchainMode) {
 	case ToolchainModeManaged:
@@ -1158,11 +1157,15 @@ func (b Builder) resolveDevcontainerCLI(ctx context.Context, opts BuildOptions) 
 			return []string{node, cli}, nil
 		}
 		if b.Provisioner == nil {
-			return nil, fmt.Errorf("managed toolchain selected but no provisioner is configured and no escape-hatch paths were supplied; set the AILERON_SANDBOX_NODE/AILERON_DEVCONTAINER_CLI escape hatch or use the default host-npx toolchain")
+			return nil, fmt.Errorf("managed toolchain selected but no provisioner is configured and no escape-hatch paths were supplied; set the AILERON_SANDBOX_NODE/AILERON_DEVCONTAINER_CLI escape hatch or opt out with the host-npx toolchain (--toolchain=host-npx)")
 		}
 		managed, err := b.Provisioner.Provision(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("provision managed toolchain: %w", err)
+			// Lead the managed-provision failure with the manual fallback so an
+			// operator on an unsupported/offline host has an immediate next step:
+			// point Aileron at a host-provided Node + CLI via the escape hatch, or
+			// opt out of the managed default entirely with host-npx.
+			return nil, fmt.Errorf("provision managed toolchain: %w; fall back to a host-provided Node by setting AILERON_SANDBOX_NODE/AILERON_DEVCONTAINER_CLI, or opt out with --toolchain=host-npx (AILERON_SANDBOX_TOOLCHAIN=host-npx)", err)
 		}
 		return []string{managed.NodeBinary, managed.CLIEntrypoint}, nil
 	default:
@@ -1176,12 +1179,12 @@ func (b Builder) resolveDevcontainerCLI(ctx context.Context, opts BuildOptions) 
 
 // Toolchain selection environment variables. They mirror the --runtime →
 // AILERON_SANDBOX_RUNTIME convention: a flag takes precedence, then the env, then
-// the default (host-npx). The escape-hatch vars point at a pre-staged Node
+// the default (managed). The escape-hatch vars point at a pre-staged Node
 // binary and devcontainer CLI entrypoint so a hermetic/offline host can run the
 // managed branch without provisioning.
 const (
-	// ToolchainModeEnv selects the managed toolchain when set to "managed"
-	// (host-npx otherwise). Read by both `aileron sandbox` and launch.
+	// ToolchainModeEnv selects the host-`npx` opt-out when set to "host-npx"
+	// (managed otherwise, the default). Read by both `aileron sandbox` and launch.
 	ToolchainModeEnv = "AILERON_SANDBOX_TOOLCHAIN"
 	// NodeBinaryEnv is the managed-toolchain escape hatch for the Node binary.
 	NodeBinaryEnv = "AILERON_SANDBOX_NODE"
@@ -1194,9 +1197,9 @@ const (
 // from a flag value and the process environment, mirroring the
 // flag → env → default precedence the --runtime override uses. flagMode is the
 // raw --toolchain flag value (empty when unset); the escape-hatch flag values
-// (flagNode, flagCLI) likewise override the env vars. The default is host-npx
-// (#1530 flips it). It returns the (mode, nodeBinary, cliEntrypoint) triple a
-// caller copies into BuildOptions.
+// (flagNode, flagCLI) likewise override the env vars. The default is managed
+// (#1530); host-npx is the explicit opt-out. It returns the (mode, nodeBinary,
+// cliEntrypoint) triple a caller copies into BuildOptions.
 func ResolveToolchainSelection(flagMode, flagNode, flagCLI string, getenv func(string) string) (mode, nodeBinary, cliEntrypoint string) {
 	if getenv == nil {
 		getenv = func(string) string { return "" }
@@ -1209,24 +1212,24 @@ func ResolveToolchainSelection(flagMode, flagNode, flagCLI string, getenv func(s
 }
 
 // IsManagedToolchain reports whether a resolved toolchain mode selects the
-// managed branch. Callers use it to decide whether to wire the real managed
-// provisioner into the Builder (the host-npx default needs none).
+// managed branch (the default). Callers use it to decide whether to wire the real
+// managed provisioner into the Builder (the host-npx opt-out needs none).
 func IsManagedToolchain(mode string) bool {
 	return resolveToolchainMode(mode) == ToolchainModeManaged
 }
 
 // resolveToolchainMode normalizes a raw toolchain-mode selection to one of the
-// recognized modes. An empty value or the explicit host-npx token both resolve
-// to host-npx; only the explicit managed token selects the managed branch. An
-// unrecognized value defers to host-npx (the safe default) rather than failing,
-// matching the --runtime/--sandbox-proxy tri-state convention where an unknown
-// value falls through to the default.
+// recognized modes. Only the explicit host-npx token selects the host-`npx`
+// branch; an empty/auto value or any unrecognized value resolves to managed (the
+// default). The managed default matches the --runtime/--sandbox-proxy tri-state
+// convention where an unknown value falls through to the default rather than
+// failing.
 func resolveToolchainMode(mode string) string {
 	switch strings.TrimSpace(strings.ToLower(mode)) {
-	case ToolchainModeManaged:
-		return ToolchainModeManaged
-	default:
+	case ToolchainModeHostNPX:
 		return ToolchainModeHostNPX
+	default:
+		return ToolchainModeManaged
 	}
 }
 

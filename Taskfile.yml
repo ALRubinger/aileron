@@ -427,10 +427,21 @@ tasks:
         sh: cd "{{.ROOT_DIR}}/images/sandbox-base" && pwd
 
   test:integration:sandbox-features:
-    desc: "Build the per-agent sandbox Features (claude/codex) and assert each agent CLI is on PATH in the composed image: directly via @devcontainers/cli (#1082) and through Aileron's own composition.Discover -> Builder.Build path with a second Feature (#1083); fail-fast — requires Docker + Node + @devcontainers/cli (no self-skip)"
+    desc: "Build the per-agent sandbox Features (claude/codex) and assert each agent CLI is on PATH in the composed image: directly via @devcontainers/cli (#1082) and through Aileron's own composition.Discover -> Builder.Build path with a second Feature (#1083); fail-fast — requires Docker + Node + @devcontainers/cli (no self-skip). Excludes the managed-toolchain build (TestSandboxFeaturesManaged*), which has its own target/job."
     dir: internal
     cmds:
-      - go test -tags=integration_sandbox -run TestSandboxFeatures ./launch/...
+      - go test -tags=integration_sandbox -run 'TestSandboxFeatures$|TestSandboxFeaturesComposeViaAileron$|TestGHFeatureComposesViaAileron$' ./launch/...
+    env:
+      AILERON_SANDBOX_BASE_CONTEXT:
+        sh: cd "{{.ROOT_DIR}}/images/sandbox-base" && pwd
+      AILERON_SANDBOX_FEATURES_CONTEXT:
+        sh: cd "{{.ROOT_DIR}}/images/sandbox-features" && pwd
+
+  test:integration:sandbox-managed:
+    desc: "Build a sandbox Feature (claude) through Aileron's composition.Discover -> Builder.Build path with the MANAGED toolchain wired (real provisioner: fetch + verify + cache Node and the pinned @devcontainers/cli), then assert the agent CLI is on PATH — the #1530 acceptance gate; fail-fast — requires Docker plus network/registry access for the managed Node fetch (no self-skip). Host Node/npx is NOT required."
+    dir: internal
+    cmds:
+      - go test -tags=integration_sandbox -run TestSandboxFeaturesManaged ./launch/...
     env:
       AILERON_SANDBOX_BASE_CONTEXT:
         sh: cd "{{.ROOT_DIR}}/images/sandbox-base" && pwd
