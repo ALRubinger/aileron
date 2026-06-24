@@ -19,24 +19,23 @@ test/system/
   lib/
     assert.sh          generic assert/log helpers (sourced)
     probes.sh          agent-agnostic R8 wiring-invariant probes (sourced)
-    assert_test.sh     contract tests for assert.sh   (CI-safe, no Docker)
-    probes_test.sh     contract tests for probes.sh   (CI-safe, stubbed docker)
-    taskenv_test.sh    regression: launch targets export AILERON_BIN et al.
-                       at task scope, where go-task honors `env:` (CI-safe)
+    *_test.go          Go contract suite for assert.sh and probes.sh plus the
+                       launch-target taskenv wiring regression; needs only the
+                       Go toolchain, no Docker and no shell (CI-safe, Windows)
 ```
 
 ## Static gate (what runs unattended vs. by hand)
 
 | Layer | Command | Needs | Runs in CI / headless? |
 | --- | --- | --- | --- |
-| Library contract tests | `task test:system:lib` | nothing | yes — pure POSIX shell, `docker` stubbed |
+| Library contract tests | `task test:system:lib` | Go toolchain | yes, runs unattended and on Windows (Go contract suite, no Docker, no shell) |
 | Scenario wiring compile | `task --dry test:system:launch:codex` / `:claude` | nothing | yes — compiles the target, does not launch |
 | Live codex scenario | `task test:system:launch:codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
 | Live claude scenario | `task test:system:launch:claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
 
 The headless path validates the **wiring** (the target compiles, the build
-dependency and preconditions resolve, the shell library passes its contracts)
-without performing a live `aileron launch`. The live scenario is the only
+dependency and preconditions resolve, the scenario library passes its Go
+contracts) without performing a live `aileron launch`. The live scenario is the only
 thing that needs an authenticated agent, and it is invoked manually.
 
 ## Run the codex scenario by hand
