@@ -139,6 +139,25 @@ func TestParsePEMPrivateKey_RejectsNonEd25519(t *testing.T) {
 	}
 }
 
+func TestSign_RejectsWrongLengthKey(t *testing.T) {
+	// A private key of the wrong length must be rejected before signing.
+	if _, _, err := Sign(ed25519.PrivateKey([]byte("too short")), []byte("x")); err == nil {
+		t.Error("Sign must reject a wrong-length private key")
+	}
+}
+
+func TestVerify_MalformedSignature(t *testing.T) {
+	priv, _ := genSigningKey(t)
+	_, pubPEM, err := Sign(priv, []byte("content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A signature of the wrong size fails verification (not a panic).
+	if err := Verify([]byte("content"), []byte("not-a-real-sig"), pubPEM); err == nil {
+		t.Error("Verify must fail on a malformed signature")
+	}
+}
+
 func TestMarshalPublicKeyPEM_ConsumableByX509(t *testing.T) {
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

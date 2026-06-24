@@ -388,6 +388,55 @@ func (f *fakeRunner) Run(_ context.Context, _ string, args []string, stdout, _ i
 	return nil
 }
 
+// withFakeInspector points newImageInspector at an inspector over the given
+// fake runner, so the production ResolveDigest/ComposeDigest wrappers run
+// their delegation without Docker.
+func withFakeInspector(t *testing.T, fr *fakeRunner) {
+	t.Helper()
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{runner: fr, runtime: "docker"}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+}
+
+func TestRuntimeDigestResolver_DelegatesThroughInspector(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	fr := &fakeRunner{outputs: map[string]string{
+		`image inspect --format {{json .RepoDigests}} img:1`: `["img@` + digest + `"]`,
+	}}
+	withFakeInspector(t, fr)
+	got, err := runtimeDigestResolver{}.ResolveDigest(context.Background(), "img:1")
+	if err != nil {
+		t.Fatalf("ResolveDigest: %v", err)
+	}
+	if got != digest {
+		t.Errorf("digest = %q", got)
+	}
+}
+
+func TestRuntimeDigestResolver_InspectorError(t *testing.T) {
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{}, errTestInspect
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+	if _, err := (runtimeDigestResolver{}).ResolveDigest(context.Background(), "img:1"); err == nil {
+		t.Error("an inspector-construction error must surface")
+	}
+}
+
+func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{}, errTestInspect
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), []string{"f"}); err == nil {
+		t.Error("an inspector-construction error must surface from ComposeDigest")
+	}
+}
+
 func TestImageInspector_ResolveDigest(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	fr := &fakeRunner{outputs: map[string]string{

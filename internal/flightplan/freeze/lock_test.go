@@ -119,6 +119,23 @@ func TestInjectLock_NoFrontmatter(t *testing.T) {
 	}
 }
 
+func TestInjectLock_AileronNotAMapping(t *testing.T) {
+	// An `aileron` key whose value is a scalar (not a mapping) is a
+	// malformed manifest; injectLock must error rather than corrupt it.
+	const bad = "---\nname: x\naileron: not-a-mapping\n---\nbody\n"
+	if _, err := injectLock([]byte(bad), sampleLock()); err == nil {
+		t.Error("injectLock must error when aileron is not a mapping")
+	}
+}
+
+func TestInjectLock_FrontmatterNotAMapping(t *testing.T) {
+	// Frontmatter that is a YAML sequence, not a mapping.
+	const bad = "---\n- a\n- b\n---\nbody\n"
+	if _, err := injectLock([]byte(bad), sampleLock()); err == nil {
+		t.Error("injectLock must error when frontmatter is not a mapping")
+	}
+}
+
 func TestInjectLock_CRLFProducesStableLFOutput(t *testing.T) {
 	lf := exampleSkillMD(t)
 	crlf := []byte(strings.ReplaceAll(string(lf), "\n", "\r\n"))

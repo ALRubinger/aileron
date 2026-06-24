@@ -121,3 +121,42 @@ func TestLint_RejectsModelMarkerOnTransform(t *testing.T) {
 		t.Error("a transform carrying a model marker must fail lint")
 	}
 }
+
+func TestLint_NilManifestClean(t *testing.T) {
+	if err := Lint(nil); err != nil {
+		t.Errorf("Lint(nil) must be clean: %v", err)
+	}
+}
+
+func TestLintError_MessageWithAndWithoutStepID(t *testing.T) {
+	withID := &LintError{StepID: "s1", Reason: "bad"}
+	if got := withID.Error(); !strings.Contains(got, "s1") || !strings.Contains(got, "bad") {
+		t.Errorf("error with id = %q", got)
+	}
+	noID := &LintError{Reason: "global problem"}
+	if got := noID.Error(); strings.Contains(got, "step \"\"") || !strings.Contains(got, "global problem") {
+		t.Errorf("error without id = %q", got)
+	}
+}
+
+func TestScalarString_NonStringScalars(t *testing.T) {
+	// A non-string id (number) coerces to its string form; nil yields "".
+	m := manifestWithSteps([]any{
+		map[string]any{"id": 42, "kind": "not-a-kind"},
+	})
+	err := Lint(m)
+	if err == nil {
+		t.Fatal("bad kind must fail")
+	}
+	if !strings.Contains(err.Error(), "42") {
+		t.Errorf("numeric id should stringify in the error, got: %v", err)
+	}
+}
+
+func TestStepIDOf_NonMapping(t *testing.T) {
+	// A non-mapping step has no id; lint still names the failure without a panic.
+	m := manifestWithSteps([]any{12345})
+	if err := Lint(m); err == nil {
+		t.Error("a non-mapping step must fail lint")
+	}
+}

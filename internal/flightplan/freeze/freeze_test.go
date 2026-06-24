@@ -227,6 +227,38 @@ func TestRun_MissingSigningKey(t *testing.T) {
 	}
 }
 
+func TestRun_ResolutionErrorSurfaces(t *testing.T) {
+	// A rung-1 manifest whose resolver errors must fail Run after lint and
+	// key-load, exercising the resolveImages error branch in Run.
+	_, keyPath := genSigningKey(t)
+	dr := DigestResolverFunc(func(context.Context, string) (string, error) {
+		return "", context.Canceled
+	})
+	_, err := Run(context.Background(), []byte(rung1MD), Options{
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err == nil {
+		t.Error("a resolver error must fail Run")
+	}
+}
+
+func TestRun_TagNotDigestFails(t *testing.T) {
+	// A resolver returning a tag (not a digest) must fail Run via the
+	// pin-by-digest guard.
+	_, keyPath := genSigningKey(t)
+	dr := DigestResolverFunc(func(context.Context, string) (string, error) {
+		return "registry.example.com/runner:1.4", nil
+	})
+	_, err := Run(context.Background(), []byte(rung1MD), Options{
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err == nil {
+		t.Error("a tag (non-digest) resolution must fail Run")
+	}
+}
+
 func TestRun_BadManifestErrors(t *testing.T) {
 	_, keyPath := genSigningKey(t)
 	if _, err := Run(context.Background(), []byte("not a manifest"), Options{SigningKeyPath: keyPath}); err == nil {

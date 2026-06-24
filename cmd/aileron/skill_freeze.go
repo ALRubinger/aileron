@@ -131,8 +131,10 @@ type imageInspector struct {
 }
 
 // newImageInspector builds an inspector over the real container runtime,
-// resolving the runtime name (erroring when none is on PATH).
-func newImageInspector() (imageInspector, error) {
+// resolving the runtime name (erroring when none is on PATH). It is a
+// package-level seam so CLI tests inject a fake-runner inspector and the
+// resolver/composer delegation runs without Docker.
+var newImageInspector = func() (imageInspector, error) {
 	runtimeName, err := container.ResolveRuntime(container.DefaultRuntime)
 	if err != nil {
 		return imageInspector{}, fmt.Errorf("resolve container runtime: %w", err)

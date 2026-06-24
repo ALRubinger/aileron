@@ -199,6 +199,37 @@ func TestReadFrozen_MissingErrors(t *testing.T) {
 	}
 }
 
+func TestWriteFrozen_EmptyIDRejected(t *testing.T) {
+	s := New(t.TempDir())
+	v := sampleVersion("")
+	if err := s.WriteFrozen("demo", v); err == nil {
+		t.Error("an empty version id must be rejected")
+	}
+}
+
+func TestFrozenVersions_IgnoresNonVersionEntries(t *testing.T) {
+	root := t.TempDir()
+	s := New(root)
+	if err := s.WriteFrozen("demo", sampleVersion("v1")); err != nil {
+		t.Fatal(err)
+	}
+	// A stray file and a dir without SKILL.md under versions/ are ignored.
+	versionsDir := filepath.Join(s.Dir("demo"), "versions")
+	if err := os.WriteFile(filepath.Join(versionsDir, "stray.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(versionsDir, "empty-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := s.FrozenVersions("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "v1" {
+		t.Errorf("FrozenVersions must ignore non-version entries, got %v", ids)
+	}
+}
+
 func TestReadFrozen_RejectsTraversalID(t *testing.T) {
 	s := New(t.TempDir())
 	for _, id := range []string{"../escape", "a/b", "..", "."} {
