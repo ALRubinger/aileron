@@ -1,6 +1,7 @@
 package composition
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,48 @@ func TestDiscoverMissingDevcontainerNonPublishableAgentResolvesLocalBuild(t *tes
 	}
 	if plan.BaseImage != BaseImage("0.4.0") {
 		t.Fatalf("BaseImage = %q, want %q", plan.BaseImage, BaseImage("0.4.0"))
+	}
+}
+
+func TestDiscoverMissingDevcontainerLocalAgentInheritsBakedMCPBase(t *testing.T) {
+	// Regression lock for #1457. The local Claude image is built FROM the
+	// PUBLISHED sandbox-base, which bakes aileron-mcp at /usr/local/bin and
+	// stamps the ai.aileron.mcp.version label (images/sandbox-base/Containerfile.published).
+	// A child image built FROM that base inherits BOTH the baked binary and the
+	// label, so the launcher's BakedMCPVersion (container.MCPVersionLabel) reads
+	// non-empty and the local Claude path skips the host-mount of aileron-mcp
+	// entirely (dodging the #1447 Windows-junction friction). That inheritance,
+	// not a per-image COPY, is what satisfies the operator intent.
+	//
+	// The invariant this test guards: the synthesized local-build devcontainer's
+	// `image` field is EXACTLY the published, labeled base repository. If a future
+	// change repoints BaseImage at the unlabeled local Tier 0 base
+	// (images/sandbox-base/Containerfile, which carries no label and bakes no
+	// aileron-mcp) or drops the image field, the label is no longer inherited and
+	// the local Claude path silently regresses to the host-mount. Asserting the
+	// exact published-base reference (rather than a substring) catches that.
+	plan, err := Discover(t.TempDir(), "0.4.0", "claude")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierDevcontainer {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
+	}
+	var cfg struct {
+		Image string `json:"image"`
+	}
+	if err := json.Unmarshal([]byte(plan.SynthesizedDevcontainer), &cfg); err != nil {
+		t.Fatalf("parse synthesized devcontainer %q: %v", plan.SynthesizedDevcontainer, err)
+	}
+	// The base must be the PUBLISHED repository (it is the only sandbox-base
+	// recipe that stamps ai.aileron.mcp.version and bakes aileron-mcp), pinned to
+	// the resolved version tag. Equal, not Contains: a substring match would also
+	// pass for an unlabeled local base whose name happened to contain this one.
+	if cfg.Image != BaseImage("0.4.0") {
+		t.Fatalf("synthesized image = %q, want the published labeled base %q", cfg.Image, BaseImage("0.4.0"))
+	}
+	if !strings.HasPrefix(cfg.Image, DefaultBaseImageRepository+":") {
+		t.Fatalf("synthesized image = %q, want it to FROM the published base repository %q so the local Claude image inherits the baked aileron-mcp + ai.aileron.mcp.version label", cfg.Image, DefaultBaseImageRepository)
 	}
 }
 
