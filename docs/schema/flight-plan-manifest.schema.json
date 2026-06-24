@@ -89,6 +89,7 @@
         { "required": ["rung1Image"], "not": { "required": ["rung2CapabilityUnits"] } },
         { "required": ["rung2CapabilityUnits"], "not": { "required": ["rung1Image"] } },
         {
+          "required": ["rung3PerStepImages"],
           "not": {
             "anyOf": [
               { "required": ["rung1Image"] },

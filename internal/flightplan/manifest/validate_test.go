@@ -151,7 +151,9 @@ aileron:
 // rung-3-only declaration is now valid (a reserved, build-deferred slot it is
 // freeze's job to report, not the schema's job to forbid). rung-3 alongside
 // rung-1 is also permitted: rung-3 is a reserved slot and does not weaken the
-// rung-1/rung-2 exclusivity.
+// rung-1/rung-2 exclusivity. A present-but-empty executionEnvironment ({}) is
+// rejected: declaring the key obliges naming at least one rung (key omission,
+// not an empty block, is how a skill says it has no execution environment).
 func TestExecutionEnvironmentRungValidity(t *testing.T) {
 	valid := map[string]string{
 		"rung1 only": `      rung1Image:
@@ -182,6 +184,7 @@ func TestExecutionEnvironmentRungValidity(t *testing.T) {
       rung2CapabilityUnits:
         features:
           - ghcr.io/example/aileron-feature-metrics-cli:1`,
+		"empty executionEnvironment rejected": `      {}`,
 	}
 	for name, env := range invalid {
 		t.Run("invalid/"+name, func(t *testing.T) {
