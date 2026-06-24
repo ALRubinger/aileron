@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	systestlib "github.com/ALRubinger/aileron/test/system/lib"
@@ -20,6 +21,16 @@ const sbxPrefix = "aileron-sbx-"
 // after a graceful SIGINT (so the launcher's `docker stop` handler can tear the
 // sandbox down) before escalating to SIGKILL.
 const reapGracePeriod = 10 * time.Second
+
+// r10PollTimeout is how long the R10 assertion polls the audit file for this
+// run's http_request_sent record. The daemon writes it from a background
+// goroutine (handlers_comms.executeApprovedCommsHTTP), so it can lag the launch
+// exit; poll rather than read once.
+const r10PollTimeout = 20 * time.Second
+
+// r10Event is the comms audit event the daemon logs for a forwarded http_request
+// (internal/app/handlers_comms.go logCommsEvent("http_request_sent", ...)).
+const r10Event = "http_request_sent"
 
 // env holds the validated environment the scenario reads, mirroring the bash
 // `: "${VAR:?...}"` preconditions. AILERON_SYSTEST_LIB is intentionally absent:
@@ -87,7 +98,30 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	// Per-run sentinel (R9): a fresh token so a stale workspace file can't pass.
 	runID := systestlib.NewRunID()
 	sentinel := systestlib.Sentinel(runID)
-	prompt := systestlib.BuildPrompt(cfg, sentinel)
+
+	// --- daemon lifecycle (R10 prerequisite) -------------------------------
+	// Drive the daemon through the CLI exactly as a user would: ensure one is
+	// running (`aileron daemon start` is idempotent and prints its host URL),
+	// and stop it on exit ONLY if this run started it — never clobber a daemon
+	// the operator already had up. `aileron launch` would auto-spawn one too,
+	// but starting it here gives us the concrete host URL the agent's R10
+	// http_request must target (the daemon issues that fetch from the host, so
+	// the URL must be host-reachable; its own gateway is). AILERON_URL inside the
+	// container is host.docker.internal-based and is NOT what the daemon can
+	// fetch, and nothing expands a `${AILERON_URL}` placeholder, so we resolve a
+	// real URL here and bake it into the prompt.
+	daemonWasRunning := daemonRunning(e.aileronBin)
+	daemonURL, err := daemonStart(e.aileronBin)
+	if err != nil {
+		return fmt.Errorf("starting aileron daemon for R10: %w", err)
+	}
+	if !daemonWasRunning {
+		defer daemonStop(e.aileronBin)
+	}
+	healthURL := strings.TrimRight(daemonURL, "/") + "/healthz"
+	logf("%s scenario: daemon at %s (started-by-test=%v)", cfg.Name, daemonURL, !daemonWasRunning)
+
+	prompt := systestlib.BuildPrompt(cfg, sentinel, healthURL)
 	execArgs := systestlib.BuildExecArgs(cfg, prompt)
 
 	logf("%s scenario: runid=%s workspace=%s image=%s", cfg.Name, runID, e.workspace, cfg.ExpectedImage)
@@ -255,8 +289,15 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	}
 	logf("ok: R7a post-`--` exec args forwarded to %s", cfg.Name)
 
-	// --- R10 round-trip audit (conditional on AILERON_STATE_DIR) -----------
-	if err := assertAuditR10(e.stateDir); err != nil {
+	// --- R10 round-trip audit: this run's session produced http_request_sent --
+	// The session id is the container-name suffix (aileron-sbx-<sessionID>); the
+	// launcher sets it as AILERON_SESSION_ID, which the daemon records on the
+	// comms audit entry, so we can assert THIS run's record rather than any
+	// unrelated event in the shared daily file.
+	sessionID := strings.TrimPrefix(container, sbxPrefix)
+	if err := assertAuditR10(e.stateDir, sessionID); err != nil {
+		logf("launch log follows:")
+		dumpFile(launchLog)
 		return err
 	}
 
@@ -264,26 +305,64 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	return nil
 }
 
-// assertAuditR10 performs the conditional R10 audit assertion: when stateDir is
-// set, read today's audit JSONL and assert it has at least one event record;
-// when unset, skip with a logged note (matching the bash). The audit filename is
-// audit-YYYY-MM-DD.jsonl per internal/audit/local.go.
-func assertAuditR10(stateDir string) error {
+// assertAuditR10 performs the session-scoped R10 audit assertion: when stateDir
+// is set, poll today's audit JSONL for a "http_request_sent" record carrying
+// this run's sessionID, proving the agent's forwarded http_request reached the
+// daemon and was audited. When stateDir is unset, skip with a logged note. The
+// audit filename is audit-YYYY-MM-DD.jsonl per internal/audit/local.go.
+//
+// The daemon writes the record from a background goroutine
+// (handlers_comms.executeApprovedCommsHTTP), so it can land slightly after the
+// launch exits; poll up to r10PollTimeout before failing.
+func assertAuditR10(stateDir, sessionID string) error {
 	if stateDir == "" {
 		logf("R10 audit assertion skipped: AILERON_STATE_DIR unset (set it to the daemon state dir to enable)")
 		return nil
 	}
 	auditFile := filepath.Join(stateDir, "audit", "audit-"+time.Now().Format("2006-01-02")+".jsonl")
-	data, err := os.ReadFile(auditFile)
+	deadline := time.Now().Add(r10PollTimeout)
+	for {
+		data, readErr := os.ReadFile(auditFile)
+		if readErr == nil {
+			if n, _ := systestlib.CountAuditEventsForSession(data, r10Event, sessionID); n > 0 {
+				logf("ok: R10 audit has %q for session %s (%s)", r10Event, sessionID, auditFile)
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			// Final attempt: render the faithful diagnostic (also covers a
+			// never-created audit file via the read error inside the assert).
+			data, _ := os.ReadFile(auditFile)
+			return systestlib.AssertAuditHasEventForSession(data, r10Event, sessionID, auditFile)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// daemonRunning reports whether `aileron daemon status` says a daemon is up.
+func daemonRunning(bin string) bool {
+	out, _ := exec.Command(bin, "daemon", "status").CombinedOutput()
+	return systestlib.DaemonStatusRunning(string(out))
+}
+
+// daemonStart runs `aileron daemon start` (idempotent — returns the existing
+// daemon's URL if one is already up) and parses the host URL from its output.
+func daemonStart(bin string) (string, error) {
+	out, err := exec.Command(bin, "daemon", "start").CombinedOutput()
 	if err != nil {
-		return systestlib.Fail(fmt.Sprintf("R10 audit file not found: %s", auditFile))
+		return "", fmt.Errorf("aileron daemon start: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	if err := systestlib.AssertAuditHasEvents(data, auditFile); err != nil {
-		return err
+	url := systestlib.ParseDaemonStartURL(string(out))
+	if url == "" {
+		return "", fmt.Errorf("aileron daemon start: could not parse daemon URL from output: %q", strings.TrimSpace(string(out)))
 	}
-	count, _ := systestlib.CountAuditEventRecords(data)
-	logf("ok: R10 today's audit JSONL has %d event record(s) (%s)", count, auditFile)
-	return nil
+	return url, nil
+}
+
+// daemonStop runs `aileron daemon stop`, best-effort (used in a defer for a
+// daemon this run started; teardown failures must not mask the test result).
+func daemonStop(bin string) {
+	_ = exec.Command(bin, "daemon", "stop").Run()
 }
 
 // --- live probe wrappers: gather docker facts, delegate the decision -------

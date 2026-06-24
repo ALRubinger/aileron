@@ -78,3 +78,59 @@ func TestAssertAuditHasEventsNoRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestCountAuditEventsForSessionMatchesEventAndSession(t *testing.T) {
+	jsonl := []byte(strings.Join([]string{
+		`{"event":"http_request_sent","session_id":"sess-A"}`, // counts
+		`{"event":"http_request_sent","session_id":"sess-B"}`, // wrong session: skipped
+		`{"event":"message_sent","session_id":"sess-A"}`,      // wrong event: skipped
+		`{"event":"http_request_sent"}`,                       // no session_id: skipped (session constrained)
+		`{"event":"http_request_sent","session_id":"sess-A"}`, // counts
+		``,         // empty: skipped
+		`not json`, // malformed: skipped
+	}, "\n") + "\n")
+	got, err := systestlib.CountAuditEventsForSession(jsonl, "http_request_sent", "sess-A")
+	if err != nil {
+		t.Fatalf("CountAuditEventsForSession returned error %v; want nil", err)
+	}
+	if got != 2 {
+		t.Errorf("count = %d; want 2 (only http_request_sent records for sess-A)", got)
+	}
+}
+
+func TestCountAuditEventsForSessionEmptySessionIgnoresSession(t *testing.T) {
+	// An empty wantSession constrains only the event, not the session_id.
+	jsonl := []byte(strings.Join([]string{
+		`{"event":"http_request_sent","session_id":"sess-A"}`,
+		`{"event":"http_request_sent","session_id":"sess-B"}`,
+	}, "\n") + "\n")
+	got, err := systestlib.CountAuditEventsForSession(jsonl, "http_request_sent", "")
+	if err != nil {
+		t.Fatalf("CountAuditEventsForSession returned error %v; want nil", err)
+	}
+	if got != 2 {
+		t.Errorf("count = %d; want 2 (both events, session unconstrained)", got)
+	}
+}
+
+func TestAssertAuditHasEventForSessionHappyPath(t *testing.T) {
+	jsonl := []byte(`{"event":"http_request_sent","session_id":"sess-A"}` + "\n")
+	if err := systestlib.AssertAuditHasEventForSession(jsonl, "http_request_sent", "sess-A", "/state/audit/x.jsonl"); err != nil {
+		t.Errorf("returned error %v; want nil for a matching record", err)
+	}
+}
+
+func TestAssertAuditHasEventForSessionMissing(t *testing.T) {
+	// The session's event is absent (only another session's record present).
+	jsonl := []byte(`{"event":"http_request_sent","session_id":"other"}` + "\n")
+	const path = "/state/audit/audit-2026-06-24.jsonl"
+	err := systestlib.AssertAuditHasEventForSession(jsonl, "http_request_sent", "sess-A", path)
+	if err == nil {
+		t.Fatal("returned nil; want the R10 missing-record diagnostic")
+	}
+	for _, sub := range []string{"R10", "http_request_sent", "sess-A", path} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q does not contain %q", err.Error(), sub)
+		}
+	}
+}

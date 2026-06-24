@@ -153,17 +153,25 @@ func BuildExecArgs(cfg AgentConfig, prompt string) []string {
 	return args
 }
 
-// BuildPrompt assembles the deterministic two-step agent prompt, byte-for-byte
-// faithful to codex.sh's EXEC_PROMPT: (1) write the exact sentinel string (no
-// newline, nothing else) to <WorkspaceContainerPath>/<SentinelName>, and (2)
-// call the aileron http_request tool GET ${AILERON_URL}/healthz so a daemon-side
-// audit record lands for the run (R10). sentinel is the per-run token from
-// Sentinel(runID). The ${AILERON_URL} is left literal so the container's shell/
-// agent expands it inside the sandbox, matching the bash.
-func BuildPrompt(cfg AgentConfig, sentinel string) string {
+// BuildPrompt assembles the deterministic two-step agent prompt: (1) write the
+// exact sentinel string (no newline, nothing else) to
+// <WorkspaceContainerPath>/<SentinelName> (R9), and (2) call the aileron
+// http_request tool GET <healthURL> so a daemon-side audit record lands for the
+// run (R10). sentinel is the per-run token from Sentinel(runID).
+//
+// healthURL MUST be a fully-resolved absolute URL (e.g.
+// http://127.0.0.1:60036/healthz), NOT a `${AILERON_URL}` placeholder. Nothing
+// in the path expands shell-style placeholders: the agent passes the url tool
+// argument verbatim (cmd/aileron-mcp), and the daemon issues the outbound fetch
+// against that exact string (internal/app/handlers_comms.go). A literal
+// placeholder therefore produces an invalid request and no audit record, which
+// is why the original `${AILERON_URL}/healthz` prompt never produced an R10
+// record. The caller resolves the running daemon's host URL (via
+// `aileron daemon start`) and passes <daemonURL>/healthz here.
+func BuildPrompt(cfg AgentConfig, sentinel, healthURL string) string {
 	return fmt.Sprintf(
 		"Do exactly two things and then stop. "+
 			"1) Write the exact text %s (no newline, nothing else) to the file %s/%s. "+
-			"2) Call the aileron http_request tool with method GET and url ${AILERON_URL}/healthz.",
-		sentinel, cfg.WorkspaceContainerPath, cfg.SentinelName)
+			"2) Call the aileron http_request tool with method GET and url %s.",
+		sentinel, cfg.WorkspaceContainerPath, cfg.SentinelName, healthURL)
 }

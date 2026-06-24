@@ -129,7 +129,8 @@ func TestBuildExecArgsClaude(t *testing.T) {
 func TestBuildPromptClaude(t *testing.T) {
 	cfg := systestlib.ClaudeConfig("")
 	sentinel := systestlib.Sentinel("17-42-abc")
-	prompt := systestlib.BuildPrompt(cfg, sentinel)
+	const healthURL = "http://127.0.0.1:60036/healthz"
+	prompt := systestlib.BuildPrompt(cfg, sentinel, healthURL)
 
 	if !strings.Contains(prompt, sentinel) {
 		t.Errorf("prompt missing the sentinel token %q:\n%s", sentinel, prompt)
@@ -138,8 +139,11 @@ func TestBuildPromptClaude(t *testing.T) {
 	if !strings.Contains(prompt, wantPath) {
 		t.Errorf("prompt missing the sentinel file path %q:\n%s", wantPath, prompt)
 	}
-	if !strings.Contains(prompt, "${AILERON_URL}/healthz") {
-		t.Errorf("prompt missing the healthz URL (literal ${AILERON_URL}):\n%s", prompt)
+	if !strings.Contains(prompt, healthURL) {
+		t.Errorf("prompt missing the resolved healthz URL %q:\n%s", healthURL, prompt)
+	}
+	if strings.Contains(prompt, "${AILERON_URL}") {
+		t.Errorf("prompt still contains the unexpanded ${AILERON_URL} placeholder (nothing expands it):\n%s", prompt)
 	}
 }
 
@@ -190,7 +194,8 @@ func TestBuildExecArgsDoesNotAliasBatchFlags(t *testing.T) {
 func TestBuildPrompt(t *testing.T) {
 	cfg := systestlib.CodexConfig("")
 	sentinel := systestlib.Sentinel("17-42-abc")
-	prompt := systestlib.BuildPrompt(cfg, sentinel)
+	const healthURL = "http://127.0.0.1:60036/healthz"
+	prompt := systestlib.BuildPrompt(cfg, sentinel, healthURL)
 
 	// Side effect 1: write the exact sentinel to the workspace sentinel file.
 	if !strings.Contains(prompt, sentinel) {
@@ -200,12 +205,17 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(prompt, wantPath) {
 		t.Errorf("prompt missing the sentinel file path %q:\n%s", wantPath, prompt)
 	}
-	// Side effect 2: call the http_request tool GET ${AILERON_URL}/healthz.
+	// Side effect 2: call the http_request tool GET <resolved healthz URL>. The
+	// URL must be concrete (no ${AILERON_URL} placeholder), since nothing in the
+	// agent/tool/daemon path expands shell-style placeholders.
 	if !strings.Contains(prompt, "http_request") {
 		t.Errorf("prompt missing the http_request instruction:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "${AILERON_URL}/healthz") {
-		t.Errorf("prompt missing the healthz URL (literal ${AILERON_URL}):\n%s", prompt)
+	if !strings.Contains(prompt, healthURL) {
+		t.Errorf("prompt missing the resolved healthz URL %q:\n%s", healthURL, prompt)
+	}
+	if strings.Contains(prompt, "${AILERON_URL}") {
+		t.Errorf("prompt still contains the unexpanded ${AILERON_URL} placeholder (nothing expands it):\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "method GET") {
 		t.Errorf("prompt missing the GET method:\n%s", prompt)

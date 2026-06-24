@@ -65,8 +65,12 @@ Prerequisites (the scenario fail-fasts with the exact remediation if missing):
 
 1. A reachable Docker daemon (`docker info`).
 2. A host-side codex login: `codex login` writes `~/.codex/auth.json`.
-3. A running Aileron daemon if you want the R10 audit assertion to read real
-   records (`AILERON_STATE_DIR` defaults to `~/.aileron`).
+3. The Aileron daemon binary (`aileron-server`) resolvable next to `aileron` or
+   on PATH. The scenario manages the daemon lifecycle itself through the CLI: it
+   runs `aileron daemon start` before the launch (idempotent — it reuses a daemon
+   you already have running) and `aileron daemon stop` on exit only if it started
+   one. R10 then asserts the audit round-trip against that daemon (state dir
+   `~/.aileron`). `task build` produces `aileron-server` alongside `aileron`.
 
 The simplest path is the Taskfile target:
 
@@ -95,8 +99,10 @@ AILERON_STATE_DIR="$HOME/.aileron" \
 Point `WORKSPACE` at any writable, empty temp directory. On Windows use a path
 under `%TEMP%`; the directory is bind-mounted into the container and seeded with
 the run sentinel. `EXPECTED_IMAGE` overrides the default expected image ref.
-`AILERON_STATE_DIR` is optional: when unset the R10 audit assertion is skipped
-with a logged note.
+`AILERON_STATE_DIR` should point at the daemon state dir (`~/.aileron`, the
+daemon's only state dir) so R10 reads the audit file the daemon writes; when
+unset the R10 audit assertion is skipped with a logged note. The Taskfile target
+sets it for you.
 
 The driver is its own nested Go module outside `./test/system/lib/...`, so the
 standard `go test ./test/system/lib/...` coverage and vet CI job never compiles
@@ -144,17 +150,25 @@ session id at runtime, so the exact name is discovered, not predicted).
   `/home/agent/workspace/.aileron-systest-sentinel`; the test reads
   `<workspace>/.aileron-systest-sentinel` on the host and asserts byte-exact
   equality. The `<runid>` is fresh each run, so a stale file cannot pass.
-- **R10 — audit round-trip (authored; deterministic where the daemon logs).**
-  The agent calls the built-in `http_request` MCP tool against the daemon's
-  own `${AILERON_URL}/healthz`. That routes through the daemon's `/comms/http`
-  handler, which appends a message audit entry to today's audit JSONL
+- **R10 — audit round-trip (daemon-backed, session-scoped).**
+  The agent calls the built-in `http_request` MCP tool with method GET against a
+  **concrete** daemon health URL. The scenario resolves that URL from
+  `aileron daemon start` (the daemon issues the outbound fetch itself, from the
+  host, so the URL must be host-reachable — its own gateway is, e.g.
+  `http://127.0.0.1:60036/healthz`). Nothing in the path expands a
+  `${AILERON_URL}` placeholder: the agent passes the `url` tool argument verbatim
+  (`cmd/aileron-mcp`), and the daemon fetches that exact string
+  (`internal/app/handlers_comms.go`), so a literal placeholder yields an invalid
+  request and no audit record (the original prompt's bug). The request routes
+  through the daemon's `/comms/http` handler, which appends an
+  `"event":"http_request_sent"` audit record carrying the launch's
+  `session_id` to today's audit JSONL
   (`internal/audit/local.go` `MessageEntry`, written by
-  `handlers_comms.go logCommsEvent`). The R10 jq assertion is **conditional**:
-  it runs only when `AILERON_STATE_DIR` points at a daemon state dir (it
-  defaults to `~/.aileron`), and it is skipped with a logged note when that
-  dir is unset, so a run without a daemon does not fail on a missing audit
-  trail. When enabled, the test jq-asserts today's audit file has event
-  records for this run window.
+  `handlers_comms.go logCommsEvent`). R10 polls today's audit file for an
+  `http_request_sent` record matching **this run's session id**
+  (`aileron-sbx-<sessionID>`), so it asserts the test's own round-trip rather
+  than any unrelated event line. It is skipped with a logged note only when
+  `AILERON_STATE_DIR` is unset.
 
   When the daemon's OpenTelemetry tracing is enabled, the richer span record
   carrying `aileron.action.name` lands separately under
@@ -201,8 +215,9 @@ Prerequisites (the scenario fail-fasts with the exact remediation if missing):
    vault holds the entry (`aileron vault list --scope agent` prints
    `agents/claude/oauth`). Run `aileron launch claude` once and complete the
    in-flow login (or `claude /login`) to populate it.
-3. A running Aileron daemon if you want the R10 audit assertion to read real
-   records (`AILERON_STATE_DIR` defaults to `~/.aileron`).
+3. The Aileron daemon binary (`aileron-server`) resolvable next to `aileron` or
+   on PATH; the scenario starts/stops the daemon through the CLI for the R10
+   round-trip exactly as the codex scenario does (state dir `~/.aileron`).
 
 The simplest path is the Taskfile target:
 
