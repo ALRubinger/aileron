@@ -150,7 +150,8 @@ func TestBuildDevcontainerWithFeaturesUsesDevcontainerCLI(t *testing.T) {
 	writeFeaturesDevcontainer(t, dir)
 	runner := &recordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-		WorkDir: dir,
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
 		Plan: composition.Plan{
 			Tier:      composition.TierDevcontainer,
 			Features:  map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
@@ -180,7 +181,8 @@ func TestBuildDevcontainerWithFeaturesNoBuildArgs(t *testing.T) {
 	writeFeaturesDevcontainer(t, dir)
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-		WorkDir: dir,
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
 		Plan: composition.Plan{
 			Tier:     composition.TierDevcontainer,
 			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
@@ -201,7 +203,8 @@ func TestBuildDevcontainerWithFeaturesNoDockerfileStillBuilds(t *testing.T) {
 	writeFeaturesDevcontainer(t, dir)
 	runner := &recordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-		WorkDir: dir,
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
 		Plan: composition.Plan{
 			// No DockerfilePath: features-only plan must still build via the CLI
 			// rather than returning ErrNoBuildRequired.

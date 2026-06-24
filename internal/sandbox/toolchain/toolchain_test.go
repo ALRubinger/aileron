@@ -175,16 +175,33 @@ func TestProvisionChecksumMismatchAborts(t *testing.T) {
 
 func TestProvisionUnsupportedPlatformFailsFast(t *testing.T) {
 	cacheRoot := t.TempDir()
+	installer := &fakeCLIInstaller{entrypoint: "/x"}
+	// Supply a non-empty keyring so the unsupported-target classification is the
+	// failure that surfaces, not the empty-keyring config guard.
+	_, kr := newTestKeyring(t)
 	_, err := Provision(context.Background(), Options{
 		CacheRoot:    cacheRoot,
 		HTTP:         &fakeFetcher{bodies: map[string][]byte{}},
-		Keyring:      func() (keyringList, error) { return nil, nil },
+		Keyring:      func() (keyringList, error) { return kr, nil },
 		GOOS:         "plan9",
 		GOARCH:       "mips",
-		CLIInstaller: &fakeCLIInstaller{entrypoint: "/x"},
+		CLIInstaller: installer,
 	})
 	if err == nil {
 		t.Fatal("Provision: want unsupported-platform error, got nil")
+	}
+	// ErrUnsupportedTarget is an ErrorKind string, not a sentinel error, so the
+	// classification is checked via errors.As against *nodedist.Error and the
+	// Kind field, unwrapping through the "fetch managed Node …: %w" wrap. This
+	// mirrors nodedist/fetch_test.go and is what the managed CI matrix relies on
+	// to distinguish a genuinely unsupported leg from a transient failure.
+	var ndErr *nodedist.Error
+	if !errors.As(err, &ndErr) || ndErr.Kind != nodedist.ErrUnsupportedTarget {
+		t.Fatalf("error = %v, want *nodedist.Error with Kind=%q", err, nodedist.ErrUnsupportedTarget)
+	}
+	// The unsupported target must fail before the CLI installer runs.
+	if installer.calls != 0 {
+		t.Fatalf("CLI installer ran (%d calls) for an unsupported target; want 0", installer.calls)
 	}
 }
 

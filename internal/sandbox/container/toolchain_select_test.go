@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -90,8 +91,9 @@ func TestBuildManagedArgvTailMatchesHostNPX(t *testing.T) {
 
 	hostRunner := &recordingRunner{}
 	if _, err := (Builder{Runtime: "docker", Runner: hostRunner}).Build(context.Background(), BuildOptions{
-		WorkDir: dir,
-		Plan:    plan,
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
+		Plan:          plan,
 	}); err != nil {
 		t.Fatalf("host-npx Build: %v", err)
 	}
@@ -119,13 +121,13 @@ func TestBuildManagedArgvTailMatchesHostNPX(t *testing.T) {
 	}
 }
 
-func TestBuildHostNPXDefaultNeverProvisions(t *testing.T) {
-	// The default selection (no ToolchainMode) must take the host-npx branch and
-	// never touch the provisioner, preserving the Docker-only/no-network unit
-	// path.
+func TestBuildDefaultUsesManagedToolchain(t *testing.T) {
+	// The default selection (no ToolchainMode) must take the managed branch,
+	// invoke the provisioner once, and run the provisioned managed prefix. This
+	// is the #1530 flip: managed is now the default, host-npx the opt-out.
 	dir := t.TempDir()
 	writeFeaturesDevcontainer(t, dir)
-	prov := &fakeProvisioner{managed: ManagedToolchain{NodeBinary: "/n", CLIEntrypoint: "/c"}}
+	prov := &fakeProvisioner{managed: ManagedToolchain{NodeBinary: "/managed/node", CLIEntrypoint: "/managed/cli.js"}}
 	runner := &recordingRunner{}
 	if _, err := (Builder{Runtime: "docker", Runner: runner, Provisioner: prov}).Build(context.Background(), BuildOptions{
 		WorkDir: dir,
@@ -133,16 +135,17 @@ func TestBuildHostNPXDefaultNeverProvisions(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if prov.calls != 0 {
-		t.Fatalf("provisioner called %d times on the host-npx default; want 0", prov.calls)
+	if prov.calls != 1 {
+		t.Fatalf("provisioner called %d times on the managed default; want 1", prov.calls)
 	}
-	if runner.name != devcontainerCLI[0] {
-		t.Fatalf("runner.name = %q, want host-npx %q", runner.name, devcontainerCLI[0])
+	if runner.name != "/managed/node" {
+		t.Fatalf("runner.name = %q, want managed node path %q", runner.name, "/managed/node")
 	}
 }
 
 func TestBuildHostNPXExplicitModeNeverProvisions(t *testing.T) {
-	// The explicit host-npx token behaves like the default.
+	// The explicit host-npx opt-out takes the host-npx branch and never touches
+	// the provisioner, preserving the Docker-only/no-network unit path.
 	dir := t.TempDir()
 	writeFeaturesDevcontainer(t, dir)
 	prov := &fakeProvisioner{managed: ManagedToolchain{NodeBinary: "/n", CLIEntrypoint: "/c"}}
@@ -264,28 +267,35 @@ func TestBuildManagedProvisionerErrorPropagates(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Build err = %v, want wrap of %v", err, sentinel)
 	}
+	// A genuine managed-provision failure must lead the operator to the manual
+	// fallback: a host-provided Node via the escape hatch, or the host-npx opt-out.
+	for _, want := range []string{"AILERON_SANDBOX_NODE", "--toolchain=host-npx"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("provision-failure error %q missing manual-fallback hint %q", err.Error(), want)
+		}
+	}
 }
 
 func TestResolveToolchainSelection(t *testing.T) {
 	env := func(m map[string]string) func(string) string {
 		return func(k string) string { return m[k] }
 	}
-	t.Run("default is host-npx with no escape hatch", func(t *testing.T) {
+	t.Run("default is managed with no escape hatch", func(t *testing.T) {
 		mode, node, cli := ResolveToolchainSelection("", "", "", env(nil))
-		if mode != ToolchainModeHostNPX || node != "" || cli != "" {
+		if mode != ToolchainModeManaged || node != "" || cli != "" {
 			t.Fatalf("got mode=%q node=%q cli=%q", mode, node, cli)
 		}
 	})
-	t.Run("env selects managed", func(t *testing.T) {
-		mode, _, _ := ResolveToolchainSelection("", "", "", env(map[string]string{ToolchainModeEnv: "managed"}))
-		if mode != ToolchainModeManaged {
-			t.Fatalf("mode = %q, want managed", mode)
+	t.Run("env selects host-npx opt-out", func(t *testing.T) {
+		mode, _, _ := ResolveToolchainSelection("", "", "", env(map[string]string{ToolchainModeEnv: "host-npx"}))
+		if mode != ToolchainModeHostNPX {
+			t.Fatalf("mode = %q, want host-npx", mode)
 		}
 	})
 	t.Run("flag overrides env", func(t *testing.T) {
-		mode, _, _ := ResolveToolchainSelection("host-npx", "", "", env(map[string]string{ToolchainModeEnv: "managed"}))
-		if mode != ToolchainModeHostNPX {
-			t.Fatalf("mode = %q, want host-npx (flag override)", mode)
+		mode, _, _ := ResolveToolchainSelection("managed", "", "", env(map[string]string{ToolchainModeEnv: "host-npx"}))
+		if mode != ToolchainModeManaged {
+			t.Fatalf("mode = %q, want managed (flag override)", mode)
 		}
 	})
 	t.Run("escape hatch from env", func(t *testing.T) {
@@ -308,15 +318,20 @@ func TestResolveToolchainSelection(t *testing.T) {
 	})
 	t.Run("nil getenv is safe", func(t *testing.T) {
 		mode, _, _ := ResolveToolchainSelection("", "", "", nil)
-		if mode != ToolchainModeHostNPX {
-			t.Fatalf("mode = %q, want host-npx", mode)
+		if mode != ToolchainModeManaged {
+			t.Fatalf("mode = %q, want managed", mode)
 		}
 	})
 }
 
 func TestIsManagedToolchain(t *testing.T) {
-	if IsManagedToolchain("") || IsManagedToolchain("host-npx") || IsManagedToolchain("bogus") {
-		t.Fatal("non-managed modes reported managed")
+	// The default ("") and any unrecognized value now report managed; only the
+	// explicit host-npx opt-out reports not-managed.
+	if IsManagedToolchain("host-npx") {
+		t.Fatal("explicit host-npx opt-out reported managed")
+	}
+	if !IsManagedToolchain("") || !IsManagedToolchain("bogus") {
+		t.Fatal("default/unknown modes not reported managed")
 	}
 	if !IsManagedToolchain("managed") || !IsManagedToolchain("MANAGED") {
 		t.Fatal("managed mode not reported managed")
@@ -325,13 +340,13 @@ func TestIsManagedToolchain(t *testing.T) {
 
 func TestResolveToolchainMode(t *testing.T) {
 	cases := map[string]string{
-		"":           ToolchainModeHostNPX,
+		"":           ToolchainModeManaged,
 		"host-npx":   ToolchainModeHostNPX,
 		"HOST-NPX":   ToolchainModeHostNPX,
 		"managed":    ToolchainModeManaged,
 		"MANAGED":    ToolchainModeManaged,
 		"  managed ": ToolchainModeManaged,
-		"bogus":      ToolchainModeHostNPX,
+		"bogus":      ToolchainModeManaged,
 	}
 	for in, want := range cases {
 		if got := resolveToolchainMode(in); got != want {
