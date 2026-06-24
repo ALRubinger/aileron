@@ -749,6 +749,25 @@ tasks:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_BASE_URL: http://localhost:3000
 
+  test:integration:local:
+    desc: One command for the local Go integration loop — build + start the stack, wait for health, run the integration suite, then tear the stack down (even on failure)
+    cmds:
+      # Register teardown FIRST so the stack comes down even if `up`, the health
+      # poll, or the tests fail — a `defer` only registers once its line runs,
+      # mirroring the test:e2e:scenario cleanup-first pattern in this file.
+      - defer: { task: down, vars: { CLI_ARGS: '-v' } }
+      # Match the `up` task: seed deploy/.env from the example so a fresh clone's
+      # `docker compose up` resolves its env interpolation.
+      - test -f deploy/.env || cp deploy/.env.example deploy/.env
+      - docker compose -f {{.COMPOSE_FILE}} up -d --build --wait
+      # Belt-and-suspenders over compose `--wait`: poll the health endpoint the
+      # same way the CI integration-go job does before running the suite.
+      - for i in $(seq 1 60); do curl -sf http://localhost:8080/v1/health && break; sleep 3; done
+      - go test -tags=integration -race ./test/integration/... ./internal/store/postgres/...
+    env:
+      AILERON_API_URL: http://localhost:8080
+      AILERON_UI_BASE_URL: http://localhost:3000
+
   ci:
     desc: Run the full CI pipeline locally
     cmds:
