@@ -282,7 +282,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./internal/... ./cmd/aileron/... ./cmd/aileron-mcp/...
+      - go vet {{.GO_TEST_PACKAGES}}
 
   lint:webapp:
     desc: Check the local webapp for type errors
