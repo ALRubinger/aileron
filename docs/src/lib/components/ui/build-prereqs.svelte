@@ -49,6 +49,30 @@
 		},
 	];
 
+	const ccInstall: PlatformTabItem[] = [
+		{
+			value: "macos",
+			label: "macOS",
+			lang: "sh",
+			note: "Install the Xcode Command Line Tools, which provide clang:",
+			code: "xcode-select --install",
+		},
+		{
+			value: "linux",
+			label: "Linux",
+			lang: "sh",
+			note: "Install your distro's gcc package:",
+			code: "# Debian / Ubuntu\nsudo apt-get install build-essential\n# Fedora\nsudo dnf install gcc",
+		},
+		{
+			value: "windows",
+			label: "Windows",
+			lang: "powershell",
+			note: "Install MinGW-w64 (provides gcc), then make sure CGO_ENABLED=1 is set so the race detector can use it:",
+			code: "scoop install mingw   # or: choco install mingw\n$env:CGO_ENABLED = '1'",
+		},
+	];
+
 	const triggerClass = cn(
 		"flex w-full items-center justify-between py-3 text-left text-sm font-medium",
 		"cursor-pointer hover:bg-muted/60 transition-colors duration-150 px-3 -mx-3 rounded-md focus-visible:outline-1 focus-visible:outline-ring",
@@ -114,6 +138,25 @@
 				then <code>corepack prepare pnpm@11.0.8 --activate</code>.
 			</p>
 			<PlatformTabs items={nodeInstall} />
+		</AccordionPrimitive.Content>
+	</AccordionPrimitive.Item>
+
+	<AccordionPrimitive.Item value="cc" class={itemClass}>
+		<AccordionPrimitive.Header>
+			<AccordionPrimitive.Trigger class={triggerClass}>
+				<span>A C compiler (for the race detector)</span>
+				<ChevronDown size={16} class="shrink-0 transition-transform" />
+			</AccordionPrimitive.Trigger>
+		</AccordionPrimitive.Header>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
+			<p>
+				The Go race detector is a C runtime, so the <code>-race</code> test tasks need cgo enabled
+				(<code>CGO_ENABLED=1</code>) plus a C compiler on <code>PATH</code>. macOS and Linux ship
+				one or install it through the steps above. On a stock Windows host Go defaults to
+				<code>CGO_ENABLED=0</code> with no compiler present, so <code>go test -race</code> aborts
+				before any test runs. Install MinGW-w64 to match what CI's Windows runners already have.
+			</p>
+			<PlatformTabs items={ccInstall} />
 		</AccordionPrimitive.Content>
 	</AccordionPrimitive.Item>
 </AccordionPrimitive.Root>

@@ -46,6 +46,8 @@ go test ./internal/sandbox -race
 
 The sandbox package has the densest concurrency surface (per-invocation state, shared executor, audit emission). Run with `-race` whenever you change any of those paths. CI does the same automatically.
 
+The race detector is a C runtime, so every `-race` task (`test:go:ci`, `test:integration`, `test:integration:coverage`, and the sandbox-integration targets) needs `CGO_ENABLED=1` plus a C compiler on `PATH`. macOS and Linux satisfy this out of the box once you have the Xcode Command Line Tools or your distro's `gcc`. On a stock Windows host Go defaults to `CGO_ENABLED=0` with no compiler present, so `go test -race` aborts with `exit status 2` before any test runs. Install MinGW-w64 (`scoop install mingw` or `choco install mingw`) and set `CGO_ENABLED=1`. CI's Windows runners already ship MinGW-w64 gcc, so this local setup matches CI rather than working around it. See [Building from Source](/development/building-from-source/) for the per-OS install commands.
+
 ## Coverage
 
 The project doesn't pin a hard coverage threshold, but the convention is:
