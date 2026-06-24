@@ -1,6 +1,16 @@
-//go:build integration_sandbox
+//go:build integration_sandbox && linux
 
 // Workspace uid-remap integration test (#1461).
+//
+// Build constraint: this file is gated to `linux` in addition to
+// `integration_sandbox` because the test reads host-file ownership via
+// `syscall.Stat_t`, which exists only on Unix, and the contract it exercises
+// (the DAC uid mismatch) only reproduces on rootful Linux Docker — the test
+// already skips at runtime unless GOOS == linux (see #1565). Without the
+// `linux` constraint the `syscall.Stat_t` reference fails to compile on
+// Windows and takes the whole package's `integration_sandbox` build down with
+// it, making platform-agnostic siblings like TestSandboxFeaturesManaged
+// unrunnable off-Linux.
 //
 // This test exercises the DAC uid-mismatch contract on the platform where it
 // actually breaks: rootful Docker on Linux. `aileron launch --sandbox=docker`
