@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,7 +75,14 @@ func TestInstallGitURLViaLocalBareRepo(t *testing.T) {
 	mustGit(t, repo, "commit", "-q", "-m", "init")
 
 	s := New(t.TempDir())
-	url := "file://" + repo
+	// Build a cross-platform file URL. On Windows a temp path is like
+	// C:\...; the valid file URL form is file:///C:/... (forward slashes,
+	// triple slash). filepath.ToSlash + a leading slash normalizes both.
+	slashed := filepath.ToSlash(repo)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	url := "file://" + slashed
 	res, err := s.Install(context.Background(), url, InstallOptions{})
 	if err != nil {
 		t.Fatalf("git-URL install: %v", err)
