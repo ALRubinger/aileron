@@ -211,8 +211,17 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 		return systestlib.Fail(fmt.Sprintf("never observed a running %s* container during the launch", sbxPrefix))
 	}
 
-	// --- reap and assert the launch exit code (R8.6) -----------------------
-	reap()
+	// --- wait for the launch to finish, then assert its exit code (R8.6) ----
+	// Wait for the launch to exit on its own here — do NOT reap()/kill it. The
+	// agent must complete its forwarded exec (write the R9 sentinel into the
+	// mounted workspace and perform the R10 http_request) before we read the
+	// result, exactly as bash did with `wait "$LAUNCH_PID"`. Calling reap()
+	// (which signals/kills the launch) on this normal path interrupts the agent
+	// mid-exec, so the sentinel is never written and R9 fails with "agent did
+	// not write it". The probes above already ran against the live container;
+	// reap() remains the deferred / early-return safety net for the abnormal
+	// path (a mid-probe failure still tears the launch down).
+	<-waitDone
 	if err := systestlib.ProbeExitCode(launchExit(), 0); err != nil {
 		logf("launch log follows:")
 		dumpFile(launchLog)
