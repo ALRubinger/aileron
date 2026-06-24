@@ -15,9 +15,11 @@ import (
 // downloads the signed checksums to learn the expected hash) nor runs the CLI
 // installer. Instead it computes the Node cache key from the committed
 // tools.lock pin, serves the cached Node tree and the cached CLI entrypoint
-// directly, and re-asserts the cached hash against the pin as a cheap tamper
-// guard. A cold cache (Node tree or CLI entrypoint absent) fails with an
-// actionable error naming `aileron sandbox warm`.
+// directly, and re-asserts the cached hash against the pin as a cheap
+// consistency assert against the committed pin (it does not re-hash cached
+// contents, so it is not a tamper guard). A cold cache (Node tree or CLI
+// entrypoint absent) fails with an actionable error naming `aileron sandbox
+// warm`.
 func provisionOffline(resolved resolvedOptions) (container.ManagedToolchain, error) {
 	nodeCacheRoot := filepath.Join(resolved.CacheRoot, "node")
 	node, err := resolveCachedNode(nodeCacheRoot, resolved.NodeVersion, resolved.GOOS, resolved.GOARCH)
