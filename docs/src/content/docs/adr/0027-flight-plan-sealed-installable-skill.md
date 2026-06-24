@@ -52,6 +52,8 @@ Inputs resolve once, at a boundary. At launch the runtime resolves all declared 
 
 The audit records resolved inputs and outputs. Each launch records the resolved value of every input and the outputs the run produced. A scalar input is recorded by value, so a launch-time clock input is recorded as the concrete timestamp it resolved to. A data read is recorded by its resolved binding, which is the parameters, the query, and a result or snapshot identifier with a summary, rather than the full dataset inline. The dataset is the run's recorded output, and the audit references it rather than duplicating it. The recorded binding is what makes a past run explainable without reconstructing it from a moving source.
 
+Outputs are a declared contract, separate from their transport. The manifest declares an `outputs:` block that names each artifact, its media type, and its encoding, and the runtime materializes those artifacts deterministically through a typed file-map transport. Keeping the contract distinct from the transport lets the transport change later without changing what the plan promises. The `encoding` field admits `utf-8` and `base64`, and the v1 runtime implements `utf-8` only. Text is the v1 implementation, never the declared interface, so the contract reserves the binary shape without committing to a binary mechanism now. The shape and the field layout live in the [Flight Plan manifest specification](/development/flight-plan-manifest-spec).
+
 The no-LLM-at-runtime rule seals the agent and the LLM out of the function, not the data out of the inputs. An LLM in the runtime loop is forbidden because it injects non-determinism into the function itself. A live or time-relative data read is an input, and an input is allowed. The line is between the logic, which is sealed and fixed, and the inputs, which are declared, resolved, and recorded.
 
 ### Execution rungs
@@ -139,6 +141,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 The following are out of scope for this ADR and this layer's MVP.
 
 - Rung three build. The per-step sealed sibling-image dispatch with mount and run-and-collect I/O is a forward-declared manifest slot only.
+- Binary outputs. The `outputs:` contract reserves the `base64` encoding, but the v1 runtime materializes `utf-8` artifacts only. Binary output is blocked on a host-ABI binary-body field, because the current JSON-string result body coerces arbitrary bytes to valid UTF-8 and corrupts them. The mount and run-and-collect boundary of rung three (#1510) is the escape hatch for large or binary artifacts when a consumer arrives.
 - STS and SSO. Short-lived token services and single sign-on integration are not specified here.
 - Specific connectors. No named connector is specified by this ADR. The trust-contract format applies to any action, and individual connector contracts are authored against this format elsewhere.
 
@@ -146,6 +149,8 @@ The following are out of scope for this ADR and this layer's MVP.
 
 - [Issue #1506](https://github.com/ALRubinger/aileron/issues/1506). The Flight Plan layer umbrella and implementation home
 - [Issue #1514](https://github.com/ALRubinger/aileron/issues/1514). This ADR's tracking sub-issue
+- [Issue #1519](https://github.com/ALRubinger/aileron/issues/1519). The output-contract reservation that text is the v1 implementation and binary is a deferred follow-up
+- [The Flight Plan manifest specification](/development/flight-plan-manifest-spec). The `outputs:` contract shape and the file-map transport
 - [ADR-0003](/adr/0003-action-model). The action model the per-action trust contract attaches to
 - [ADR-0005](/adr/0005-sandbox-choice). The sandbox and credential mediation a Flight Plan runs inside
 - [ADR-0009](/adr/0009-user-channel). The out-of-band approval channel the per-action effect feeds
