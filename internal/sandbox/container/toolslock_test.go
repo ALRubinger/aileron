@@ -90,6 +90,30 @@ func TestPinnedNodeChecksumLookup(t *testing.T) {
 	})
 }
 
+// PinnedNodeChecksum is the exported wrapper the offline toolchain resolver
+// (#1531) reads to compute the cache key from the pin alone. It must return the
+// same hash the unexported lookup does for a supported platform, and ok=false
+// for an unsupported platform or a non-pinned version, with no logic of its own.
+func TestPinnedNodeChecksumExported(t *testing.T) {
+	sum, ok := PinnedNodeChecksum(pinnedNode.Version, "linux", "amd64")
+	if !ok {
+		t.Fatal("PinnedNodeChecksum(linux/amd64) ok=false, want a pin")
+	}
+	if want := pinnedNode.Checksums["linux-x64"]; sum != want {
+		t.Fatalf("checksum = %q, want %q", sum, want)
+	}
+	// Exported wrapper must agree with the unexported source exactly.
+	if inner, innerOK := pinnedNodeChecksum(pinnedNode.Version, "linux", "amd64"); inner != sum || innerOK != ok {
+		t.Fatalf("PinnedNodeChecksum (%q,%v) disagrees with pinnedNodeChecksum (%q,%v)", sum, ok, inner, innerOK)
+	}
+	if _, ok := PinnedNodeChecksum(pinnedNode.Version, "plan9", "mips"); ok {
+		t.Fatal("an unsupported platform must resolve ok=false")
+	}
+	if _, ok := PinnedNodeChecksum("0.0.0", "linux", "amd64"); ok {
+		t.Fatal("a non-pinned version must resolve ok=false")
+	}
+}
+
 // Checksum-mismatch-vs-lock acceptance / regression guard: VerifyNodeChecksum
 // rejects a distribution whose sha256 disagrees with the lock (naming the
 // platform and both hashes), accepts the recorded sha, and rejects an unpinned

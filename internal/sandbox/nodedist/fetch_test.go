@@ -91,6 +91,20 @@ func fixture(t *testing.T, signerKeyring func(t *testing.T) (*signer, keyring)) 
 	return ff, kr, archiveHash, archive
 }
 
+// NodeBinaryPath is the exported wrapper the offline toolchain resolver (#1531)
+// calls so it reuses this package's single layout rule rather than re-deriving
+// it. It must return bin/node on unix targets and node.exe on windows.
+func TestNodeBinaryPath(t *testing.T) {
+	entry := filepath.Join("cache", "sha256", "deadbeef")
+	if got, want := nodedist.NodeBinaryPath(entry, linuxTarget), filepath.Join(entry, "bin", "node"); got != want {
+		t.Fatalf("unix NodeBinaryPath = %q, want %q", got, want)
+	}
+	win := nodedist.Target{GOOS: "windows", GOARCH: "amd64"}
+	if got, want := nodedist.NodeBinaryPath(entry, win), filepath.Join(entry, "node.exe"); got != want {
+		t.Fatalf("windows NodeBinaryPath = %q, want %q", got, want)
+	}
+}
+
 func TestFetch_HappyPath(t *testing.T) {
 	ff, kr, archiveHash, _ := fixture(t, matchedSigner)
 	root := filepath.Join(t.TempDir(), "node")

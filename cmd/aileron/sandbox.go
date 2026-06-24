@@ -21,7 +21,7 @@ import (
 
 func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|cache>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|warm|cache>")
 		return 1
 	}
 	switch args[0] {
@@ -33,11 +33,13 @@ func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writ
 		return runSandboxBuild(args[1:], stdout, stderr)
 	case "check":
 		return runSandboxCheck(args[1:], stdout, stderr)
+	case "warm":
+		return runSandboxWarm(args[1:], stdout, stderr)
 	case "cache":
 		return runSandboxCache(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown sandbox command: %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|cache>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build|check|warm|cache>")
 		return 1
 	}
 }
@@ -217,11 +219,12 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 	toolchain := flags.String("toolchain", sandboxcontainer.ToolchainModeAuto, "Features-build toolchain: managed (default) or host-npx")
 	node := flags.String("node", "", "Managed-toolchain escape hatch: path to a Node binary (with --devcontainer-cli)")
 	devcontainerCLI := flags.String("devcontainer-cli", "", "Managed-toolchain escape hatch: path to the @devcontainers/cli entrypoint (with --node)")
+	offline := flags.Bool("offline", false, "Resolve the managed toolchain from the warm cache with no network (run `aileron sandbox warm` first)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>] [--toolchain=managed|host-npx] [--node=<path> --devcontainer-cli=<path>]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>] [--toolchain=managed|host-npx] [--offline] [--node=<path> --devcontainer-cli=<path>]")
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -242,6 +245,7 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 		ToolchainMode:             toolchainMode,
 		NodeBinary:                nodeBinary,
 		DevcontainerCLIEntrypoint: cliEntrypoint,
+		Offline:                   *offline,
 	})
 	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		fmt.Fprintf(stdout, "tier: %s\n", result.Tier)
@@ -269,11 +273,12 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	toolchain := flags.String("toolchain", sandboxcontainer.ToolchainModeAuto, "Features-build toolchain: managed (default) or host-npx")
 	node := flags.String("node", "", "Managed-toolchain escape hatch: path to a Node binary (with --devcontainer-cli)")
 	devcontainerCLI := flags.String("devcontainer-cli", "", "Managed-toolchain escape hatch: path to the @devcontainers/cli entrypoint (with --node)")
+	offline := flags.Bool("offline", false, "Resolve the managed toolchain from the warm cache with no network (run `aileron sandbox warm` first)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() > 1 || (*agent != "" && flags.NArg() != 0) {
-		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [--toolchain=managed|host-npx] [--node=<path> --devcontainer-cli=<path>] [command]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [--toolchain=managed|host-npx] [--offline] [--node=<path> --devcontainer-cli=<path>] [command]")
 		return 1
 	}
 	command := *agent
@@ -315,6 +320,7 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		ToolchainMode:             toolchainMode,
 		NodeBinary:                nodeBinary,
 		DevcontainerCLIEntrypoint: cliEntrypoint,
+		Offline:                   *offline,
 	})
 	if err != nil && !errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		fmt.Fprintf(stderr, "error: %s\n", sandboxCheckError(err))
@@ -348,6 +354,47 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// runSandboxWarm pre-stages the Aileron-managed toolchain (the pinned Node
+// runtime plus @devcontainers/cli) into the content-addressed cache ahead of the
+// first build, so a later `aileron sandbox build --offline` resolves it with no
+// network. Warm is managed-only by definition: there is nothing to pre-fetch for
+// the host-npx path (it uses the host's npx at build time), so an explicit
+// `--toolchain=host-npx` is rejected with a clear message. Warm is idempotent: a
+// warm cache short-circuits without re-downloading.
+func runSandboxWarm(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("sandbox warm", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	toolchain := flags.String("toolchain", sandboxcontainer.ToolchainModeAuto, "Toolchain to warm: managed (default). host-npx has nothing to pre-fetch.")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: aileron sandbox warm [--toolchain=managed]")
+		return 1
+	}
+	if !sandboxcontainer.IsManagedToolchain(*toolchain) {
+		fmt.Fprintln(stderr, "error: `aileron sandbox warm` only applies to the managed toolchain; host-npx has nothing to pre-fetch")
+		return 1
+	}
+	managed, err := sandboxWarmFn(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "node: %s\n", managed.NodeBinary)
+	fmt.Fprintf(stdout, "devcontainer-cli: %s\n", managed.CLIEntrypoint)
+	fmt.Fprintln(stdout, "warmed: ok")
+	return 0
+}
+
+// sandboxWarmFn provisions the managed toolchain with all production defaults
+// (network on, Offline=false), populating the content-addressed cache.
+// Swappable in tests so a unit test exercises the command surface without
+// network.
+var sandboxWarmFn = func(ctx context.Context) (sandboxcontainer.ManagedToolchain, error) {
+	return sandboxtoolchain.Provision(ctx, sandboxtoolchain.Options{})
+}
+
 // reportBakedMCPVersion surfaces version skew between a baked sandbox image's
 // aileron-mcp and the host CLI. ADR-0024's host-mount lockstep does not hold
 // for baked images (issue #957), so skew is an expected operational state for
@@ -377,7 +424,9 @@ var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stder
 	// Builder consults the provisioner only on the managed branch and only when the
 	// escape hatch is absent.
 	if sandboxcontainer.IsManagedToolchain(opts.ToolchainMode) {
-		builder.Provisioner = sandboxtoolchain.Provisioner{}
+		builder.Provisioner = sandboxtoolchain.Provisioner{
+			Options: sandboxtoolchain.Options{Offline: opts.Offline},
+		}
 	}
 	return builder.Build(ctx, opts)
 }

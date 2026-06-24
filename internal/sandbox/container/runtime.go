@@ -266,6 +266,14 @@ type BuildOptions struct {
 	// pre-staged Node + CLI rather than fetching. Both must exist on disk.
 	NodeBinary                string
 	DevcontainerCLIEntrypoint string
+	// Offline requests that a managed-toolchain build resolve Node +
+	// @devcontainers/cli from the warm content-addressed cache with no network
+	// access (#1531). The Builder itself never reads this field; the CLI layer
+	// that constructs the toolchain Provisioner carries it into
+	// toolchain.Options.Offline, so a build with --offline fails fast with a
+	// `run aileron sandbox warm` hint on a cold cache instead of fetching. It is
+	// ignored when ToolchainMode is host-npx or when the escape hatch is set.
+	Offline bool
 }
 
 // BuildResult reports the image selected or built for launch.

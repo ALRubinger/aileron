@@ -161,6 +161,27 @@ aileron sandbox build --toolchain=managed \
 
 The escape hatch is also available through `AILERON_SANDBOX_NODE` and `AILERON_DEVCONTAINER_CLI`. Both paths must be supplied together and must exist on disk; a half-configured escape hatch is rejected rather than partially provisioned.
 
+### Prefetch and offline builds
+
+`aileron sandbox warm` pre-stages the managed toolchain ahead of the first build. It fetches and verifies the pinned Node distribution and installs the pinned `@devcontainers/cli` into the content-addressed cache, exactly as a managed build does on a cold cache. Run it once on a host with network access:
+
+```bash
+aileron sandbox warm
+```
+
+Warm is idempotent. A warm cache short-circuits without re-downloading. Warm applies only to the managed toolchain, so `aileron sandbox warm --toolchain=host-npx` is rejected because the host-npx path has nothing to pre-fetch.
+
+Once warmed, `aileron sandbox build --offline` (and `aileron sandbox check --offline`) resolve the managed toolchain from that cache with no network access:
+
+```bash
+aileron sandbox build --offline
+aileron sandbox check --offline --agent=claude
+```
+
+Offline mode computes the Node cache key from the committed `tools.lock.json` pin rather than downloading the signed checksums to learn it, so it never touches the network. The cached Node hash is re-verified against the pin as a tamper guard. On a cold cache the build fails with an actionable error that names `aileron sandbox warm`, so run warm with network access first.
+
+This is distinct from the escape hatch above. The escape hatch points at pre-staged Node and CLI binaries you manage yourself. The `--offline` route resolves the Aileron-managed, pin-verified toolchain from Aileron's own cache.
+
 ## Claude Code Feature
 
 The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
