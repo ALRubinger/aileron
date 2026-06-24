@@ -8,6 +8,8 @@ The Flight Plan manifest is the machine-readable contract that both the authorin
 
 The manifest is the YAML frontmatter of a `SKILL.md` document in the [agentskills.io](https://agentskills.io) format, extended with a single Aileron-specific block. Every Aileron field lives under one namespaced top-level key so the extension is lossless if stripped. A host without Aileron reads a valid skill and treats the Aileron block as inert.
 
+The deterministic step-graph composition format is specified on this single page rather than a separate sibling page. It is one coherent format covered by one drift-guard test, amended in place under the [Composition and the step graph](#composition-and-the-step-graph) section below. The existing "Flight Plan Manifest Spec" navigation entry stands and no new navigation entry is added.
+
 This page is a spec deliverable. It defines the format. It does not ship a parser, a validator, the freeze step, or runtime enforcement. The Go parser and validator are tracked in [#1508](https://github.com/ALRubinger/aileron/issues/1508). Freeze is tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509). Runtime enforcement is tracked in [#1511](https://github.com/ALRubinger/aileron/issues/1511). The `lock` section is shaped here as freeze's target, not produced here.
 
 ## Schema
