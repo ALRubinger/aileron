@@ -649,6 +649,9 @@ func TestMalformedActionRefRejected(t *testing.T) {
 			if !ok {
 				continue
 			}
+			if _, has := src["actionRef"]; !has {
+				continue
+			}
 			src["actionRef"] = bad
 			return
 		}
