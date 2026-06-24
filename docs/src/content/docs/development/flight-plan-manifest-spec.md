@@ -248,7 +248,7 @@ Each operation's `audit.fields` declares which of the closed record fields it em
 
 Freeze turns a skill into a Flight Plan ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) freeze boundary). Freeze resolves every image reference to a content-addressed digest, produces a lockfile that pins those digests and the resolved capability set, binds the execution environment, attaches the per-action trust contract, and signs the result. The `lock` section is the record of those pins.
 
-The `lock` section is absent before freeze. Freeze populates it and writes an immutable, signed version into the canonical skill store. See the [Freezing a Flight Plan](/guides/freezing-a-flight-plan) guide for the command and the reproducibility and signature-verification guarantees.
+The `lock` section is absent before freeze. Freeze populates it and writes an immutable, signed version into the canonical skill store. See the [Freezing a Flight Plan](/guides/freezing-a-flight-plan) guide for the command and the reproducibility and signature-verification guarantees. See the [Launching a Flight Plan](/guides/launching-a-flight-plan) guide for how the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) verifies a frozen unit, resolves inputs once at the launch boundary, walks the step graph with no model in the loop, enforces the per-action trust contract, and materializes the declared outputs.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
