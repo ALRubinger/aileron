@@ -12,7 +12,7 @@ Aileron leans heavily on the test suite. Every PR runs the full Go test set on L
 task test
 ```
 
-This is the full local equivalent of what CI runs. It exercises the Go suite, the docs tests, the UI tests, and the Playwright integration tests. Expect ~5–10 minutes on a modern machine.
+This runs the Go suite, the webapp tests, the UI tests, and the docs tests. Expect ~5–10 minutes on a modern machine. It does not bring up the stack, so it excludes both `task test:integration` (the Go HTTP/API suite) and the Playwright E2E suite. CI runs those in dedicated jobs that provision a running stack first.
 
 For a faster inner loop, run individual targets:
 
@@ -22,8 +22,22 @@ task test:go:cover        # Go unit tests with coverage summary
 task test:go:ci           # what CI runs: race + coverage + JUnit
 task test:docs            # docs site unit tests (rehype plugins, etc.)
 task test:ui              # UI unit and component tests
-task test:integration     # Playwright + running services
+task test:integration     # Go HTTP/API integration suite against a running daemon
 task test:e2e:integration # Playwright E2E against a real stack
+```
+
+`task test:integration` needs a daemon already listening on `localhost:8080`. It does not start the stack itself, and `task test` deliberately excludes it. Run it standalone against a cold machine and every HTTP test fails with `dial tcp [::1]:8080: connect: connection refused`. Bring the stack up first. The simplest path is:
+
+```sh
+task test:integration:coverage  # brings the compose stack up --wait, runs the Go suite, then tears it down
+```
+
+Or run the explicit sequence that `task ci` uses:
+
+```sh
+task up -- -d --build --wait
+task test:integration
+task down
 ```
 
 ## Run a single Go package
@@ -97,7 +111,7 @@ If a test passes locally but fails in CI, the usual suspects are:
 
 ## System tests (black-box CLI)
 
-The system-test suite sits above the unit, integration, and sandbox-integration layers. It builds the shipped `aileron` binary and drives the real `aileron launch <agent> -- <agent-flag> "..."` path against a live Docker sandbox, for example `aileron launch codex -- exec "..."` or `aileron launch claude -- -p "..."`, then asserts on the result with shell and `jq`. The lower layers prove that Docker works on the host. The `test:go` unit layer exercises Go functions in isolation. The `task test:integration` layer runs Playwright against running services. The `integration_sandbox` Go tests call `docker run` and the sandbox Go functions directly. The system suite proves that `aileron launch` itself correctly drives Docker on the host. It does not replace any of those layers, and it sits above them.
+The system-test suite sits above the unit, integration, and sandbox-integration layers. It builds the shipped `aileron` binary and drives the real `aileron launch <agent> -- <agent-flag> "..."` path against a live Docker sandbox, for example `aileron launch codex -- exec "..."` or `aileron launch claude -- -p "..."`, then asserts on the result with shell and `jq`. The lower layers prove that Docker works on the host. The `test:go` unit layer exercises Go functions in isolation. The `task test:integration` layer runs the Go HTTP/API integration tests against a running daemon. The `integration_sandbox` Go tests call `docker run` and the sandbox Go functions directly. The system suite proves that `aileron launch` itself correctly drives Docker on the host. It does not replace any of those layers, and it sits above them.
 
 ### Run it
 
