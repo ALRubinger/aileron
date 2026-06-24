@@ -88,7 +88,7 @@ The architectural split sits at the freeze step. There are two sub-layers.
 
 The format and install sub-layer holds skills before freeze. This sub-layer covers instruction-only skills and credentialed skills. This sub-layer carries no determinism guarantee. A skill in this sub-layer can be installed and run, and it has no reproducibility or behavioral-determinism promise.
 
-The Flight-Plan-core sub-layer holds skills after freeze. This sub-layer carries the freeze step, the execution-environment binding, the no-LLM-at-runtime rule, and the signing. A unit in this sub-layer is a Flight Plan with all the guarantees recorded above.
+The Flight-Plan-core sub-layer holds skills after freeze. This sub-layer carries the freeze step, the execution-environment binding, the no-LLM-at-runtime rule, and the signing. A unit in this sub-layer is a Flight Plan with all the guarantees recorded above. The distribution surfaces over a frozen Flight Plan are specified in the [Launch-a-Flight Surfaces Spec](/development/launch-surfaces-spec/).
 
 ### Layer boundary
 
@@ -151,6 +151,7 @@ The following are out of scope for this ADR and this layer's MVP.
 - [Issue #1514](https://github.com/ALRubinger/aileron/issues/1514). This ADR's tracking sub-issue
 - [Issue #1519](https://github.com/ALRubinger/aileron/issues/1519). The output-contract reservation that text is the v1 implementation and binary is a deferred follow-up
 - [The Flight Plan manifest specification](/development/flight-plan-manifest-spec). The `outputs:` contract shape and the file-map transport
+- [The Launch-a-Flight Surfaces Spec](/development/launch-surfaces-spec/). The distribution surfaces over a frozen Flight Plan
 - [ADR-0003](/adr/0003-action-model). The action model the per-action trust contract attaches to
 - [ADR-0005](/adr/0005-sandbox-choice). The sandbox and credential mediation a Flight Plan runs inside
 - [ADR-0009](/adr/0009-user-channel). The out-of-band approval channel the per-action effect feeds

@@ -99,6 +99,7 @@ export const navigation: NavItem[] = [
       { label: 'Sandbox Connector Specs', href: '/development/sandbox-connector-specs/' },
       { label: 'Flight Plan Manifest Spec', href: '/development/flight-plan-manifest-spec/' },
       { label: 'AI-Assisted Authoring UX Spec', href: '/development/ai-assisted-authoring-spec/' },
+      { label: 'Launch-a-Flight Surfaces Spec', href: '/development/launch-surfaces-spec/' },
       { label: 'Submitting Changes', href: '/development/submitting-changes/' }
     ]
   },
