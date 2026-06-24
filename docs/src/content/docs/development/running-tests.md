@@ -119,7 +119,7 @@ The system-test suite sits above the unit, integration, and sandbox-integration 
 
 ```sh
 task test:system               # lib contract tests + harness smoke + the codex and claude scenarios
-task test:system:lib           # POSIX-shell contract tests for the shared scenario library (no Docker, CI-safe)
+task test:system:lib           # Go contract tests for the shared scenario library (no Docker, no shell, CI-safe, Windows-runnable)
 task test:system:smoke         # harness self-test: build fires, Docker precondition gates, defer cleanup runs
 task test:system:launch:codex  # the codex scenario in isolation: aileron launch codex -- exec "..."
 task test:system:launch:claude # the claude scenario in isolation: aileron launch claude -- -p "..."

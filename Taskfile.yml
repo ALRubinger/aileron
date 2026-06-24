@@ -602,14 +602,14 @@ tasks:
     desc: >-
       Contract tests for the shared system-test scenario library
       (test/system/lib/assert.sh + probes.sh) used by the codex (#1476) and
-      claude (#1477) scenarios. Pure POSIX shell with a stubbed `docker`, so
-      it needs no Docker daemon and no `aileron launch` — safe to run in CI
-      and unattended. Validates the assert helpers and discover_container's
-      match-count arbitration against their contracts.
+      claude (#1477) scenarios. A shell-free Go contract suite that needs only
+      the Go toolchain. It needs no Docker daemon, no `aileron launch`, and no
+      Unix shell, so it is safe to run in CI, unattended, and on Windows. It
+      validates the assert helpers, the discover_container match-count
+      arbitration, and the launch-target taskenv wiring regression against
+      their contracts.
     cmds:
-      - sh "{{.ROOT_DIR}}/test/system/lib/assert_test.sh"
-      - sh "{{.ROOT_DIR}}/test/system/lib/probes_test.sh"
-      - sh "{{.ROOT_DIR}}/test/system/lib/taskenv_test.sh"
+      - go test ./test/system/lib/...
 
   test:system:smoke:
     desc: >-
