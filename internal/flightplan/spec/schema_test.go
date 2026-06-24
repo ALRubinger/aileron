@@ -616,6 +616,63 @@ func TestStepActionRefsDeclared(t *testing.T) {
 	}
 }
 
+// TestMalformedActionRefRejected: an action reference that violates the
+// aileron:<connector>.<action> pattern is rejected at every site that carries
+// it. The three sites (requires.actions[].ref, an input resolution
+// source.actionRef, and an action-call step's actionRef) share one
+// $defs.actionRef definition, so this exercises the shared pattern at each
+// place it is referenced.
+func TestMalformedActionRefRejected(t *testing.T) {
+	sch := compileSchema(t)
+	const bad = "metrics.query_series" // missing the required aileron: prefix
+
+	atActionRequirement := func(inst map[string]any) {
+		actions := aileronBlock(t, inst)["requires"].(map[string]any)["actions"].([]any)
+		actions[0].(map[string]any)["ref"] = bad
+	}
+	atActionCallStep := func(inst map[string]any) {
+		for _, s := range steps(t, inst) {
+			if s["kind"] == "action-call" {
+				s["actionRef"] = bad
+				return
+			}
+		}
+		t.Fatal("expected the worked example to carry at least one action-call step")
+	}
+	atResolutionSource := func(inst map[string]any) {
+		for _, in := range aileronBlock(t, inst)["inputs"].([]any) {
+			res, ok := in.(map[string]any)["resolution"].(map[string]any)
+			if !ok {
+				continue
+			}
+			src, ok := res["source"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, has := src["actionRef"]; !has {
+				continue
+			}
+			src["actionRef"] = bad
+			return
+		}
+		t.Skip("worked example carries no source-resolved input to mutate")
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"requires.actions[].ref":      atActionRequirement,
+		"action-call step actionRef":  atActionCallStep,
+		"resolution source actionRef": atResolutionSource,
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := validExampleInstance(t)
+			mutate(inst)
+			if err := sch.Validate(inst); err == nil {
+				t.Fatalf("a malformed actionRef %q at %s must be rejected by the shared pattern", bad, name)
+			}
+		})
+	}
+}
+
 // TestStrippedManifestDropsSteps: removing the aileron block drops the step
 // graph with it, so the lossless-if-stripped guarantee covers the composition.
 // TestStrippedManifestStillValid already deletes the whole block; this sharpens
