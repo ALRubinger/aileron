@@ -832,23 +832,29 @@ jobs:
     # Node/npx is NOT required by the toolchain under test; setup-node is here only
     # so the Go module cache and Task install behave like the other jobs.
     name: Integration Tests (Sandbox Managed)
-    # Linux (ubuntu-latest) is the single REQUIRED, blocking leg: it is the
-    # fail-fast acceptance environment with first-class Docker. macOS-arm64
-    # (macos-latest) and Windows run non-blocking via continue-on-error below —
-    # they report best-effort nested-Docker signal but do NOT gate the flip. Do
-    # not add continue-on-error to the Linux leg. (macOS amd64 / macos-13 /
-    # self-hosted Intel are explicitly out of scope.)
+    # Linux (ubuntu-latest) is the only leg run: it is the fail-fast acceptance
+    # environment with first-class Docker.
+    #
+    # KNOWN GAP — macOS/Windows managed-build verification is NOT run in CI:
+    # GitHub-hosted macOS runners ship no Docker engine and Windows runners
+    # default to Windows containers, so a real Linux-base `devcontainer build`
+    # cannot pass there. They were previously run as `continue-on-error`
+    # (non-blocking) legs, but a guaranteed-fail job is pure noise: perpetual red
+    # checks, wasted CI minutes on doomed builds, and a false-stall trigger for
+    # the autonomous merge gate (it counts non-required legs as blocking — see
+    # ALRubinger/craftwork-skills#65). So we do not run what cannot pass. macOS/
+    # Windows users are covered by the host-`npx` escape hatch documented in
+    # docs/.../sandbox-agent-images.md; managed-build verification on those
+    # platforms is pending Docker-capable (self-hosted) runners, at which point
+    # they can be re-added to this matrix. This is a documented gap, not a silent
+    # skip.
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             required: true
-          - os: macos-latest
-          - os: windows-latest
     runs-on: ${{ matrix.os }}
-    # Only the Linux leg can fail the workflow; macOS/Windows are best-effort.
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
