@@ -46,7 +46,7 @@ The internal surfaces expose a Flight Plan to people inside the org. The four in
 
 ### Portal button
 
-The portal button is an embeddable widget the org places in its own portal. The button design is specified in [Embeddable widget designs](#embeddable-widget-designs).
+The portal button is an embeddable widget the org places in its own portal. The button design is specified in [Embeddable widget designs](#embeddable-widget-designs), and its embedding mechanism is the script-tag-loaded web component with an iframe fallback in [Embedding mechanism](#embedding-mechanism).
 
 The invocation contract is a button click that emits the embeddable invocation payload. The payload names the Flight Plan, the version, the resolved-input overrides, the idempotency key, and the identity label. The identity binding is the portal session identity carried into the `identityLabel`. The idempotency key is minted per click so a double click does not double-run.
 
@@ -56,7 +56,7 @@ The result delivery is the result-render contract of [Embeddable widget designs]
 
 ### Form
 
-The form collects literal-input overrides as form fields and Launches on submit.
+The form collects literal-input overrides as form fields and Launches on submit. The form is an embeddable widget, and its embedding mechanism is the script-tag-loaded web component with an iframe fallback in [Embedding mechanism](#embedding-mechanism).
 
 The invocation contract is a form submission that maps each declared literal input to a form field. The submission emits the same invocation payload as the portal button. The identity binding is the form session identity carried into the `identityLabel`. The idempotency key is minted per submission so a resubmitted form does not double-run.
 
@@ -66,7 +66,7 @@ The result delivery shows the run outcome on the form's result view. A message-s
 
 ### Slack command
 
-The Slack command is an embeddable command the org installs in its own workspace. The command design is specified in [Embeddable widget designs](#embeddable-widget-designs).
+The Slack command is an embeddable command the org installs in its own workspace. The command design is specified in [Embeddable widget designs](#embeddable-widget-designs), and its embedding mechanism is slash-command registration plus an interactive-message callback in [Embedding mechanism](#embedding-mechanism).
 
 The invocation contract is a slash-command invocation that emits the invocation payload. Command arguments map to declared literal inputs. The identity binding is the Slack user identity carried into the `identityLabel`. The idempotency key is minted per invocation.
 
@@ -144,7 +144,7 @@ A large or binary artifact is published by reference, never inlined. A small tex
 
 ## Embeddable widget designs
 
-The portal button, the form, and the Slack command are embeddable. Each is implementable from one invocation payload shape and one result-render contract.
+The portal button, the form, and the Slack command are embeddable. Each is implementable from one invocation payload shape, one result-render contract, and one concrete embedding mechanism. The payload shape and the result-render contract are below; the per-widget mechanism is in [Embedding mechanism](#embedding-mechanism).
 
 The invocation payload is the shape a widget emits to Launch a Flight. It names the Flight Plan, the frozen version, the resolved-input overrides, the idempotency key, and the identity label. The payload is a binding of values into the common Launch contract, never a step or a credential.
 
@@ -166,6 +166,16 @@ The result-render contract is the shape a widget renders after a Launch. It carr
 | `artifacts` | No | The published file artifacts, each named and referenced by its declared `outputs:` name, delivered by reference when large or binary. |
 
 A widget renders a message-shaped result inline. A widget renders each file artifact through the file-artifact rules in [Result delivery and file artifacts](#result-delivery-and-file-artifacts). A widget on a surface that cannot execute JavaScript renders the hosted URL or iframe target the runtime publishes.
+
+### Embedding mechanism
+
+Each embeddable widget commits to a concrete embedding mechanism so engineering implements against the mechanism, not only against the field and contract shapes above. The mechanism is fixed per widget. The invocation payload and the result-render contract are the same across mechanisms.
+
+The portal button and the form embed as a **script-tag-loaded web component**. The org places a single `<script>` tag that registers a custom element (`<aileron-launch-button>` for the portal button, `<aileron-launch-form>` for the form). The org then drops the custom element into its own portal markup and configures it with the `flightPlan` and, optionally, the `version` from the invocation payload. The custom element collects the resolved-input overrides, mints the per-invocation idempotency key, binds the surface session identity into the `identityLabel`, emits the invocation payload, and renders the result-render contract inline through its shadow DOM. The custom element is the primary mechanism because it composes into the host portal's own DOM and styling without a nested document.
+
+The portal button and the form fall back to an **iframe** for a surface that cannot execute the script tag or the custom element. The org embeds an `<iframe>` whose `src` is the hosted widget for that Flight Plan. The hosted widget inside the iframe emits the same invocation payload and renders the same result-render contract. The iframe fallback is the same hosted-URL-or-iframe target the [Result delivery and file artifacts](#result-delivery-and-file-artifacts) rules name for a surface that cannot execute JavaScript inline. The web component is primary and the iframe is the fallback, never the reverse.
+
+The Slack command embeds as a **slash-command registration plus an interactive-message callback**. The org installs a Slack app that registers the slash command in the org's own workspace. A slash-command invocation maps the command arguments to declared literal inputs, mints the per-invocation idempotency key, binds the Slack user identity into the `identityLabel`, and emits the invocation payload. The interactive-message callback is the registered request URL that receives the effect-driven approval decision and the result-render contract. The callback posts the recorded approval decision and the message-shaped result back into the command's thread and posts each file artifact through the file-artifact rules, by reference when the artifact is large or binary. Slack does not load the web component or the iframe; the slash-command registration and the interactive-message callback are its embedding mechanism end to end.
 
 ## References
 
