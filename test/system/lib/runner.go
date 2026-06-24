@@ -77,6 +77,14 @@ type AgentConfig struct {
 // assert a release :latest or a digest pin.
 const codexDefaultImage = "ghcr.io/alrubinger/aileron-sandbox-codex:edge"
 
+// claudeDefaultImage is the floating dev image ref claude.sh defaults
+// EXPECTED_IMAGE to. Unlike codex's GHCR ref, this is the LOCAL Feature-build
+// repo (`aileron/sandbox-agent-claude`, per #1451/#1585): no registry host and
+// no digest-pin path, because the claude sandbox image is built locally from the
+// devcontainer Feature rather than published to a registry. A dev/empty version
+// build pulls :edge; override with EXPECTED_IMAGE to assert a specific local ref.
+const claudeDefaultImage = "aileron/sandbox-agent-claude:edge"
+
 // ResolveExpectedImage mirrors codex.sh's `EXPECTED_IMAGE="${EXPECTED_IMAGE:-<default>}"`:
 // a non-empty override wins, otherwise the agent default is used. Pure; the
 // override is passed in (read from os.Getenv("EXPECTED_IMAGE") by the live driver)
@@ -100,6 +108,35 @@ func CodexConfig(expectedImageOverride string) AgentConfig {
 		MCPMarker:              "[mcp_servers.aileron]",
 		AuthPath:               "/home/agent/.codex/auth.json",
 		BatchFlags:             []string{"exec", "--skip-git-repo-check"},
+		WorkspaceContainerPath: "/home/agent/workspace",
+		SentinelName:           ".aileron-systest-sentinel",
+	}
+}
+
+// ClaudeConfig returns the claude AgentConfig with bindings confirmed against
+// claude.sh (issue #1477 decision 2). override is the EXPECTED_IMAGE value (empty
+// for the default); the live driver passes os.Getenv("EXPECTED_IMAGE").
+//
+// Claude differs from codex in three ways the driver reads off this config:
+//   - MCP is wired by the `--mcp-config` command-line flag (MCPModeCmdline), not a
+//     config file, so ConfigPath is empty and MCPFlag/MCPMarker drive the R8.2
+//     cmdline probe (ProbeMCPCmdline). MCPMarker is the JSON-key form `"aileron"`,
+//     byte-identical to claude.sh's MCP_MARKER.
+//   - The credential file is /home/agent/.claude/.credentials.json.
+//   - The non-interactive batch flag is `-p`, so BuildExecArgs yields
+//     ["-p", "<prompt>"] forwarded as `aileron launch claude -- -p "<prompt>"`.
+//
+// The default ExpectedImage is the LOCAL aileron/sandbox-agent-claude:edge ref
+// (no registry host, no digest pin); see claudeDefaultImage.
+func ClaudeConfig(expectedImageOverride string) AgentConfig {
+	return AgentConfig{
+		Name:                   "claude",
+		ExpectedImage:          ResolveExpectedImage(expectedImageOverride, claudeDefaultImage),
+		MCPMode:                MCPModeCmdline,
+		MCPFlag:                "--mcp-config",
+		MCPMarker:              `"aileron"`,
+		AuthPath:               "/home/agent/.claude/.credentials.json",
+		BatchFlags:             []string{"-p"},
 		WorkspaceContainerPath: "/home/agent/workspace",
 		SentinelName:           ".aileron-systest-sentinel",
 	}

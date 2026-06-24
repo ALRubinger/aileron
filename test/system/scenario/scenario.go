@@ -54,19 +54,38 @@ func logf(format string, a ...any) {
 // `aileron launch codex -- exec --skip-git-repo-check "<prompt>"` in the
 // background, runs the live-container R8 probes while codex is resident, reaps
 // the launch and asserts its exit code, verifies clean teardown, then performs
-// the host-side R9 sentinel and conditional R10 audit assertions. Every decision
-// delegates to systestlib; this function holds only the impure docker/exec/poll
-// plumbing.
+// the host-side R9 sentinel and conditional R10 audit assertions. It is the
+// codex binding of the shared runScenario body; its R8.2 MCP probe is the
+// config-file wrapper probeMCPConfigFile.
 func runCodex(e env) error {
-	cfg := systestlib.CodexConfig(e.expectedImage)
+	return runScenario(e, systestlib.CodexConfig(e.expectedImage), probeMCPConfigFile)
+}
 
+// runClaude is the faithful Go port of claude.sh's scenario body. It is the
+// claude binding of the shared runScenario body, differing from codex only in the
+// claude AgentConfig (cmdline-mode MCP, `-p` batch flag, the claude credential
+// path, the local sandbox-agent-claude image) and its R8.2 MCP probe, which is
+// the flag-mode wrapper probeMCPCmdline (asserting `--mcp-config` + the
+// `"aileron"` server marker on the container command line).
+func runClaude(e env) error {
+	return runScenario(e, systestlib.ClaudeConfig(e.expectedImage), probeMCPCmdline)
+}
+
+// runScenario is the shared, agent-agnostic live-scenario body both runCodex and
+// runClaude delegate to. cfg carries the per-agent bindings (image, batch flags,
+// credential path, MCP mode); probeMCP is the agent's R8.2 MCP probe wrapper
+// (config-file for codex, cmdline for claude). The launch/reap/discovery-poll and
+// the R8.1/R8.3-8.6/R9/R7a/R10 assertions are identical across agents, so they
+// live here once. Every decision delegates to systestlib; this function holds
+// only the impure docker/exec/poll plumbing.
+func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container string, cfg systestlib.AgentConfig) error) error {
 	// Per-run sentinel (R9): a fresh token so a stale workspace file can't pass.
 	runID := systestlib.NewRunID()
 	sentinel := systestlib.Sentinel(runID)
 	prompt := systestlib.BuildPrompt(cfg, sentinel)
 	execArgs := systestlib.BuildExecArgs(cfg, prompt)
 
-	logf("codex scenario: runid=%s workspace=%s image=%s", runID, e.workspace, cfg.ExpectedImage)
+	logf("%s scenario: runid=%s workspace=%s image=%s", cfg.Name, runID, e.workspace, cfg.ExpectedImage)
 
 	// --- launch in the background (R7a arg forwarding) ---------------------
 	// `-- exec --skip-git-repo-check "<prompt>"` forwards verbatim through
@@ -156,7 +175,7 @@ func runCodex(e env) error {
 		if err := probeImage(container, cfg.ExpectedImage); err != nil {
 			return err
 		}
-		if err := probeMCPConfigFile(container, cfg); err != nil {
+		if err := probeMCP(container, cfg); err != nil {
 			return err
 		}
 		if err := probeCredentials(container, cfg.AuthPath); err != nil {
@@ -199,17 +218,17 @@ func runCodex(e env) error {
 	logf("ok: R9 sentinel content byte-exact")
 
 	// --- R7a forwarding: the agent acted on the forwarded exec instruction --
-	if err := systestlib.AssertNotEmpty(actual, "R7a post-`--` exec args forwarded to codex"); err != nil {
+	if err := systestlib.AssertNotEmpty(actual, "R7a post-`--` exec args forwarded to "+cfg.Name); err != nil {
 		return err
 	}
-	logf("ok: R7a post-`--` exec args forwarded to codex")
+	logf("ok: R7a post-`--` exec args forwarded to %s", cfg.Name)
 
 	// --- R10 round-trip audit (conditional on AILERON_STATE_DIR) -----------
 	if err := assertAuditR10(e.stateDir); err != nil {
 		return err
 	}
 
-	logf("codex scenario: all assertions passed (R7a, R8.1-8.6, R9, R10)")
+	logf("%s scenario: all assertions passed (R7a, R8.1-8.6, R9, R10)", cfg.Name)
 	return nil
 }
 
@@ -276,6 +295,33 @@ func probeMCPConfigFile(container string, cfg systestlib.AgentConfig) error {
 		return err
 	}
 	logf("ok: R8.2 %s contains %s", cfg.ConfigPath, cfg.MCPMarker)
+	return nil
+}
+
+func probeMCPCmdline(container string, cfg systestlib.AgentConfig) error {
+	// Agent-agnostic R8.2 core (same facts probeMCPConfigFile gathers):
+	// aileron-mcp present + executable, daemon-wiring env vars all set.
+	binOK := dockerExecOK(container, "test", "-x", "/usr/local/bin/aileron-mcp")
+	envOK := true
+	for _, v := range []string{"AILERON_URL", "AILERON_COMMS_URL", "AILERON_SESSION_ID", "AILERON_APPROVAL_URL", "AILERON_TOKEN"} {
+		if !dockerExecOK(container, "printenv", v) {
+			envOK = false
+			break
+		}
+	}
+
+	// Cmdline tail: the container command line carries the MCP flag whose payload
+	// references the aileron server marker. Inspect BOTH .Config.Cmd and .Args so
+	// the probe is robust to whichever Docker populates, matching probe_mcp_cmdline
+	// in lib/probes.sh.
+	cmdline, err := dockerInspect(container, "{{range .Config.Cmd}}{{.}} {{end}}{{range .Args}}{{.}} {{end}}")
+	if err != nil {
+		return systestlib.Fail(fmt.Sprintf("R8.2 docker inspect %s failed (probe_mcp_cmdline)", container))
+	}
+	if err := systestlib.ProbeMCPCmdline(binOK, envOK, cmdline, cfg.MCPFlag, cfg.MCPMarker); err != nil {
+		return err
+	}
+	logf("ok: R8.2 container command carries %s and references %s", cfg.MCPFlag, cfg.MCPMarker)
 	return nil
 }
 
