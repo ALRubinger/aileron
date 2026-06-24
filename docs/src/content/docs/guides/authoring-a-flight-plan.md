@@ -69,7 +69,7 @@ aileron:
     - id: summarize
       kind: transform
       bindings:
-        rows: steps.read
+        rows: steps.read.messages
       outputs: ["text"]
       materializesOutput: digest
 ---
