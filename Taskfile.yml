@@ -5,15 +5,6 @@ vars:
   # Single source of truth for Go test/vet package set, shared by local
   # (test:go, vet:go) and CI (test:go:ci) targets.
   GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-mcp/... ./sdk/go/...
-  # Host executable suffix from the canonical Go primitive: empty on
-  # Unix/macOS, ".exe" on Windows. The local host-arch build tasks pass an
-  # explicit `-o build/<name>`, so the toolchain writes that exact name and
-  # skips the platform `.exe` append it only performs when `-o` is absent.
-  # Appending {{.HOST_EXE}} keeps the built path matching what consumers
-  # (mcp:setup registration, system-test AILERON_BIN) expect on Windows while
-  # leaving Unix output unchanged by construction.
-  HOST_EXE:
-    sh: go env GOEXE
 
 tasks:
   default:
@@ -113,6 +104,14 @@ tasks:
       VERSION: dev
       COMMIT:
         sh: git rev-parse --short HEAD
+      # Host executable suffix from the canonical Go primitive: empty on
+      # Unix/macOS, ".exe" on Windows. An explicit `-o build/<name>` makes the
+      # toolchain write that exact name and skip the platform `.exe` append it
+      # only performs when `-o` is absent; appending {{.HOST_EXE}} restores it.
+      # Scoped per-task (not global) so Go-free targets like build:docs/webapp
+      # don't eagerly evaluate `go env`, matching build:mcp's HOST_GOOS/GOARCH.
+      HOST_EXE:
+        sh: go env GOEXE
     cmds:
       # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
       # binaries import no cgo, so an ambient CGO_ENABLED=1 only invites
@@ -132,6 +131,11 @@ tasks:
         sh: go env GOOS
       HOST_GOARCH:
         sh: go env GOARCH
+      # Empty on Unix/macOS, ".exe" on Windows. Appended only to the host-arch
+      # output below; the forced GOOS=linux sandbox sibling stays extensionless
+      # (it is bind-mounted into a Linux container).
+      HOST_EXE:
+        sh: go env GOEXE
     cmds:
       # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
       # inline assignment is required: go-task's task-level env: does NOT
@@ -153,6 +157,10 @@ tasks:
       VERSION: dev
       COMMIT:
         sh: git rev-parse --short HEAD
+      # Empty on Unix/macOS, ".exe" on Windows. Restores the suffix the toolchain
+      # skips when `-o` is given explicitly (see build:server for the full why).
+      HOST_EXE:
+        sh: go env GOEXE
     cmds:
       # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
       # inline assignment is required: go-task's task-level env: does NOT
@@ -194,6 +202,11 @@ tasks:
 
   mcp:setup:
     desc: Build and register the Aileron MCP server with Claude Code
+    vars:
+      # Match the path build:mcp wrote: ".exe" on Windows, empty elsewhere, so
+      # the registered MCP binary points at the file that actually exists.
+      HOST_EXE:
+        sh: go env GOEXE
     cmds:
       - task: build:mcp
       - claude mcp add --scope project aileron -e AILERON_URL=http://localhost:8080 -- ./build/aileron-mcp{{.HOST_EXE}}
@@ -617,6 +630,10 @@ tasks:
       # can't resolve /tmp under go-task's embedded shell on Windows. `unixEpoch`
       # + `randInt` replace `date +%s` and `$$` (no shell binary on PATH needed).
       WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-smoke-{{now | unixEpoch}}-{{randInt 10000 99999}}'
+      # ".exe" on Windows, empty elsewhere, so the build:launch artifact check
+      # below tests the actual file the toolchain wrote (build/aileron.exe).
+      HOST_EXE:
+        sh: go env GOEXE
     cmds:
       - task: _test:system:precond:docker
         vars:
@@ -678,6 +695,10 @@ tasks:
       # env vars (TMPDIR/TEMP/TMP) as template vars for a writable temp root.
       SESSION: 'codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
+      # ".exe" on Windows, empty elsewhere. AILERON_BIN below must point at the
+      # file build:launch wrote; codex.sh invokes "$AILERON_BIN" launch directly.
+      HOST_EXE:
+        sh: go env GOEXE
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it
@@ -724,6 +745,10 @@ tasks:
       # env vars (TMPDIR/TEMP/TMP) as template vars for a writable temp root.
       SESSION: 'claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
+      # ".exe" on Windows, empty elsewhere. AILERON_BIN below must point at the
+      # file build:launch wrote; claude.sh invokes "$AILERON_BIN" launch directly.
+      HOST_EXE:
+        sh: go env GOEXE
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it

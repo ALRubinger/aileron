@@ -262,25 +262,62 @@ done
 # from the canonical `go env GOEXE` (empty on Unix/macOS, ".exe" on Windows) and
 # appends {{.HOST_EXE}} to the three host-arch outputs and every path that
 # consumes them. This section pins both halves:
-#   E1. structural — HOST_EXE is a global var sourced from `go env GOEXE`; the
-#       host-arch outputs and their consumers append it; the forced GOOS=linux
-#       sandbox sibling stays extensionless (it is bind-mounted into a Linux
-#       container, where a `.exe` suffix would be wrong).
+#   E1. structural — HOST_EXE is sourced from `go env GOEXE`; it is scoped
+#       per-task (NOT a top-level global var, whose eager `sh:` eval would break
+#       Go-free targets like build:docs/webapp); every task that references
+#       {{.HOST_EXE}} also defines it; the host-arch outputs and their consumers
+#       append it; and the forced GOOS=linux sandbox sibling stays extensionless
+#       (it is bind-mounted into a Linux container, where `.exe` would be wrong).
 #   E2. behavioral — with GOEXE=.exe (Windows), AILERON_BIN and the host-arch
 #       build `-o` flags resolve WITH the .exe suffix while the Linux sibling
 #       stays bare; with GOEXE empty (Unix), the outputs are unchanged.
 
-# E1a. HOST_EXE is a top-level var sourced from `go env GOEXE`.
-hostexe_def="$(awk '
+# E1a. Every HOST_EXE definition is sourced from `go env GOEXE`. Each `HOST_EXE:`
+# key in the file must be immediately followed by an `sh: go env GOEXE` child;
+# a literal or any other source would drift from the canonical host primitive.
+hostexe_defs="$(grep -c '^      HOST_EXE:' "$TASKFILE")"
+hostexe_goexe="$(grep -A1 '^      HOST_EXE:' "$TASKFILE" | grep -c 'sh: go env GOEXE')"
+if [ "$hostexe_defs" -ge 1 ] && [ "$hostexe_defs" -eq "$hostexe_goexe" ]; then
+	report "every HOST_EXE definition is sourced from \`go env GOEXE\` ($hostexe_defs found)" 0
+else
+	printf 'HOST_EXE defs=%s, go-env-GOEXE-sourced=%s (must be equal and >=1)\n' "$hostexe_defs" "$hostexe_goexe" >&2
+	report "every HOST_EXE definition is sourced from \`go env GOEXE\`" 1
+fi
+
+# E1a2. HOST_EXE is NOT a top-level (global) var. A global `sh:` var is evaluated
+# eagerly by go-task on EVERY task invocation, so a global `go env GOEXE` would
+# abort Go-free targets (build:docs, build:webapp, up) on a host without `go`.
+# The fix scopes it per-task instead; a 2-space-indented `HOST_EXE:` under the
+# top-level `vars:` block is the regression this guards against.
+global_hostexe="$(awk '
 	/^vars:[[:space:]]*$/ { invars = 1; next }
 	invars && /^[^ ]/ { invars = 0 }
-	invars && /^  HOST_EXE:/ { found = 1; next }
-	found && /^    sh:/ { print; found = 0 }
+	invars && /^  HOST_EXE:/ { print }
 ' "$TASKFILE")"
-case "$hostexe_def" in
-	*"go env GOEXE"*) report "HOST_EXE global var sourced from \`go env GOEXE\`" 0 ;;
-	*) report "HOST_EXE global var sourced from \`go env GOEXE\`" 1 ;;
-esac
+if [ -z "$global_hostexe" ]; then
+	report "HOST_EXE is NOT a top-level global var (no eager go-env on Go-free tasks)" 0
+else
+	report "HOST_EXE is NOT a top-level global var (no eager go-env on Go-free tasks)" 1
+fi
+
+# E1a3. Every task that REFERENCES {{.HOST_EXE}} also DEFINES it in its own vars.
+# A `{{.HOST_EXE}}` reference in a task that lacks a `HOST_EXE:` var resolves to
+# the empty string under go-task (no error), silently reintroducing the bug on
+# Windows. Walk each task block: if it mentions {{.HOST_EXE}}, it must also
+# declare `HOST_EXE:` at the 6-space var indent.
+ref_tasks="$(awk '
+	# A task header is a 2-space-indented name ending in `:` (names may contain
+	# internal colons, e.g. test:system:smoke), so strip only the trailing `:`.
+	/^  [a-zA-Z][a-zA-Z0-9:_-]*:[[:space:]]*$/ { name = $0; sub(/^  /, "", name); sub(/:[[:space:]]*$/, "", name) }
+	/\{\{\.HOST_EXE\}\}/ { if (name != "") print name }
+' "$TASKFILE" | sort -u)"
+for t in $ref_tasks; do
+	if block_for "$t" | grep -q '^      HOST_EXE:'; then
+		report "$t: references {{.HOST_EXE}} and defines it in task vars" 0
+	else
+		report "$t: references {{.HOST_EXE}} and defines it in task vars" 1
+	fi
+done
 
 # E1b. The three host-arch build outputs append {{.HOST_EXE}}. Each `-o` flag for
 # a host binary (server/mcp/cli) must be immediately followed by {{.HOST_EXE}};
