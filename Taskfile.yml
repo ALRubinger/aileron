@@ -5,6 +5,15 @@ vars:
   # Single source of truth for Go test/vet package set, shared by local
   # (test:go, vet:go) and CI (test:go:ci) targets.
   GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-mcp/... ./sdk/go/...
+  # Host executable suffix from the canonical Go primitive: empty on
+  # Unix/macOS, ".exe" on Windows. The local host-arch build tasks pass an
+  # explicit `-o build/<name>`, so the toolchain writes that exact name and
+  # skips the platform `.exe` append it only performs when `-o` is absent.
+  # Appending {{.HOST_EXE}} keeps the built path matching what consumers
+  # (mcp:setup registration, system-test AILERON_BIN) expect on Windows while
+  # leaving Unix output unchanged by construction.
+  HOST_EXE:
+    sh: go env GOEXE
 
 tasks:
   default:
@@ -111,7 +120,7 @@ tasks:
       # Windows). The inline assignment is required: go-task's task-level env:
       # does NOT override a CGO_ENABLED already set in the OS environment, and a
       # cmd-level env: is silently ignored — a shell prefix always wins.
-      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server ./internal/server
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server{{.HOST_EXE}} ./internal/server
 
   build:mcp:
     desc: Build the Aileron MCP server binary locally (plus a Linux variant on macOS/Windows hosts so `aileron launch --sandbox=docker` can bind-mount it into the container)
@@ -128,7 +137,7 @@ tasks:
       # inline assignment is required: go-task's task-level env: does NOT
       # override a CGO_ENABLED already set in the OS environment, and a cmd-level
       # env: is silently ignored — a shell prefix always wins.
-      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp{{.HOST_EXE}} ./cmd/aileron-mcp
       # Sandbox launch bind-mounts aileron-mcp into a Linux container. On
       # non-Linux hosts the host-arch Mach-O / PE binary above fails with
       # exec format error; this second build produces a sibling the
@@ -149,7 +158,7 @@ tasks:
       # inline assignment is required: go-task's task-level env: does NOT
       # override a CGO_ENABLED already set in the OS environment, and a cmd-level
       # env: is silently ignored — a shell prefix always wins.
-      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron{{.HOST_EXE}} ./cmd/aileron
 
   build:webapp:
     desc: Install webapp dependencies, build static output, copy into internal/app/webapp_dist for Go embed
@@ -187,7 +196,7 @@ tasks:
     desc: Build and register the Aileron MCP server with Claude Code
     cmds:
       - task: build:mcp
-      - claude mcp add --scope project aileron -e AILERON_URL=http://localhost:8080 -- ./build/aileron-mcp
+      - claude mcp add --scope project aileron -e AILERON_URL=http://localhost:8080 -- ./build/aileron-mcp{{.HOST_EXE}}
 
   up:
     desc: Start all services via Docker Compose
@@ -619,7 +628,7 @@ tasks:
       - |
         set -u
         # Prove build:launch produced the launch binary.
-        test -f build/aileron || { echo "build:launch did not produce build/aileron" >&2; exit 1; }
+        test -f build/aileron{{.HOST_EXE}} || { echo "build:launch did not produce build/aileron{{.HOST_EXE}}" >&2; exit 1; }
         # Seed a sentinel the deferred cleanup must remove.
         touch "{{.WORKSPACE}}/sentinel"
         test -f "{{.WORKSPACE}}/sentinel" || { echo "failed to seed sentinel" >&2; exit 1; }
@@ -674,7 +683,7 @@ tasks:
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it
     # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
     env:
-      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron{{.HOST_EXE}}'
       AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
       WORKSPACE: '{{.WORKSPACE}}'
       AILERON_STATE_DIR:
@@ -720,7 +729,7 @@ tasks:
     # the scenario script must receive AILERON_BIN et al. from here. Keeping it
     # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
     env:
-      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron'
+      AILERON_BIN: '{{.ROOT_DIR}}/build/aileron{{.HOST_EXE}}'
       AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
       WORKSPACE: '{{.WORKSPACE}}'
       AILERON_STATE_DIR:
