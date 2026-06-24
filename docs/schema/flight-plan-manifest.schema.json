@@ -11,6 +11,11 @@
   },
   "$comment": "The `aileron` block is optional at this top level so that a stripped manifest (the block removed) still validates. This encodes the lossless-if-stripped guarantee: the Aileron block is purely additive. An unsatisfied `requires:` is a missing-requirement signal resolved by the runtime, never a schema parse failure.",
   "$defs": {
+    "actionRef": {
+      "type": "string",
+      "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$",
+      "description": "An Aileron action reference in the form aileron:<connector>.<action> (for example aileron:metrics.query_series). The connector segment matches [a-z0-9][a-z0-9_-]* and the action segment matches [a-z0-9][a-z0-9_.-]*. This single definition is referenced everywhere an action reference appears so the three sites cannot drift apart."
+    },
     "aileronBlock": {
       "type": "object",
       "description": "The single namespaced top-level key that holds every Aileron-specific field. Namespacing under one key keeps the extension lossless if stripped.",
@@ -70,9 +75,8 @@
       "required": ["ref", "trustContract"],
       "properties": {
         "ref": {
-          "type": "string",
-          "description": "The action reference in the form aileron:<connector>.<action> (for example aileron:metrics.query_series).",
-          "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+          "$ref": "#/$defs/actionRef",
+          "description": "The action reference in the form aileron:<connector>.<action> (for example aileron:metrics.query_series)."
         },
         "trustContract": { "$ref": "#/$defs/trustContract" }
       }
@@ -388,9 +392,8 @@
               "required": ["actionRef"],
               "properties": {
                 "actionRef": {
-                  "type": "string",
-                  "description": "The action reference whose result resolves this input, in the form aileron:<connector>.<action>.",
-                  "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+                  "$ref": "#/$defs/actionRef",
+                  "description": "The action reference whose result resolves this input, in the form aileron:<connector>.<action>."
                 },
                 "select": {
                   "type": "string",
@@ -495,9 +498,8 @@
           "description": "Invokes a declared action."
         },
         "actionRef": {
-          "type": "string",
-          "description": "The action this step invokes, in the form aileron:<connector>.<action>. MUST match a declared requires.actions[].ref.",
-          "pattern": "^aileron:[a-z0-9][a-z0-9_-]*\\.[a-z0-9][a-z0-9_.-]*$"
+          "$ref": "#/$defs/actionRef",
+          "description": "The action this step invokes, in the form aileron:<connector>.<action>. MUST match a declared requires.actions[].ref."
         },
         "args": {
           "type": "object",
