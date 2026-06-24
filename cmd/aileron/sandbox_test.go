@@ -379,19 +379,56 @@ func TestRunSandboxCheckOfflineRejectsEscapeHatch(t *testing.T) {
 	}
 }
 
+// TestRunSandboxCheckPublishedAgentResolvesPerAgentImage pins that a publishable
+// agent (codex, Apache-2.0) resolves the build-free TierPublished default whose
+// image is the prebuilt per-agent image, in parity with launch. Claude is no
+// longer publishable (#1451) and is covered by
+// TestRunSandboxCheckNonPublishableAgentBuildsLocally.
 func TestRunSandboxCheckPublishedAgentResolvesPerAgentImage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	plan := captureSandboxCheckPlan(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxCheck([]string{"--agent=codex"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if plan.Tier != sandboxcomposition.TierPublished {
+		t.Fatalf("plan.Tier = %s, want %s", plan.Tier, sandboxcomposition.TierPublished)
+	}
+	want := sandboxcomposition.PublishedAgentImage("codex", version.Version)
+	if plan.Image != want {
+		t.Fatalf("plan.Image = %q, want %q (parity with launch)", plan.Image, want)
+	}
+}
+
+// TestRunSandboxCheckNonPublishableAgentBuildsLocally is the #1451 check-side
+// parity with TestLaunch_SandboxNoDevcontainerNonPublishableAgentBuildsLocally:
+// a recipe'd-but-not-publishable agent (claude) must NOT resolve a published
+// per-agent image. With no .devcontainer it resolves a LOCAL Feature build
+// (TierDevcontainer with the agent Feature + a synthesized devcontainer), built
+// on the host rather than pulled, keeping Aileron out of the redistribution
+// chain.
+func TestRunSandboxCheckNonPublishableAgentBuildsLocally(t *testing.T) {
 	t.Chdir(t.TempDir())
 	plan := captureSandboxCheckPlan(t)
 	var out, errb bytes.Buffer
 	if code := runSandboxCheck([]string{"--agent=claude"}, &out, &errb); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
 	}
-	if plan.Tier != sandboxcomposition.TierPublished {
-		t.Fatalf("plan.Tier = %s, want %s", plan.Tier, sandboxcomposition.TierPublished)
+	if plan.Tier != sandboxcomposition.TierDevcontainer {
+		t.Fatalf("plan.Tier = %s, want %s (local build, not published)", plan.Tier, sandboxcomposition.TierDevcontainer)
 	}
-	want := sandboxcomposition.PublishedAgentImage("claude", version.Version)
+	want := sandboxcomposition.LocalAgentImageTag("claude", version.Version)
 	if plan.Image != want {
-		t.Fatalf("plan.Image = %q, want %q (parity with launch)", plan.Image, want)
+		t.Fatalf("plan.Image = %q, want %q (local agent image tag)", plan.Image, want)
+	}
+	if plan.Image == sandboxcomposition.PublishedAgentImage("claude", version.Version) {
+		t.Fatalf("plan.Image resolved a published claude image; want a local build")
+	}
+	if _, ok := plan.Features[sandboxcomposition.FeatureReference("claude")]; !ok {
+		t.Fatalf("plan.Features missing the claude agent Feature: %v", plan.Features)
+	}
+	if plan.SynthesizedDevcontainer == "" {
+		t.Fatal("plan.SynthesizedDevcontainer is empty; want a synthesized devcontainer for the no-.devcontainer local build")
 	}
 }
 
