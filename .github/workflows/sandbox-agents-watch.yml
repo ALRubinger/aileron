@@ -113,7 +113,10 @@ jobs:
           # Agent -> npm package. The package names mirror NPMPackage in
           # internal/sandbox/composition/recipes.go (the source of truth). A case
           # lookup (not an associative array) keeps this portable across bash
-          # versions under `set -u`.
+          # versions under `set -u`. The watched AGENTS list is computed from Go
+          # (composition.PublishedAgents), so a new publishable agent must also be
+          # added here; the `return 1` default fails the step LOUDLY under `set
+          # -e` rather than silently skipping, so the drift never goes unnoticed.
           npm_pkg_for() {
             case "$1" in
               claude) echo "@anthropic-ai/claude-code" ;;

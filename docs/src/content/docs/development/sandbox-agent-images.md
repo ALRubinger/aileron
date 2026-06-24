@@ -19,7 +19,7 @@ The check uses the same composition plan and minimal launch validation as `ailer
 
 | Agent | Command | Sandbox image support | MCP under `--sandbox=docker` | Notes |
 |---|---|---|---|---|
-| Claude Code | `claude` | Agent Feature (local build) | ✓ via `--mcp-config` | First-class Feature below. The build-free path builds the image **locally** from the Feature, because `@anthropic-ai/claude-code` is all-rights-reserved and cannot be redistributed as a published image ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). Use `sandbox check --agent=claude` before launch. |
+| Claude Code | `claude` | Agent Feature (local build) | ✓ via `--mcp-config` | First-class Feature below. The default launch path builds the image **locally** from the Feature, because `@anthropic-ai/claude-code` is all-rights-reserved and cannot be redistributed as a published image ([#1451](https://github.com/ALRubinger/aileron/issues/1451)). Use `sandbox check --agent=claude` before launch. |
 | Codex | `codex` | Agent Feature (published image) | ✓ via bind-mounted `config.toml` | Feature below. `@openai/codex` is Apache-2.0, so its per-agent image is published and pulled build-free. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` ([ADR-0024](/adr/0024-sandbox-mcp-parity/)). Host `~/.codex/config.toml` is never touched. |
 | Goose | `goose` | Command contract only | ✓ via `--with-extension` | List the agent Feature in Tier 1, or install the CLI in a BYO image; no maintained Feature yet. |
 | OpenCode | `opencode` | Command contract only | ✓ via workspace `opencode.json` | Launcher writes `opencode.json` into the launch directory; the workspace bind-mount makes it readable in-container. |
