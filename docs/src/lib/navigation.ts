@@ -54,7 +54,8 @@ export const navigation: NavItem[] = [
       { label: 'Connectors', href: '/concepts/connectors/' },
       { label: 'The Vault', href: '/concepts/the-vault/' },
       { label: 'Proof of Control', href: '/concepts/proof-of-control/' },
-      { label: 'The Keyring', href: '/concepts/the-keyring/' }
+      { label: 'The Keyring', href: '/concepts/the-keyring/' },
+      { label: 'Flight Plans', href: '/concepts/flight-plans/' }
     ]
   },
   {
@@ -72,6 +73,7 @@ export const navigation: NavItem[] = [
       { label: 'Installing a Connector', href: '/guides/installing-a-connector/' },
       { label: 'Installing an Action', href: '/guides/installing-an-action/' },
       { label: 'Installing a Skill', href: '/guides/installing-a-skill/' },
+      { label: 'Authoring a Flight Plan', href: '/guides/authoring-a-flight-plan/' },
       { label: 'Freezing a Flight Plan', href: '/guides/freezing-a-flight-plan/' },
       { label: 'Launching a Flight Plan', href: '/guides/launching-a-flight-plan/' },
       { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
