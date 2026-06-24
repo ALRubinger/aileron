@@ -93,6 +93,12 @@ func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir stri
 // ConfigureMCP writes a project-local `opencode.json` in the workspace
 // mount, not under the data dir, so no sibling mount needs to coexist
 // with auth.json.
+// SkillsPath returns "" because OpenCode's Agent Skills directory under
+// the sandbox is not yet grounded; the launcher skips the skills mount for
+// it. Wiring OpenCode's skills path is deferred until its layout is
+// confirmed.
+func (o OpenCode) SkillsPath() string { return "" }
+
 func (o OpenCode) AuthSpec() launch.AuthSpec {
 	return launch.AuthSpec{
 		FileBindings: []launch.FileBinding{{

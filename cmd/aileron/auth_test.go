@@ -303,6 +303,7 @@ func (f fakeAuthAgent) ConfigureMCP(string, map[string]string, string, launch.Mo
 	return nil, nil, nil
 }
 func (f fakeAuthAgent) AuthSpec() launch.AuthSpec { return f.spec }
+func (f fakeAuthAgent) SkillsPath() string        { return "" }
 
 // TestRunAuth_BindingMissingCapture covers the defensive guard that
 // rejects an agent whose oauth FileBinding declares no Capture

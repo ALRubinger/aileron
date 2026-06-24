@@ -114,6 +114,14 @@ func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, m
 // persists the rotated bundle to vault, and hands Render the new
 // secret. AE6 invariant: the rotated bundle is in vault before
 // container start; a failed persist aborts the launch.
+// SkillsPath returns Codex's container-side Agent Skills directory. Codex
+// reads skills from ~/.codex/skills, which under the sandbox's /home/agent
+// home is /home/agent/.codex/skills — consistent with the .codex home
+// convention the rest of this adapter uses (config.toml, auth.json). The
+// launcher bind-mounts the canonical skill store read-only here at sandbox
+// launch.
+func (c Codex) SkillsPath() string { return "/home/agent/.codex/skills" }
+
 func (c Codex) AuthSpec() launch.AuthSpec {
 	return launch.AuthSpec{
 		FileBindings: []launch.FileBinding{{

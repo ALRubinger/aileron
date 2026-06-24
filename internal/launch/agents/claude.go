@@ -125,6 +125,12 @@ func (c Claude) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, 
 	return []string{"--mcp-config", mcpConfig}, nil, nil
 }
 
+// SkillsPath returns Claude Code's container-side Agent Skills directory.
+// Claude Code reads personal skills from ~/.claude/skills, which under the
+// sandbox's /home/agent home is /home/agent/.claude/skills. The launcher
+// bind-mounts the canonical skill store read-only here at sandbox launch.
+func (c Claude) SkillsPath() string { return "/home/agent/.claude/skills" }
+
 // AuthSpec returns Claude's vault-backed credential descriptor per
 // ADR-0025.
 //

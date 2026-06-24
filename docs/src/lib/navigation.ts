@@ -71,6 +71,7 @@ export const navigation: NavItem[] = [
       { label: 'Discovering Connectors', href: '/guides/discovering-connectors/' },
       { label: 'Installing a Connector', href: '/guides/installing-a-connector/' },
       { label: 'Installing an Action', href: '/guides/installing-an-action/' },
+      { label: 'Installing a Skill', href: '/guides/installing-a-skill/' },
       { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
       { label: 'Setting up BlueBubbles for Aileron', href: '/guides/setting-up-bluebubbles/' },
       { label: 'Authoring an Action', href: '/guides/authoring-an-action/' },

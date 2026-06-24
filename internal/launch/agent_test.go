@@ -62,3 +62,4 @@ func (a testAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) 
 	return nil, nil, nil
 }
 func (a testAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+func (a testAgent) SkillsPath() string        { return "" }
