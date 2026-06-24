@@ -61,9 +61,9 @@ var linuxTarget = nodedist.Target{GOOS: "linux", GOARCH: "amd64"}
 const fetchVersion = "24.2.0"
 
 // fixture builds a complete, internally-consistent fixture: a synthetic
-// tar.gz Node archive, a SHASUMS256.txt listing its real sha256, and a valid
-// detached signature, all registered on the returned fetcher. The signed
-// archive hash is returned for assertions.
+// tar.gz Node archive and a clearsigned SHASUMS256.txt.asc listing its real
+// sha256 (the same shape Node publishes), all registered on the returned
+// fetcher. The signed archive hash is returned for assertions.
 func fixture(t *testing.T, signerKeyring func(t *testing.T) (*signer, keyring)) (*fakeFetcher, keyring, string, []byte) {
 	t.Helper()
 	distro, err := nodedist.DistroName(fetchVersion, linuxTarget)
@@ -81,7 +81,7 @@ func fixture(t *testing.T, signerKeyring func(t *testing.T) (*signer, keyring)) 
 	checksums := fmt.Sprintf("%s  %s\n", archiveHash, archiveName)
 
 	sk, kr := signerKeyring(t)
-	sig := sk.armoredDetachedSign(t, []byte(checksums))
+	sig := sk.clearsignBody(t, []byte(checksums))
 
 	urls, _ := nodedist.ResolveURLs(fetchVersion, linuxTarget)
 	ff := newFakeFetcher()
@@ -224,7 +224,7 @@ func TestFetch_UnpackFailurePropagates(t *testing.T) {
 	bogusHash := hex.EncodeToString(sum[:])
 	archiveName, _ := nodedist.ArchiveName(fetchVersion, linuxTarget)
 	checksums := fmt.Sprintf("%s  %s\n", bogusHash, archiveName)
-	sig := sk.armoredDetachedSign(t, []byte(checksums))
+	sig := sk.clearsignBody(t, []byte(checksums))
 
 	urls, _ := nodedist.ResolveURLs(fetchVersion, linuxTarget)
 	ff := newFakeFetcher()
@@ -284,7 +284,7 @@ func TestFetch_MissingChecksumEntry(t *testing.T) {
 	sk, kr := matchedSigner(t)
 	urls, _ := nodedist.ResolveURLs(fetchVersion, linuxTarget)
 	checksums := "1111111111111111111111111111111111111111111111111111111111111111  some-other-file.tar.gz\n"
-	sig := sk.armoredDetachedSign(t, []byte(checksums))
+	sig := sk.clearsignBody(t, []byte(checksums))
 
 	ff := newFakeFetcher()
 	ff.bodies[urls.Checksums] = []byte(checksums)
@@ -304,7 +304,9 @@ func TestFetch_MissingChecksumEntry(t *testing.T) {
 func TestFetch_FetchFailurePropagates(t *testing.T) {
 	ff, kr, _, _ := fixture(t, matchedSigner)
 	urls, _ := nodedist.ResolveURLs(fetchVersion, linuxTarget)
-	ff.failURL = urls.Checksums
+	// The clearsigned SHASUMS256.txt.asc is the only checksum file fetched;
+	// a failure downloading it must propagate as ErrFetchFailed.
+	ff.failURL = urls.Signature
 
 	f := &nodedist.Fetcher{HTTP: ff, Keyring: kr, Root: filepath.Join(t.TempDir(), "node")}
 	_, err := f.Fetch(context.Background(), nodedist.Request{Version: fetchVersion, Target: linuxTarget})

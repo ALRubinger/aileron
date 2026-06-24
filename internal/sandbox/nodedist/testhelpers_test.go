@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"golang.org/x/crypto/openpgp" //nolint:staticcheck // test signing primitive mirrors the production verify path.
+	"golang.org/x/crypto/openpgp"           //nolint:staticcheck // test signing primitive mirrors the production verify path.
+	"golang.org/x/crypto/openpgp/clearsign" //nolint:staticcheck // tests must produce the same clearsigned shape Node publishes.
 )
 
 // keyring aliases the openpgp.EntityList used as the trusted Node release key
@@ -16,13 +17,21 @@ type signer struct {
 	entity *openpgp.Entity
 }
 
-// armoredDetachedSign returns an armored detached signature over msg, the
-// same shape as SHASUMS256.txt.asc.
-func (s *signer) armoredDetachedSign(t *testing.T, msg []byte) []byte {
+// clearsign returns a PGP clearsigned document wrapping msg, the same shape
+// Node publishes for SHASUMS256.txt.asc (an inline "BEGIN PGP SIGNED MESSAGE"
+// carrying both the checksum lines and the signature).
+func (s *signer) clearsignBody(t *testing.T, msg []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := openpgp.ArmoredDetachSign(&buf, s.entity, bytes.NewReader(msg), nil); err != nil {
-		t.Fatalf("ArmoredDetachSign: %v", err)
+	w, err := clearsign.Encode(&buf, s.entity.PrivateKey, nil)
+	if err != nil {
+		t.Fatalf("clearsign.Encode: %v", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		t.Fatalf("write clearsign body: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close clearsign writer: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -63,9 +72,9 @@ func newTestSigner(t *testing.T) (*openpgp.Entity, openpgp.EntityList) {
 	return ent, openpgp.EntityList{ent}
 }
 
-// armoredDetachedSign signs msg with ent (free-function form used by the
-// verify unit tests).
-func armoredDetachedSign(t *testing.T, ent *openpgp.Entity, msg []byte) []byte {
+// clearsignBody signs msg with ent as a clearsigned document (free-function
+// form used by the verify unit tests).
+func clearsignBody(t *testing.T, ent *openpgp.Entity, msg []byte) []byte {
 	t.Helper()
-	return (&signer{entity: ent}).armoredDetachedSign(t, msg)
+	return (&signer{entity: ent}).clearsignBody(t, msg)
 }

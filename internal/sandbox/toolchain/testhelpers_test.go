@@ -8,7 +8,8 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/nodedist"
-	"golang.org/x/crypto/openpgp" //nolint:staticcheck // test signing primitive mirrors the production verify path.
+	"golang.org/x/crypto/openpgp"           //nolint:staticcheck // test signing primitive mirrors the production verify path.
+	"golang.org/x/crypto/openpgp/clearsign" //nolint:staticcheck // tests must produce the clearsigned shape Node publishes for SHASUMS256.txt.asc.
 )
 
 // newTestKeyring returns a fresh in-memory PGP entity plus a keyring holding its
@@ -22,13 +23,21 @@ func newTestKeyring(t *testing.T) (*openpgp.Entity, keyringList) {
 	return ent, keyringList{ent}
 }
 
-// armoredDetachedSign returns an armored detached signature over msg, the same
-// shape as SHASUMS256.txt.asc consumed by the nodedist verify path.
-func armoredDetachedSign(t *testing.T, ent *openpgp.Entity, msg []byte) []byte {
+// clearsignBody returns a PGP clearsigned document wrapping msg, the same shape
+// Node publishes for SHASUMS256.txt.asc and consumed by the nodedist verify
+// path (an inline "BEGIN PGP SIGNED MESSAGE", not a detached signature).
+func clearsignBody(t *testing.T, ent *openpgp.Entity, msg []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := openpgp.ArmoredDetachSign(&buf, ent, bytes.NewReader(msg), nil); err != nil {
-		t.Fatalf("ArmoredDetachSign: %v", err)
+	w, err := clearsign.Encode(&buf, ent.PrivateKey, nil)
+	if err != nil {
+		t.Fatalf("clearsign.Encode: %v", err)
+	}
+	if _, err := w.Write(msg); err != nil {
+		t.Fatalf("write clearsign body: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close clearsign writer: %v", err)
 	}
 	return buf.Bytes()
 }
@@ -44,7 +53,7 @@ func signedChecksumsWithHash(t *testing.T, hash string, target nodedist.Target) 
 	}
 	body = []byte(hash + "  " + name + "\n")
 	ent, kr := newTestKeyring(t)
-	sig = armoredDetachedSign(t, ent, body)
+	sig = clearsignBody(t, ent, body)
 	return body, sig, func() (keyringList, error) { return kr, nil }, name
 }
 

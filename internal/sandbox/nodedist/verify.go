@@ -4,18 +4,19 @@ import (
 	"bytes"
 	"strings"
 
-	"golang.org/x/crypto/openpgp" //nolint:staticcheck // openpgp is the GPG detached-signature primitive Node release verification needs; no maintained in-tree replacement.
+	"golang.org/x/crypto/openpgp"           //nolint:staticcheck // openpgp is the GPG signature primitive Node release verification needs; no maintained in-tree replacement.
+	"golang.org/x/crypto/openpgp/clearsign" //nolint:staticcheck // Node signs SHASUMS256.txt.asc as a clearsigned document, not a detached signature.
 )
 
 // Checksums maps an artifact filename to its lowercase hex SHA-256, as
 // published in a verified SHASUMS256.txt.
 type Checksums map[string]string
 
-// ChecksumVerifier verifies Node's SHASUMS256.txt against its detached PGP
-// signature and exposes the verified filename → sha256hex entries. Its
+// ChecksumVerifier verifies Node's clearsigned SHASUMS256.txt.asc against the
+// trusted keyring and exposes the verified filename → sha256hex entries. Its
 // contract: a checksum is only ever returned after the signature over the
-// whole file has been verified against the trusted keyring, so a caller can
-// never act on an unsigned or tampered checksum.
+// clearsigned message has been verified against the trusted keyring, so a
+// caller can never act on an unsigned or tampered checksum.
 type ChecksumVerifier struct {
 	// Keyring is the set of trusted Node release public keys. A nil or empty
 	// keyring causes VerifyAndParse to fail closed (every signature is
@@ -23,27 +24,39 @@ type ChecksumVerifier struct {
 	Keyring openpgp.EntityList
 }
 
-// VerifyAndParse checks the detached armored signature sig over the
-// SHASUMS256.txt bytes checksums against the verifier's keyring, and only on
-// success parses and returns the verified filename → sha256hex map.
+// VerifyAndParse verifies the clearsigned SHASUMS256.txt.asc against the
+// verifier's keyring, and only on success parses and returns the verified
+// filename → sha256hex map.
+//
+// Node publishes SHASUMS256.txt.asc as a PGP *clearsigned* document (an inline
+// "BEGIN PGP SIGNED MESSAGE" wrapping the checksum lines and the signature),
+// NOT a detached signature over a separate SHASUMS256.txt. So the checksums
+// that are parsed are the ones embedded in — and covered by — the verified
+// signature; there is no second, unsigned file to trust.
 //
 // Order matters and is part of the contract: the signature is verified
-// first. On a bad signature (wrong key, tampered body, malformed armor) it
-// returns an ErrBadSignature-kind error and no entries — nothing in the file
-// is trusted. Only after the signature verifies are the lines parsed.
-func (v ChecksumVerifier) VerifyAndParse(checksums, sig []byte) (Checksums, error) {
+// first. On anything but a good signature (not clearsigned, wrong key,
+// tampered body, malformed armor) it returns an ErrBadSignature-kind error and
+// no entries — nothing in the message is trusted. Only after the signature
+// verifies are the embedded lines parsed.
+func (v ChecksumVerifier) VerifyAndParse(asc []byte) (Checksums, error) {
 	if len(v.Keyring) == 0 {
 		return nil, wrapErr(ErrBadSignature, nil, "no trusted Node release keys configured")
 	}
-	_, err := openpgp.CheckArmoredDetachedSignature(
+	block, _ := clearsign.Decode(asc)
+	if block == nil {
+		return nil, wrapErr(ErrBadSignature, nil, "SHASUMS256.txt.asc is not a clearsigned message")
+	}
+	// The signature covers block.Bytes (the canonicalized signed text); verify
+	// it against the trusted keyring before trusting any embedded checksum.
+	if _, err := openpgp.CheckDetachedSignature(
 		v.Keyring,
-		bytes.NewReader(checksums),
-		bytes.NewReader(sig),
-	)
-	if err != nil {
+		bytes.NewReader(block.Bytes),
+		block.ArmoredSignature.Body,
+	); err != nil {
 		return nil, wrapErr(ErrBadSignature, err, "SHASUMS256.txt signature did not verify")
 	}
-	return parseChecksums(checksums)
+	return parseChecksums(block.Plaintext)
 }
 
 // parseChecksums decodes a SHASUMS256.txt body into a filename → sha256hex
