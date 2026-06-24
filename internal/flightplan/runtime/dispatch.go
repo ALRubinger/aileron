@@ -1,0 +1,119 @@
+package runtime
+
+import (
+	"context"
+	"fmt"
+)
+
+// DenyError reports that an effect-gated action was denied at the approval
+// channel. The step aborts and the run fails; the denial is audited.
+type DenyError struct {
+	ActionRef string
+	Reason    string
+}
+
+func (e *DenyError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("flightplan: action %q denied at approval: %s", e.ActionRef, e.Reason)
+	}
+	return fmt.Sprintf("flightplan: action %q denied at approval", e.ActionRef)
+}
+
+// enforcer wraps the action-dispatch seam with trust-contract enforcement
+// (#1507): effect-routed approval before dispatch, idempotency-aware retry,
+// and redaction of the result before it surfaces. It is the single chokepoint
+// every action-call (and source-input read) passes through, so the
+// trust-contract rules are applied in exactly one place.
+type enforcer struct {
+	dispatcher ActionDispatcher
+	approver   Approver
+}
+
+// dispatchOutcome carries the redacted result plus the approval decision (for
+// the audit record).
+type dispatchOutcome struct {
+	// Result is the redacted dispatch result that surfaces into the graph.
+	Result map[string]any
+	// Approved is the approval decision; true for an unattended read.
+	Approved bool
+	// ApprovalRequested reports whether the action routed through approval.
+	ApprovalRequested bool
+}
+
+// dispatch runs one action through the enforcement pipeline. action is the
+// decoded trust contract; args are the resolved binding values. attempt is the
+// 1-based call attempt so a retry of a non-idempotent action is refused rather
+// than silently re-issued.
+func (e *enforcer) dispatch(ctx context.Context, action Action, args map[string]any, attempt int) (dispatchOutcome, error) {
+	tc := action.TrustContract
+
+	// Idempotency: a retried dispatch of an action declared not safe-to-retry
+	// is refused rather than re-issued, so a write is never silently doubled.
+	if attempt > 1 && !tc.Idempotency.SafeToRetry {
+		return dispatchOutcome{}, fmt.Errorf("flightplan: action %q is not safe to retry (attempt %d); refusing to re-issue", action.Ref, attempt)
+	}
+
+	out := dispatchOutcome{Approved: true}
+
+	// Effect-routed approval (ADR-0009). A read runs unattended; everything
+	// else blocks on the out-of-band decision.
+	if requiresApproval(tc.Effect) {
+		out.ApprovalRequested = true
+		if e.approver == nil {
+			return dispatchOutcome{}, fmt.Errorf("flightplan: action %q has effect %q and needs approval but no approver is configured", action.Ref, tc.Effect)
+		}
+		decision, err := e.approver.Approve(ctx, ApprovalRequest{
+			ActionRef: action.Ref,
+			Effect:    tc.Effect,
+			Args:      approvalArgsSummary(args),
+		})
+		if err != nil {
+			return dispatchOutcome{}, fmt.Errorf("flightplan: approval for %q failed: %w", action.Ref, err)
+		}
+		out.Approved = decision.Approved
+		if !decision.Approved {
+			return dispatchOutcome{Approved: false, ApprovalRequested: true}, &DenyError{ActionRef: action.Ref, Reason: decision.Reason}
+		}
+	}
+
+	// Thread a stable idempotency key when the contract declares one so the
+	// upstream dedups a retried write. The key is derived from the action ref
+	// and never carries a secret.
+	dispatchArgs := args
+	if tc.Idempotency.IdempotencyKey {
+		dispatchArgs = withIdempotencyKey(args, action.Ref)
+	}
+
+	res, err := e.dispatcher.Dispatch(ctx, action.Ref, dispatchArgs)
+	if err != nil {
+		return dispatchOutcome{Approved: out.Approved, ApprovalRequested: out.ApprovalRequested}, fmt.Errorf("flightplan: dispatch %q: %w", action.Ref, err)
+	}
+
+	// Redaction runs on the dispatch result BEFORE it enters the graph or any
+	// audit summary (#1507). The original result is never surfaced unredacted.
+	out.Result = applyRedaction(res.Output, tc.Redaction)
+	return out, nil
+}
+
+// approvalArgsSummary builds the redacted args summary presented to the
+// approver. Args are already resolved binding values (never secrets), but we
+// pass a copy so the approver can never mutate the live args.
+func approvalArgsSummary(args map[string]any) map[string]any {
+	return deepCopyMap(args)
+}
+
+// idempotencyKeyField is the conventional arg key the runtime threads a stable
+// idempotency key through when the contract declares idempotencyKey:true.
+const idempotencyKeyField = "idempotencyKey"
+
+// withIdempotencyKey returns a copy of args with a stable idempotency key
+// added, derived from the action ref. The key lets the upstream deduplicate a
+// retried write. It is deterministic for a given action so a retry threads the
+// same key.
+func withIdempotencyKey(args map[string]any, ref string) map[string]any {
+	out := deepCopyMap(args)
+	if _, present := out[idempotencyKeyField]; !present {
+		out[idempotencyKeyField] = "aileron-idem-" + ref
+	}
+	return out
+}

@@ -1,0 +1,84 @@
+package freeze
+
+import (
+	"bytes"
+	"context"
+	"strings"
+	"testing"
+)
+
+// freezeExample freezes the committed worked example with a fresh signing key
+// and returns the freeze Result. It is the shared fixture for the
+// Launch-side verification tests: the bytes it produces are exactly what the
+// store persists and what VerifyFrozen must accept.
+func freezeExample(t *testing.T) Result {
+	t.Helper()
+	_, keyPath := genSigningKey(t)
+	res, err := Run(context.Background(), exampleSkillMD(t), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Composer:       fakeComposer(fakeDigest),
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run: %v", err)
+	}
+	return res
+}
+
+func TestVerifyFrozen_AcceptsUntamperedUnit(t *testing.T) {
+	res := freezeExample(t)
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen rejected an untampered unit: %v", err)
+	}
+	if v.ContentHash != res.ContentHash {
+		t.Errorf("verified contentHash = %q, want %q", v.ContentHash, res.ContentHash)
+	}
+	if !bytes.Equal(v.SkillMD, res.FrozenManifest) {
+		t.Error("verified SkillMD must equal the stored frozen manifest bytes")
+	}
+}
+
+func TestVerifyFrozen_RejectsTamperedManifest(t *testing.T) {
+	res := freezeExample(t)
+	// Flip a byte in the Markdown body (after the frontmatter) so the
+	// manifest no longer matches the signed canonical bytes.
+	tampered := bytes.Replace(res.FrozenManifest,
+		[]byte("Weekly Metrics Digest"), []byte("Weekly Metrics Digesz"), 1)
+	if bytes.Equal(tampered, res.FrozenManifest) {
+		t.Fatal("test setup: expected to alter the manifest body")
+	}
+	if _, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey); err == nil {
+		t.Fatal("VerifyFrozen accepted a tampered manifest")
+	}
+}
+
+func TestVerifyFrozen_RejectsTamperedSignature(t *testing.T) {
+	res := freezeExample(t)
+	sig := append([]byte(nil), res.Signature...)
+	sig[0] ^= 0xFF
+	if _, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, sig, res.PublicKey); err == nil {
+		t.Fatal("VerifyFrozen accepted a tampered signature")
+	}
+}
+
+func TestVerifyFrozen_RejectsContentHashMismatch(t *testing.T) {
+	res := freezeExample(t)
+	// Rewrite the recorded contentHash in the frozen manifest to a different
+	// (but well-formed) digest. The recomputed hash will no longer match.
+	bad := "sha256:" + strings.Repeat("0", 64)
+	tampered := bytes.Replace(res.FrozenManifest, []byte(res.ContentHash), []byte(bad), 1)
+	if bytes.Equal(tampered, res.FrozenManifest) {
+		t.Fatal("test setup: contentHash not found in frozen manifest")
+	}
+	if _, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey); err == nil {
+		t.Fatal("VerifyFrozen accepted a manifest whose recorded hash was altered")
+	}
+}
+
+func TestVerifyFrozen_RejectsMissingLockBlock(t *testing.T) {
+	// An unfrozen manifest (no lock block) is not a frozen unit.
+	if _, err := VerifyFrozen(exampleSkillMD(t), []byte("{}\n"), []byte("sig"), []byte("pub")); err == nil {
+		t.Fatal("VerifyFrozen accepted an unfrozen manifest")
+	}
+}
