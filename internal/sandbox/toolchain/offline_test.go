@@ -35,7 +35,7 @@ func (f failingCLIInstaller) Install(_ context.Context, _, _, _ string) (string,
 // offline path's entrypoint probe finds it.
 func stageCLIEntrypoint(t *testing.T, cacheRoot, cliVersion string) string {
 	t.Helper()
-	entrypoint := cliEntrypointForCache(cacheRoot, cliVersion)
+	entrypoint, _ := cliEntrypointForCache(cacheRoot, cliVersion)
 	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
 		t.Fatalf("mkdir CLI prefix: %v", err)
 	}

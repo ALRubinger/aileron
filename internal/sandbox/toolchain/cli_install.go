@@ -13,11 +13,33 @@ import (
 // this package never carries its own copy of the pin.
 const devcontainerCLIPackage = "@devcontainers/cli"
 
-// cliEntrypointRelPath is the path, relative to an npm install prefix, of the
-// devcontainer CLI's JS entrypoint. npm installs a package's files under
-// <prefix>/lib/node_modules/<package>/, and @devcontainers/cli's package.json
-// "bin" points at devcontainer.js under its bin/ directory.
-var cliEntrypointRelPath = filepath.Join("lib", "node_modules", "@devcontainers", "cli", "devcontainer.js")
+// cliEntrypointRelPaths are the candidate paths, relative to an npm install
+// prefix, of the devcontainer CLI's JS entrypoint. `npm install --global
+// --prefix <prefix>` lands the package's files under
+// <prefix>/lib/node_modules/<package>/ on Unix but <prefix>/node_modules/<package>/
+// on Windows (npm omits the lib/ segment there), so both layouts must be probed.
+// @devcontainers/cli's package.json "bin" points at devcontainer.js under its
+// own root. The Unix path is first so it is the canonical one used in error
+// messages (see cliEntrypointForPrefix).
+var cliEntrypointRelPaths = []string{
+	filepath.Join("lib", "node_modules", "@devcontainers", "cli", "devcontainer.js"),
+	filepath.Join("node_modules", "@devcontainers", "cli", "devcontainer.js"),
+}
+
+// cliEntrypointForPrefix returns the @devcontainers/cli JS entrypoint under an
+// npm install prefix. It probes the Unix and Windows install layouts in order
+// and returns the first that exists with found=true. When none exists it returns
+// the canonical Unix path with found=false, so callers get a stable,
+// human-readable path to name in "not found" errors regardless of platform.
+func cliEntrypointForPrefix(prefix string) (string, bool) {
+	for _, rel := range cliEntrypointRelPaths {
+		candidate := filepath.Join(prefix, rel)
+		if fileExists(candidate) {
+			return candidate, true
+		}
+	}
+	return filepath.Join(prefix, cliEntrypointRelPaths[0]), false
+}
 
 // cliCachePrefix is the version-keyed npm install prefix the CLI installer
 // writes into: <cacheRoot>/devcontainer-cli/<cliVersion>. It is the single
@@ -41,8 +63,7 @@ type npmCLIInstaller struct{}
 // returned with fromCache=false.
 func (npmCLIInstaller) Install(ctx context.Context, nodeBinary, cliVersion, cacheRoot string) (string, bool, error) {
 	prefix := cliCachePrefix(cacheRoot, cliVersion)
-	entrypoint := filepath.Join(prefix, cliEntrypointRelPath)
-	if fileExists(entrypoint) {
+	if entrypoint, found := cliEntrypointForPrefix(prefix); found {
 		return entrypoint, true, nil
 	}
 	if err := os.MkdirAll(prefix, 0o755); err != nil {
@@ -54,7 +75,8 @@ func (npmCLIInstaller) Install(ctx context.Context, nodeBinary, cliVersion, cach
 	}
 	// Run the managed node against its bundled npm to install the pinned package
 	// into the version-keyed prefix. `--prefix` makes npm treat the prefix as a
-	// global install root, landing files under <prefix>/lib/node_modules.
+	// global install root, landing files under <prefix>/lib/node_modules on Unix
+	// and <prefix>/node_modules on Windows (cliEntrypointForPrefix probes both).
 	spec := devcontainerCLIPackage + "@" + cliVersion
 	args := []string{npmCLI, "install", "--global", "--prefix", prefix, "--no-audit", "--no-fund", spec}
 	cmd := exec.CommandContext(ctx, nodeBinary, args...)
@@ -63,7 +85,8 @@ func (npmCLIInstaller) Install(ctx context.Context, nodeBinary, cliVersion, cach
 	if err := cmd.Run(); err != nil {
 		return "", false, fmt.Errorf("npm install %s: %w", spec, err)
 	}
-	if !fileExists(entrypoint) {
+	entrypoint, found := cliEntrypointForPrefix(prefix)
+	if !found {
 		return "", false, fmt.Errorf("npm install %s did not produce %s", spec, entrypoint)
 	}
 	return entrypoint, false, nil
