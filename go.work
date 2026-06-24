@@ -6,4 +6,5 @@ use (
 	./internal
 	./sdk/go
 	./test/integration
+	./test/system/lib
 )
