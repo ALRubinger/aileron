@@ -110,6 +110,30 @@ task generate:tools-lock VERSION=22.14.0
 
 The generator (`internal/tools/toolslock`) resolves each supported platform's archive sha256 from Node's published `SHASUMS256.txt` and writes the lockfile in canonical form. It does not verify the detached GPG signature on that file; the signature-verified fetch pipeline is a separate concern under #1525. The generated file is deterministic, so a regenerate with no version change is a no-op diff. A test asserts the committed lockfile is canonical, so a hand-edit or a stale regenerate fails CI.
 
+### Refreshing the embedded Node release keyring
+
+The signature-verified fetch pipeline trusts a baked-in set of GPG public keys, not a key fetched at runtime. Those keys live in `internal/sandbox/nodedist/nodekeys.asc`, embedded into the binary via `go:embed` and parsed by `DefaultKeyring` in `internal/sandbox/nodedist/keyring.go`. The asset holds one armored public-key block per current Node release signer.
+
+The authoritative source for these keys is the [nodejs/node](https://github.com/nodejs/node) repository: its README maintains the canonical list of release-signing GPG key fingerprints (the "Release keys" / "Release Schedule" signer table). Those fingerprints, and only those, are what the embedded asset must contain. Do not derive or auto-pin fingerprint constants from the asset itself: the trust anchor is the human-verified nodejs/node key list, and re-deriving constants from the committed blob would launder an unverified key into a "pinned" one.
+
+Refresh the asset by hand when Node rotates a release signer (for example when a new pinned version's `SHASUMS256.txt` is signed by a key not yet in the keyring):
+
+1. Open the current release-key list in the [nodejs/node README](https://github.com/nodejs/node#release-keys) and note the full fingerprint of each active signer.
+2. For each fingerprint, fetch the public key from a keyserver and verify its fingerprint matches the README exactly before trusting it:
+
+   ```bash
+   gpg --keyserver hkps://keys.openpgp.org --recv-keys <FINGERPRINT>
+   gpg --fingerprint <FINGERPRINT>   # confirm it matches the nodejs/node README
+   ```
+
+3. Re-export the verified keys as armored blocks and write them, concatenated (one block per signer), to `internal/sandbox/nodedist/nodekeys.asc`:
+
+   ```bash
+   gpg --armor --export <FINGERPRINT_1> <FINGERPRINT_2> ... > internal/sandbox/nodedist/nodekeys.asc
+   ```
+
+`TestDefaultKeyringVerifiesPinnedRelease` (`internal/sandbox/nodedist/keyring_test.go`) is the regression guard for this asset. It verifies the genuine `SHASUMS256.txt` signature Node published for the pinned version against the embedded keyring, so it fails until the asset is refreshed with the signer of the pinned release. A red `TestDefaultKeyringVerifiesPinnedRelease` after a Node version bump is the signal that the keyring needs the procedure above.
+
 ## Managed Toolchain Build
 
 A Tier 1 devcontainer that declares `features` cannot be built with raw `docker build`, so Aileron routes it through `@devcontainers/cli`, which needs a Node runtime. By default Aileron resolves both through the host's `npx` (`npx --yes @devcontainers/cli@<pinned>`), so the host must have Node installed. The managed toolchain removes that host prerequisite: Aileron provisions a verified, pinned Node and the pinned CLI itself, leaving Docker as the only host prerequisite for a Features build.
