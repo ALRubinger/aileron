@@ -105,7 +105,13 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server ./internal/server
+      # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
+      # binaries import no cgo, so an ambient CGO_ENABLED=1 only invites
+      # toolchain failures (e.g. runtime/cgo's -fPIC under clang/msvc on
+      # Windows). The inline assignment is required: go-task's task-level env:
+      # does NOT override a CGO_ENABLED already set in the OS environment, and a
+      # cmd-level env: is silently ignored — a shell prefix always wins.
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server ./internal/server
 
   build:mcp:
     desc: Build the Aileron MCP server binary locally (plus a Linux variant on macOS/Windows hosts so `aileron launch --sandbox=docker` can bind-mount it into the container)
@@ -118,14 +124,18 @@ tasks:
       HOST_GOARCH:
         sh: go env GOARCH
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
+      # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
+      # inline assignment is required: go-task's task-level env: does NOT
+      # override a CGO_ENABLED already set in the OS environment, and a cmd-level
+      # env: is silently ignored — a shell prefix always wins.
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
       # Sandbox launch bind-mounts aileron-mcp into a Linux container. On
       # non-Linux hosts the host-arch Mach-O / PE binary above fails with
       # exec format error; this second build produces a sibling the
       # launcher's resolveSandboxMCPBinary prefers for the sandbox path.
       - |
         if [ "{{.HOST_GOOS}}" != "linux" ]; then
-          GOOS=linux GOARCH={{.HOST_GOARCH}} go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp-linux-{{.HOST_GOARCH}} ./cmd/aileron-mcp
+          CGO_ENABLED=0 GOOS=linux GOARCH={{.HOST_GOARCH}} go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp-linux-{{.HOST_GOARCH}} ./cmd/aileron-mcp
         fi
 
   build:cli:
@@ -135,7 +145,11 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
+      # Force a pure-Go build (CGO_ENABLED=0) to match .goreleaser.yml. The
+      # inline assignment is required: go-task's task-level env: does NOT
+      # override a CGO_ENABLED already set in the OS environment, and a cmd-level
+      # env: is silently ignored — a shell prefix always wins.
+      - CGO_ENABLED=0 go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
 
   build:webapp:
     desc: Install webapp dependencies, build static output, copy into internal/app/webapp_dist for Go embed
