@@ -48,6 +48,10 @@ func examplePath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.skill.md")
 }
 
+func rung1ExamplePath(t *testing.T) string {
+	return filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.rung1.skill.md")
+}
+
 // compileSchema compiles the committed Flight Plan manifest schema.
 func compileSchema(t *testing.T) *jsonschema.Schema {
 	t.Helper()
@@ -144,6 +148,25 @@ func TestWorkedExampleValidates(t *testing.T) {
 	inst := frontmatter(t, examplePath(t))
 	if err := sch.Validate(inst); err != nil {
 		t.Fatalf("worked example must validate against the schema:\n%v", err)
+	}
+}
+
+// TestRung1WorkedExampleValidates is the rung-1 worked-example drift guard:
+// the committed rung-1 example (a skill naming a whole prebuilt image)
+// validates against the committed schema, paralleling the rung-2 example.
+func TestRung1WorkedExampleValidates(t *testing.T) {
+	sch := compileSchema(t)
+	inst := frontmatter(t, rung1ExamplePath(t))
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("rung-1 worked example must validate against the schema:\n%v", err)
+	}
+	// It declares a rung-1 image and no rung-2 capability units.
+	env := inst["aileron"].(map[string]any)["requires"].(map[string]any)["executionEnvironment"].(map[string]any)
+	if _, ok := env["rung1Image"]; !ok {
+		t.Error("rung-1 example must declare rung1Image")
+	}
+	if _, ok := env["rung2CapabilityUnits"]; ok {
+		t.Error("rung-1 example must not declare rung2CapabilityUnits")
 	}
 }
 
@@ -288,35 +311,42 @@ func TestNoSecretValueField(t *testing.T) {
 	}
 }
 
-// TestExecutionEnvironmentRequiresExactlyOneRung: an execution environment that
-// declares both rung1Image and rung2CapabilityUnits, or neither, fails. The
-// prose states exactly one rung is declared (ADR-0027 execution rungs).
-func TestExecutionEnvironmentRequiresExactlyOneRung(t *testing.T) {
+// TestExecutionEnvironmentRung1AndRung2MutuallyExclusive: declaring both
+// rung1Image and rung2CapabilityUnits fails. The two image rungs are mutually
+// exclusive (ADR-0027 execution rungs). This is the load-bearing guarantee the
+// rung-3 relaxation must not weaken.
+func TestExecutionEnvironmentRung1AndRung2MutuallyExclusive(t *testing.T) {
 	sch := compileSchema(t)
-
-	bothRungs := func(env map[string]any) {
-		env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
-		env["rung2CapabilityUnits"] = map[string]any{"features": []any{"ghcr.io/example/feature:1"}}
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	requires := blk["requires"].(map[string]any)
+	env := requires["executionEnvironment"].(map[string]any)
+	env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
+	env["rung2CapabilityUnits"] = map[string]any{"features": []any{"ghcr.io/example/feature:1"}}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("declaring both rung1Image and rung2CapabilityUnits must be rejected")
 	}
-	emptyEnv := func(env map[string]any) {
-		delete(env, "rung1Image")
-		delete(env, "rung2CapabilityUnits")
-	}
+}
 
-	for name, mutate := range map[string]func(map[string]any){
-		"both rungs": bothRungs,
-		"no rung":    emptyEnv,
-	} {
-		t.Run(name, func(t *testing.T) {
-			inst := validExampleInstance(t)
-			blk := aileronBlock(t, inst)
-			requires := blk["requires"].(map[string]any)
-			env := requires["executionEnvironment"].(map[string]any)
-			mutate(env)
-			if err := sch.Validate(inst); err == nil {
-				t.Fatalf("an execution environment with %q must be rejected", name)
-			}
-		})
+// TestExecutionEnvironmentRung3OnlyAccepted: an execution environment that
+// declares only the reserved rung3PerStepImages slot (neither rung1Image nor
+// rung2CapabilityUnits) is valid. The schema permits the reserved slot;
+// freeze parses it and reports it as build-deferred rather than building
+// anything (#1510, ADR-0027). An execution environment with no image rung is
+// no longer a schema rejection.
+func TestExecutionEnvironmentRung3OnlyAccepted(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	requires := blk["requires"].(map[string]any)
+	env := requires["executionEnvironment"].(map[string]any)
+	delete(env, "rung1Image")
+	delete(env, "rung2CapabilityUnits")
+	env["rung3PerStepImages"] = map[string]any{
+		"steps": []any{map[string]any{"image": "registry.example.com/per-step-tool:1"}},
+	}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("a rung-3-only execution environment must validate:\n%v", err)
 	}
 }
 

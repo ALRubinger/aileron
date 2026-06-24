@@ -25,49 +25,49 @@ func TestResolveImages_BothRungsRejected(t *testing.T) {
 		"rung1Image":           map[string]any{"ref": "a:1"},
 		"rung2CapabilityUnits": map[string]any{"features": []any{"f"}},
 	})
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
 		t.Error("declaring both rungs must error")
 	}
 }
 
 func TestResolveImages_Rung1MissingRef(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"rung1Image": map[string]any{}})
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
 		t.Error("rung1Image with no ref must error")
 	}
 }
 
 func TestResolveImages_Rung1NotMapping(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"rung1Image": "scalar"})
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
 		t.Error("rung1Image that is not a mapping must error")
 	}
 }
 
 func TestResolveImages_Rung2EmptyFeatures(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"rung2CapabilityUnits": map[string]any{"features": []any{}}})
-	if _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
 		t.Error("rung2 with empty features must error")
 	}
 }
 
 func TestResolveImages_Rung2EmptyFeatureEntry(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"rung2CapabilityUnits": map[string]any{"features": []any{""}}})
-	if _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
 		t.Error("rung2 with an empty feature entry must error")
 	}
 }
 
 func TestResolveImages_Rung2NotMapping(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"rung2CapabilityUnits": "scalar"})
-	if _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, fakeComposer(fakeDigest)); err == nil {
 		t.Error("rung2CapabilityUnits that is not a mapping must error")
 	}
 }
 
 func TestResolveImages_NeitherRung(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"somethingElse": map[string]any{}})
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
 		t.Error("an executionEnvironment with neither rung must error")
 	}
 }

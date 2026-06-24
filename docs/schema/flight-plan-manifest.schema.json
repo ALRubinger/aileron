@@ -83,11 +83,19 @@
     },
     "executionEnvironment": {
       "type": "object",
-      "description": "The execution-environment dependency. Exactly one of rung-1 (a pinned prebuilt image) or rung-2 (composed capability units on the Aileron base) is declared per ADR-0027 execution rungs. Rung-3 per-step sibling-image dispatch is a reserved, build-deferred slot.",
+      "description": "The execution-environment dependency. At most one of rung-1 (a pinned prebuilt image) or rung-2 (composed capability units on the Aileron base) is declared per ADR-0027 execution rungs; rung-1 and rung-2 are mutually exclusive. Rung-3 per-step sibling-image dispatch is a reserved, build-deferred slot: a manifest may declare rung3PerStepImages alone, in which case freeze parses it and reports it as build-deferred rather than building anything.",
       "additionalProperties": false,
       "oneOf": [
         { "required": ["rung1Image"], "not": { "required": ["rung2CapabilityUnits"] } },
-        { "required": ["rung2CapabilityUnits"], "not": { "required": ["rung1Image"] } }
+        { "required": ["rung2CapabilityUnits"], "not": { "required": ["rung1Image"] } },
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["rung1Image"] },
+              { "required": ["rung2CapabilityUnits"] }
+            ]
+          }
+        }
       ],
       "properties": {
         "rung1Image": {
@@ -122,9 +130,9 @@
           }
         },
         "rung3PerStepImages": {
-          "$comment": "RESERVED, BUILD-DEFERRED. Rung three is per-step sealed sibling-image dispatch with mount and run-and-collect I/O. ADR-0027 defines it as a manifest slot only so a later build can fill it without a format change. It is intentionally typed loosely here and MUST NOT be relied on by v1 tooling.",
+          "$comment": "RESERVED, BUILD-DEFERRED. Rung three is per-step sealed sibling-image dispatch with mount and run-and-collect I/O. ADR-0027 defines it as a manifest slot only so a later build can fill it without a format change. It is intentionally typed loosely here and MUST NOT be relied on by v1 tooling. Freeze parses a rung-3 declaration and reports it as build-deferred (empty image set); it never builds a rung-3 image in v1.",
           "type": "object",
-          "description": "RESERVED and build-deferred. Per-step sibling-image dispatch (ADR-0027 rung three). Designed as a manifest slot only; not implemented in v1. Do not author this field expecting runtime support."
+          "description": "RESERVED and build-deferred. Per-step sibling-image dispatch (ADR-0027 rung three). Designed as a manifest slot only; not implemented in v1. A manifest may declare this slot alone: freeze parses it and reports it as build-deferred rather than building anything. Do not author this field expecting runtime support."
         }
       }
     },

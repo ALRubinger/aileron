@@ -77,6 +77,12 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "  ContentHash: %s\n", res.ContentHash)
 	fmt.Fprintf(stdout, "  Stored at:   %s\n", s.FrozenDir(res.Name, id))
+	// Surface any execution-environment rung that was declared but
+	// intentionally not built (today: the reserved rung-3 slot). The operator
+	// is told explicitly rather than left to assume the image set is complete.
+	for _, rung := range res.DeferredRungs {
+		fmt.Fprintf(stdout, "  Rung 3 declared: build-deferred (reserved manifest slot %q, ADR-0027); no image built\n", rung)
+	}
 	return 0
 }
 
