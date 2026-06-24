@@ -27,6 +27,7 @@ jobs:
             cmd/aileron-mcp/go.mod
             sdk/go/go.mod
             test/integration/go.mod
+            test/system/lib/go.sum
 
       - name: Verify generated code
         working-directory: internal
@@ -87,6 +88,7 @@ jobs:
             cmd/aileron-mcp/go.mod
             sdk/go/go.mod
             test/integration/go.mod
+            test/system/lib/go.sum
 
       - name: Install Task
         uses: arduino/setup-task@v2
