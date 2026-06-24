@@ -133,6 +133,45 @@ image_ref_matches 'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:abc' \
 	'ghcr.io/alrubinger/aileron-sandbox-codex@sha256:abc' >/dev/null 2>&1
 check "image_ref_matches accepts an exact digest override" "$?" 0
 
+# --- LOCAL (no registry host) tag: the recipe'd-but-not-publishable agent -----
+# claude (#1451/#1585) resolves LocalAgentImageTag = `aileron/sandbox-agent-
+# claude:<tag>` (composition.go:188-198, scaffold.go:106-108), a local-daemon
+# repo with NO registry host. The shared probe must derive the repo from the
+# actual ref and accept :edge/:latest on it, exactly as it does for the GHCR
+# repo — that is what lets claude reuse probes.sh verbatim. This locks that
+# contract so the R8.1 probe handles a host-less local tag.
+
+# image_repo strips :edge from a no-registry-host local ref.
+out="$(image_repo 'aileron/sandbox-agent-claude:edge')"
+assert_eq "aileron/sandbox-agent-claude" "$out" "image_repo strips :edge from a local ref" >/dev/null 2>&1
+check "image_repo strips the tag from a no-registry-host ref" "$?" 0
+
+# image_repo strips :latest from the same local ref (release-path tag).
+out="$(image_repo 'aileron/sandbox-agent-claude:latest')"
+assert_eq "aileron/sandbox-agent-claude" "$out" "image_repo strips :latest from a local ref" >/dev/null 2>&1
+check "image_repo strips :latest from a no-registry-host ref" "$?" 0
+
+# image_ref_matches accepts the local :edge tag on its own repo (claude default).
+image_ref_matches 'aileron/sandbox-agent-claude:edge' \
+	'aileron/sandbox-agent-claude:edge' >/dev/null 2>&1
+check "image_ref_matches accepts the local :edge tag on its own repo" "$?" 0
+
+# image_ref_matches accepts the local :latest tag on its own repo (release path).
+# claude has no GHCR-published digest, so :latest is the release shape here.
+image_ref_matches 'aileron/sandbox-agent-claude:latest' \
+	'aileron/sandbox-agent-claude:latest' >/dev/null 2>&1
+check "image_ref_matches accepts the local :latest tag on its own repo" "$?" 0
+
+# A wrong repo (codex) must still fail against the local claude expectation.
+image_ref_matches 'aileron/sandbox-agent-claude:edge' \
+	'aileron/sandbox-agent-codex:edge' >/dev/null 2>&1
+check "image_ref_matches rejects a different local agent repo" "$?" 1
+
+# A wrong (non-floating) tag on the right local repo must still fail.
+image_ref_matches 'aileron/sandbox-agent-claude:edge' \
+	'aileron/sandbox-agent-claude:v0.0.1' >/dev/null 2>&1
+check "image_ref_matches rejects an unexpected tag on the local repo" "$?" 1
+
 # --- probe_mcp_runtime: the agent-agnostic R8.2 core (binary + env) ----------
 # All sub-checks green: aileron-mcp present (test -x rc 0) and every daemon env
 # var set (printenv rc 0) -> returns 0.
