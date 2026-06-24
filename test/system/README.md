@@ -16,13 +16,35 @@ test/system/
   README.md            this file
   codex.sh             the codex scenario body (#1476)
   claude.sh            the claude scenario body (#1477)
+  scenario/            shell-free Go scenario driver (#1624), its own module,
+                       run by hand with `go run ./test/system/scenario codex`;
+                       NOT in GO_TEST_PACKAGES, so the live path never runs in CI
+    main.go            agent-name dispatch (codex today; claude in #1625)
+    scenario.go        the live orchestration (background launch, reap,
+                       discovery poll, probes, sentinel read, R10 audit)
+    docker.go          thin docker ps/inspect/exec shellouts returning raw facts
   lib/
     assert.sh          generic assert/log helpers (sourced)
     probes.sh          agent-agnostic R8 wiring-invariant probes (sourced)
-    *_test.go          Go contract suite for assert.sh and probes.sh plus the
-                       launch-target taskenv wiring regression; needs only the
-                       Go toolchain, no Docker and no shell (CI-safe, Windows)
+    runner.go          AgentConfig + CodexConfig + BuildExecArgs/BuildPrompt
+    sentinel.go        per-run sentinel (R9) generation
+    audit.go           pure R10 audit event-record count + assertion
+    scenario.go        pure R8.1/8.3/8.4/8.5 decision predicates (docker-free)
+    *_test.go          Go contract suite for the shell library and the pure Go
+                       scenario logic plus the launch-target taskenv wiring
+                       regression; needs only the Go toolchain, no Docker and no
+                       shell (CI-safe, Windows)
 ```
+
+The Go driver is the shell-free equivalent of `codex.sh`. Both still exist
+side by side: the Taskfile target `test:system:launch:codex` runs `codex.sh`
+today, and the Go path is added and documented here. `codex.sh` (and
+`claude.sh`/`probes.sh`/`assert.sh`) stay on disk and functional; the Taskfile
+rewire and the shell retirement happen in #1626. The pure decision logic the Go
+driver depends on lives in `lib/` (`systestlib`) and is covered by the standard
+`go test ./test/system/lib/...` CI job; the `scenario/` module holds only the
+impure docker/exec/poll plumbing and has no tests by design (it is the live
+path, excluded from CI).
 
 ## Static gate (what runs unattended vs. by hand)
 
@@ -30,7 +52,9 @@ test/system/
 | --- | --- | --- | --- |
 | Library contract tests | `task test:system:lib` | Go toolchain | yes, runs unattended and on Windows (Go contract suite, no Docker, no shell) |
 | Scenario wiring compile | `task --dry test:system:launch:codex` / `:claude` | nothing | yes — compiles the target, does not launch |
-| Live codex scenario | `task test:system:launch:codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
+| Go scenario driver compile | `go build ./test/system/scenario` | Go toolchain | yes — compiles the driver; its own module, not in GO_TEST_PACKAGES |
+| Live codex scenario (shell) | `task test:system:launch:codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
+| Live codex scenario (Go) | `go run ./test/system/scenario codex` | Docker + `codex login` + tokens | **no — by hand on a real host** |
 | Live claude scenario | `task test:system:launch:claude` | Docker + Claude login (vault, ADR-0025) + tokens | **no — by hand on a real host** |
 
 The headless path validates the **wiring** (the target compiles, the build
@@ -57,6 +81,34 @@ The target builds a fresh `aileron` (+ the Linux `aileron-mcp` sibling),
 checks the preconditions, runs `test/system/codex.sh`, and on exit the
 deferred cleanup removes the sandbox container and the temp workspace even if
 an assertion failed.
+
+## Run the codex scenario by hand (shell-free Go)
+
+`test/system/scenario` is the shell-free Go equivalent of `codex.sh`. It runs
+the same R7a/R8.1-8.6/R9/R10 assertions, delegating every decision to the pure
+`lib/` (`systestlib`) package, and holds only the impure docker/exec/poll
+plumbing. It needs the same prerequisites as the shell scenario (Docker, a
+`codex login`, and optionally a running daemon for R10). It reads its inputs
+from the environment, so build an `aileron` first and point the driver at it:
+
+```sh
+task build                                  # produces build/aileron
+AILERON_BIN="$PWD/build/aileron" \
+WORKSPACE="$(mktemp -d)" \
+AILERON_STATE_DIR="$HOME/.aileron" \
+  go run ./test/system/scenario codex
+```
+
+`EXPECTED_IMAGE` overrides the default expected image ref the same way the shell
+scenario does. `AILERON_STATE_DIR` is optional: when unset the R10 audit
+assertion is skipped with a logged note. The driver imports the scenario library
+as a Go package, so the `AILERON_SYSTEST_LIB` variable the shell path needs is
+vestigial for the Go path and is not read.
+
+The driver is its own nested Go module outside `./test/system/lib/...`, so the
+standard `go test ./test/system/lib/...` coverage and vet CI job never compiles
+or executes it and cannot start a real container. Its pure logic is covered by
+the `systestlib` unit tests; the driver itself has no tests by design.
 
 ## What the codex scenario asserts
 
