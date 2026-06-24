@@ -234,16 +234,19 @@ func TestValidateSandboxEnrichesDevcontainerMismatch(t *testing.T) {
 	orig := validateSandboxImageForLaunch
 	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
 	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, _ map[string]string, _ []sandboxcontainer.Volume, _ string) error {
-		return errors.New("validate sandbox image image:test: agent command not found in sandbox image: claude: exit status 127")
+		return errors.New("validate sandbox image image:test: agent command not found in sandbox image: codex: exit status 127")
 	}
 
+	// codex is publishable, so the enrichment names its published image as the
+	// alternative. Claude is no longer publishable (#1451), so it would not
+	// trigger this hint.
 	workDir := t.TempDir()
 	err := validateSandbox(context.Background(), SandboxLaunchPlan{
 		Runtime: "docker",
 		Image:   "image:test",
 		Tier:    sandboxcomposition.TierDevcontainer,
 	}, LaunchConfig{
-		Agent: publishedNameAgent{name: "claude"},
+		Agent: publishedNameAgent{name: "codex"},
 		Dir:   workDir,
 	}, nil)
 	if err == nil {
@@ -253,7 +256,7 @@ func TestValidateSandboxEnrichesDevcontainerMismatch(t *testing.T) {
 	for _, want := range []string{
 		string(sandboxcomposition.TierDevcontainer),
 		filepath.Join(workDir, sandboxcomposition.DefaultDevcontainerPath),
-		sandboxcomposition.PublishedAgentImage("claude", version.Version),
+		sandboxcomposition.PublishedAgentImage("codex", version.Version),
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("validateSandbox error missing %q: %s", want, msg)

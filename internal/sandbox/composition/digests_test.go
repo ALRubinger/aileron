@@ -161,7 +161,9 @@ func TestPublishedAgentImageDigestPin(t *testing.T) {
 
 func TestPublishedAgents(t *testing.T) {
 	got := PublishedAgents()
-	want := []string{"claude", "codex"}
+	// Only publishable agents are listed. Claude is recipe'd but not publishable
+	// (#1451), so it is excluded; codex (Apache-2.0) remains.
+	want := []string{"codex"}
 	if len(got) != len(want) {
 		t.Fatalf("PublishedAgents() = %v, want %v", got, want)
 	}

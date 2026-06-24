@@ -97,28 +97,66 @@ func PublishedAgentImage(agent, version string) string {
 	return DefaultPublishedImageRepository + "-" + agent + ":" + imageTag(version)
 }
 
-// PublishedAgents returns the agents that ship a prebuilt per-agent image,
-// sorted for determinism. It is the single source of truth for "which images
-// exist" consumed by the digest-pin generator (internal/tools/agentdigests), so
-// a new agent gaining a recipe is automatically pinned at the next release prep.
+// LocalAgentImageTag returns the local-only image tag for a recipe'd-but-not-
+// publishable agent built from a synthesized devcontainer (#1451). The name is
+// deterministic per (agent, image tag) so the `auto` build policy can skip a
+// rebuild when the image already exists locally. It is never pushed to a
+// registry — the "aileron/" prefix (no registry host) keeps it a local-daemon
+// tag, mirroring ProjectImageTag's convention.
+func LocalAgentImageTag(agent, version string) string {
+	return "aileron/sandbox-agent-" + agent + ":" + imageTag(version)
+}
+
+// PublishedAgents returns the agents whose per-agent image is publishable, i.e.
+// whose CLI license permits Aileron to bake it into a redistributable image and
+// host it on GHCR (see agentPublishable). It is the single source of truth for
+// "which images exist to publish" consumed by the digest-pin generator
+// (internal/tools/agentdigests) and the sandbox-agents CI matrix, so a
+// publishable agent is automatically pinned at release prep and a
+// non-publishable one (e.g. Claude Code) is auto-excluded from publishing
+// without further wiring (#1451). The list is sorted for determinism.
 func PublishedAgents() []string {
 	agents := make([]string, 0, len(agentRecipes))
-	for agent := range agentRecipes {
-		agents = append(agents, agent)
+	for agent, recipe := range agentRecipes {
+		if recipe.Publishable {
+			agents = append(agents, agent)
+		}
 	}
 	sort.Strings(agents)
 	return agents
 }
 
-// PublishedAgentExists reports whether agent has a prebuilt per-agent image to
-// pull for the build-free default. It reuses the agentRecipes set, which is the
-// single source of truth for "this agent has a verified recipe and ships a
-// published Feature/image" (see recipes.go). Discover and `sandbox check` share
-// this predicate so both resolve the same image (the launch/check parity
-// requirement). New agents that gain a recipe automatically gain auto-resolve.
+// PublishedAgentExists reports whether agent ships a prebuilt, publishable
+// per-agent image to pull for the build-free default. It is the publish-eligible
+// subset of recipe-existence: an agent must both have a verified recipe AND have
+// a redistributable CLI license (see agentPublishable). Discover and `sandbox
+// check` share this predicate so both resolve the same published image (the
+// launch/check parity requirement). A recipe'd-but-not-publishable agent (e.g.
+// Claude Code) is false here and resolves to a LOCAL Feature build instead of a
+// published image pull (#1451).
 func PublishedAgentExists(agent string) bool {
-	_, ok := recipeForAgent(agent)
-	return ok
+	return agentPublishable(agent)
+}
+
+// synthesizedAgentDevcontainer returns the devcontainer.json that composes the
+// Aileron base image with a single agent Feature, used by Discover's
+// no-.devcontainer local-build branch for a recipe'd-but-not-publishable agent
+// (e.g. Claude Code). It carries no commented customer-tooling slot and no
+// customizations block: it is a build-only artifact materialized into a managed
+// temp workspace folder by the container builder, never written into the user's
+// workDir (#1451). The Aileron customizations the launcher needs (mediation,
+// approval surface, credential sealing) are applied runtime-side regardless of
+// image provenance, so this minimal config is sufficient to build a launchable
+// agent image.
+func synthesizedAgentDevcontainer(agent, version string) string {
+	return fmt.Sprintf(`{
+  "name": "Aileron sandbox",
+  "image": %q,
+  "features": {
+    %q: {}
+  }
+}
+`, BaseImage(version), FeatureReference(agent))
 }
 
 // starterDevcontainer emits the Feature-composing devcontainer.json recorded in

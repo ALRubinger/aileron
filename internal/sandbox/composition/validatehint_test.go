@@ -20,7 +20,10 @@ func agentNotFoundErr(agent string) error {
 // names none of those) and passes after.
 func TestEnrichValidateErrorDevcontainerMismatch(t *testing.T) {
 	const (
-		agent   = "claude"
+		// codex is publishable (Apache-2.0), so the devcontainer-mismatch hint
+		// names its published image as the alternative. Claude is no longer
+		// publishable (#1451), so it would not trigger this hint.
+		agent   = "codex"
 		version = "1.2.3"
 		workDir = "/home/dev/project"
 	)
@@ -283,8 +286,10 @@ func TestEnrichValidateErrorNilUnchanged(t *testing.T) {
 }
 
 func TestEnrichValidateErrorEmptyWorkDirDefaultsToCwd(t *testing.T) {
-	base := agentNotFoundErr("claude")
-	got := EnrichValidateError(base, TierDevcontainer, "claude", "1.2.3", "", "linux", false)
+	// codex is publishable, so the devcontainer-mismatch hint fires and names
+	// the devcontainer path (claude is no longer publishable, #1451).
+	base := agentNotFoundErr("codex")
+	got := EnrichValidateError(base, TierDevcontainer, "codex", "1.2.3", "", "linux", false)
 	// filepath.Join(".", path) cleans to the bare relative path.
 	wantPath := DefaultDevcontainerPath
 	if !strings.Contains(got.Error(), wantPath) {

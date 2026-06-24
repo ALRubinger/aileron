@@ -1,8 +1,11 @@
 name: Sandbox Agent Image Freshness
 
 # Keeps the published per-agent sandbox images
-# (ghcr.io/alrubinger/aileron-sandbox-{claude,codex}) fresh against upstream
-# agent-CLI npm releases by detecting drift and re-triggering sandbox-agents.yml.
+# (ghcr.io/alrubinger/aileron-sandbox-<agent>) fresh against upstream agent-CLI
+# npm releases by detecting drift and re-triggering sandbox-agents.yml. The set
+# of watched agents is the publishable set (composition.PublishedAgents, computed
+# from Go), so a non-publishable agent like Claude Code — which ships no
+# per-agent image — is never watched (#1451).
 #
 # Corrected mechanism (verified against shipped reality):
 #   - The agent Feature install scripts run `npm install -g <pkg>` with NO
@@ -27,13 +30,13 @@ name: Sandbox Agent Image Freshness
 # background job must never clobber it. This is documented in
 # docs/src/content/docs/development/sandbox-agent-images.md.
 #
-# sandbox-agents.yml has a hardcoded [claude, codex] matrix and a bare
-# workflow_dispatch (no inputs). A single `gh workflow run sandbox-agents.yml`
-# rebuilds BOTH agents. This watcher dispatches the whole workflow when *either*
-# agent is stale; rebuilding the non-stale agent is a harmless no-op `edge`
-# republish (same digest, same version). We deliberately do NOT add a
-# workflow_dispatch input to scope dispatch per-agent (keeps sandbox-agents.yml
-# untouched, per the #1088 plan).
+# sandbox-agents.yml derives its build matrix from composition.PublishedAgents
+# and has a bare workflow_dispatch (no inputs). A single `gh workflow run
+# sandbox-agents.yml` rebuilds ALL publishable agents. This watcher dispatches
+# the whole workflow when *any* publishable agent is stale; rebuilding a
+# non-stale agent is a harmless no-op `edge` republish (same digest, same
+# version). We deliberately do NOT add a workflow_dispatch input to scope
+# dispatch per-agent (keeps sandbox-agents.yml untouched, per the #1088 plan).
 #
 # Re-pushing `edge`/`dev-<cli>` to the existing aileron-sandbox-<agent> package
 # preserves its current visibility (visibility is per-package, not per-tag; the
@@ -58,10 +61,14 @@ on:
         default: true
 
 permissions:
+  # contents: read checks out the repo to compute the publishable-agent list
+  # from Go (composition.PublishedAgents), the single source of truth shared with
+  # sandbox-agents.yml (#1451).
   # packages: read enumerates GHCR tags / resolves manifest digests.
   # actions: write dispatches sandbox-agents.yml via `gh workflow run`.
   # No contents: write, no packages: write — the watcher never edits the repo
   # nor pushes images itself.
+  contents: read
   packages: read
   actions: write
 
@@ -74,23 +81,42 @@ jobs:
     name: Detect agent CLI drift
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+      - id: agents
+        name: Resolve publishable agents
+        working-directory: internal
+        run: |
+          set -euo pipefail
+          # The agents to watch are exactly the agents sandbox-agents.yml
+          # publishes: composition.PublishedAgents (#1451). A non-publishable
+          # agent (Claude Code) ships no per-agent image, so there is nothing to
+          # watch for drift. Emit a space-separated list for the loop below.
+          list="$(go run ./tools/publishedagents | jq -r '.[]' | paste -sd' ' -)"
+          echo "publishable agents: ${list}"
+          echo "agents=${list}" >> "$GITHUB_OUTPUT"
       - name: Detect drift and conditionally dispatch rebuild
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # github.event.inputs.dry_run is empty on schedule; treat empty as
           # false so scheduled runs dispatch on drift.
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          AGENTS: ${{ steps.agents.outputs.agents }}
         run: |
           set -euo pipefail
 
           OWNER="alrubinger"
 
-          # Agent -> npm package. Mirrors the [claude, codex] matrix in
-          # sandbox-agents.yml and NPMPackage in
-          # internal/sandbox/composition/recipes.go (the source of truth for the
-          # package names; kept inline here to avoid a repo checkout). A case
+          # Agent -> npm package. The package names mirror NPMPackage in
+          # internal/sandbox/composition/recipes.go (the source of truth). A case
           # lookup (not an associative array) keeps this portable across bash
-          # versions under `set -u`.
+          # versions under `set -u`. The watched AGENTS list is computed from Go
+          # (composition.PublishedAgents), so a new publishable agent must also be
+          # added here; the `return 1` default fails the step LOUDLY under `set
+          # -e` rather than silently skipping, so the drift never goes unnoticed.
           npm_pkg_for() {
             case "$1" in
               claude) echo "@anthropic-ai/claude-code" ;;
@@ -133,7 +159,7 @@ jobs:
               | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}'
           }
 
-          for agent in claude codex; do
+          for agent in ${AGENTS}; do
             pkg="$(npm_pkg_for "${agent}")"
             repo="${OWNER}/aileron-sandbox-${agent}"
 

@@ -1,10 +1,17 @@
 name: Sandbox Agent Images
 
 # Builds and publishes the multi-arch per-agent sandbox images
-# (ghcr.io/alrubinger/aileron-sandbox-claude and -codex), each baked from the
+# (ghcr.io/alrubinger/aileron-sandbox-<agent>), each baked from the
 # GHCR-published sandbox base (#1085) plus the agent's devcontainer Feature
-# install script (#1082). One workflow, one matrix leg per agent, so claude and
-# codex stay in lockstep with no file duplication (#1086).
+# install script (#1082). One workflow, one matrix leg per PUBLISHABLE agent,
+# with no file duplication (#1086).
+#
+# The matrix is computed from Go (composition.PublishedAgents, via the `agents`
+# job) rather than hardcoded, so only agents whose CLI license permits
+# redistribution are built/published here. Claude Code is recipe'd but NOT
+# publishable (@anthropic-ai/claude-code is all-rights-reserved); it is excluded
+# from this workflow and instead built LOCALLY on the host from its Feature at
+# launch (#1451). Codex (Apache-2.0) is publishable and stays.
 #
 # Each published image is smoke-tested by the launchability validation in
 # internal/launch/sandbox_agent_image_smoke_test.go: the agent CLI is on PATH
@@ -29,6 +36,11 @@ on:
       - "images/sandbox-agents/**"
       - "images/sandbox-features/**"
       - "internal/launch/sandbox_agent_image_smoke_test.go"
+      # The publishable-agent matrix is computed from these (#1451).
+      - "internal/tools/publishedagents/**"
+      - "internal/sandbox/composition/recipes.go"
+      - "internal/sandbox/composition/scaffold.go"
+      - "internal/sandbox/composition/composition.go"
   push:
     tags:
       - "v*"
@@ -51,8 +63,35 @@ env:
   BASE_IMAGE_NAME: ghcr.io/alrubinger/aileron-sandbox-base
 
 jobs:
+  # Single source of truth for the build matrix: the publishable per-agent
+  # images, computed from Go (composition.PublishedAgents) rather than hardcoded
+  # here. A non-publishable agent (e.g. Claude Code, whose @anthropic-ai/claude-
+  # code license forbids redistribution) is excluded automatically, so CI never
+  # builds or publishes a non-redistributable per-agent image (#1451). A new
+  # publishable agent appears in the matrix by gaining a publishable recipe.
+  agents:
+    name: Resolve publishable agent matrix
+    runs-on: ubuntu-latest
+    outputs:
+      agents: ${{ steps.list.outputs.agents }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+      - id: list
+        name: List publishable agents
+        working-directory: internal
+        run: |
+          set -euo pipefail
+          agents="$(go run ./tools/publishedagents)"
+          echo "publishable agents: ${agents}"
+          echo "agents=${agents}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build sandbox-${{ matrix.agent }}
+    needs: agents
     runs-on: ubuntu-latest
     # Skip the cascade leg unless the triggering base run SUCCEEDED on main: a
     # failed or non-main base run must not republish agent edge onto a base that
@@ -72,10 +111,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The agent name doubles as the Feature subdirectory under
-        # images/sandbox-features/<agent>, the AGENT build-arg, and the agent CLI
-        # command asserted on PATH.
-        agent: [claude, codex]
+        # The publishable agents resolved by the `agents` job from
+        # composition.PublishedAgents (#1451). The agent name doubles as the
+        # Feature subdirectory under images/sandbox-features/<agent>, the AGENT
+        # build-arg, and the agent CLI command asserted on PATH.
+        agent: ${{ fromJSON(needs.agents.outputs.agents) }}
     steps:
       - uses: actions/checkout@v7
 

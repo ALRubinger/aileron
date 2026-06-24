@@ -72,6 +72,17 @@ type Plan struct {
 	// rather than raw `docker build`; on a Tier 2 (BYO image) plan it is inert
 	// (carried only for plan inspection).
 	Features map[string]json.RawMessage
+	// SynthesizedDevcontainer carries a devcontainer.json that Discover
+	// composed in memory rather than reading from the user's workDir. It is set
+	// only on the no-.devcontainer local-build branch for a recipe'd-but-not-
+	// publishable agent (e.g. Claude Code): Discover composes BaseImage + the
+	// agent Feature into a TierDevcontainer plan whose Features route the build
+	// through @devcontainers/cli, but with no .devcontainer on disk the builder
+	// must materialize this content into a managed temp workspace folder to feed
+	// `devcontainer build --workspace-folder` without polluting the user's
+	// workDir (#1451). Empty on every other tier and on devcontainer plans read
+	// from disk.
+	SynthesizedDevcontainer string
 }
 
 // Mount is the subset of devcontainer mount configuration Aileron needs to
@@ -134,13 +145,21 @@ type devcontainerCustomizations struct {
 // Discover returns the sandbox image-composition plan for workDir.
 //
 // agent is the launch agent's name (e.g. "claude", "codex"). It only affects
-// the no-.devcontainer branch: when a project authors no .devcontainer and the
-// agent has a published per-agent image (PublishedAgentExists), Discover
-// resolves the build-free Tier 0 default (TierPublished) whose Image is that
-// per-agent image. An empty agent or an agent with no published image keeps the
-// existing local-base behavior (TierBase), so `sandbox plan`/`build` (which pass
-// no agent) and unsupported agents are unchanged. The agent never perturbs Tier
-// 1/Tier 2 resolution when a .devcontainer is present.
+// the no-.devcontainer branch, which resolves one of three ways (#1451):
+//
+//   - A publishable agent (PublishedAgentExists, e.g. "codex"): the build-free
+//     Tier 0 default (TierPublished) whose Image is the prebuilt per-agent
+//     image. Pulled, never built.
+//   - A recipe'd-but-not-publishable agent (has a recipe but no redistributable
+//     published image, e.g. "claude"): a LOCAL Feature build (TierDevcontainer
+//     with the agent Feature and a SynthesizedDevcontainer), built on the host
+//     from the base image + agent Feature via @devcontainers/cli.
+//   - An empty agent or an unsupported agent (no recipe): the local-base default
+//     (TierBase), so `sandbox plan`/`build` (which pass no agent) and unknown
+//     agents are unchanged.
+//
+// The agent never perturbs Tier 1/Tier 2 resolution when a .devcontainer is
+// present.
 func Discover(workDir, version, agent string) (Plan, error) {
 	if workDir == "" {
 		workDir = "."
@@ -156,6 +175,26 @@ func Discover(workDir, version, agent string) (Plan, error) {
 					BaseImage: baseImage,
 					Image:     PublishedAgentImage(agent, version),
 				}, nil
+			}
+			// A recipe'd-but-not-publishable agent (e.g. Claude Code) has a
+			// Feature and a verified install recipe but no redistributable
+			// published image (#1451). Resolve a LOCAL Feature build: compose
+			// the base image with the agent Feature into a TierDevcontainer
+			// plan whose Features route the build through @devcontainers/cli
+			// (runtime.go Features path), materializing the synthesized
+			// devcontainer.json into a managed temp workspace folder so it
+			// builds without a .devcontainer on disk and without touching the
+			// user's workDir.
+			if agent != "" {
+				if _, ok := recipeForAgent(agent); ok {
+					return Plan{
+						Tier:                    TierDevcontainer,
+						BaseImage:               baseImage,
+						Image:                   LocalAgentImageTag(agent, version),
+						Features:                map[string]json.RawMessage{FeatureReference(agent): json.RawMessage("{}")},
+						SynthesizedDevcontainer: synthesizedAgentDevcontainer(agent, version),
+					}, nil
+				}
 			}
 			return Plan{Tier: TierBase, BaseImage: baseImage, Image: baseImage}, nil
 		}

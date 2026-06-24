@@ -20,29 +20,70 @@ func TestDiscoverMissingDevcontainerUsesBaseImage(t *testing.T) {
 	}
 }
 
-func TestDiscoverMissingDevcontainerPublishedAgentResolvesPerAgentImage(t *testing.T) {
-	for _, tc := range []struct {
-		agent     string
-		wantImage string
-	}{
-		{"claude", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
-		{"codex", "ghcr.io/alrubinger/aileron-sandbox-codex:latest"},
-	} {
-		t.Run(tc.agent, func(t *testing.T) {
-			plan, err := Discover(t.TempDir(), "0.4.0", tc.agent)
-			if err != nil {
-				t.Fatalf("Discover: %v", err)
-			}
-			if plan.Tier != TierPublished {
-				t.Fatalf("Tier = %s, want %s", plan.Tier, TierPublished)
-			}
-			if plan.Image != tc.wantImage {
-				t.Fatalf("Image = %q, want %q", plan.Image, tc.wantImage)
-			}
-			if plan.BaseImage != BaseImage("0.4.0") {
-				t.Fatalf("BaseImage = %q, want %q", plan.BaseImage, BaseImage("0.4.0"))
-			}
-		})
+func TestDiscoverMissingDevcontainerPublishableAgentResolvesPerAgentImage(t *testing.T) {
+	// Codex is publishable (Apache-2.0): no .devcontainer resolves the build-free
+	// published per-agent image.
+	plan, err := Discover(t.TempDir(), "0.4.0", "codex")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierPublished {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierPublished)
+	}
+	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-codex:latest" {
+		t.Fatalf("Image = %q, want %q", plan.Image, "ghcr.io/alrubinger/aileron-sandbox-codex:latest")
+	}
+	if plan.BaseImage != BaseImage("0.4.0") {
+		t.Fatalf("BaseImage = %q, want %q", plan.BaseImage, BaseImage("0.4.0"))
+	}
+	if plan.SynthesizedDevcontainer != "" {
+		t.Fatalf("SynthesizedDevcontainer should be empty for a published agent, got %q", plan.SynthesizedDevcontainer)
+	}
+}
+
+func TestDiscoverMissingDevcontainerNonPublishableAgentResolvesLocalBuild(t *testing.T) {
+	// Claude has a recipe but is NOT publishable (@anthropic-ai/claude-code is
+	// all-rights-reserved, no redistribution grant, #1451). With no .devcontainer
+	// it must resolve a LOCAL Feature build (TierDevcontainer with the agent
+	// Feature and a synthesized devcontainer.json), never a published image pull.
+	plan, err := Discover(t.TempDir(), "0.4.0", "claude")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierDevcontainer {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
+	}
+	if plan.Image != LocalAgentImageTag("claude", "0.4.0") {
+		t.Fatalf("Image = %q, want local tag %q", plan.Image, LocalAgentImageTag("claude", "0.4.0"))
+	}
+	// The plan must NOT name any aileron-sandbox-claude published image: that
+	// would redistribute Claude Code, the exact violation #1451 fixes.
+	if strings.Contains(plan.Image, "aileron-sandbox-claude") {
+		t.Fatalf("Image = %q must not reference a published claude image", plan.Image)
+	}
+	want := FeatureReference("claude")
+	if _, ok := plan.Features[want]; !ok {
+		t.Fatalf("Features = %v, want it to contain the claude Feature %q", plan.Features, want)
+	}
+	if len(plan.Features) != 1 {
+		t.Fatalf("Features = %v, want exactly the claude Feature", plan.Features)
+	}
+	if plan.SynthesizedDevcontainer == "" {
+		t.Fatalf("SynthesizedDevcontainer must be set for a local agent build")
+	}
+	// The synthesized config must compose the base image with the claude Feature
+	// and nothing else (no published claude image baked in).
+	if !strings.Contains(plan.SynthesizedDevcontainer, BaseImage("0.4.0")) {
+		t.Fatalf("SynthesizedDevcontainer %q must FROM the base image", plan.SynthesizedDevcontainer)
+	}
+	if !strings.Contains(plan.SynthesizedDevcontainer, want) {
+		t.Fatalf("SynthesizedDevcontainer %q must reference the claude Feature %q", plan.SynthesizedDevcontainer, want)
+	}
+	if strings.Contains(plan.SynthesizedDevcontainer, "aileron-sandbox-claude") {
+		t.Fatalf("SynthesizedDevcontainer %q must not reference a published claude image", plan.SynthesizedDevcontainer)
+	}
+	if plan.BaseImage != BaseImage("0.4.0") {
+		t.Fatalf("BaseImage = %q, want %q", plan.BaseImage, BaseImage("0.4.0"))
 	}
 }
 
@@ -109,8 +150,10 @@ func TestPublishedAgentImage(t *testing.T) {
 }
 
 func TestPublishedAgentExists(t *testing.T) {
+	// PublishedAgentExists is now publish-eligibility, not recipe-existence:
+	// claude has a recipe but is NOT publishable (#1451), so it is false here.
 	for agent, want := range map[string]bool{
-		"claude": true,
+		"claude": false,
 		"codex":  true,
 		"goose":  false,
 		"":       false,

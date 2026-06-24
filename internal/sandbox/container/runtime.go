@@ -420,8 +420,18 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			return BuildResult{}, err
 		}
 		result.Runtime = runtimeName
+		// A synthesized-devcontainer plan (Discover's no-.devcontainer local
+		// agent build, #1451) carries its own deterministic local image tag in
+		// Plan.Image and is NOT keyed off workDir: the build reads a managed
+		// temp workspace folder, not workDir, so ProjectImageTag(workDir) would
+		// be the wrong (and non-deterministic across launches) name. Honor
+		// Plan.Image for that case; otherwise the project-local image tag.
 		if opts.Tag == "" {
-			result.Image = ProjectImageTag(workDir)
+			if opts.Plan.SynthesizedDevcontainer != "" {
+				result.Image = opts.Plan.Image
+			} else {
+				result.Image = ProjectImageTag(workDir)
+			}
 		}
 		shouldBuild, err := b.shouldBuild(ctx, runner, runtimeName, result.Image, policy)
 		if err != nil {
@@ -440,7 +450,21 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			if err != nil {
 				return BuildResult{}, err
 			}
-			name, args, err := devcontainerCLIBuildArgs(prefix, workDir, opts.Plan, result.Image)
+			// For a synthesized-devcontainer plan there is no .devcontainer on
+			// disk under workDir; materialize the composed config into a
+			// managed temp workspace folder and build from there so the user's
+			// workDir is never written to (#1451). The run path still mounts
+			// the real workDir; only the build reads the temp folder.
+			buildWorkDir := workDir
+			if opts.Plan.SynthesizedDevcontainer != "" {
+				tmp, cleanup, err := materializeSynthesizedWorkspace(opts.Plan.SynthesizedDevcontainer)
+				if err != nil {
+					return BuildResult{}, err
+				}
+				defer cleanup()
+				buildWorkDir = tmp
+			}
+			name, args, err := devcontainerCLIBuildArgs(prefix, buildWorkDir, opts.Plan, result.Image)
 			if err != nil {
 				return BuildResult{}, err
 			}
@@ -1267,6 +1291,32 @@ func statExisting(path, label string) error {
 // <image>` plus deterministic (sorted) `--build-arg k=v` tokens mirroring
 // devcontainerBuildArgs. The argv tail (everything after the prefix) is
 // byte-identical between the host-npx and managed branches.
+// materializeSynthesizedWorkspace writes a Discover-synthesized devcontainer.json
+// (the no-.devcontainer local agent build, #1451) into a fresh temp directory
+// laid out as <tmp>/.devcontainer/devcontainer.json, so devcontainerCLIBuildArgs
+// can pass <tmp> as the `--workspace-folder` exactly as it would a real project
+// directory. The returned cleanup removes the temp tree; callers defer it. The
+// user's actual workDir is never touched — only the build reads this folder, and
+// the run path mounts the real workDir.
+func materializeSynthesizedWorkspace(content string) (string, func(), error) {
+	tmp, err := os.MkdirTemp("", "aileron-sandbox-build-")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create synthesized devcontainer workspace: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(tmp) }
+	dir := filepath.Join(tmp, filepath.Dir(composition.DefaultDevcontainerPath))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("create synthesized devcontainer dir: %w", err)
+	}
+	path := filepath.Join(tmp, composition.DefaultDevcontainerPath)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("write synthesized devcontainer %s: %w", path, err)
+	}
+	return tmp, cleanup, nil
+}
+
 func devcontainerCLIBuildArgs(prefix []string, workDir string, plan composition.Plan, image string) (string, []string, error) {
 	devcontainerPath := filepath.Join(workDir, composition.DefaultDevcontainerPath)
 	if _, err := os.Stat(devcontainerPath); err != nil {
