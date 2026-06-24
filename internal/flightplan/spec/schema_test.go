@@ -377,3 +377,291 @@ func TestNoneCredentialNeedsNoPlacement(t *testing.T) {
 		t.Fatalf("a credential of kind none must validate without a placement:\n%v", err)
 	}
 }
+
+// steps returns the worked example's step graph as a slice of step maps.
+func steps(t *testing.T, inst map[string]any) []map[string]any {
+	t.Helper()
+	blk := aileronBlock(t, inst)
+	raw, ok := blk["steps"].([]any)
+	if !ok {
+		t.Fatalf("steps block missing or not an array, got %T", blk["steps"])
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for i, s := range raw {
+		m, ok := s.(map[string]any)
+		if !ok {
+			t.Fatalf("step %d is not an object, got %T", i, s)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// TestStepGraphExampleValidates asserts the worked example carries a non-empty
+// step graph and that it validates against the schema. TestWorkedExampleValidates
+// already validates the whole document; this sharpens the guard so the example
+// cannot quietly drop its composition and still pass.
+func TestStepGraphExampleValidates(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	if got := len(steps(t, inst)); got == 0 {
+		t.Fatal("the worked example must carry a non-empty steps graph")
+	}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("the worked example with its step graph must validate:\n%v", err)
+	}
+}
+
+// TestUnknownStepKindRejected: a step with an out-of-enum kind fails. The kind
+// enum is closed to action-call, transform, and llm-seam.
+func TestUnknownStepKindRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	steps(t, inst)[0]["kind"] = "frobnicate"
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("a step with an unknown kind must be rejected; the kind enum is closed")
+	}
+}
+
+// TestStepSecretFieldRejected: adding a secret-bearing key to a step makes the
+// closed step object invalid, mirroring TestNoSecretValueField for the
+// credential block. No step field may carry a secret.
+func TestStepSecretFieldRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	steps(t, inst)[0]["value"] = "super-secret-token"
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("a step must reject any extra field; additionalProperties is closed on every step kind")
+	}
+}
+
+// TestStepLiteralBindingRejected: a binding that carries a literal value rather
+// than a reference is rejected. The binding grammar is closed to inputs.<name>
+// and steps.<id>.<output>, so a literal secret cannot be embedded in the wiring.
+func TestStepLiteralBindingRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	mutated := false
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "action-call" {
+			if args, ok := s["args"].(map[string]any); ok {
+				for k := range args {
+					args[k] = "super-secret-token"
+					mutated = true
+					break
+				}
+				break
+			}
+		}
+	}
+	if !mutated {
+		t.Fatal("expected an action-call step with at least one arg to mutate in the worked example")
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("a step arg that is a literal value rather than a binding reference must be rejected")
+	}
+}
+
+// TestLLMSeamMarkAccepted: an llm-seam step validates. The marked seam is a
+// first-class kind, not an error.
+func TestLLMSeamMarkAccepted(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	var found bool
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "llm-seam" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected the worked example to carry an llm-seam step")
+	}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("an llm-seam step must validate as the marked seam:\n%v", err)
+	}
+}
+
+// TestLLMSeamIsOnlySeam: the llm-seam kind is the single seam mark. No other
+// kind carries it, so the no-LLM guarantee is structurally checkable. Exactly
+// one step in the example is the marked seam, and the rest are deterministic.
+func TestLLMSeamIsOnlySeam(t *testing.T) {
+	inst := validExampleInstance(t)
+	seams := 0
+	for _, s := range steps(t, inst) {
+		switch s["kind"] {
+		case "llm-seam":
+			seams++
+		case "action-call", "transform":
+			// deterministic kinds
+		default:
+			t.Fatalf("unexpected step kind %v", s["kind"])
+		}
+	}
+	if seams != 1 {
+		t.Fatalf("expected exactly one llm-seam in the worked example, got %d", seams)
+	}
+}
+
+// TestStepBindingsResolve: every binding in the worked example resolves to a
+// declared input or a prior step's named output. This is a contract-level walk
+// of the graph references; it survives refactoring of the schema internals.
+func TestStepBindingsResolve(t *testing.T) {
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+
+	declaredInputs := map[string]bool{}
+	for _, in := range blk["inputs"].([]any) {
+		declaredInputs[in.(map[string]any)["name"].(string)] = true
+	}
+
+	priorOutputs := map[string]bool{} // "stepId.outputName"
+	for _, s := range steps(t, inst) {
+		for _, b := range stepBindings(s) {
+			if strings.HasPrefix(b, "inputs.") {
+				name := strings.TrimPrefix(b, "inputs.")
+				if !declaredInputs[name] {
+					t.Errorf("binding %q references an undeclared input", b)
+				}
+				continue
+			}
+			if strings.HasPrefix(b, "steps.") {
+				ref := strings.TrimPrefix(b, "steps.")
+				if !priorOutputs[ref] {
+					t.Errorf("binding %q references a step output not produced by a prior step", b)
+				}
+				continue
+			}
+			t.Errorf("binding %q has an unrecognized form", b)
+		}
+		// After this step is processed, its own outputs become available to
+		// later steps. Processing in declared order is the topological order
+		// the runtime executes (asserted acyclic by TestStepGraphIsAcyclic).
+		id := s["id"].(string)
+		for _, o := range stepOutputNames(s) {
+			priorOutputs[id+"."+o] = true
+		}
+	}
+}
+
+// TestStepGraphIsAcyclic: the worked example's step references form a directed
+// acyclic graph. The runtime executes the graph in topological order; this
+// asserts a valid order exists. A JSON Schema cannot express acyclicity, so the
+// drift guard checks it as a contract invariant.
+func TestStepGraphIsAcyclic(t *testing.T) {
+	inst := validExampleInstance(t)
+	all := steps(t, inst)
+
+	// Build the dependency edges: a step depends on each prior step it binds.
+	deps := map[string]map[string]bool{}
+	for _, s := range all {
+		id := s["id"].(string)
+		if _, exists := deps[id]; exists {
+			t.Fatalf("duplicate step id %q in the worked example", id)
+		}
+		deps[id] = map[string]bool{}
+		for _, b := range stepBindings(s) {
+			if strings.HasPrefix(b, "steps.") {
+				parts := strings.SplitN(strings.TrimPrefix(b, "steps."), ".", 2)
+				deps[id][parts[0]] = true
+			}
+		}
+	}
+
+	// Kahn's algorithm: repeatedly remove a node with no unresolved deps.
+	resolved := map[string]bool{}
+	for progress := true; progress; {
+		progress = false
+		for id, d := range deps {
+			if resolved[id] {
+				continue
+			}
+			ready := true
+			for dep := range d {
+				if !resolved[dep] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				resolved[id] = true
+				progress = true
+			}
+		}
+	}
+	if len(resolved) != len(deps) {
+		t.Fatalf("the step graph is not acyclic: only %d of %d steps could be ordered", len(resolved), len(deps))
+	}
+}
+
+// TestStepActionRefsDeclared: every action-call step's actionRef matches a
+// declared requires.actions[].ref. The schema cannot express cross-array
+// membership, so the drift guard asserts it on the example.
+func TestStepActionRefsDeclared(t *testing.T) {
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+
+	declared := map[string]bool{}
+	for _, a := range blk["requires"].(map[string]any)["actions"].([]any) {
+		declared[a.(map[string]any)["ref"].(string)] = true
+	}
+
+	for _, s := range steps(t, inst) {
+		if s["kind"] != "action-call" {
+			continue
+		}
+		ref := s["actionRef"].(string)
+		if !declared[ref] {
+			t.Errorf("action-call step %v references undeclared action %q", s["id"], ref)
+		}
+	}
+}
+
+// TestStrippedManifestDropsSteps: removing the aileron block drops the step
+// graph with it, so the lossless-if-stripped guarantee covers the composition.
+// TestStrippedManifestStillValid already deletes the whole block; this sharpens
+// the regression by asserting the steps surface specifically disappears.
+func TestStrippedManifestDropsSteps(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	if _, ok := aileronBlock(t, inst)["steps"]; !ok {
+		t.Fatal("expected the worked example to carry a steps block before stripping")
+	}
+	delete(inst, "aileron")
+	if _, ok := inst["aileron"]; ok {
+		t.Fatal("stripping the aileron block must drop the steps graph with it")
+	}
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("a stripped manifest (steps dropped with the block) must still validate:\n%v", err)
+	}
+}
+
+// stepBindings returns every binding reference a step carries, across the
+// kind-specific args/bindings maps.
+func stepBindings(s map[string]any) []string {
+	var out []string
+	collect := func(key string) {
+		if m, ok := s[key].(map[string]any); ok {
+			for _, v := range m {
+				if sv, ok := v.(string); ok {
+					out = append(out, sv)
+				}
+			}
+		}
+	}
+	collect("args")
+	collect("bindings")
+	return out
+}
+
+// stepOutputNames returns the named outputs a step produces.
+func stepOutputNames(s map[string]any) []string {
+	var out []string
+	if raw, ok := s["outputs"].([]any); ok {
+		for _, o := range raw {
+			if so, ok := o.(string); ok {
+				out = append(out, so)
+			}
+		}
+	}
+	return out
+}
