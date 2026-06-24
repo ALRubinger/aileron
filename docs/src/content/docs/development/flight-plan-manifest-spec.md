@@ -10,7 +10,7 @@ The manifest is the YAML frontmatter of a `SKILL.md` document in the [agentskill
 
 The deterministic step-graph composition format is specified on this single page rather than a separate sibling page. It is one coherent format covered by one drift-guard test, amended in place under the [Composition and the step graph](#composition-and-the-step-graph) section below. The existing "Flight Plan Manifest Spec" navigation entry stands and no new navigation entry is added.
 
-This page is a spec deliverable. It defines the format. It does not ship a parser, a validator, the freeze step, or runtime enforcement. The Go parser and validator are tracked in [#1508](https://github.com/ALRubinger/aileron/issues/1508). Freeze is tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509). Runtime enforcement is tracked in [#1511](https://github.com/ALRubinger/aileron/issues/1511). The `lock` section is shaped here as freeze's target, not produced here.
+This page is the normative format spec. The Go parser and validator ship under [#1508](https://github.com/ALRubinger/aileron/issues/1508). Freeze ships under [#1509](https://github.com/ALRubinger/aileron/issues/1509): `aileron skill freeze` resolves image references to digests, produces the lockfile, content-addresses the unit, and signs it. Runtime enforcement is tracked in [#1511](https://github.com/ALRubinger/aileron/issues/1511). The `lock` section below is freeze's target, and freeze now populates it; the schema on this page stays the authoritative shape.
 
 ## Schema
 
@@ -248,7 +248,7 @@ Each operation's `audit.fields` declares which of the closed record fields it em
 
 Freeze turns a skill into a Flight Plan ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) freeze boundary). Freeze resolves every image reference to a content-addressed digest, produces a lockfile that pins those digests and the resolved capability set, binds the execution environment, attaches the per-action trust contract, and signs the result. The `lock` section is the record of those pins.
 
-The `lock` section is absent before freeze. This page specifies its shape only, as freeze's target. Freeze itself is tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509).
+The `lock` section is absent before freeze. Freeze populates it and writes an immutable, signed version into the canonical skill store. See the [Freezing a Flight Plan](/guides/freezing-a-flight-plan) guide for the command and the reproducibility and signature-verification guarantees.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|

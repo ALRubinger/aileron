@@ -13,7 +13,8 @@ import (
 
 const skillUsage = `usage:
   aileron skill install <source>   Install a skill from a local path or git URL into ~/.aileron/skills
-  aileron skill list               List installed skills`
+  aileron skill list               List installed skills
+  aileron skill freeze <name>      Seal an installed skill into a signed, digest-pinned Flight Plan version`
 
 // skillStoreDir is a seam so tests can point the CLI at a temp store
 // instead of the user's real ~/.aileron/skills.
@@ -45,6 +46,8 @@ func runSkill(args []string, stdout, stderr io.Writer) int {
 		return runSkillInstall(args[1:], stdout, stderr)
 	case "list":
 		return runSkillList(args[1:], stdout, stderr)
+	case "freeze":
+		return runSkillFreeze(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown skill command: %q\n", args[0])
 		fmt.Fprintln(stderr, skillUsage)
