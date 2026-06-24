@@ -501,6 +501,76 @@ func TestTaskfileLaunchAileronBinHostExe(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// (F) launch leaves are shell-free Go (#1626)
+// ---------------------------------------------------------------------------
+
+// scenarioInvocationRe matches the shell-free leaf cmd that drives the Go
+// scenario driver: `go run ./test/system/scenario <agent>`. The agent token is
+// captured so the per-target assertion can confirm the right one.
+var scenarioInvocationRe = regexp.MustCompile(`go run \./test/system/scenario\s+(codex|claude)\b`)
+
+// sourcedShellScriptRe matches a retired sourced-bash leaf: a `sh ` (or
+// `sh -x` etc.) invocation of a `.sh` file, the exact shape #1626 retires
+// (`sh "{{.ROOT_DIR}}/test/system/codex.sh"`). Anchored at the start of the
+// scalar (after optional leading whitespace) so a `.sh` mention inside prose
+// does not false-positive; the broader `.sh` ban below catches the rest.
+var sourcedShellScriptRe = regexp.MustCompile(`^\s*sh\b.*\.sh\b`)
+
+// dotShReferenceRe matches any `.sh` filename token, used to assert no retired
+// bash file survives anywhere under a launch task's cmd subtree.
+var dotShReferenceRe = regexp.MustCompile(`\.sh\b`)
+
+// TestTaskfileLaunchCmdShellFree pins the #1626 contract: each launch leaf runs
+// the shell-free Go scenario driver, and no retired `sh "...sh"` invocation (or
+// any `.sh` reference) survives under either launch task's cmds. This guards the
+// shell-free posture going forward: reverting a leaf to `cmd: sh ".../codex.sh"`
+// fails (b), and dropping the Go driver invocation fails (a).
+func TestTaskfileLaunchCmdShellFree(t *testing.T) {
+	root := loadTaskfile(t)
+	targets := map[string]string{
+		"test:system:launch:codex":  "codex",
+		"test:system:launch:claude": "claude",
+	}
+
+	for target, wantAgent := range targets {
+		t.Run(target, func(t *testing.T) {
+			task := taskNode(t, root, target)
+			cmds := mapGet(task, "cmds")
+			if cmds == nil || cmds.Kind != yaml.SequenceNode {
+				t.Fatalf("%s: no cmds: sequence", target)
+			}
+			cmdScalars := allScalars(cmds)
+
+			// (a) positive: the terminal scenario-invocation cmd drives
+			// `go run ./test/system/scenario <agent>` with the matching agent.
+			foundAgent := ""
+			for _, s := range cmdScalars {
+				if m := scenarioInvocationRe.FindStringSubmatch(s); m != nil {
+					foundAgent = m[1]
+					break
+				}
+			}
+			if foundAgent == "" {
+				t.Errorf("%s: no leaf cmd invokes `go run ./test/system/scenario <agent>`; cmds=%q", target, cmdScalars)
+			} else if foundAgent != wantAgent {
+				t.Errorf("%s: scenario driver invoked with agent %q, want %q", target, foundAgent, wantAgent)
+			}
+
+			// (b) negative: no retired sourced-bash leaf and no `.sh` reference
+			// survives anywhere under the task's cmds subtree.
+			for _, s := range cmdScalars {
+				if sourcedShellScriptRe.MatchString(s) {
+					t.Errorf("%s: a sourced-bash leaf survives (retired by #1626): %q", target, s)
+				}
+				if dotShReferenceRe.MatchString(s) {
+					t.Errorf("%s: a `.sh` reference survives under cmds (retired by #1626): %q", target, s)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // (A) behavioral: go-task env scope semantics
 // ---------------------------------------------------------------------------
 

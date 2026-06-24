@@ -601,7 +601,7 @@ tasks:
   test:system:lib:
     desc: >-
       Contract tests for the shared system-test scenario library
-      (test/system/lib/assert.sh + probes.sh) used by the codex (#1476) and
+      (test/system/lib/assert.go + probes.go) used by the codex (#1476) and
       claude (#1477) scenarios. A shell-free Go contract suite that needs only
       the Go toolchain. It needs no Docker daemon, no `aileron launch`, and no
       Unix shell, so it is safe to run in CI, unattended, and on Windows. It
@@ -679,10 +679,11 @@ tasks:
       System-test scenario for the codex agent under `aileron launch` (#1476).
       Wires the reusable build seam (build:launch), fail-fast preconditions
       (_test:system:precond AGENT=codex), and `defer` cleanup (#1475), then runs
-      test/system/codex.sh: it drives `aileron launch codex -- exec "…"` once
-      (never `docker run` directly), runs the shared R8 wiring-invariant probes
-      against the live container, asserts R7a arg-forwarding, the R9 sentinel,
-      and the R10 audit round-trip. STATIC GATE — a live run needs a real codex
+      the shell-free Go scenario driver (`go run ./test/system/scenario codex`):
+      it drives `aileron launch codex -- exec "…"` once (never `docker run`
+      directly), runs the shared R8 wiring-invariant probes against the live
+      container, asserts R7a arg-forwarding, the R9 sentinel, and the R10 audit
+      round-trip. STATIC GATE — a live run needs a real codex
       login and LLM tokens, so it is run BY HAND on a real host; the headless
       path validates wiring with `task --dry test:system:launch:codex`, which
       compiles the target without executing the scenario. See test/system/README.md.
@@ -696,13 +697,14 @@ tasks:
       SESSION: 'codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-codex-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       # ".exe" on Windows, empty elsewhere. AILERON_BIN below must point at the
-      # file build:launch wrote; codex.sh invokes "$AILERON_BIN" launch directly.
+      # file build:launch wrote; the Go driver reads AILERON_BIN from the env and
+      # invokes that binary's `launch` directly.
       HOST_EXE:
         sh: go env GOEXE
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
-    # the scenario script must receive AILERON_BIN et al. from here. Keeping it
-    # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
+    # the Go scenario driver must receive AILERON_BIN et al. from here. Keeping
+    # it task-scoped also exports the vars to the `defer`/precond cmds uniformly.
     env:
       AILERON_BIN: '{{.ROOT_DIR}}/build/aileron{{.HOST_EXE}}'
       AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
@@ -716,22 +718,23 @@ tasks:
       - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
       # The WORKSPACE template no longer creates the dir the way `mktemp -d` did;
       # create it explicitly (mkdir is bundled in Task's coreutils, cross-platform)
-      # before the scenario `cd`s into it and writes its sentinel.
+      # before the scenario bind-mounts it and reads back its sentinel.
       - mkdir -p "{{.WORKSPACE}}"
       - task: _test:system:precond
         vars:
           AGENT: codex
-      - cmd: sh "{{.ROOT_DIR}}/test/system/codex.sh"
+      - go run ./test/system/scenario codex
 
   test:system:launch:claude:
     desc: >-
       System-test scenario for the claude agent under `aileron launch` (#1477).
       Wires the reusable build seam (build:launch), fail-fast preconditions
       (_test:system:precond AGENT=claude), and `defer` cleanup (#1475), then
-      runs test/system/claude.sh: it drives `aileron launch claude -- -p "…"`
-      once (never `docker run` directly), runs the shared R8 wiring-invariant
-      probes against the live container, asserts R7a arg-forwarding, the R9
-      sentinel, and the R10 audit round-trip. STATIC GATE — a live run needs a
+      runs the shell-free Go scenario driver (`go run ./test/system/scenario
+      claude`): it drives `aileron launch claude -- -p "…"` once (never `docker
+      run` directly), runs the shared R8 wiring-invariant probes against the
+      live container, asserts R7a arg-forwarding, the R9 sentinel, and the R10
+      audit round-trip. STATIC GATE — a live run needs a
       real Claude login (vault-captured, ADR-0025) and LLM tokens, so it is run
       BY HAND on a real host; the headless path validates wiring with
       `task --dry test:system:launch:claude`, which compiles the target without
@@ -746,13 +749,14 @@ tasks:
       SESSION: 'claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       WORKSPACE: '{{.TMPDIR | default .TEMP | default .TMP | default "/tmp"}}/aileron-claude-{{now | unixEpoch}}-{{randInt 10000 99999}}'
       # ".exe" on Windows, empty elsewhere. AILERON_BIN below must point at the
-      # file build:launch wrote; claude.sh invokes "$AILERON_BIN" launch directly.
+      # file build:launch wrote; the Go driver reads AILERON_BIN from the env and
+      # invokes that binary's `launch` directly.
       HOST_EXE:
         sh: go env GOEXE
     # Task-scoped env: go-task only honors `env:` at the task level, not on an
     # individual `cmds:` entry (a command-level `env:` is silently ignored), so
-    # the scenario script must receive AILERON_BIN et al. from here. Keeping it
-    # task-scoped also exports the vars to the `defer`/precond cmds uniformly.
+    # the Go scenario driver must receive AILERON_BIN et al. from here. Keeping
+    # it task-scoped also exports the vars to the `defer`/precond cmds uniformly.
     env:
       AILERON_BIN: '{{.ROOT_DIR}}/build/aileron{{.HOST_EXE}}'
       AILERON_SYSTEST_LIB: '{{.ROOT_DIR}}/test/system/lib'
@@ -766,12 +770,12 @@ tasks:
       - defer: { task: _test:system:cleanup, vars: { SESSION: '{{.SESSION}}', WORKSPACE: '{{.WORKSPACE}}' } }
       # The WORKSPACE template no longer creates the dir the way `mktemp -d` did;
       # create it explicitly (mkdir is bundled in Task's coreutils, cross-platform)
-      # before the scenario `cd`s into it and writes its sentinel.
+      # before the scenario bind-mounts it and reads back its sentinel.
       - mkdir -p "{{.WORKSPACE}}"
       - task: _test:system:precond
         vars:
           AGENT: claude
-      - cmd: sh "{{.ROOT_DIR}}/test/system/claude.sh"
+      - go run ./test/system/scenario claude
 
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services
