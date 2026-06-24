@@ -33,6 +33,8 @@ aileron skill install https://github.com/acme/weekly-digest.git
 
 Aileron shallow-clones the repository, reads the `SKILL.md` at its root, and installs it the same way as a local path.
 
+A git-URL install requires the `git` binary on your `PATH`. `aileron skill install` runs host-side, so it is unrestricted by the sandbox egress boundary. If `git` is missing the install fails with the underlying clone error.
+
 > Installing by an [agentskills.io](https://agentskills.io) registry slug is not wired yet. Use a local path or a git URL for now.
 
 ## Action requirements and graceful degrade
