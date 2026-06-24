@@ -121,34 +121,63 @@ func frozenVersionID(contentHash string) string {
 	return h
 }
 
+// imageInspector drives the small set of container-runtime commands the
+// freeze resolvers need (pull, image inspect). It is the seam over
+// container.Runner + the resolved runtime name so the pull-then-inspect and
+// RepoDigests-then-Id fallback logic is unit-testable without Docker.
+type imageInspector struct {
+	runner  container.Runner
+	runtime string
+}
+
+// newImageInspector builds an inspector over the real container runtime,
+// resolving the runtime name (erroring when none is on PATH).
+func newImageInspector() (imageInspector, error) {
+	runtimeName, err := container.ResolveRuntime(container.DefaultRuntime)
+	if err != nil {
+		return imageInspector{}, fmt.Errorf("resolve container runtime: %w", err)
+	}
+	return imageInspector{runner: container.DefaultRunner(), runtime: runtimeName}, nil
+}
+
+// pull best-effort pulls ref. A failure is intentionally non-fatal: the
+// image may already be local, in which case the inspect still yields a
+// digest.
+func (in imageInspector) pull(ctx context.Context, ref string) {
+	_ = in.runner.Run(ctx, in.runtime, []string{"pull", ref}, io.Discard, io.Discard)
+}
+
+// inspectFormat runs `image inspect --format <format> <image>` and returns
+// its stdout.
+func (in imageInspector) inspectFormat(ctx context.Context, image, format string) ([]byte, error) {
+	var out bytes.Buffer
+	if err := in.runner.Run(ctx, in.runtime, []string{"image", "inspect", "--format", format, image}, &out, io.Discard); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
 // runtimeDigestResolver resolves a rung-1 image reference to its digest by
 // pulling (best-effort) then inspecting RepoDigests through the shared
 // container Runner seam. It pins by digest, never by tag.
 type runtimeDigestResolver struct{}
 
 func (runtimeDigestResolver) ResolveDigest(ctx context.Context, ref string) (string, error) {
-	runner := container.DefaultRunner()
-	runtimeName, err := container.ResolveRuntime(container.DefaultRuntime)
+	in, err := newImageInspector()
 	if err != nil {
-		return "", fmt.Errorf("resolve container runtime: %w", err)
+		return "", err
 	}
-
-	// Best-effort pull so an image present only in a remote registry can be
-	// inspected. A pull failure is not fatal here: the image may already be
-	// local, in which case the inspect below still yields a digest.
-	_ = runner.Run(ctx, runtimeName, []string{"pull", ref}, io.Discard, io.Discard)
-
-	var out bytes.Buffer
-	if err := runner.Run(ctx, runtimeName, []string{"image", "inspect", "--format", "{{json .RepoDigests}}", ref}, &out, io.Discard); err != nil {
-		return "", fmt.Errorf("inspect image %q: %w", ref, err)
-	}
-	return digestFromRepoDigests(out.Bytes(), ref)
+	return in.resolveDigest(ctx, ref)
 }
 
-// resolvedRuntime resolves the default container runtime name, returning an
-// error when no supported runtime is on PATH.
-func resolvedRuntime() (string, error) {
-	return container.ResolveRuntime(container.DefaultRuntime)
+// resolveDigest is the seam-driven core of ResolveDigest.
+func (in imageInspector) resolveDigest(ctx context.Context, ref string) (string, error) {
+	in.pull(ctx, ref)
+	out, err := in.inspectFormat(ctx, ref, "{{json .RepoDigests}}")
+	if err != nil {
+		return "", fmt.Errorf("inspect image %q: %w", ref, err)
+	}
+	return digestFromRepoDigests(out, ref)
 }
 
 // digestFromRepoDigests extracts the `sha256:` digest from a docker
@@ -215,25 +244,21 @@ func repoOfRef(ref string) string {
 type builderFeatureComposer struct{}
 
 func (builderFeatureComposer) ComposeDigest(ctx context.Context, features []string) (string, error) {
+	in, err := newImageInspector()
+	if err != nil {
+		return "", err
+	}
 	// Compose the Features onto the Aileron base image via the standard
 	// composition Plan, build through the Builder, then resolve the built
-	// image's digest with the same digest resolver used for rung-1.
-	plan := composition.Plan{
-		Tier:     composition.TierDevcontainer,
-		Features: map[string]json.RawMessage{},
-	}
-	for _, f := range features {
-		plan.Features[f] = json.RawMessage("{}")
-	}
-
+	// image's digest with the same inspector used for rung-1.
 	b := container.Builder{
-		Runtime: container.DefaultRuntime,
-		Runner:  container.DefaultRunner(),
+		Runtime: in.runtime,
+		Runner:  in.runner,
 		Stdout:  io.Discard,
 		Stderr:  io.Discard,
 	}
 	result, err := b.Build(ctx, container.BuildOptions{
-		Plan:   plan,
+		Plan:   rung2Plan(features),
 		Policy: container.BuildPolicyAlways,
 	})
 	if err != nil {
@@ -241,32 +266,40 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, features []stri
 	}
 	// The built image is a local tag; resolve it to a digest. A locally-built
 	// image typically has no RepoDigests, so fall back to its image Id.
-	return localImageDigest(ctx, result.Image)
+	return in.localImageDigest(ctx, result.Image)
+}
+
+// rung2Plan builds the composition Plan that composes the given
+// capability-unit Features onto the Aileron base image. Routing rung-2
+// through composition.Plan + the Builder keeps freeze on the same build
+// path the sandbox uses rather than a bespoke build.
+func rung2Plan(features []string) composition.Plan {
+	plan := composition.Plan{
+		Tier:     composition.TierDevcontainer,
+		Features: make(map[string]json.RawMessage, len(features)),
+	}
+	for _, f := range features {
+		plan.Features[f] = json.RawMessage("{}")
+	}
+	return plan
 }
 
 // localImageDigest resolves a locally-built image tag to a content digest.
 // It prefers the registry RepoDigests pin, then falls back to the local
 // image Id (also a `sha256:` content address) for an image that was never
 // pushed.
-func localImageDigest(ctx context.Context, image string) (string, error) {
-	runner := container.DefaultRunner()
-	runtimeName, err := resolvedRuntime()
-	if err != nil {
-		return "", fmt.Errorf("resolve container runtime: %w", err)
-	}
-
-	var rd bytes.Buffer
-	if err := runner.Run(ctx, runtimeName, []string{"image", "inspect", "--format", "{{json .RepoDigests}}", image}, &rd, io.Discard); err == nil {
-		if digest, derr := digestFromRepoDigests(rd.Bytes(), image); derr == nil {
+func (in imageInspector) localImageDigest(ctx context.Context, image string) (string, error) {
+	if rd, err := in.inspectFormat(ctx, image, "{{json .RepoDigests}}"); err == nil {
+		if digest, derr := digestFromRepoDigests(rd, image); derr == nil {
 			return digest, nil
 		}
 	}
 
-	var id bytes.Buffer
-	if err := runner.Run(ctx, runtimeName, []string{"image", "inspect", "--format", "{{.Id}}", image}, &id, io.Discard); err != nil {
+	id, err := in.inspectFormat(ctx, image, "{{.Id}}")
+	if err != nil {
 		return "", fmt.Errorf("resolve digest for built image %q: %w", image, err)
 	}
-	digest := strings.TrimSpace(id.String())
+	digest := strings.TrimSpace(string(id))
 	if !strings.HasPrefix(digest, "sha256:") {
 		return "", fmt.Errorf("built image %q reported a non-sha256 Id %q", image, digest)
 	}

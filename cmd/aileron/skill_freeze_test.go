@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +16,15 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
 
 const fakeFreezeDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+var (
+	errTestPull    = errors.New("pull failed")
+	errTestInspect = errors.New("inspect failed")
+)
 
 // stubFreezeResolvers points the CLI's digest resolver + feature composer at
 // fakes that return a fixed digest, so freeze runs end-to-end without Docker.
@@ -354,6 +362,167 @@ func TestDigestFromRepoDigests_MatchesRequestedRepo(t *testing.T) {
 	// rather than pinning the wrong repository.
 	if _, err := digestFromRepoDigests(in, "unrelated.example.com/thing:1"); err == nil {
 		t.Error("multiple non-matching RepoDigests must error rather than guess")
+	}
+}
+
+// fakeRunner is a container.Runner whose Run is scripted per command verb,
+// so the inspector's pull-then-inspect and RepoDigests-then-Id fallback are
+// exercised without Docker.
+type fakeRunner struct {
+	// outputs maps a join of the args to the stdout the command writes.
+	outputs map[string]string
+	// fails maps a join of the args to an error the command returns.
+	fails map[string]error
+	calls []string
+}
+
+func (f *fakeRunner) Run(_ context.Context, _ string, args []string, stdout, _ io.Writer) error {
+	key := strings.Join(args, " ")
+	f.calls = append(f.calls, key)
+	if err, ok := f.fails[key]; ok {
+		return err
+	}
+	if out, ok := f.outputs[key]; ok {
+		_, _ = stdout.Write([]byte(out))
+	}
+	return nil
+}
+
+func TestImageInspector_ResolveDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	fr := &fakeRunner{outputs: map[string]string{
+		`image inspect --format {{json .RepoDigests}} registry.example.com/runner:1.4`: `["registry.example.com/runner@` + digest + `"]`,
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	got, err := in.resolveDigest(context.Background(), "registry.example.com/runner:1.4")
+	if err != nil {
+		t.Fatalf("resolveDigest: %v", err)
+	}
+	if got != digest {
+		t.Errorf("digest = %q, want %q", got, digest)
+	}
+	// A pull was attempted (best-effort) before the inspect.
+	if len(fr.calls) == 0 || !strings.HasPrefix(fr.calls[0], "pull ") {
+		t.Errorf("expected a best-effort pull first, calls=%v", fr.calls)
+	}
+}
+
+func TestImageInspector_ResolveDigest_PullFailsButLocalInspectSucceeds(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	fr := &fakeRunner{
+		fails: map[string]error{"pull img:1": errTestPull},
+		outputs: map[string]string{
+			`image inspect --format {{json .RepoDigests}} img:1`: `["img@` + digest + `"]`,
+		},
+	}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	got, err := in.resolveDigest(context.Background(), "img:1")
+	if err != nil {
+		t.Fatalf("a failed pull must not abort when the image is local: %v", err)
+	}
+	if got != digest {
+		t.Errorf("digest = %q", got)
+	}
+}
+
+func TestImageInspector_ResolveDigest_InspectFails(t *testing.T) {
+	fr := &fakeRunner{fails: map[string]error{
+		`image inspect --format {{json .RepoDigests}} img:1`: errTestInspect,
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	if _, err := in.resolveDigest(context.Background(), "img:1"); err == nil {
+		t.Error("a failing inspect must error")
+	}
+}
+
+func TestImageInspector_LocalImageDigest_RepoDigestsWins(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("d", 64)
+	fr := &fakeRunner{outputs: map[string]string{
+		`image inspect --format {{json .RepoDigests}} built:local`: `["built@` + digest + `"]`,
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	got, err := in.localImageDigest(context.Background(), "built:local")
+	if err != nil {
+		t.Fatalf("localImageDigest: %v", err)
+	}
+	if got != digest {
+		t.Errorf("digest = %q", got)
+	}
+}
+
+func TestImageInspector_LocalImageDigest_FallsBackToID(t *testing.T) {
+	id := "sha256:" + strings.Repeat("e", 64)
+	fr := &fakeRunner{
+		// RepoDigests empty -> digestFromRepoDigests errors -> fall back to Id.
+		outputs: map[string]string{
+			`image inspect --format {{json .RepoDigests}} built:local`: `[]`,
+			`image inspect --format {{.Id}} built:local`:               id + "\n",
+		},
+	}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	got, err := in.localImageDigest(context.Background(), "built:local")
+	if err != nil {
+		t.Fatalf("localImageDigest: %v", err)
+	}
+	if got != id {
+		t.Errorf("digest = %q, want the image Id %q", got, id)
+	}
+}
+
+func TestImageInspector_LocalImageDigest_NonSha256IDRejected(t *testing.T) {
+	fr := &fakeRunner{outputs: map[string]string{
+		`image inspect --format {{json .RepoDigests}} built:local`: `[]`,
+		`image inspect --format {{.Id}} built:local`:               "not-a-digest\n",
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	if _, err := in.localImageDigest(context.Background(), "built:local"); err == nil {
+		t.Error("a non-sha256 image Id must be rejected")
+	}
+}
+
+func TestImageInspector_LocalImageDigest_BothInspectsFail(t *testing.T) {
+	fr := &fakeRunner{fails: map[string]error{
+		`image inspect --format {{json .RepoDigests}} built:local`: errTestInspect,
+		`image inspect --format {{.Id}} built:local`:               errTestInspect,
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	if _, err := in.localImageDigest(context.Background(), "built:local"); err == nil {
+		t.Error("when both inspects fail, localImageDigest must error")
+	}
+}
+
+func TestReadSkillForFreeze_NonSkillFilePath(t *testing.T) {
+	withTempStore(t)
+	dir := t.TempDir()
+	notSkill := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(notSkill, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSkillForFreeze(notSkill); err == nil {
+		t.Error("a non-SKILL.md file path must error")
+	}
+}
+
+func TestReadSkillForFreeze_DirectoryWithoutSkill(t *testing.T) {
+	withTempStore(t)
+	if _, err := readSkillForFreeze(t.TempDir()); err == nil {
+		t.Error("a directory with no SKILL.md must error")
+	}
+}
+
+func TestRung2Plan(t *testing.T) {
+	features := []string{"ghcr.io/x/a:1", "ghcr.io/x/b:1"}
+	plan := rung2Plan(features)
+	if plan.Tier != composition.TierDevcontainer {
+		t.Errorf("tier = %s", plan.Tier)
+	}
+	if len(plan.Features) != 2 {
+		t.Errorf("features = %v", plan.Features)
+	}
+	for _, f := range features {
+		if _, ok := plan.Features[f]; !ok {
+			t.Errorf("feature %q missing from plan", f)
+		}
 	}
 }
 
