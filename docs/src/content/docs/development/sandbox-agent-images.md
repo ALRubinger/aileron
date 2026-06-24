@@ -178,7 +178,7 @@ aileron sandbox build --offline
 aileron sandbox check --offline --agent=claude
 ```
 
-Offline mode computes the Node cache key from the committed `tools.lock.json` pin rather than downloading the signed checksums to learn it, so it never touches the network. The cached Node hash is re-verified against the pin as a tamper guard. On a cold cache the build fails with an actionable error that names `aileron sandbox warm`, so run warm with network access first.
+Offline mode computes the Node cache key from the committed `tools.lock.json` pin rather than downloading the signed checksums to learn it, so it never touches the network. The cached Node hash is re-asserted against the pin as a cheap consistency check that guards against a drifted lock pin. It does not re-hash the on-disk cache tree, so offline mode does not detect tampering of an already-warmed cache (the online warm path has the same trust-on-name property). On a cold cache the build fails with an actionable error that names `aileron sandbox warm`, so run warm with network access first.
 
 This is distinct from the escape hatch above. The escape hatch points at pre-staged Node and CLI binaries you manage yourself. The `--offline` route resolves the Aileron-managed, pin-verified toolchain from Aileron's own cache.
 
