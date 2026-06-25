@@ -549,11 +549,21 @@ tasks:
             logincmd="claude /login"
             if [ -f "$authfile" ]; then
               :
-            elif aileron vault list --scope agent 2>/dev/null | grep -qx "agents/claude/oauth"; then
-              :
             else
-              echo "Missing claude credential: neither host file $authfile nor a vault entry (agents/claude/oauth) is present. Authenticate first with: $logincmd" >&2
-              exit 1
+              # The vault-entry check below touches the vault with stderr
+              # suppressed. When the daemon vault is locked, that touch would
+              # prompt for the passphrase on /dev/tty with the prompt text
+              # hidden, hanging the run with no visible prompt. Touch the vault
+              # VISIBLY first (stdout discarded, the passphrase prompt left on
+              # the terminal) so the operator sees and can answer it; this is a
+              # no-op when the vault is already unlocked.
+              aileron vault list >/dev/null || true
+              if aileron vault list --scope agent 2>/dev/null | grep -qx "agents/claude/oauth"; then
+                :
+              else
+                echo "Missing claude credential: neither host file $authfile nor a vault entry (agents/claude/oauth) is present. Authenticate first with: $logincmd" >&2
+                exit 1
+              fi
             fi
             ;;
           *)
