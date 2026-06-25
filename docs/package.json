@@ -12,10 +12,10 @@
     "test": "node --test \"src/lib/**/*.test.mjs\""
   },
   "dependencies": {
-    "@astrojs/mdx": "^6.0.0",
-    "@astrojs/svelte": "^8.0.5",
+    "@astrojs/mdx": "^7.0.0",
+    "@astrojs/svelte": "^9.0.0",
     "@lucide/svelte": "^1.16.0",
-    "astro": "^6.1.6",
+    "astro": "^7.0.0",
     "bits-ui": "^2.18.0",
     "clsx": "^2.1.1",
     "mermaid": "^11.4.1",
