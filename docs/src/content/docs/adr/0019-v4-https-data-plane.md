@@ -141,13 +141,12 @@ The proxy/data-plane implementation stands on its own; it never depended on shel
 
 **Only generated shims, no proxy.** Insufficient for third-party CLIs users expect to run inside the sandbox.
 
-**Model B: proxy as egress allowlist (rejected).** An earlier shape of this ADR refused unmatched HTTPS upstreams at the proxy boundary and emitted `sandbox.proxy.rejected reason=operation_not_matched`. That shape claimed two things: credential sealing AND that the proxy was a hard egress boundary against unknown upstreams. The second claim was unenforceable against the threats it appeared to address (a hostile in-container process can open raw TCP sockets and bypass the proxy entirely), and it created visible friction for legitimate calls (a CLI hitting `httpbin.org` or a package index got an opaque proxy 403). The credential-sealing claim sharpens when the egress promise is dropped. See [the credential-injection-only requirements brainstorm](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-v4-proxy-credential-injection-only-requirements.md) for the full reasoning.
+**Model B: proxy as egress allowlist (rejected).** An earlier shape of this ADR refused unmatched HTTPS upstreams at the proxy boundary and emitted `sandbox.proxy.rejected reason=operation_not_matched`. That shape claimed two things: credential sealing AND that the proxy was a hard egress boundary against unknown upstreams. The second claim was unenforceable against the threats it appeared to address (a hostile in-container process can open raw TCP sockets and bypass the proxy entirely), and it created visible friction for legitimate calls (a CLI hitting `httpbin.org` or a package index got an opaque proxy 403). The credential-sealing claim sharpens when the egress promise is dropped.
 
 ## References
 
 - [Issue #896](https://github.com/ALRubinger/aileron/issues/896) — HTTPS proxy/data-plane implementation
 - [Issue #898](https://github.com/ALRubinger/aileron/issues/898) — runtime audit-schema cross-cut
-- [Credential-injection-only requirements brainstorm](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-v4-proxy-credential-injection-only-requirements.md) — Model A pivot rationale, threat-model framing, and the work split that drives this amendment
 - [ADR-0009](/adr/0009-user-channel) — typed audit and per-operation governance that connector specs carry and bare host bindings do not
 - [ADR-0010](/adr/0010-failure-handling) — per-operation approval gating connector operations receive
 - [ADR-0017](/adr/0017-sandbox-composition) — current sandbox runtime cut
