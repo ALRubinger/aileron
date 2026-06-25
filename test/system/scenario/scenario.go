@@ -437,8 +437,11 @@ func approveSessionHTTPRequest(bin, sessionID string) error {
 	for {
 		out, _ := exec.Command(bin, "approval", "list").CombinedOutput()
 		if id := systestlib.ParseApprovalIDForSession(string(out), sessionID); id != "" {
-			if aerr := exec.Command(bin, "approval", "approve", id).Run(); aerr != nil {
-				return fmt.Errorf("approving http_request approval %s: %w", id, aerr)
+			// Capture combined output so an approve failure surfaces the CLI's
+			// own diagnostic (e.g. "server returned …") instead of a bare exit
+			// status — being blind here cost a debugging round.
+			if aout, aerr := exec.Command(bin, "approval", "approve", id).CombinedOutput(); aerr != nil {
+				return fmt.Errorf("approving http_request approval %s: %v: %s", id, aerr, strings.TrimSpace(string(aout)))
 			}
 			logf("ok: approved pending http_request %s for session %s", id, sessionID)
 			return nil

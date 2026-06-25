@@ -155,7 +155,7 @@ func TestRunApproval_ApproveSendsApprovedTrue(t *testing.T) {
 	fakeApprovalServer(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -184,7 +184,7 @@ func TestRunApproval_DenyWithReasonFlag(t *testing.T) {
 	}
 	fakeApprovalServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -215,7 +215,7 @@ func TestRunApproval_DenyWithPositionalReason(t *testing.T) {
 	}
 	fakeApprovalServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	var stdout, stderr bytes.Buffer
 	code := runApproval([]string{"deny", "act-test-1", "wrong-recipient"},
@@ -270,6 +270,40 @@ func TestRunApproval_ApproveAlreadyResolved(t *testing.T) {
 		t.Errorf("exit code = 0, want non-zero")
 	}
 	if !strings.Contains(stderr.String(), "unknown or already resolved") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// TestRunApproval_ApproveAcceptsNoContent locks the fix for the 204 bug: the
+// decide endpoint returns 204 No Content on success, and the CLI must treat that
+// (and any 2xx) as success rather than misreporting it as a server error.
+func TestRunApproval_ApproveAcceptsNoContent(t *testing.T) {
+	fakeApprovalServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runApproval([]string{"approve", "act-test-204"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d (want 0); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Approved act-test-204") {
+		t.Errorf("output = %q", stdout.String())
+	}
+}
+
+// TestRunApproval_ApproveServerErrorReturnsNonZero asserts the 2xx-acceptance
+// did not swallow genuine server errors: a 5xx still exits non-zero.
+func TestRunApproval_ApproveServerErrorReturnsNonZero(t *testing.T) {
+	fakeApprovalServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"decide_error"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runApproval([]string{"approve", "act-boom"}, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit code = 0, want non-zero for a 500")
+	}
+	if !strings.Contains(stderr.String(), "server returned 500") {
 		t.Errorf("stderr = %q", stderr.String())
 	}
 }
