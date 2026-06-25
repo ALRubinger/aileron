@@ -928,19 +928,14 @@ func (s *server) draftReply(args map[string]any) toolResult {
 		return errorResult("message_id and body are required")
 	}
 
-	resp, err := s.commsPOST(s.commsEndpoint("draft"), map[string]string{
+	pending, err := s.commsPOST(s.commsEndpoint("draft"), map[string]string{
 		"reply_to": messageID,
 		"body":     body,
 	})
 	if err != nil {
 		return errorResult(err.Error())
 	}
-	if !resp.OK {
-		return errorResult(resp.Error)
-	}
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: "Draft submitted for user review."}},
-	}
+	return pendingApprovalResult(pending)
 }
 
 func (s *server) sendMessage(args map[string]any) toolResult {
@@ -956,7 +951,7 @@ func (s *server) sendMessage(args map[string]any) toolResult {
 		return errorResult("service, channel, and body are required")
 	}
 
-	resp, err := s.commsPOST(s.commsEndpoint("send"), map[string]string{
+	pending, err := s.commsPOST(s.commsEndpoint("send"), map[string]string{
 		"service": service,
 		"channel": channel,
 		"body":    body,
@@ -964,12 +959,7 @@ func (s *server) sendMessage(args map[string]any) toolResult {
 	if err != nil {
 		return errorResult(err.Error())
 	}
-	if !resp.OK {
-		return errorResult(resp.Error)
-	}
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: "Message sent successfully."}},
-	}
+	return pendingApprovalResult(pending)
 }
 
 func (s *server) httpRequest(args map[string]any) toolResult {
@@ -997,32 +987,23 @@ func (s *server) httpRequest(args map[string]any) toolResult {
 		payload["headers"] = headers
 	}
 
-	resp, err := s.commsPOST(s.commsEndpoint("http"), payload)
+	pending, err := s.commsPOST(s.commsEndpoint("http"), payload)
 	if err != nil {
 		return errorResult(err.Error())
 	}
-	if !resp.OK {
-		return errorResult(resp.Error)
-	}
-	// Response body is in the first message's Body field; the daemon
-	// stamps the upstream HTTP status code into Id.
-	if len(resp.Messages) > 0 {
-		return toolResult{
-			Content: []toolContent{{Type: "text", Text: resp.Messages[0].Body}},
-		}
-	}
-	return toolResult{
-		Content: []toolContent{{Type: "text", Text: "Request completed (no response body)."}},
-	}
+	// The HTTP call is approval-gated: the daemon answers 202 and runs
+	// the request server-side once the user approves. The upstream
+	// response body is carried on the approval result, retrieved later
+	// via check_action_status — not returned synchronously here.
+	return pendingApprovalResult(pending)
 }
 
-// --- Comms wire shapes (mirrors internal/api/openapi.yaml CommsToolResponse) ---
-
-type commsToolResponse struct {
-	OK       bool           `json:"ok"`
-	Error    string         `json:"error,omitempty"`
-	Messages []commsMessage `json:"messages,omitempty"`
-}
+// --- Comms wire shapes (mirrors internal/api/openapi.yaml) ---
+//
+// The approval-gated POST endpoints (/comms/send, /comms/draft,
+// /comms/http) return a 202 ActionRunPendingResponse, decoded via the
+// shared [actionRunPendingResponse] type. Only the read path
+// (/comms/messages) returns a synchronous body, modeled here.
 
 type readMessagesResponse struct {
 	Messages []commsMessage `json:"messages"`
@@ -1072,18 +1053,25 @@ func (s *server) commsGET(endpoint string, out any) error {
 	return nil
 }
 
-// commsPOST issues a POST with the JSON-encoded body and returns the
-// parsed CommsToolResponse. The daemon's send-shaped endpoints always
-// return 200 — the verdict rides in `ok` + `error` — so a non-200
-// here means the call never reached the queue.
-func (s *server) commsPOST(endpoint string, body any) (commsToolResponse, error) {
+// commsPOST issues a POST with the JSON-encoded body against one of the
+// daemon's approval-gated comms endpoints (/comms/send, /comms/draft,
+// /comms/http) and returns the 202 ActionRunPendingResponse. Those
+// endpoints register a pending approval and answer 202 immediately — the
+// dispatch happens server-side once the user approves, and the outcome
+// is reached later via the check_action_status tool
+// (GET /v1/action-approvals/{id}/result). This mirrors the
+// /v1/actions/{name}/run 202 branch in [runActionInner]: the pending
+// state is a successful result, not a failure. Any non-202 status,
+// transport error, or decode failure is a real error and surfaces as
+// one so the agent sees the call never reached the queue.
+func (s *server) commsPOST(endpoint string, body any) (actionRunPendingResponse, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return commsToolResponse{}, fmt.Errorf("encoding request: %w", err)
+		return actionRunPendingResponse{}, fmt.Errorf("encoding request: %w", err)
 	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
-		return commsToolResponse{}, fmt.Errorf("comms request: %w", err)
+		return actionRunPendingResponse{}, fmt.Errorf("comms request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.aileronToken != "" {
@@ -1091,18 +1079,35 @@ func (s *server) commsPOST(endpoint string, body any) (commsToolResponse, error)
 	}
 	resp, err := s.commsHTTPClient.Do(req)
 	if err != nil {
-		return commsToolResponse{}, fmt.Errorf("daemon unreachable: %w", err)
+		return actionRunPendingResponse{}, fmt.Errorf("daemon unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 	rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		return commsToolResponse{}, fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(rawBody)))
+	if resp.StatusCode != http.StatusAccepted {
+		return actionRunPendingResponse{}, fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(rawBody)))
 	}
-	var out commsToolResponse
+	var out actionRunPendingResponse
 	if err := json.Unmarshal(rawBody, &out); err != nil {
-		return commsToolResponse{}, fmt.Errorf("decoding response: %w", err)
+		return actionRunPendingResponse{}, fmt.Errorf("decoding pending response: %w", err)
 	}
 	return out, nil
+}
+
+// pendingApprovalResult turns a 202 ActionRunPendingResponse into the
+// successful tool result the agent sees. The daemon's `message` is the
+// human-readable instruction the LLM is meant to surface verbatim; pass
+// it through unchanged. When the daemon omits it (older builds), fall
+// back to a minimal instruction naming the approval id so the agent can
+// still reach the outcome via check_action_status. Mirrors the 202
+// branch of [runActionInner].
+func pendingApprovalResult(pending actionRunPendingResponse) toolResult {
+	text := pending.Message
+	if text == "" {
+		text = "Approval requested. Approval id: " + pending.ApprovalID
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: text}},
+	}
 }
 
 // --- Action discovery / execution against the Aileron daemon ---

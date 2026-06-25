@@ -1088,6 +1088,21 @@ func TestReadMessages_PassesQueryFilters(t *testing.T) {
 	}
 }
 
+// writePendingApproval encodes the 202 ActionRunPendingResponse the
+// daemon returns for an approval-gated comms POST. It is the real
+// contract for /comms/send, /comms/draft, and /comms/http (the daemon
+// always answers 202 — see internal/app/handlers_comms.go) — never a
+// 200 with an `ok`/`error` body.
+func writePendingApproval(w http.ResponseWriter, approvalID, message string) {
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(actionRunPendingResponse{
+		Status:     "pending_approval",
+		ApprovalID: approvalID,
+		ReviewURL:  "http://review/" + approvalID,
+		Message:    message,
+	})
+}
+
 func TestSendMessage_WithDaemon(t *testing.T) {
 	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/comms/send") {
@@ -1098,24 +1113,47 @@ func TestSendMessage_WithDaemon(t *testing.T) {
 		if body["service"] != "slack" || body["channel"] != "#x" || body["body"] != "hi" {
 			t.Errorf("body = %v", body)
 		}
-		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: true})
+		writePendingApproval(w, "appr-send", "Approval needed for send_message. Visit http://review/appr-send to approve.")
+	}))
+	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
+	if got.IsError {
+		t.Fatalf("202 pending_approval must not be an error result, got: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "Approval needed for send_message") {
+		t.Errorf("expected the pending-approval message verbatim, got %q", got.Content[0].Text)
+	}
+}
+
+// TestSendMessage_PendingMessageFallback covers the older-daemon case
+// where the 202 omits `message`: the wrapper still returns a non-error
+// result naming the approval id so the agent can poll check_action_status.
+func TestSendMessage_PendingMessageFallback(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writePendingApproval(w, "appr-77", "")
 	}))
 	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
 	if got.IsError {
 		t.Fatalf("unexpected error: %s", got.Content[0].Text)
 	}
+	if !strings.Contains(got.Content[0].Text, "appr-77") {
+		t.Errorf("expected approval id in fallback message, got %q", got.Content[0].Text)
+	}
 }
 
-func TestSendMessage_DaemonDenies(t *testing.T) {
+// TestSendMessage_DaemonError verifies a genuine non-202 (the request
+// never reached the queue, e.g. a 400 no_listener) still surfaces as an
+// error result, not the pending path.
+func TestSendMessage_DaemonError(t *testing.T) {
 	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "user denied"})
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"no_listener","message":"no listener for service: slack"}`))
 	}))
 	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
 	if !got.IsError {
-		t.Fatal("expected error when daemon denies send")
+		t.Fatal("expected error result on non-202 from daemon")
 	}
-	if !strings.Contains(got.Content[0].Text, "user denied") {
-		t.Errorf("expected daemon's error text in result, got %q", got.Content[0].Text)
+	if !strings.Contains(got.Content[0].Text, "no_listener") {
+		t.Errorf("expected daemon's error body in result, got %q", got.Content[0].Text)
 	}
 }
 
@@ -1124,21 +1162,25 @@ func TestDraftReply_WithDaemon(t *testing.T) {
 		if !strings.HasSuffix(r.URL.Path, "/comms/draft") {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: true})
+		writePendingApproval(w, "appr-draft", "Approval needed for draft_reply. Visit http://review/appr-draft to approve.")
 	}))
 	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
 	if got.IsError {
-		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+		t.Fatalf("202 pending_approval must not be an error result, got: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "Approval needed for draft_reply") {
+		t.Errorf("expected the pending-approval message verbatim, got %q", got.Content[0].Text)
 	}
 }
 
-func TestDraftReply_DaemonDenies(t *testing.T) {
+func TestDraftReply_DaemonError(t *testing.T) {
 	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "discarded"})
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"action_approvals_disabled"}`))
 	}))
 	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
 	if !got.IsError {
-		t.Fatal("expected error when daemon discards draft")
+		t.Fatal("expected error result on non-202 from daemon")
 	}
 }
 
@@ -1147,43 +1189,37 @@ func TestHttpRequest_WithDaemon(t *testing.T) {
 		if !strings.HasSuffix(r.URL.Path, "/comms/http") {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(commsToolResponse{
-			OK: true,
-			Messages: []commsMessage{
-				{ID: "200", Body: "{\"ok\":true}"},
-			},
-		})
+		writePendingApproval(w, "appr-http", "Approval needed for http_request. Visit http://review/appr-http to approve.")
 	}))
 	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
 	if got.IsError {
-		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+		t.Fatalf("202 pending_approval must not be an error result, got: %s", got.Content[0].Text)
 	}
-	if !strings.Contains(got.Content[0].Text, "ok") {
-		t.Errorf("expected response body in result, got %q", got.Content[0].Text)
+	if !strings.Contains(got.Content[0].Text, "Approval needed for http_request") {
+		t.Errorf("expected the pending-approval message verbatim, got %q", got.Content[0].Text)
 	}
 }
 
-func TestHttpRequest_DaemonDenies(t *testing.T) {
+func TestHttpRequest_DaemonError(t *testing.T) {
 	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "url not in allowlist"})
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":"url_not_allowed"}`))
 	}))
 	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://blocked"})
 	if !got.IsError {
-		t.Fatal("expected error when daemon denies")
+		t.Fatal("expected error result on non-202 from daemon")
 	}
 }
 
 func TestDispatchTool_RoutesAllCommsTools(t *testing.T) {
 	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /comms/messages is GET; the rest are POST.
+		// /comms/messages is GET (200 body); the approval-gated POSTs
+		// answer 202 ActionRunPendingResponse.
 		if strings.HasSuffix(r.URL.Path, "/comms/messages") {
 			_ = json.NewEncoder(w).Encode(readMessagesResponse{Messages: []commsMessage{}})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(commsToolResponse{
-			OK:       true,
-			Messages: []commsMessage{{ID: "x", Body: "ok"}},
-		})
+		writePendingApproval(w, "appr-x", "Approval needed. Visit http://review/appr-x to approve.")
 	}))
 	cases := []struct {
 		name string
