@@ -86,6 +86,7 @@ func TestProbeCredentials(t *testing.T) {
 		name           string
 		authFileExists bool
 		mode, mounts   string
+		isWindowsHost  bool
 		wantErr        bool
 		errContains    []string
 	}{
@@ -128,10 +129,44 @@ func TestProbeCredentials(t *testing.T) {
 			wantErr:        true,
 			errContains:    []string{"no bind mount"},
 		},
+		{
+			// Docker Desktop on Windows presents the bind-mounted auth file as
+			// 0777 because it does not project the host's Unix mode bits. The
+			// 0600 check is skipped, so the otherwise-passing facts still return
+			// nil rather than failing on the host-uncontrollable mode.
+			name:           "windows host skips the 0600 mode check",
+			authFileExists: true,
+			mode:           "777",
+			mounts:         okMounts,
+			isWindowsHost:  true,
+			wantErr:        false,
+		},
+		{
+			// The mode skip is Windows-only: the same 0777 mode still fails on a
+			// non-Windows host where the bit is faithfully carried.
+			name:           "non-windows host still enforces the 0600 mode check",
+			authFileExists: true,
+			mode:           "777",
+			mounts:         okMounts,
+			isWindowsHost:  false,
+			wantErr:        true,
+			errContains:    []string{"mode is 0600"},
+		},
+		{
+			// Mode is skipped on Windows, but file presence and the parent-dir
+			// bind mount are still enforced on every host.
+			name:           "windows host still requires the parent bind mount",
+			authFileExists: true,
+			mode:           "777",
+			mounts:         "bind:/home/agent/workspace\nvolume:/data",
+			isWindowsHost:  true,
+			wantErr:        true,
+			errContains:    []string{"no bind mount"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := systestlib.ProbeCredentials(tc.authFileExists, tc.mode, authPath, authDir, tc.mounts)
+			err := systestlib.ProbeCredentials(tc.authFileExists, tc.mode, authPath, authDir, tc.mounts, tc.isWindowsHost)
 			assertErr(t, err, tc.wantErr, tc.errContains)
 		})
 	}

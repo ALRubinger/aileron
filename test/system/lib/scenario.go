@@ -19,16 +19,29 @@ import (
 // ProbeCredentials re-expresses probe_credentials' decision core (R8.3). The live
 // driver supplies: authFileExists (`docker exec test -f <auth_path>` succeeded),
 // mode (`docker exec stat -c %a <auth_path>`, e.g. "600"), authDir
-// (path.Dir(authPath)), and mounts (the `{{.Type}}:{{.Destination}}` block from
-// `docker inspect`, one per line). Returns nil only when the file exists, the
-// mode is exactly "600", and some bind mount's Destination equals authDir.
-// Diagnostics mirror the shell's R8.3 wording so CI logs read the same.
-func ProbeCredentials(authFileExists bool, mode, authPath, authDir, mounts string) error {
+// (path.Dir(authPath)), mounts (the `{{.Type}}:{{.Destination}}` block from
+// `docker inspect`, one per line), and isWindowsHost (runtime.GOOS == "windows").
+// Returns nil only when the file exists, the mode is exactly "600", and some bind
+// mount's Destination equals authDir. Diagnostics mirror the shell's R8.3 wording
+// so CI logs read the same.
+//
+// The 0600 mode check is skipped on a Windows host. The launcher writes the auth
+// file 0600 on the host (authspec_runtime.go), and on Linux/macOS Docker carries
+// that bit faithfully into the bind mount. Docker Desktop on Windows shares a
+// Windows-path bind mount through a translation layer that does not project the
+// host's Unix mode bits, so the file always presents as 0777 inside the container
+// regardless of the host mode. The 0600 guarantee is therefore inexpressible for a
+// Windows-host bind mount; asserting it would fail on a host where the property is
+// simply not observable. File presence and the parent-dir bind mount are still
+// checked on every host.
+func ProbeCredentials(authFileExists bool, mode, authPath, authDir, mounts string, isWindowsHost bool) error {
 	if !authFileExists {
 		return Fail(fmt.Sprintf("R8.3 auth file %s missing in container", authPath))
 	}
-	if err := AssertEq("600", mode, fmt.Sprintf("R8.3 %s mode is 0600", authPath)); err != nil {
-		return err
+	if !isWindowsHost {
+		if err := AssertEq("600", mode, fmt.Sprintf("R8.3 %s mode is 0600", authPath)); err != nil {
+			return err
+		}
 	}
 	// The auth file's parent dir must be a bind mount. The shell matches the
 	// substring `bind:<authDir>` in the mount block; do the same but anchor each

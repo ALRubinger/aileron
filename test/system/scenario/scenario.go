@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -533,11 +534,21 @@ func probeCredentials(container, authPath string) error {
 		mode, _ = dockerExecOutput(container, "stat", "-c", "%a", authPath)
 	}
 	mounts, _ := dockerInspect(container, `{{range .Mounts}}{{.Type}}:{{.Destination}}{{"\n"}}{{end}}`)
-	authDir := filepath.Dir(authPath)
-	if err := systestlib.ProbeCredentials(authFileExists, mode, authPath, authDir, mounts); err != nil {
+	// authPath is an in-container POSIX path; use path.Dir (forward-slash), not
+	// filepath.Dir, so the parent matches the docker-inspect mount destinations on
+	// a Windows host (where filepath.Dir would emit backslashes).
+	authDir := path.Dir(authPath)
+	isWindows := runtime.GOOS == "windows"
+	if err := systestlib.ProbeCredentials(authFileExists, mode, authPath, authDir, mounts, isWindows); err != nil {
 		return err
 	}
-	logf("ok: R8.3 auth file %s present, mode 0600, %s bind-mounted", authPath, authDir)
+	if isWindows {
+		// Docker Desktop on Windows does not project the host file's 0600 mode into
+		// the bind mount, so the mode is not asserted (see ProbeCredentials).
+		logf("ok: R8.3 auth file %s present, %s bind-mounted (mode not host-controlled on Windows)", authPath, authDir)
+	} else {
+		logf("ok: R8.3 auth file %s present, mode 0600, %s bind-mounted", authPath, authDir)
+	}
 	return nil
 }
 
