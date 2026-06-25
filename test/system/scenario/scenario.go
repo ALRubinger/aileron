@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,12 @@ const r10PollTimeout = 20 * time.Second
 // r10Event is the comms audit event the daemon logs for a forwarded http_request
 // (internal/app/handlers_comms.go logCommsEvent("http_request_sent", ...)).
 const r10Event = "http_request_sent"
+
+// approvalPollTimeout is how long approveSessionHTTPRequest polls `aileron
+// approval list` for this session's pending http_request before failing. The
+// approval is registered as the agent calls the tool, so it is normally present
+// by the time the launch exits; the window only covers a brief lag.
+const approvalPollTimeout = 15 * time.Second
 
 // env holds the validated environment the scenario reads, mirroring the bash
 // `: "${VAR:?...}"` preconditions. AILERON_SYSTEST_LIB is intentionally absent:
@@ -120,6 +127,19 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	}
 	healthURL := strings.TrimRight(daemonURL, "/") + "/healthz"
 	logf("%s scenario: daemon at %s (started-by-test=%v)", cfg.Name, daemonURL, !daemonWasRunning)
+
+	// Unlock the daemon vault before backgrounding the launch. A freshly-started
+	// daemon comes up with a locked vault, and `aileron launch` needs it unlocked
+	// (the agent credential is vault-backed). The launch runs in the background
+	// with redirected stdio, so its own passphrase prompt cannot reach the
+	// terminal; instead we touch the vault here in the FOREGROUND, where the
+	// prompt reaches the operator's terminal (`aileron vault list` triggers the
+	// run() vault state-machine — ensureVaultUnlocked — which prompts when locked
+	// and is a no-op when already unlocked). The operator running by hand answers
+	// the prompt; the launch then proceeds against an unlocked daemon.
+	if err := ensureVaultUnlocked(e.aileronBin); err != nil {
+		return err
+	}
 
 	prompt := systestlib.BuildPrompt(cfg, sentinel, healthURL)
 	execArgs := systestlib.BuildExecArgs(cfg, prompt)
@@ -242,7 +262,9 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 			return err
 		}
 	} else {
-		return systestlib.Fail(fmt.Sprintf("never observed a running %s* container during the launch", sbxPrefix))
+		logf("launch log follows:")
+		dumpFile(launchLog)
+		return systestlib.Fail(fmt.Sprintf("never observed a running %s* container during the launch (see launch log above)", sbxPrefix))
 	}
 
 	// --- wait for the launch to finish, then assert its exit code (R8.6) ----
@@ -295,6 +317,22 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	// comms audit entry, so we can assert THIS run's record rather than any
 	// unrelated event in the shared daily file.
 	sessionID := strings.TrimPrefix(container, sbxPrefix)
+
+	// R10 prerequisite — approve the agent's pending http_request via the CLI.
+	// http_request is an approval-gated action: the daemon parks a pending
+	// approval and its executor goroutine waits (effectively forever) for a
+	// decision, then performs the outbound fetch and writes the
+	// http_request_sent audit record. The agent's MCP client surfaces the
+	// 202-pending as a tool failure and the agent moves on, but the daemon
+	// goroutine is still waiting — so approving the pending request here, exactly
+	// as a user would (`aileron approval approve <id>`), unblocks the round-trip
+	// and produces the audit record R10 asserts.
+	if err := approveSessionHTTPRequest(e.aileronBin, sessionID); err != nil {
+		logf("launch log follows:")
+		dumpFile(launchLog)
+		return err
+	}
+
 	if err := assertAuditR10(e.stateDir, sessionID); err != nil {
 		logf("launch log follows:")
 		dumpFile(launchLog)
@@ -363,6 +401,53 @@ func daemonStart(bin string) (string, error) {
 // daemon this run started; teardown failures must not mask the test result).
 func daemonStop(bin string) {
 	_ = exec.Command(bin, "daemon", "stop").Run()
+}
+
+// ensureVaultUnlocked touches the daemon vault in the FOREGROUND so its
+// passphrase prompt (when locked) reaches the operator's terminal, before the
+// backgrounded launch needs the vault. `aileron vault list` runs through run()'s
+// vault state-machine (ensureVaultUnlocked): it prompts on /dev/tty when the
+// vault is locked and is a silent pass-through when already unlocked. stdout is
+// discarded (the secret listing is irrelevant); stdin and stderr stay attached
+// to the terminal so the prompt is visible and answerable. The launch is
+// backgrounded with redirected stdio and cannot prompt, so this must happen
+// here.
+func ensureVaultUnlocked(bin string) error {
+	logf("ensuring the Aileron daemon vault is unlocked (enter your passphrase if prompted)...")
+	cmd := exec.Command(bin, "vault", "list")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = io.Discard
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("unlocking the daemon vault (run `%s vault list` and enter the passphrase): %w", bin, err)
+	}
+	return nil
+}
+
+// approveSessionHTTPRequest approves the agent's pending http_request approval
+// for sessionID via the CLI, exactly as a user would. http_request is
+// approval-gated; the daemon parks a pending approval whose executor goroutine
+// waits (effectively forever) for a decision, so the approval is still pending
+// after the launch exits and approving it here produces the http_request_sent
+// audit record. It polls `aileron approval list` briefly because the approval
+// registers as the agent calls the tool. A missing approval is a hard error:
+// R10 requires the round-trip, so none means the agent never called the tool.
+func approveSessionHTTPRequest(bin, sessionID string) error {
+	deadline := time.Now().Add(approvalPollTimeout)
+	for {
+		out, _ := exec.Command(bin, "approval", "list").CombinedOutput()
+		if id := systestlib.ParseApprovalIDForSession(string(out), sessionID); id != "" {
+			if aerr := exec.Command(bin, "approval", "approve", id).Run(); aerr != nil {
+				return fmt.Errorf("approving http_request approval %s: %w", id, aerr)
+			}
+			logf("ok: approved pending http_request %s for session %s", id, sessionID)
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return systestlib.Fail(fmt.Sprintf("R10 no pending http_request approval for session %s found via `aileron approval list` (the agent did not call the http_request tool)", sessionID))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // --- live probe wrappers: gather docker facts, delegate the decision -------
