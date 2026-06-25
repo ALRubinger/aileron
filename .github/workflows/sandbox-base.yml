@@ -202,6 +202,43 @@ jobs:
               --image-name aileron-sandbox-base:smoke
           fi
 
+      # Verify the just-assembled manifest is genuinely multi-arch before the job
+      # goes green (#1657). The multi-arch base is load-bearing under the
+      # local-build model (#1451): arm64 (Apple Silicon) users build the Claude
+      # layer on top of whatever the base resolves to, so a base that silently
+      # regresses to amd64-only forces emulation or failure on arm64 hosts. A
+      # change that drops an arch (editing the compose loop to a single arch, or
+      # removing arm64 from the substrate `platforms:`) would otherwise publish a
+      # single-arch manifest with green CI. This inspects every published meta tag
+      # and fails the job unless both linux/amd64 and linux/arm64 are present.
+      - name: Assert published manifest is multi-arch
+        if: ${{ steps.publish.outputs.publish == 'true' }}
+        run: |
+          set -euo pipefail
+
+          required="linux/amd64 linux/arm64"
+          status=0
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "::group::inspect $tag"
+            platforms=$(docker buildx imagetools inspect "$tag" \
+              --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}}{{"\n"}}{{end}}')
+            echo "$platforms"
+            echo "::endgroup::"
+            for want in $required; do
+              if ! printf '%s\n' "$platforms" | grep -qx "$want"; then
+                echo "::error::tag $tag is missing required platform $want (got: $(printf '%s' "$platforms" | tr '\n' ' '))"
+                status=1
+              fi
+            done
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+          if [ "$status" -ne 0 ]; then
+            echo "published sandbox-base manifest is not multi-arch (amd64 + arm64); failing job"
+            exit 1
+          fi
+          echo "all published tags carry linux/amd64 and linux/arm64"
+
       # Single-arch local load of the Tier 0 Containerfile so the smoke step can
       # `docker run` it. This recipe takes the images/sandbox-base context (no
       # repo-root, no AILERON_VERSION/COMMIT build-args) and is UNBAKED (no
