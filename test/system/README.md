@@ -71,6 +71,16 @@ Prerequisites (the scenario fail-fasts with the exact remediation if missing):
    you already have running) and `aileron daemon stop` on exit only if it started
    one. R10 then asserts the audit round-trip against that daemon (state dir
    `~/.aileron`). `task build` produces `aileron-server` alongside `aileron`.
+4. An unlockable vault. Before backgrounding the launch the scenario touches the
+   vault in the foreground (`aileron vault list`), so if the daemon's vault is
+   locked you are prompted for the passphrase on your terminal — answer it and the
+   run continues. The launch needs the vault unlocked (the agent credential is
+   vault-backed); a freshly-started daemon comes up locked. Set
+   `AILERON_VAULT_PASSPHRASE` to skip the prompt.
+5. Interactive approval of one action. The R10 round-trip is approval-gated: the
+   agent's `http_request` parks a pending approval that the scenario approves for
+   you via `aileron approval approve <id>` (so this is non-interactive), then the
+   daemon performs the request and writes the audit record R10 checks.
 
 The simplest path is the Taskfile target:
 
@@ -159,10 +169,14 @@ session id at runtime, so the exact name is discovered, not predicted).
   `${AILERON_URL}` placeholder: the agent passes the `url` tool argument verbatim
   (`cmd/aileron-mcp`), and the daemon fetches that exact string
   (`internal/app/handlers_comms.go`), so a literal placeholder yields an invalid
-  request and no audit record (the original prompt's bug). The request routes
-  through the daemon's `/comms/http` handler, which appends an
-  `"event":"http_request_sent"` audit record carrying the launch's
-  `session_id` to today's audit JSONL
+  request and no audit record (the original prompt's bug). `http_request` is an
+  **approval-gated** action: the daemon parks a pending approval and its executor
+  goroutine waits for a decision, so the scenario approves it for the run via
+  `aileron approval approve <id>` (found by session through `aileron approval
+  list`) after the launch exits — the goroutine is still waiting, so approving it
+  then unblocks the fetch. The request routes through the daemon's `/comms/http`
+  handler, which appends an `"event":"http_request_sent"` audit record carrying
+  the launch's `session_id` to today's audit JSONL
   (`internal/audit/local.go` `MessageEntry`, written by
   `handlers_comms.go logCommsEvent`). R10 polls today's audit file for an
   `http_request_sent` record matching **this run's session id**
