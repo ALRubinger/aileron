@@ -16,7 +16,7 @@ order: 25
 
 Sandbox launches today land in a fresh `/home/agent/.claude/` and `/home/agent/.codex/` every time. Each agent's first-launch wizard fires on every invocation. Subscription auth (the dominant auth mode for both Claude Code and Codex CLI) has no path through the launcher.
 
-The vault SPI at `internal/vault/spi.go` already enumerates `oauth_refresh_token` and `api_key` as `Metadata.Type` values. Nothing in `internal/launch/` consults it. The brainstorm at [`docs/brainstorms/2026-06-10-vault-backed-agent-auth-injection-requirements.md`](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-vault-backed-agent-auth-injection-requirements.md) settled the user-facing shape: the vault is durable, the container is ephemeral, and a writable bind-mount is the conduit between them.
+The vault SPI at `internal/vault/spi.go` already enumerates `oauth_refresh_token` and `api_key` as `Metadata.Type` values. Nothing in `internal/launch/` consults it. The user-facing shape: the vault is durable, the container is ephemeral, and a writable bind-mount is the conduit between them.
 
 The decision below pins the implementation contract: a new `AuthSpec` descriptor on the `Agent` interface, a daemon-brokered vault credentials API, per-agent specs for Claude and Codex, and a single seeding path that runs entirely inside the sandbox container.
 

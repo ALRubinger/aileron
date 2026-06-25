@@ -75,3 +75,8 @@ deploy/.env
 # Agent checkpoint artifacts
 /.entire/
 /.codex/
+
+# Local planning artifacts — dated working docs (ce-plan / ce-brainstorm output).
+# Source of record is GitHub issues + ADRs; these go stale and stay out of Git.
+docs/plans/
+docs/brainstorms/
