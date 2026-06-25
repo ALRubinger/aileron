@@ -519,11 +519,12 @@ tasks:
     desc: >-
       Fail-fast preconditions for an agent system-test scenario: Docker must be
       reachable AND the agent's credential must be resolvable. Pass
-      AGENT=codex|claude. For codex the host-side auth file the launcher's
-      AuthSpec mounts must exist. For claude the credential is vault-backed
-      (agents/claude/oauth), so the gate passes when EITHER the host file
-      exists OR the vault/daemon holds the entry. On a missing credential,
-      exits non-zero naming the remediation — never a silent skip.
+      AGENT=codex|claude. The credential is accepted from EITHER source: the
+      host-side auth file the launcher's AuthSpec mounts, OR the vault/daemon
+      entry agents/<agent>/oauth (which the launcher's AuthSpec renders into the
+      sandbox at run time, so the host file may legitimately be absent on a
+      machine where the credential lives only in the vault). On a missing
+      credential, exits non-zero naming the remediation — never a silent skip.
     vars:
       AGENT: '{{.AGENT}}'
     cmds:
@@ -535,42 +536,43 @@ tasks:
           codex)
             authfile="$HOME/.codex/auth.json"
             logincmd="codex login"
-            if [ ! -f "$authfile" ]; then
-              echo "Missing codex auth file: $authfile. Authenticate first with: $logincmd" >&2
-              exit 1
-            fi
             ;;
           claude)
-            # Claude's credential is vault-backed (agents/claude/oauth): the
-            # launcher's AuthSpec renders it into the sandbox at run time, so
-            # the host file may be absent on a machine where the credential
-            # lives only in the vault. Accept EITHER source.
             authfile="$HOME/.claude/.credentials.json"
             logincmd="claude /login"
-            if [ -f "$authfile" ]; then
-              :
-            else
-              # The vault-entry check below touches the vault with stderr
-              # suppressed. When the daemon vault is locked, that touch would
-              # prompt for the passphrase on /dev/tty with the prompt text
-              # hidden, hanging the run with no visible prompt. Touch the vault
-              # VISIBLY first (stdout discarded, the passphrase prompt left on
-              # the terminal) so the operator sees and can answer it; this is a
-              # no-op when the vault is already unlocked.
-              aileron vault list >/dev/null || true
-              if aileron vault list --scope agent 2>/dev/null | grep -qx "agents/claude/oauth"; then
-                :
-              else
-                echo "Missing claude credential: neither host file $authfile nor a vault entry (agents/claude/oauth) is present. Authenticate first with: $logincmd" >&2
-                exit 1
-              fi
-            fi
             ;;
           *)
             echo "Unknown AGENT '{{.AGENT}}' (expected codex or claude)" >&2
             exit 1
             ;;
         esac
+        # Normalize any Windows backslashes in $HOME so the path renders with a
+        # single separator style (e.g. C:/Users/alr/.codex/auth.json) instead of
+        # the mixed C:\Users\alr/.codex/auth.json that git-bash would print.
+        authfile="$(printf '%s' "$authfile" | tr '\\' '/')"
+        vaultentry="agents/{{.AGENT}}/oauth"
+        # The credential is accepted from EITHER the host file OR the vault
+        # entry. The launcher's AuthSpec renders the vault credential into the
+        # sandbox at run time, so the host file may be absent on a machine where
+        # the credential lives only in the vault (agents/<agent>/oauth).
+        if [ -f "$authfile" ]; then
+          :
+        else
+          # The vault-entry check below touches the vault with stderr
+          # suppressed. When the daemon vault is locked, that touch would
+          # prompt for the passphrase on /dev/tty with the prompt text hidden,
+          # hanging the run with no visible prompt. Touch the vault VISIBLY
+          # first (stdout discarded, the passphrase prompt left on the
+          # terminal) so the operator sees and can answer it; this is a no-op
+          # when the vault is already unlocked.
+          aileron vault list >/dev/null || true
+          if aileron vault list --scope agent 2>/dev/null | grep -qx "$vaultentry"; then
+            :
+          else
+            echo "Missing {{.AGENT}} credential: neither host file $authfile nor a vault entry ($vaultentry) is present. Authenticate first with: $logincmd" >&2
+            exit 1
+          fi
+        fi
 
   _test:system:cleanup:
     internal: true
@@ -598,8 +600,10 @@ tasks:
       into CI — v1). Runs the harness smoke self-test and the shared
       scenario-library contract tests, then the per-agent scenarios codex
       (#1476) and claude (#1477) end to end. Requires a reachable Docker daemon
-      and, per scenario, host-side agent auth — each scenario fail-fasts with
-      the exact remediation if its auth is missing, never a silent skip. To run
+      and, per scenario, an agent credential resolvable from EITHER the host
+      auth file OR the vault entry agents/<agent>/oauth — each scenario
+      fail-fasts with the exact remediation if its auth is missing from both
+      sources, never a silent skip. To run
       a single agent without the other, invoke its leaf directly
       (e.g. `task test:system:launch:claude`).
     cmds:
