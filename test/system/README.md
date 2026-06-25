@@ -64,7 +64,11 @@ thing that needs an authenticated agent, and it is invoked manually.
 Prerequisites (the scenario fail-fasts with the exact remediation if missing):
 
 1. A reachable Docker daemon (`docker info`).
-2. A host-side codex login: `codex login` writes `~/.codex/auth.json`.
+2. A codex login resolvable by the launcher's AuthSpec. The precondition passes
+   when EITHER the host file `~/.codex/auth.json` exists OR the vault holds the
+   entry (`aileron vault list --scope agent` prints `agents/codex/oauth`), since
+   the AuthSpec renders the vault credential into the sandbox at run time. Run
+   `codex login` to write the host file, or populate the vault entry.
 3. The Aileron daemon binary (`aileron-server`) resolvable next to `aileron` or
    on PATH. The scenario manages the daemon lifecycle itself through the CLI: it
    runs `aileron daemon start` before the launch (idempotent — it reuses a daemon
