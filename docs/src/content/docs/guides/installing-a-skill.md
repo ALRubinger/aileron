@@ -35,7 +35,7 @@ Aileron shallow-clones the repository, reads the `SKILL.md` at its root, and ins
 
 A git-URL install requires the `git` binary on your `PATH`. `aileron skill install` runs host-side, so it is unrestricted by the sandbox egress boundary. If `git` is missing the install fails with the underlying clone error.
 
-> Installing by an [agentskills.io](https://agentskills.io) registry slug is not wired yet. Use a local path or a git URL for now.
+> Installing by an [agentskills.io](https://agentskills.io) registry slug is not supported. agentskills.io is a format spec, not a registry, so a slug has no canonical location to resolve against. Install from a local path or a git URL instead.
 
 ## Action requirements and graceful degrade
 

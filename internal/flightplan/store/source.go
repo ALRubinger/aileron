@@ -12,12 +12,14 @@ import (
 )
 
 // ErrSlugNotWired is returned when an agentskills.io slug install is
-// attempted. The slug source is a seam in v0: there is no pinned
-// agentskills.io wire contract in the repo yet, so the concrete fetch is
-// deferred to a named follow-up rather than invented here. See issue #1583.
+// attempted. Slug install is intentionally unsupported: agentskills.io is a
+// format spec, not a registry, so a slug resolves to no canonical location.
+// The only implementable shape would be GitHub-as-registry, which is pure
+// sugar over the git-URL source that already covers distribution. Decided
+// won't-do in #1583; revisit only if a real agentskills.io registry ships.
 var ErrSlugNotWired = errors.New(
-	"store: installing by agentskills.io slug is not wired yet; " +
-		"use a local path or a git URL for now (tracked by #1583)")
+	"store: installing by agentskills.io slug is not supported; " +
+		"use a local path or a git URL")
 
 // SourceKind classifies an install source string.
 type SourceKind int
@@ -79,10 +81,12 @@ func runGit(ctx context.Context, args ...string) error {
 
 // slugResolver resolves an agentskills.io slug to fetched skill content on
 // disk, returning the local directory the content was fetched into. It is a
-// seam: v0 returns ErrSlugNotWired. See issue #1583 for the wire contract.
+// seam, but slug install is unsupported by decision (#1583, won't-do): the
+// resolver returns ErrSlugNotWired.
 type slugResolver func(ctx context.Context, slug, destDir string) (string, error)
 
-// notWiredSlugResolver is the v0 slug resolver.
+// notWiredSlugResolver is the slug resolver. Slug install is unsupported by
+// decision (#1583); it always returns ErrSlugNotWired.
 func notWiredSlugResolver(_ context.Context, _, _ string) (string, error) {
 	return "", ErrSlugNotWired
 }
