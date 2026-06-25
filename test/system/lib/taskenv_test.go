@@ -571,6 +571,201 @@ func TestTaskfileLaunchCmdShellFree(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// (G) _test:system:precond is free of Windows-fatal Unix externals (#1653)
+// ---------------------------------------------------------------------------
+
+// stripShellComments drops full-line `#` comments and blank lines from a shell
+// block scalar, returning only the executable lines. The precond block's own
+// prose mentions `tr` and `grep -qx` to explain why they were removed, so a
+// flat scan of the raw scalar would false-positive on the documentation; the
+// contract is about what the shell actually EXECUTES, so only code lines count.
+// A `#` that is not the first non-space token (e.g. inside a string) is left
+// intact — none of the precond's external-command shapes embed a literal `#`,
+// so this conservative line-level strip is sufficient and never hides code.
+func stripShellComments(block string) string {
+	var keep []string
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.Join(keep, "\n")
+}
+
+// trExternalRe matches an invocation of the `tr` coreutil: `tr` as a command
+// word, i.e. at a statement boundary: the start of any line (the `(?m)`
+// flag makes `^` match each line, not just the block start), or after `|`,
+// `;`, `&`, `(`, or `$(`. Anchoring on the boundary avoids matching `tr`
+// inside an identifier
+// (e.g. `authfile`, `entries`, `vaultentry`) while catching the real
+// `printf ... | tr '\\' '/'` shape #1653 removed.
+var trExternalRe = regexp.MustCompile(`(?m)(?:^|[|;&(])\s*tr\s`)
+
+// grepExternalRe matches an invocation of the `grep` coreutil at a statement or
+// pipeline boundary, catching `... | grep -qx ...` (the retired vault-entry
+// membership shape) without matching the word inside a comment or string.
+var grepExternalRe = regexp.MustCompile(`(?m)(?:^|[|;&(])\s*grep\s`)
+
+// TestTaskfilePrecondNoUnixExternals pins the #1653 contract: the
+// `_test:system:precond` block shells out to NO Unix-only external that a stock
+// Windows host may lack — specifically not `tr` (which failed the whole run
+// with exit 127) and not `grep` (the next such trap, called out in the issue).
+// The check is over the EXECUTED lines of the block (comments stripped), so the
+// block may still document why those externals were removed. The normalization
+// and membership-test behavior these externals previously provided is covered
+// behaviorally by TestTaskBehaviorPrecondShellBuiltins below.
+func TestTaskfilePrecondNoUnixExternals(t *testing.T) {
+	root := loadTaskfile(t)
+	task := taskNode(t, root, "_test:system:precond")
+	cmds := mapGet(task, "cmds")
+	if cmds == nil || cmds.Kind != yaml.SequenceNode {
+		t.Fatal("_test:system:precond: no cmds: sequence")
+	}
+	code := stripShellComments(strings.Join(allScalars(cmds), "\n"))
+
+	if loc := trExternalRe.FindString(code); loc != "" {
+		t.Errorf("_test:system:precond executes `tr` (Unix external, not on a stock Windows PATH — #1653); "+
+			"use go-task's shell builtin `${var//\\\\//}` instead. Matched: %q", strings.TrimSpace(loc))
+	}
+	if loc := grepExternalRe.FindString(code); loc != "" {
+		t.Errorf("_test:system:precond executes `grep` (Unix external, not on a stock Windows PATH — #1653); "+
+			"use a shell `while read`+`case` membership test instead. Matched: %q", strings.TrimSpace(loc))
+	}
+}
+
+// TestPrecondExternalRegexSensitivity pins the matcher used by
+// TestTaskfilePrecondNoUnixExternals: it must flag a `tr`/`grep` invocation at
+// ANY statement boundary, including the start of a later line in the multiline
+// block (the `(?m)` anchoring), not only after a pipe. A line-leading external
+// is a plausible future regression shape (e.g. a bare `tr ... < file` on its
+// own line), so the guard would be hollow if it only caught the piped form.
+// Conversely it must NOT flag the substring `tr`/`grep` inside an identifier.
+func TestPrecondExternalRegexSensitivity(t *testing.T) {
+	cases := []struct {
+		name  string
+		code  string
+		re    *regexp.Regexp
+		match bool
+	}{
+		{"tr piped", "printf '%s' \"$x\" | tr '\\\\' '/'", trExternalRe, true},
+		{"tr line-leading on later line", "authfile=x\ntr 'a' 'b' < f", trExternalRe, true},
+		{"tr after semicolon", "x=1; tr a b", trExternalRe, true},
+		{"tr inside identifier authfile", "authfile=\"$HOME/x\"", trExternalRe, false},
+		{"tr inside identifier entries", "entries=\"$(cmd)\"", trExternalRe, false},
+		{"grep piped on later line", "aileron vault list >/dev/null\naileron vault list | grep -qx \"$e\"", grepExternalRe, true},
+		{"grep line-leading", "grep -q foo bar", grepExternalRe, true},
+		{"grep absent", "while IFS= read -r line; do :; done", grepExternalRe, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.re.MatchString(c.code)
+			if got != c.match {
+				t.Errorf("re.MatchString(%q) = %v, want %v", c.code, got, c.match)
+			}
+		})
+	}
+}
+
+// TestTaskBehaviorPrecondShellBuiltins pins the behavioral half of #1653: the
+// two builtins that replaced `tr` and `grep -qx` produce the correct results
+// under go-task's embedded shell, with a PATH that omits `tr` and `grep`
+// (simulating the stock Windows host where the bug manifested). This is the
+// regression proof: before the fix the precond shelled out to those externals
+// and would exit 127 under this PATH; after, the builtins resolve natively.
+func TestTaskBehaviorPrecondShellBuiltins(t *testing.T) {
+	sandbox := sandboxPATH(t)
+	taskEnvPATH := append(filterEnv(os.Environ(), "PATH"), "PATH="+sandbox)
+
+	// Sim-validity: the sandbox PATH must truly lack tr and grep, else the test
+	// proves nothing about the no-external posture.
+	t.Run("sandbox PATH excludes tr and grep", func(t *testing.T) {
+		if resolvableUnder(sandbox, "tr") {
+			t.Error("sandbox PATH unexpectedly resolves `tr`")
+		}
+		if resolvableUnder(sandbox, "grep") {
+			t.Error("sandbox PATH unexpectedly resolves `grep`")
+		}
+	})
+
+	// (1) Backslash normalization: ${authfile//\\//} turns the mixed
+	// C:\Users\alr/.codex/auth.json git-bash form into a single-separator path,
+	// exactly the substitution the retired `tr '\\' '/'` performed.
+	t.Run("backslash normalization without tr", func(t *testing.T) {
+		tf := `version: '3'
+tasks:
+  r:
+    silent: true
+    cmds:
+      - |
+        authfile='C:\Users\alr/.codex/auth.json'
+        authfile="${authfile//\\//}"
+        echo "RESOLVED=[$authfile]"
+`
+		out := runTask(t, tf, "r", taskEnvPATH)
+		got := extractBracketed(out, "RESOLVED=[", "]")
+		if want := "C:/Users/alr/.codex/auth.json"; got != want {
+			t.Errorf("normalized path = %q, want %q; output:\n%s", got, want, out)
+		}
+	})
+
+	// (2) Whole-line membership test: the while-read+case loop reports a present
+	// entry as found and a substring-only near-match as NOT found, preserving the
+	// exact-line semantics of the retired `grep -qx`.
+	t.Run("whole-line membership without grep", func(t *testing.T) {
+		tf := `version: '3'
+tasks:
+  r:
+    silent: true
+    vars:
+      TARGET: '{{.TARGET}}'
+    cmds:
+      - |
+        entries="agents/codex/oauth
+        agents/claude/oauth
+        other/thing"
+        found=
+        while IFS= read -r line; do
+          case "$line" in
+            "{{.TARGET}}") found=1; break ;;
+          esac
+        done <<< "$entries"
+        echo "RESOLVED=[${found:-none}]"
+`
+		cases := []struct {
+			target string
+			want   string
+		}{
+			{"agents/claude/oauth", "1"},     // exact present entry
+			{"agents/missing/oauth", "none"}, // absent entry
+			{"agents/claude", "none"},        // substring of a line, not a whole line
+		}
+		for _, c := range cases {
+			t.Run(c.target, func(t *testing.T) {
+				env := append(filterEnv(os.Environ(), "PATH"), "PATH="+sandbox)
+				bin := taskBin(t)
+				dir := t.TempDir()
+				path := filepath.Join(dir, "Taskfile.yml")
+				if err := os.WriteFile(path, []byte(tf), 0o600); err != nil {
+					t.Fatalf("writing temp Taskfile: %v", err)
+				}
+				cmd := exec.Command(bin, "-t", path, "r", "TARGET="+c.target)
+				cmd.Env = env
+				outB, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("`task r TARGET=%s` failed: %v\noutput:\n%s", c.target, err, outB)
+				}
+				got := extractBracketed(string(outB), "RESOLVED=[", "]")
+				if got != c.want {
+					t.Errorf("membership for %q = %q, want %q; output:\n%s", c.target, got, c.want, outB)
+				}
+			})
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // (A) behavioral: go-task env scope semantics
 // ---------------------------------------------------------------------------
 

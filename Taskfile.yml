@@ -549,7 +549,10 @@ tasks:
         # Normalize any Windows backslashes in $HOME so the path renders with a
         # single separator style (e.g. C:/Users/alr/.codex/auth.json) instead of
         # the mixed C:\Users\alr/.codex/auth.json that git-bash would print.
-        authfile="$(printf '%s' "$authfile" | tr '\\' '/')"
+        # Use go-task's embedded shell (mvdan.cc/sh) pattern-substitution builtin
+        # rather than `tr`: that Unix coreutil is not on PATH on a stock Windows
+        # host, where it failed the whole run with exit 127 (#1653).
+        authfile="${authfile//\\//}"
         vaultentry="agents/{{.AGENT}}/oauth"
         # The credential is accepted from EITHER the host file OR the vault
         # entry. The launcher's AuthSpec renders the vault credential into the
@@ -566,7 +569,20 @@ tasks:
           # terminal) so the operator sees and can answer it; this is a no-op
           # when the vault is already unlocked.
           aileron vault list >/dev/null || true
-          if aileron vault list --scope agent 2>/dev/null | grep -qx "$vaultentry"; then
+          # Whole-line membership test for $vaultentry in the vault listing,
+          # done with shell builtins (`while read` + `case`) instead of
+          # `grep -qx`: like `tr` above, grep is a Unix external not guaranteed
+          # on a stock Windows host (#1653). A here-string feeds the loop in the
+          # current shell (no pipe subshell), so $found survives; `case` matches
+          # the whole line, preserving the exact-line semantics of `grep -qx`.
+          entries="$(aileron vault list --scope agent 2>/dev/null)"
+          found=
+          while IFS= read -r line; do
+            case "$line" in
+              "$vaultentry") found=1; break ;;
+            esac
+          done <<< "$entries"
+          if [ -n "$found" ]; then
             :
           else
             echo "Missing {{.AGENT}} credential: neither host file $authfile nor a vault entry ($vaultentry) is present. Authenticate first with: $logincmd" >&2
