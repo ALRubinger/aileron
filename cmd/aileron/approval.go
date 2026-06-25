@@ -148,7 +148,11 @@ func runApprovalDecide(args []string, approved bool, stdout, stderr io.Writer) i
 		fmt.Fprintf(stderr, "error: approval %q is unknown or already resolved\n", id)
 		return 1
 	}
-	if resp.StatusCode != http.StatusOK {
+	// The decide endpoint returns 204 No Content on success
+	// (DecideActionApproval). Accept any 2xx — checking only for 200 misreported
+	// the canonical 204 success as an error and exited non-zero even though the
+	// approval was recorded server-side.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
 		fmt.Fprintf(stderr, "server returned %d: %s\n", resp.StatusCode, respBody)
 		return 1
