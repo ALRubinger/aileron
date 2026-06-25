@@ -595,16 +595,18 @@ func stripShellComments(block string) string {
 }
 
 // trExternalRe matches an invocation of the `tr` coreutil: `tr` as a command
-// word, i.e. at a statement boundary (start, after `|`, `;`, `&`, `(`, or
-// `$(`). Anchoring on the boundary avoids matching `tr` inside an identifier
+// word, i.e. at a statement boundary: the start of any line (the `(?m)`
+// flag makes `^` match each line, not just the block start), or after `|`,
+// `;`, `&`, `(`, or `$(`. Anchoring on the boundary avoids matching `tr`
+// inside an identifier
 // (e.g. `authfile`, `entries`, `vaultentry`) while catching the real
 // `printf ... | tr '\\' '/'` shape #1653 removed.
-var trExternalRe = regexp.MustCompile(`(?:^|[|;&(])\s*tr\s`)
+var trExternalRe = regexp.MustCompile(`(?m)(?:^|[|;&(])\s*tr\s`)
 
 // grepExternalRe matches an invocation of the `grep` coreutil at a statement or
 // pipeline boundary, catching `... | grep -qx ...` (the retired vault-entry
 // membership shape) without matching the word inside a comment or string.
-var grepExternalRe = regexp.MustCompile(`(?:^|[|;&(])\s*grep\s`)
+var grepExternalRe = regexp.MustCompile(`(?m)(?:^|[|;&(])\s*grep\s`)
 
 // TestTaskfilePrecondNoUnixExternals pins the #1653 contract: the
 // `_test:system:precond` block shells out to NO Unix-only external that a stock
@@ -630,6 +632,39 @@ func TestTaskfilePrecondNoUnixExternals(t *testing.T) {
 	if loc := grepExternalRe.FindString(code); loc != "" {
 		t.Errorf("_test:system:precond executes `grep` (Unix external, not on a stock Windows PATH — #1653); "+
 			"use a shell `while read`+`case` membership test instead. Matched: %q", strings.TrimSpace(loc))
+	}
+}
+
+// TestPrecondExternalRegexSensitivity pins the matcher used by
+// TestTaskfilePrecondNoUnixExternals: it must flag a `tr`/`grep` invocation at
+// ANY statement boundary, including the start of a later line in the multiline
+// block (the `(?m)` anchoring), not only after a pipe. A line-leading external
+// is a plausible future regression shape (e.g. a bare `tr ... < file` on its
+// own line), so the guard would be hollow if it only caught the piped form.
+// Conversely it must NOT flag the substring `tr`/`grep` inside an identifier.
+func TestPrecondExternalRegexSensitivity(t *testing.T) {
+	cases := []struct {
+		name  string
+		code  string
+		re    *regexp.Regexp
+		match bool
+	}{
+		{"tr piped", "printf '%s' \"$x\" | tr '\\\\' '/'", trExternalRe, true},
+		{"tr line-leading on later line", "authfile=x\ntr 'a' 'b' < f", trExternalRe, true},
+		{"tr after semicolon", "x=1; tr a b", trExternalRe, true},
+		{"tr inside identifier authfile", "authfile=\"$HOME/x\"", trExternalRe, false},
+		{"tr inside identifier entries", "entries=\"$(cmd)\"", trExternalRe, false},
+		{"grep piped on later line", "aileron vault list >/dev/null\naileron vault list | grep -qx \"$e\"", grepExternalRe, true},
+		{"grep line-leading", "grep -q foo bar", grepExternalRe, true},
+		{"grep absent", "while IFS= read -r line; do :; done", grepExternalRe, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.re.MatchString(c.code)
+			if got != c.match {
+				t.Errorf("re.MatchString(%q) = %v, want %v", c.code, got, c.match)
+			}
+		})
 	}
 }
 
