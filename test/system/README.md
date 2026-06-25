@@ -151,7 +151,11 @@ session id at runtime, so the exact name is discovered, not predicted).
      `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`,
      `AILERON_TOKEN` are all set in the container.
   3. **Credentials** — `/home/agent/.codex/auth.json` exists, mode `0600`, and
-     its parent dir is a bind mount.
+     its parent dir is a bind mount. The `0600` check is skipped on a Windows
+     host: Docker Desktop shares a Windows-path bind mount through a layer that
+     does not project the host's Unix mode bits, so the file always presents as
+     `0777` in the container regardless of the host mode the launcher set. File
+     presence and the parent-dir bind mount are still checked on every host.
   4. **Daemon reachable** — `AILERON_URL` host is `host.docker.internal`
      (loopback rewrite); on Linux Docker the container's `ExtraHosts` carries
      `host.docker.internal:host-gateway`. On macOS/Windows Docker Desktop the
@@ -217,7 +221,9 @@ claude-specific bindings (issue #1477):
   agent-agnostic core (`aileron-mcp` present + executable, daemon-wiring env
   vars set).
 - **Credentials** — `/home/agent/.claude/.credentials.json`, mode `0600`, with
-  its parent dir bind-mounted writable (claude rotates the token in-session).
+  its parent dir bind-mounted writable (claude rotates the token in-session). The
+  `0600` check is skipped on a Windows host for the reason given in the codex
+  Credentials note above.
 - **Batch flag** — claude's non-interactive flag is `-p`, so the scenario
   drives `aileron launch claude -- -p "<prompt>"`.
 
