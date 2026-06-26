@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -440,7 +441,20 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 				"boundary_detail": "action",
 			})
 	}
-	cred, resolveErr := s.credentialResolver.Resolve(ctx)
+	// aws_sigv4 selects its binding by the request's target AWS region: a
+	// connector install may hold several region-scoped bindings. Parse the
+	// region from the outbound host and resolve through the region-aware
+	// path when the resolver supports it; everything else resolves once.
+	var (
+		cred       credential.Credential
+		resolveErr error
+	)
+	if rr, ok := s.credentialResolver.(credential.RegionalResolver); ok &&
+		s.expectedCredentialKind == cstore.CredentialKindAWSSigV4 {
+		cred, resolveErr = rr.ResolveForRegion(ctx, regionFromHost(req.URL.Hostname()))
+	} else {
+		cred, resolveErr = s.credentialResolver.Resolve(ctx)
+	}
 	if resolveErr != nil {
 		switch {
 		case errors.Is(resolveErr, credential.ErrBindingMissing),
@@ -483,9 +497,23 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 		// re-readable bytes.Reader over the envelope body). The secret
 		// access key (cred.Value) is used only as HMAC key material and
 		// never appears in the resulting header — nor in any error below.
+		// Binding-wins: the region and access key id resolved with the
+		// binding (when present) take precedence over the connector
+		// manifest's values. This is what lets one connector install sign
+		// for several regions and carry per-binding access keys; the
+		// manifest only supplies defaults. Service always comes from the
+		// manifest. None of these three is secret.
+		region := s.credentialRegion
+		accessKeyID := s.credentialAccessKeyID
+		if cred.Region != "" {
+			region = cred.Region
+		}
+		if cred.AccessKeyID != "" {
+			accessKeyID = cred.AccessKeyID
+		}
 		params := inject.Params{
-			AccessKeyID: s.credentialAccessKeyID,
-			Region:      s.credentialRegion,
+			AccessKeyID: accessKeyID,
+			Region:      region,
 			Service:     s.credentialService,
 		}
 		if injErr := inject.Inject(req, inject.SchemeSigV4Resign, cred.Value, params); injErr != nil {
@@ -530,6 +558,28 @@ func apiKeyInjection(header, format string) (string, string) {
 		format = "Bearer {key}"
 	}
 	return header, format
+}
+
+// awsRegionRe matches an AWS region token (e.g. us-east-1, eu-west-2,
+// ap-southeast-1). Region selection is best-effort: a host segment that
+// matches this shape is treated as the request's target region. The
+// pattern is deliberately conservative (two-letter area, an alphabetic
+// direction, a numeric suffix) so a service label like "athena" or a
+// bucket name is never mistaken for a region.
+var awsRegionRe = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]+$`)
+
+// regionFromHost extracts the AWS region from an outbound host such as
+// `athena.us-east-1.amazonaws.com` -> `us-east-1`. Returns "" when no
+// segment looks like a region (e.g. the legacy global `s3.amazonaws.com`),
+// in which case the caller falls back to the single bound region. The
+// secret access key never participates in this parsing.
+func regionFromHost(host string) string {
+	for _, seg := range strings.Split(host, ".") {
+		if awsRegionRe.MatchString(seg) {
+			return seg
+		}
+	}
+	return ""
 }
 
 // hostFromURL extracts the host:port portion of a URL using the same

@@ -42,6 +42,12 @@ client_id = "test-client-id"
 scopes = ["test:scope"]
 `
 	}
+	if kind == "aws_sigv4" {
+		// service is the one SigV4 input required on the manifest; region
+		// and access_key_id live on the binding (binding-wins).
+		manifestTOML += `service = "athena"
+`
+	}
 	return &cstore.Tarball{
 		BinaryName: "connector.wasm",
 		Binary:     []byte("FAKE-BINARY"),

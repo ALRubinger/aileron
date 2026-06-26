@@ -143,6 +143,26 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+// writeErrorDetails is writeError plus a structured `details` array, used
+// when a client needs machine-readable context beyond the code/message
+// (e.g. the connector's declared credential kind on a not_oauth2 reply so
+// the CLI can route to the right secret-entry flow).
+func writeErrorDetails(w http.ResponseWriter, status int, code, message string, details []map[string]interface{}) {
+	d := details
+	writeJSON(w, status, api.Error{
+		Error: struct {
+			Code      string                    `json:"code"`
+			Details   *[]map[string]interface{} `json:"details,omitempty"`
+			Message   string                    `json:"message"`
+			RequestId *string                   `json:"request_id,omitempty"`
+		}{
+			Code:    code,
+			Message: message,
+			Details: &d,
+		},
+	})
+}
+
 func decodeBody(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)

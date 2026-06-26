@@ -503,34 +503,25 @@ func TestValidateManifest_AcceptsAWSSigV4Kind(t *testing.T) {
 	}
 }
 
-func TestValidateManifest_RejectsAWSSigV4MissingFields(t *testing.T) {
-	// Each of region/service/access_key_id is required for signing. A
-	// manifest missing any one must fail closed at install with a
-	// field-named message, not at the first signed request.
+func TestValidateManifest_RejectsAWSSigV4MissingService(t *testing.T) {
+	// `service` is fixed per connector and never varies per install, so it
+	// is the one SigV4 input that must be on the manifest. A manifest
+	// missing it fails closed at install with a field-named message, not at
+	// the first signed request.
 	cases := []struct {
 		name string
 		cred *ManifestCredential
 		want string
 	}{
 		{
-			name: "missing region",
-			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Service: "s3", AccessKeyID: "AKIA"},
-			want: "region",
-		},
-		{
 			name: "missing service",
 			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", AccessKeyID: "AKIA"},
 			want: "service",
 		},
 		{
-			name: "missing access_key_id",
-			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", Service: "s3"},
-			want: "access_key_id",
-		},
-		{
-			name: "blank region",
-			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "   ", Service: "s3", AccessKeyID: "AKIA"},
-			want: "region",
+			name: "blank service",
+			cred: &ManifestCredential{Kind: CredentialKindAWSSigV4, Region: "us-east-1", Service: "   ", AccessKeyID: "AKIA"},
+			want: "service",
 		},
 	}
 	for _, tc := range cases {
@@ -545,6 +536,20 @@ func TestValidateManifest_RejectsAWSSigV4MissingFields(t *testing.T) {
 				t.Errorf("err = %v, want mention of %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateManifest_AWSSigV4RegionAndAccessKeyOptional(t *testing.T) {
+	// region and access_key_id may live on the binding instead of the
+	// manifest (binding-wins), so a manifest declaring only `service` is
+	// valid. The secret access key is always bound from the vault.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:    CredentialKindAWSSigV4,
+		Service: "athena",
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() with only service set = %v, want nil", err)
 	}
 }
 

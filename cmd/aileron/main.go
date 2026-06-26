@@ -847,11 +847,21 @@ func runBindingInspect(args []string, stdout, stderr io.Writer) int {
 // round trip for api_key connectors; trivial cost for the cleaner
 // CLI surface.
 func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: aileron binding setup <connector-FQN>")
+	flags := flag.NewFlagSet("binding setup", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	region := flags.String("region", "",
+		"AWS region for an aws_sigv4 binding (e.g. us-east-1); non-secret, wins over the connector manifest")
+	accessKeyID := flags.String("access-key-id", "",
+		"AWS access key id for an aws_sigv4 binding; non-secret, wins over the connector manifest")
+	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	connectorFQN := args[0]
+	rest := flags.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding setup [--region R] [--access-key-id ID] <connector-FQN>")
+		return 1
+	}
+	connectorFQN := rest[0]
 	identity := promptLine(stdin, stdout, "Identity (e.g. work, personal): ")
 	if identity == "" {
 		fmt.Fprintln(stderr, "identity is required")
@@ -872,12 +882,67 @@ func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 	case http.StatusOK:
 		return runBindingSetupOAuth2Finish(initRespBody, stdout, stderr)
 	case http.StatusUnprocessableEntity:
-		// Connector isn't oauth2 — fall through to api_key flow.
+		// Connector isn't oauth2 — fall through to a secret flow. The
+		// not_oauth2 response carries the connector's declared kind so the
+		// CLI prompts for the right secret and sends the matching kind
+		// without guessing. The --region / --access-key-id flags also imply
+		// the aws_sigv4 path for connectors whose manifest leaves them out.
 	default:
 		fmt.Fprintf(stderr, "server returned %d: %s\n", initStatus, string(initRespBody))
 		return 1
 	}
+	if declaredKindFromNotOAuth2(initRespBody) == "aws_sigv4" || *region != "" || *accessKeyID != "" {
+		return runBindingSetupAWSSigV4(connectorFQN, identity, *region, *accessKeyID, stdin, stdout, stderr)
+	}
 	return runBindingSetupAPIKey(connectorFQN, identity, stdin, stdout, stderr)
+}
+
+// declaredKindFromNotOAuth2 extracts the connector's declared credential
+// kind from a not_oauth2 error body's details, or "" when absent. Used to
+// route the secret-entry flow without a second round trip.
+func declaredKindFromNotOAuth2(body []byte) string {
+	var resp struct {
+		Error struct {
+			Details []map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return ""
+	}
+	for _, d := range resp.Error.Details {
+		if k, ok := d["declared_kind"].(string); ok {
+			return k
+		}
+	}
+	return ""
+}
+
+// runBindingSetupAWSSigV4 prompts for the AWS secret access key and POSTs
+// an aws_sigv4 binding. The non-secret region / access key id (when
+// provided via flags) ride alongside so one connector install can hold
+// several region-scoped bindings; omitted, they default to the connector
+// manifest's values at signing time.
+func runBindingSetupAWSSigV4(connectorFQN, identity, region, accessKeyID string, stdin io.Reader, stdout, stderr io.Writer) int {
+	value := promptLine(stdin, stdout, "AWS secret access key: ")
+	if value == "" {
+		fmt.Fprintln(stderr, "value is required")
+		return 1
+	}
+	source := map[string]any{"kind": "aws_sigv4", "value": value}
+	if region != "" {
+		source["region"] = region
+	}
+	if accessKeyID != "" {
+		source["access_key_id"] = accessKeyID
+	}
+	body, _ := json.Marshal(map[string]any{
+		"connector_fqn": connectorFQN,
+		"bindings": []map[string]any{{
+			"identity": identity,
+			"source":   source,
+		}},
+	})
+	return postBindingSetup(body, stdout, stderr)
 }
 
 // runBindingSetupAPIKey is the legacy api_key path: prompt for the
@@ -895,6 +960,12 @@ func runBindingSetupAPIKey(connectorFQN, identity string, stdin io.Reader, stdou
 			"source":   map[string]any{"kind": "api_key", "value": value},
 		}},
 	})
+	return postBindingSetup(body, stdout, stderr)
+}
+
+// postBindingSetup POSTs a /bindings/setup request body and renders the
+// created / skipped result. Shared by the api_key and aws_sigv4 flows.
+func postBindingSetup(body []byte, stdout, stderr io.Writer) int {
 	status, respBody, err := bindingDoRequest(http.MethodPost, "/bindings/setup",
 		strings.NewReader(string(body)))
 	if err != nil {

@@ -136,14 +136,18 @@ func (s *apiServer) SetupBindings(w http.ResponseWriter, r *http.Request) {
 				"OAuth bindings are not yet supported via setup; tracking in #388")
 			return
 		}
-		if item.Source.Kind != "api_key" {
+		// Setup wires the credential bytes directly into the vault, which
+		// works for the kinds whose value is a single opaque secret:
+		// api_key (the key) and aws_sigv4 (the secret access key). oauth2
+		// (handled above) needs the browser dance instead.
+		if item.Source.Kind != "api_key" && item.Source.Kind != cstore.CredentialKindAWSSigV4 {
 			writeError(w, http.StatusBadRequest, "unsupported_kind",
-				"v1 supports only api_key sources; got "+string(item.Source.Kind))
+				"setup supports api_key and aws_sigv4 sources; got "+string(item.Source.Kind))
 			return
 		}
 		if item.Source.Value == nil || *item.Source.Value == "" {
 			writeError(w, http.StatusBadRequest, "missing_value",
-				"bindings["+itoa(i)+"].source.value is required for api_key")
+				"bindings["+itoa(i)+"].source.value is required for "+string(item.Source.Kind))
 			return
 		}
 
@@ -168,6 +172,17 @@ func (s *apiServer) SetupBindings(w http.ResponseWriter, r *http.Request) {
 		}
 		if item.Account != nil {
 			b.Account = *item.Account
+		}
+		// aws_sigv4 carries the non-secret region / access key id on the
+		// binding so a single connector install can sign for several
+		// regions (binding-wins over the manifest at request time).
+		if item.Source.Kind == cstore.CredentialKindAWSSigV4 {
+			if item.Source.Region != nil {
+				b.Region = *item.Source.Region
+			}
+			if item.Source.AccessKeyId != nil {
+				b.AccessKeyID = *item.Source.AccessKeyId
+			}
 		}
 		err = s.bindings.Put(r.Context(), b, []byte(*item.Source.Value), binding.PutCreate)
 		if errors.Is(err, binding.ErrAlreadyExists) {
@@ -232,14 +247,26 @@ func (s *apiServer) RebindBinding(w http.ResponseWriter, r *http.Request, name a
 			"OAuth rebind is not yet supported; tracking in #388")
 		return
 	}
-	if req.Source.Kind != "api_key" {
+	if req.Source.Kind != "api_key" && req.Source.Kind != cstore.CredentialKindAWSSigV4 {
 		writeError(w, http.StatusBadRequest, "unsupported_kind",
-			"v1 supports only api_key sources; got "+string(req.Source.Kind))
+			"rebind supports api_key and aws_sigv4 sources; got "+string(req.Source.Kind))
 		return
 	}
 	if req.Source.Value == nil || *req.Source.Value == "" {
-		writeError(w, http.StatusBadRequest, "missing_value", "source.value is required for api_key")
+		writeError(w, http.StatusBadRequest, "missing_value",
+			"source.value is required for "+string(req.Source.Kind))
 		return
+	}
+	// aws_sigv4 rebind may also update the non-secret region / access key
+	// id alongside rotating the secret access key. Omitted fields keep the
+	// existing values so a pure secret rotation need not re-supply them.
+	if req.Source.Kind == cstore.CredentialKindAWSSigV4 {
+		if req.Source.Region != nil {
+			existing.Region = *req.Source.Region
+		}
+		if req.Source.AccessKeyId != nil {
+			existing.AccessKeyID = *req.Source.AccessKeyId
+		}
 	}
 	if err := s.bindings.Put(r.Context(), existing, []byte(*req.Source.Value), binding.PutUpsert); err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
@@ -318,6 +345,14 @@ func toAPIBinding(b binding.Binding) api.Binding {
 	if b.Account != "" {
 		a := b.Account
 		out.Account = &a
+	}
+	if b.Region != "" {
+		region := b.Region
+		out.Region = &region
+	}
+	if b.AccessKeyID != "" {
+		akid := b.AccessKeyID
+		out.AccessKeyId = &akid
 	}
 	if !b.LastUsedAt.IsZero() {
 		t := b.LastUsedAt

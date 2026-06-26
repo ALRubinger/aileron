@@ -183,24 +183,159 @@ func (s *VaultStore) ResolverFor(ctx context.Context, connectorFQN, kind string)
 	if s == nil || s.Vault == nil {
 		return nil
 	}
-	b, err := s.Resolve(ctx, connectorFQN, kind)
-	if err != nil {
-		return nil
-	}
 	switch kind {
 	case "api_key":
+		b, err := s.Resolve(ctx, connectorFQN, kind)
+		if err != nil {
+			return nil
+		}
 		return &credential.VaultResolver{
 			Vault:        s.Vault,
 			VaultPath:    string(b.Name),
 			ExpectedKind: kind,
 		}
 	case "oauth2":
+		b, err := s.Resolve(ctx, connectorFQN, kind)
+		if err != nil {
+			return nil
+		}
 		return &credential.OAuth2VaultResolver{
 			Vault:     s.Vault,
 			VaultPath: string(b.Name),
 		}
+	case kindAWSSigV4:
+		// aws_sigv4 deliberately does NOT gate on the single-match Resolve:
+		// a connector install may hold several region-scoped bindings, which
+		// Resolve reports as *AmbiguousError. The region-aware resolver below
+		// picks the right one at request time. Only the genuine no-binding
+		// case (zero matches) must surface as binding_required, so wire the
+		// resolver whenever at least one aws_sigv4 binding exists.
+		if !s.hasBinding(ctx, connectorFQN, kindAWSSigV4) {
+			return nil
+		}
+		return &awsSigV4Resolver{store: s, connectorFQN: connectorFQN}
 	}
 	return nil
+}
+
+// Compile-time assertion: awsSigV4Resolver satisfies the regional resolver.
+var _ credential.RegionalResolver = (*awsSigV4Resolver)(nil)
+
+// kindAWSSigV4 mirrors cstore.CredentialKindAWSSigV4. It is duplicated as
+// a local constant so the binding package does not import cstore (the
+// other kinds are likewise referenced as bare strings here).
+const kindAWSSigV4 = "aws_sigv4"
+
+// hasBinding reports whether at least one binding exists for the given
+// (connectorFQN, kind). Used by ResolverFor to decide whether to wire a
+// resolver for kinds whose Resolve may legitimately be ambiguous.
+func (s *VaultStore) hasBinding(ctx context.Context, connectorFQN, kind string) bool {
+	all, err := s.List(ctx)
+	if err != nil {
+		return false
+	}
+	for _, b := range all {
+		if b.ConnectorFQN == connectorFQN && b.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveSigV4 selects the aws_sigv4 binding for connectorFQN, keyed by
+// (connectorFQN, kind, region). With a single binding it returns that one
+// regardless of region (the single-binding fallback). With several it
+// requires region to disambiguate and returns *AmbiguousError when region
+// is empty or matches none. Returns ErrNotFound when no binding exists.
+func (s *VaultStore) resolveSigV4(ctx context.Context, connectorFQN, region string) (Binding, error) {
+	all, err := s.List(ctx)
+	if err != nil {
+		return Binding{}, err
+	}
+	var matches []Binding
+	for _, b := range all {
+		if b.ConnectorFQN == connectorFQN && b.Kind == kindAWSSigV4 {
+			matches = append(matches, b)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Binding{}, fmt.Errorf("%w: connector=%s kind=%s", ErrNotFound, connectorFQN, kindAWSSigV4)
+	case 1:
+		return matches[0], nil
+	default:
+		if region != "" {
+			for _, b := range matches {
+				if b.Region == region {
+					return b, nil
+				}
+			}
+		}
+		names := make([]Name, 0, len(matches))
+		for _, m := range matches {
+			names = append(names, m.Name)
+		}
+		return Binding{}, &AmbiguousError{
+			ConnectorFQN: connectorFQN,
+			Kind:         kindAWSSigV4,
+			Candidates:   names,
+		}
+	}
+}
+
+// awsSigV4Resolver is the [credential.RegionalResolver] for aws_sigv4
+// bindings. It defers binding selection until Resolve time so the host can
+// supply the request's target region. The secret access key is read from
+// the vault only for the selected binding; the non-secret region and
+// access key id ride along on the returned [credential.Credential] so the
+// host's signer can prefer them over the connector manifest's values.
+type awsSigV4Resolver struct {
+	store        *VaultStore
+	connectorFQN string
+}
+
+// Resolve implements [credential.Resolver]. With no region hint it
+// succeeds only when a single binding exists (the fallback); ambiguity
+// surfaces as an error rather than a silent pick.
+func (r *awsSigV4Resolver) Resolve(ctx context.Context) (credential.Credential, error) {
+	return r.resolve(ctx, "")
+}
+
+// ResolveForRegion implements [credential.RegionalResolver].
+func (r *awsSigV4Resolver) ResolveForRegion(ctx context.Context, region string) (credential.Credential, error) {
+	return r.resolve(ctx, region)
+}
+
+func (r *awsSigV4Resolver) resolve(ctx context.Context, region string) (credential.Credential, error) {
+	if r == nil || r.store == nil || r.store.Vault == nil {
+		return credential.Credential{}, credential.ErrNoBindingResolver
+	}
+	b, err := r.store.resolveSigV4(ctx, r.connectorFQN, region)
+	if err != nil {
+		// ErrNotFound maps to binding_required at the host; AmbiguousError
+		// propagates verbatim so the host surfaces the candidate names.
+		if errors.Is(err, ErrNotFound) {
+			return credential.Credential{}, credential.FormatBindingMissing(
+				kindAWSSigV4 + " binding for " + r.connectorFQN)
+		}
+		return credential.Credential{}, err
+	}
+	secret, err := r.store.Vault.Get(ctx, string(b.Name))
+	if err != nil {
+		if vault.IsNotFound(err) {
+			return credential.Credential{}, credential.FormatBindingMissing(string(b.Name))
+		}
+		return credential.Credential{}, fmt.Errorf("binding: read vault entry %q: %w", b.Name, err)
+	}
+	if secret.Metadata.Type != kindAWSSigV4 {
+		return credential.Credential{}, credential.FormatKindMismatch(kindAWSSigV4, secret.Metadata.Type)
+	}
+	return credential.Credential{
+		Kind:        kindAWSSigV4,
+		Value:       secret.Value,
+		Region:      b.Region,
+		AccessKeyID: b.AccessKeyID,
+	}, nil
 }
 
 // Resolve implements [Store]. Walks the vault listing for entries
