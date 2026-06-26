@@ -410,19 +410,23 @@ func daemonStart(bin string) (string, error) {
 }
 
 // assertAuditListReachable runs `aileron audit list` against the live daemon
-// exactly as a user would and fails if it exits non-zero or the daemon rejects
-// the call with a 401. This is the CLI->daemon authenticated round-trip: the
-// audit endpoint is behind the local-auth middleware, so a CLI that forgets the
-// bearer token gets "missing or invalid daemon token". Empty audit output is a
-// pass — we assert reachability + auth, not contents.
+// exactly as a user would and fails if it exits non-zero. This is the
+// CLI->daemon authenticated round-trip: the audit endpoint is behind the
+// local-auth middleware, so a CLI that forgets the bearer token gets a 401
+// ("missing or invalid daemon token"), which the fetcher surfaces as an error
+// and `audit list` reports with a non-zero exit. Exit status (not a substring
+// scan of the rendered audit entries, which could legitimately contain "401")
+// is the reliable signal; the auth-error text is detected only to enrich the
+// failure diagnostic. Empty audit output on exit 0 is a pass — we assert
+// reachability + auth, not contents.
 func assertAuditListReachable(bin string) error {
 	out, err := exec.Command(bin, "audit", "list").CombinedOutput()
 	combined := strings.TrimSpace(string(out))
 	if err != nil {
-		return systestlib.Fail(fmt.Sprintf("`aileron audit list` failed (CLI->daemon auth): %v: %s", err, combined))
-	}
-	if strings.Contains(combined, "401") || strings.Contains(strings.ToLower(combined), "missing or invalid daemon token") {
-		return systestlib.Fail(fmt.Sprintf("`aileron audit list` returned a daemon auth error (CLI omitted the bearer token): %s", combined))
+		if strings.Contains(combined, "401") || strings.Contains(strings.ToLower(combined), "missing or invalid daemon token") {
+			return systestlib.Fail(fmt.Sprintf("`aileron audit list` rejected by daemon auth (CLI omitted the bearer token): %v: %s", err, combined))
+		}
+		return systestlib.Fail(fmt.Sprintf("`aileron audit list` failed (CLI->daemon round-trip): %v: %s", err, combined))
 	}
 	logf("ok: `aileron audit list` reached the daemon (CLI->daemon auth)")
 	return nil
