@@ -4114,7 +4114,12 @@ func fetchAuditList(q auditListQuery) (*auditListWire, error) {
 	}
 	u.RawQuery = qs.Encode()
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(u.String())
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	setDaemonAuthorization(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -4136,7 +4141,12 @@ func fetchAuditGet(auditID string) (*auditEventWire, int, error) {
 		return nil, 0, err
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(base + "/audit/" + url.PathEscape(auditID))
+	req, err := http.NewRequest(http.MethodGet, base+"/audit/"+url.PathEscape(auditID), nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	setDaemonAuthorization(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
