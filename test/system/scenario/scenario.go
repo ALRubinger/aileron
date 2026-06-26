@@ -129,6 +129,17 @@ func runScenario(e env, cfg systestlib.AgentConfig, probeMCP func(container stri
 	healthURL := strings.TrimRight(daemonURL, "/") + "/healthz"
 	logf("%s scenario: daemon at %s (started-by-test=%v)", cfg.Name, daemonURL, !daemonWasRunning)
 
+	// --- CLI->daemon auth smoke (audit list) -------------------------------
+	// Exercise an authenticated CLI->daemon call end-to-end against the live
+	// daemon before the launch. `aileron audit list` hits /v1/audit, which the
+	// daemon's local-auth middleware 401s unless the CLI attaches the bearer
+	// token. The R10 assertion below reads the audit JSONL file directly, so it
+	// never covers this auth path — which is how a regression that dropped the
+	// Authorization header from the audit fetchers shipped unnoticed.
+	if err := assertAuditListReachable(e.aileronBin); err != nil {
+		return err
+	}
+
 	// Unlock the daemon vault before backgrounding the launch. A freshly-started
 	// daemon comes up with a locked vault, and `aileron launch` needs it unlocked
 	// (the agent credential is vault-backed). The launch runs in the background
@@ -396,6 +407,25 @@ func daemonStart(bin string) (string, error) {
 		return "", fmt.Errorf("aileron daemon start: could not parse daemon URL from output: %q", strings.TrimSpace(string(out)))
 	}
 	return url, nil
+}
+
+// assertAuditListReachable runs `aileron audit list` against the live daemon
+// exactly as a user would and fails if it exits non-zero or the daemon rejects
+// the call with a 401. This is the CLI->daemon authenticated round-trip: the
+// audit endpoint is behind the local-auth middleware, so a CLI that forgets the
+// bearer token gets "missing or invalid daemon token". Empty audit output is a
+// pass — we assert reachability + auth, not contents.
+func assertAuditListReachable(bin string) error {
+	out, err := exec.Command(bin, "audit", "list").CombinedOutput()
+	combined := strings.TrimSpace(string(out))
+	if err != nil {
+		return systestlib.Fail(fmt.Sprintf("`aileron audit list` failed (CLI->daemon auth): %v: %s", err, combined))
+	}
+	if strings.Contains(combined, "401") || strings.Contains(strings.ToLower(combined), "missing or invalid daemon token") {
+		return systestlib.Fail(fmt.Sprintf("`aileron audit list` returned a daemon auth error (CLI omitted the bearer token): %s", combined))
+	}
+	logf("ok: `aileron audit list` reached the daemon (CLI->daemon auth)")
+	return nil
 }
 
 // daemonStop runs `aileron daemon stop`, best-effort (used in a defer for a

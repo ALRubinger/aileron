@@ -1824,6 +1824,53 @@ func TestBindingDoRequestSendsDaemonAuthorization(t *testing.T) {
 	}
 }
 
+// TestFetchAuditSendsDaemonAuthorization locks in the contract that
+// both audit fetchers attach the daemon bearer token. The daemon's
+// local-auth middleware 401s any /v1 request lacking a valid bearer,
+// so omitting the header (the regressed behavior) made `aileron audit
+// list`/`show` fail with "missing or invalid daemon token". Before the
+// fix these fetchers issued a bare client.Get with no Authorization
+// header and this test's sawAuth assertions failed.
+func TestFetchAuditSendsDaemonAuthorization(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		t.Setenv("AILERON_TOKEN", "tok_audit_list")
+		var sawAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sawAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"events":[]}`)
+		}))
+		defer srv.Close()
+		t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+		if _, err := fetchAuditList(auditListQuery{}); err != nil {
+			t.Fatalf("fetchAuditList: %v", err)
+		}
+		if sawAuth != "Bearer tok_audit_list" {
+			t.Fatalf("Authorization = %q, want bearer token", sawAuth)
+		}
+	})
+
+	t.Run("show", func(t *testing.T) {
+		t.Setenv("AILERON_TOKEN", "tok_audit_show")
+		var sawAuth string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sawAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}))
+		defer srv.Close()
+		t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+		if _, _, err := fetchAuditGet("audit-123"); err != nil {
+			t.Fatalf("fetchAuditGet: %v", err)
+		}
+		if sawAuth != "Bearer tok_audit_show" {
+			t.Fatalf("Authorization = %q, want bearer token", sawAuth)
+		}
+	})
+}
+
 // TestBindingAPIBaseURL_PropagatesSpawnErrorThroughCallers locks in
 // the post-#490 contract: every helper that previously dialed the
 // hardcoded `localhost:8721` fallback now propagates the spawn
