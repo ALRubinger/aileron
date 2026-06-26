@@ -47,6 +47,16 @@ type Credential struct {
 	// then it leaves scope. Never flows into the sandbox or into
 	// any audit record.
 	Value []byte
+
+	// Region and AccessKeyID are the non-secret AWS Signature Version 4
+	// signing inputs a resolver may carry alongside the secret access key
+	// (Value) for an `aws_sigv4` binding. Both are empty for every other
+	// kind. They are safe to log. When non-empty they win over the
+	// connector manifest's region / access_key_id at signing time, which
+	// is how a single connector install supports several region-scoped
+	// bindings.
+	Region      string
+	AccessKeyID string
 }
 
 // Resolver is the contract between the sandbox host functions and
@@ -62,6 +72,28 @@ type Resolver interface {
 	// mismatch return ErrCredentialKindMismatch instead of returning
 	// a Credential with the wrong Kind.
 	Resolve(ctx context.Context) (Credential, error)
+}
+
+// RegionalResolver is an optional extension of [Resolver] for credential
+// kinds whose binding selection depends on the outbound request's target
+// region. The aws_sigv4 path implements it: a single connector install
+// may hold several region-scoped bindings, and the host parses the AWS
+// region from the outbound host at request time and calls
+// [RegionalResolver.ResolveForRegion] so the correct region's binding
+// (and its access key id) is chosen.
+//
+// Callers type-assert a [Resolver] to RegionalResolver; resolvers that do
+// not implement it are resolved through the plain [Resolver.Resolve].
+type RegionalResolver interface {
+	Resolver
+
+	// ResolveForRegion resolves the binding whose region matches the
+	// supplied region. An empty region means the caller could not derive
+	// a region from the request; the resolver falls back to the sole
+	// binding when exactly one exists. When several bindings match and no
+	// region disambiguates them the resolver returns an error rather than
+	// guessing, per ADR-0006's no-silent-matching rule.
+	ResolveForRegion(ctx context.Context, region string) (Credential, error)
 }
 
 // Sentinel errors. Resolvers wrap these via fmt.Errorf("...: %w", err)

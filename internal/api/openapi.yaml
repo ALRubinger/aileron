@@ -6887,6 +6887,18 @@ components:
         account:
           type: string
           description: Human-readable account label derived from credential metadata when available.
+        region:
+          type: string
+          description: |
+            AWS region this binding signs for, set only on `aws_sigv4`
+            bindings. Non-secret. Disambiguates multiple region-scoped
+            bindings for the same connector install.
+        access_key_id:
+          type: string
+          description: |
+            AWS access key ID for an `aws_sigv4` binding. Non-secret (it
+            appears verbatim in the signed `Authorization` header). Empty
+            for other kinds.
         created_at:
           type: string
           format: date-time
@@ -6950,21 +6962,41 @@ components:
     BindingSource:
       type: object
       description: |
-        Per-binding credential source. v1 supports only `api_key`. Setting
-        `kind: oauth2` returns a structured `400` referencing #388.
+        Per-binding credential source. Supports `api_key` and `aws_sigv4`
+        directly; `oauth2` is created through the dedicated OAuth dance and
+        setting `kind: oauth2` here returns a structured `400` referencing
+        #388.
       required: [kind]
       properties:
         kind:
           type: string
-          enum: [api_key, oauth2]
+          enum: [api_key, oauth2, aws_sigv4]
           description: |
             Credential kind. Must match the connector manifest's declared
             `[capabilities.credential].kind` for the requested capability.
         value:
           type: string
           description: |
-            Raw credential bytes (e.g. the API key). Required when `kind`
-            is `api_key`. The runtime stores this encrypted in the vault.
+            Raw credential bytes. For `api_key` this is the API key; for
+            `aws_sigv4` it is the AWS secret access key. Required for both
+            kinds. The runtime stores this encrypted in the vault and never
+            exposes it to the connector.
+        region:
+          type: string
+          description: |
+            Optional AWS region for an `aws_sigv4` binding (e.g.
+            `us-east-1`). Non-secret. When set it is stored on the binding
+            and wins over the connector manifest's `region` at signing
+            time, which is what lets one connector install hold several
+            region-scoped bindings. Ignored for other kinds.
+        access_key_id:
+          type: string
+          description: |
+            Optional AWS access key ID for an `aws_sigv4` binding. Non-secret
+            (it appears verbatim in the signed `Authorization` header's
+            `Credential=` field). When set it is stored on the binding and
+            wins over the connector manifest's `access_key_id` at signing
+            time. Ignored for other kinds.
 
     BindingSetupRequest:
       type: object

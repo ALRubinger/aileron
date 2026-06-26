@@ -1457,6 +1457,55 @@ func TestRunBinding_SetupSendsAPIKeyBody(t *testing.T) {
 	}
 }
 
+func TestRunBinding_SetupSendsAWSSigV4Body(t *testing.T) {
+	// An aws_sigv4 connector: the not_oauth2 reply carries declared_kind so
+	// the CLI prompts for the secret access key and POSTs an aws_sigv4
+	// source carrying the --region / --access-key-id overrides.
+	var got struct {
+		Bindings []struct {
+			Source struct {
+				Kind        string `json:"kind"`
+				Value       string `json:"value"`
+				Region      string `json:"region"`
+				AccessKeyID string `json:"access_key_id"`
+			} `json:"source"`
+		} `json:"bindings"`
+	}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2","message":"no oauth","details":[{"declared_kind":"aws_sigv4"}]}}`)
+		case "/bindings/setup":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"aws_sigv4/athena/prod","kind":"aws_sigv4","service":"athena","identity":"prod","connector_fqn":"github://acme/athena","created_at":"2024-01-01T00:00:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	stdin := strings.NewReader("prod\nsecret-access-key\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "--region", "us-east-1", "--access-key-id", "AKIATEST", "github://acme/athena"},
+		stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	if len(got.Bindings) != 1 {
+		t.Fatalf("len(bindings) = %d", len(got.Bindings))
+	}
+	src := got.Bindings[0].Source
+	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
+		src.Region != "us-east-1" || src.AccessKeyID != "AKIATEST" {
+		t.Errorf("source = %+v", src)
+	}
+	if !strings.Contains(stdout.String(), "Created: aws_sigv4/athena/prod") {
+		t.Errorf("stdout missing created line: %s", stdout.String())
+	}
+}
+
 func TestRunBinding_SetupRejectsEmptyValue(t *testing.T) {
 	// init returns 422 not_oauth2 → CLI falls through and rejects
 	// blank api_key value before hitting /bindings/setup.

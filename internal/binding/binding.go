@@ -76,13 +76,24 @@ const (
 // credential. It carries metadata the runtime and CLI need to display
 // the binding to the user; it never carries the credential bytes.
 type Binding struct {
-	Name                Name
-	Kind                string
-	Service             string
-	Identity            string
-	Scope               string
-	ConnectorFQN        string
-	Account             string
+	Name         Name
+	Kind         string
+	Service      string
+	Identity     string
+	Scope        string
+	ConnectorFQN string
+	Account      string
+
+	// Region and AccessKeyID are the non-secret AWS Signature Version 4
+	// signing inputs carried on an `aws_sigv4` binding. Both are empty for
+	// every other kind. Region is also the disambiguator that lets one
+	// connector install hold several region-scoped bindings: Resolve keys
+	// aws_sigv4 bindings by (connectorFQN, kind, region) and the runtime
+	// selects the matching one at request time. When set, they win over
+	// the connector manifest's `region` / `access_key_id` at signing time.
+	Region      string
+	AccessKeyID string
+
 	CreatedAt           time.Time
 	LastUsedAt          time.Time
 	LastRefreshedAt     time.Time
@@ -119,6 +130,8 @@ const (
 	labelScope            = "scope"
 	labelConnectorFQN     = "connector_fqn"
 	labelAccount          = "account"
+	labelRegion           = "region"
+	labelAccessKeyID      = "access_key_id"
 	labelCreatedAt        = "created_at"
 	labelLastUsedAt       = "last_used_at"
 	labelLastRefreshedAt  = "last_refreshed_at"
@@ -159,6 +172,12 @@ func (b Binding) toMetadata() vault.Metadata {
 	}
 	if b.Account != "" {
 		labels[labelAccount] = b.Account
+	}
+	if b.Region != "" {
+		labels[labelRegion] = b.Region
+	}
+	if b.AccessKeyID != "" {
+		labels[labelAccessKeyID] = b.AccessKeyID
 	}
 	if !b.LastUsedAt.IsZero() {
 		labels[labelLastUsedAt] = formatTime(b.LastUsedAt)
@@ -219,6 +238,8 @@ func fromEntry(e vault.Entry) (Binding, error) {
 		Scope:               labels[labelScope],
 		ConnectorFQN:        labels[labelConnectorFQN],
 		Account:             labels[labelAccount],
+		Region:              labels[labelRegion],
+		AccessKeyID:         labels[labelAccessKeyID],
 		CreatedAt:           parseTime(labels[labelCreatedAt]),
 		LastUsedAt:          parseTime(labels[labelLastUsedAt]),
 		LastRefreshedAt:     parseTime(labels[labelLastRefreshedAt]),

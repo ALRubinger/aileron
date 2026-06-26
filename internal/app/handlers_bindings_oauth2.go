@@ -245,8 +245,16 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 	}
 	cred := manifest.Capabilities.Credential
 	if cred == nil || cred.Kind != cstore.CredentialKindOAuth2 || cred.OAuth2 == nil {
-		writeError(w, http.StatusUnprocessableEntity, "not_oauth2",
-			"connector "+connFQN+" does not declare an OAuth2 credential capability")
+		// Carry the connector's declared kind so the CLI's setup flow can
+		// route a non-oauth2 connector to the matching secret-entry path
+		// (api_key vs aws_sigv4) without a second round trip.
+		declaredKind := ""
+		if cred != nil {
+			declaredKind = cred.Kind
+		}
+		writeErrorDetails(w, http.StatusUnprocessableEntity, "not_oauth2",
+			"connector "+connFQN+" does not declare an OAuth2 credential capability",
+			[]map[string]interface{}{{"declared_kind": declaredKind}})
 		return
 	}
 

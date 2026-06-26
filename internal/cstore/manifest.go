@@ -540,22 +540,20 @@ func validateCredential(c *ManifestCredential, file string) error {
 		}
 		return validateOAuth2(c.OAuth2, file)
 	case CredentialKindAWSSigV4:
-		// `region`, `service`, and `access_key_id` are the non-secret
-		// inputs to SigV4 signing. All three are required: signing fails
-		// without any of them, so reject at install rather than at the
-		// first signed request. The secret access key is bound from the
-		// vault, never declared here.
-		if strings.TrimSpace(c.Region) == "" {
-			return newValidationErr(file,
-				"[capabilities.credential].region is required when kind = %q", c.Kind)
-		}
+		// `service` is the only required SigV4 input on the manifest: it is
+		// fixed per connector (an Athena connector always signs for
+		// "athena") and never varies per install, so signing cannot proceed
+		// without it. `region` and `access_key_id` are optional here because
+		// they may instead be supplied by the binding (binding-wins): one
+		// connector install can hold several region-scoped bindings, each
+		// with its own access key id, so pinning a single region/key on the
+		// manifest would defeat that. When the binding omits them the
+		// manifest value (if any) is used; when both omit a required input
+		// the host fails the request closed at signing time. The secret
+		// access key is always bound from the vault, never declared here.
 		if strings.TrimSpace(c.Service) == "" {
 			return newValidationErr(file,
 				"[capabilities.credential].service is required when kind = %q", c.Kind)
-		}
-		if strings.TrimSpace(c.AccessKeyID) == "" {
-			return newValidationErr(file,
-				"[capabilities.credential].access_key_id is required when kind = %q", c.Kind)
 		}
 		// region, service, and access_key_id are emitted verbatim into the
 		// SigV4 `Authorization` header (the credential scope and
