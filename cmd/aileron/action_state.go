@@ -273,6 +273,7 @@ func runActionRun(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setDaemonAuthorization(req)
 	resp, err := actionsHTTPClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

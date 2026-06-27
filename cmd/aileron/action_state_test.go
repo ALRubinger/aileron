@@ -403,6 +403,35 @@ func TestRunActionRun_ArgFlagsSendArgsAndRenderResult(t *testing.T) {
 	}
 }
 
+// TestRunActionRun_SendsDaemonAuthorization locks in the contract that
+// `aileron action run` attaches the daemon bearer token. The daemon's
+// local-auth middleware 401s any /v1 request lacking a valid bearer, so
+// omitting the header (the regressed behavior) made action run the lone
+// unauthenticated /v1 caller. Before the fix runActionRun issued the
+// POST with only Content-Type set and no Authorization header, so this
+// test's sawAuth assertion failed.
+func TestRunActionRun_SendsDaemonAuthorization(t *testing.T) {
+	t.Setenv("AILERON_TOKEN", "tok_action_run")
+	var sawAuth string
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(actionRunResponse{
+			AuditID: "audit-123",
+			Result:  ptrString(`{"ok":true}`),
+		})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"--arg", "team=ENG", "linear-issues-create"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if sawAuth != "Bearer tok_action_run" {
+		t.Fatalf("Authorization = %q, want bearer token", sawAuth)
+	}
+}
+
 func TestRunActionRun_RawArgsJSONPassthrough(t *testing.T) {
 	var gotBody []byte
 	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
