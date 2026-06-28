@@ -926,8 +926,8 @@ func declaredKindFromNotOAuth2(body []byte) string {
 // the manifest; when both flag and prompt are left blank they default to the
 // connector manifest's values at signing time. Prompting (rather than relying
 // on flags alone) is what lets the bare `binding setup <fqn>` form and the
-// add-suite auto-bind loop — neither of which passes flags — produce a
-// complete aws_sigv4 source.
+// add-suite auto-bind loop, neither of which passes flags, produce a complete
+// aws_sigv4 source.
 func runBindingSetupAWSSigV4(connectorFQN, identity, region, accessKeyID string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if accessKeyID == "" {
 		accessKeyID = promptLine(stdin, stdout,
