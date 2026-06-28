@@ -917,16 +917,30 @@ func declaredKindFromNotOAuth2(body []byte) string {
 	return ""
 }
 
-// runBindingSetupAWSSigV4 prompts for the AWS secret access key and POSTs
-// an aws_sigv4 binding. The non-secret region / access key id (when
-// provided via flags) ride alongside so one connector install can hold
-// several region-scoped bindings; omitted, they default to the connector
-// manifest's values at signing time.
+// runBindingSetupAWSSigV4 prompts for the AWS access key id, secret access
+// key, and region, then POSTs an aws_sigv4 binding. A value supplied via the
+// --access-key-id / --region flags takes precedence and suppresses the
+// matching prompt, so one connector install can hold several region-scoped
+// bindings (multi-region / binding-wins). The non-secret access key id and
+// region ride alongside the secret so the host can sign without consulting
+// the manifest; when both flag and prompt are left blank they default to the
+// connector manifest's values at signing time. Prompting (rather than relying
+// on flags alone) is what lets the bare `binding setup <fqn>` form and the
+// add-suite auto-bind loop, neither of which passes flags, produce a complete
+// aws_sigv4 source.
 func runBindingSetupAWSSigV4(connectorFQN, identity, region, accessKeyID string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if accessKeyID == "" {
+		accessKeyID = promptLine(stdin, stdout,
+			"AWS access key id (leave blank to use the connector default): ")
+	}
 	value := promptLine(stdin, stdout, "AWS secret access key: ")
 	if value == "" {
 		fmt.Fprintln(stderr, "value is required")
 		return 1
+	}
+	if region == "" {
+		region = promptLine(stdin, stdout,
+			"AWS region, e.g. us-east-1 (leave blank to use the connector default): ")
 	}
 	source := map[string]any{"kind": "aws_sigv4", "value": value}
 	if region != "" {

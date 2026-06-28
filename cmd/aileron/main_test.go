@@ -1506,6 +1506,159 @@ func TestRunBinding_SetupSendsAWSSigV4Body(t *testing.T) {
 	}
 }
 
+func TestRunBinding_SetupAWSSigV4NoFlagsPromptsRegionAndAccessKey(t *testing.T) {
+	// A bare `binding setup <fqn>` (no --region / --access-key-id flags)
+	// against an aws_sigv4 connector must interactively prompt for the
+	// access key id and region in addition to the secret, and the POSTed
+	// source must carry both non-secret fields. Before the fix these were
+	// read only from flags, so they were empty here and the binding signed
+	// nothing.
+	var got struct {
+		Bindings []struct {
+			Source struct {
+				Kind        string `json:"kind"`
+				Value       string `json:"value"`
+				Region      string `json:"region"`
+				AccessKeyID string `json:"access_key_id"`
+			} `json:"source"`
+		} `json:"bindings"`
+	}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2","message":"no oauth","details":[{"declared_kind":"aws_sigv4"}]}}`)
+		case "/bindings/setup":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"aws_sigv4/athena/prod","kind":"aws_sigv4","service":"athena","identity":"prod","connector_fqn":"github://acme/athena","created_at":"2024-01-01T00:00:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	// Prompt order: identity, access key id, secret access key, region.
+	stdin := strings.NewReader("prod\nAKIANOFLAG\nsecret-access-key\nus-west-2\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://acme/athena"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	if len(got.Bindings) != 1 {
+		t.Fatalf("len(bindings) = %d", len(got.Bindings))
+	}
+	src := got.Bindings[0].Source
+	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
+		src.Region != "us-west-2" || src.AccessKeyID != "AKIANOFLAG" {
+		t.Errorf("source = %+v; want region=us-west-2 access_key_id=AKIANOFLAG", src)
+	}
+}
+
+func TestRunBinding_SetupAWSSigV4NoFlagsBlankUsesManifestDefault(t *testing.T) {
+	// Blank answers to the access key id / region prompts honor the
+	// binding-wins-over-manifest fallback: the fields are omitted from the
+	// source so the connector manifest's defaults apply at signing time.
+	var got struct {
+		Bindings []struct {
+			Source map[string]any `json:"source"`
+		} `json:"bindings"`
+	}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2","details":[{"declared_kind":"aws_sigv4"}]}}`)
+		case "/bindings/setup":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"aws_sigv4/athena/prod","kind":"aws_sigv4","service":"athena","identity":"prod","connector_fqn":"github://acme/athena","created_at":"2024-01-01T00:00:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	// identity, blank access key id, secret, blank region.
+	stdin := strings.NewReader("prod\n\nsecret-access-key\n\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://acme/athena"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	if len(got.Bindings) != 1 {
+		t.Fatalf("len(bindings) = %d", len(got.Bindings))
+	}
+	src := got.Bindings[0].Source
+	if _, ok := src["region"]; ok {
+		t.Errorf("blank region should be omitted, got source = %+v", src)
+	}
+	if _, ok := src["access_key_id"]; ok {
+		t.Errorf("blank access_key_id should be omitted, got source = %+v", src)
+	}
+}
+
+func TestRunAction_AddAutoBindsAWSSigV4PromptsRegionAndAccessKey(t *testing.T) {
+	// The add-suite auto-bind loop calls runBindingSetup with no flags. For
+	// an aws_sigv4 unbound capability it must prompt for the access key id
+	// and region so the created source is complete. Before the fix both
+	// fields were empty and the host failed closed at signing time.
+	withSeededKeyring(t, "github://x/y")
+	var got struct {
+		Bindings []struct {
+			Source struct {
+				Kind        string `json:"kind"`
+				Value       string `json:"value"`
+				Region      string `json:"region"`
+				AccessKeyID string `json:"access_key_id"`
+			} `json:"source"`
+		} `json:"bindings"`
+	}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://x/y/actions/echo","version":"1.0.0","hash":"sha256:a","name":"echo","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{
+				"name":"echo","fqn":"github://x/y/actions/echo",
+				"version":"1.0.0","source":"x","path":"/p",
+				"unbound_capabilities":[{"connector_fqn":"github://x/athena","kind":"aws_sigv4","scope":"read"}]
+			}`)
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2","details":[{"declared_kind":"aws_sigv4"}]}}`)
+		case "/bindings/setup":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"aws_sigv4/athena/prod","kind":"aws_sigv4","service":"athena","identity":"prod","connector_fqn":"github://x/athena","created_at":"2024-01-01T00:00:00Z"}]}`)
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	// add consent "y", bind prompt "y", identity, access key id, secret, region.
+	stdin := strings.NewReader("y\ny\nprod\nAKIASUITE\nsecret-access-key\neu-west-1\n")
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
+		stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if len(got.Bindings) != 1 {
+		t.Fatalf("len(bindings) = %d", len(got.Bindings))
+	}
+	src := got.Bindings[0].Source
+	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
+		src.Region != "eu-west-1" || src.AccessKeyID != "AKIASUITE" {
+		t.Errorf("source = %+v; want complete aws_sigv4 with region+access_key_id", src)
+	}
+}
+
 func TestRunBinding_SetupRejectsEmptyValue(t *testing.T) {
 	// init returns 422 not_oauth2 → CLI falls through and rejects
 	// blank api_key value before hitting /bindings/setup.
