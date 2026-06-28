@@ -62,14 +62,15 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	outDir := flags.String("out-dir", ".", "Directory file-target artifacts are written to")
 	var inputs inputFlag
 	flags.Var(&inputs, "input", "Launch input override as name=value; repeatable")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 {
+	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, skillUsage)
 		return 1
 	}
-	name := flags.Arg(0)
+	name := positionals[0]
 
 	s := store.New(skillStoreDir)
 	id, err := resolveLaunchVersion(s, name, *version)

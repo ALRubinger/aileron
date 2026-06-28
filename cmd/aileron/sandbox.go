@@ -293,10 +293,11 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	node := flags.String("node", "", "Managed-toolchain escape hatch: path to a Node binary (with --devcontainer-cli)")
 	devcontainerCLI := flags.String("devcontainer-cli", "", "Managed-toolchain escape hatch: path to the @devcontainers/cli entrypoint (with --node)")
 	offline := flags.Bool("offline", false, "Resolve the managed toolchain from the warm cache with no network (run `aileron sandbox warm` first)")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() > 1 || (*agent != "" && flags.NArg() != 0) {
+	if len(positionals) > 1 || (*agent != "" && len(positionals) != 0) {
 		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [--toolchain=managed|host-npx] [--offline] [--node=<path> --devcontainer-cli=<path>] [command]")
 		return 1
 	}
@@ -304,8 +305,8 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	command := *agent
-	if command == "" && flags.NArg() == 1 {
-		command = flags.Arg(0)
+	if command == "" && len(positionals) == 1 {
+		command = positionals[0]
 	}
 	if command == "" {
 		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [command]")
