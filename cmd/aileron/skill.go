@@ -61,14 +61,15 @@ func runSkill(args []string, stdout, stderr io.Writer) int {
 func runSkillInstall(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("skill install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 {
+	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, skillUsage)
 		return 1
 	}
-	src := flags.Arg(0)
+	src := positionals[0]
 
 	s := store.New(skillStoreDir)
 

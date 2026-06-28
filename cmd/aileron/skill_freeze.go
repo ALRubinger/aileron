@@ -29,14 +29,15 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	signingKey := flags.String("signing-key", "", "Path to the PEM ed25519 signing key (falls back to $"+freeze.SigningKeyEnv+")")
 	version := flags.String("version", "", "Semver label recorded in the lock (for example 1.0.0)")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 {
+	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, skillUsage)
 		return 1
 	}
-	target := flags.Arg(0)
+	target := positionals[0]
 
 	raw, err := readSkillForFreeze(target)
 	if err != nil {

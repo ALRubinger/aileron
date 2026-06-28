@@ -232,10 +232,11 @@ func runActionRun(args []string, stdout, stderr io.Writer) int {
 	rawArgs := flags.String("args", "", "Raw JSON object for action args")
 	asJSON := flags.Bool("json", false, "Print the daemon response envelope verbatim")
 	auditIDOut := flags.String("audit-id-out", "", "Write the action audit_id to this path")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+	if len(positionals) != 1 || strings.TrimSpace(positionals[0]) == "" {
 		fmt.Fprintln(stderr, "usage: aileron action run <NAME> [--arg k=v ...] [--args <json>] [--json] [--audit-id-out <path>]")
 		return 1
 	}
@@ -265,7 +266,7 @@ func runActionRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	name := strings.TrimSpace(flags.Arg(0))
+	name := strings.TrimSpace(positionals[0])
 	body, _ := json.Marshal(actionRunRequest{Args: runArgs})
 	req, err := http.NewRequest(http.MethodPost, base+"/actions/"+url.PathEscape(name)+"/run", bytes.NewReader(body))
 	if err != nil {

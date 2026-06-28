@@ -17,44 +17,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// splitPathArg separates the single positional path argument (the
-// first non-flag token) from the flag tokens so the verbs accept the
-// path either before or after their flags. Go's flag package stops at
-// the first non-flag arg, so without this reorder
-// `vault put agents/x/oauth --from-file f` would never parse the flag.
-// Returns the path, the remaining flag args, and false if there is not
-// exactly one positional argument.
-func splitPathArg(args []string) (path string, flagArgs []string, ok bool) {
-	flagArgs = make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "-") {
-			flagArgs = append(flagArgs, a)
-			// A flag that takes a value in `--flag value` form keeps
-			// its value token attached. `--flag=value` is self-contained.
-			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				// Only --from-file takes a separate value among these
-				// verbs; --yes/--json are booleans. Treat the next token
-				// as a value only for --from-file to avoid swallowing the
-				// path arg after a boolean flag.
-				if a == "--from-file" || a == "-from-file" {
-					flagArgs = append(flagArgs, args[i+1])
-					i++
-				}
-			}
-			continue
-		}
-		if path != "" {
-			return "", nil, false // more than one positional arg
-		}
-		path = a
-	}
-	if path == "" {
-		return "", nil, false
-	}
-	return path, flagArgs, true
-}
-
 // Environment variable that supplies the vault passphrase non-
 // interactively. Honored by every command that would otherwise prompt.
 // Documented in #492 item 5c as the CI / scripts escape hatch.
@@ -207,19 +169,19 @@ type userSummary struct {
 // credential files (Claude's .credentials.json, Codex's auth.json) are
 // exact-byte artifacts.
 func runVaultPut(args []string, stdout, stderr io.Writer) int {
-	pathArg, flagArgs, ok := splitPathArg(args)
-	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault put agents/<name>/<purpose> --from-file <path>")
-		return 1
-	}
 	flags := flag.NewFlagSet("vault put", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	fromFile := flags.String("from-file", "", "Read the credential bytes verbatim from the named file")
 	flags.Bool("yes", false, "Accepted for symmetry with delete; put never prompts")
-	if err := flags.Parse(flagArgs); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	name, purpose, err := agentPathNameAndPurpose(pathArg)
+	if len(positionals) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron vault put agents/<name>/<purpose> --from-file <path>")
+		return 1
+	}
+	name, purpose, err := agentPathNameAndPurpose(positionals[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -271,18 +233,18 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 // daemon applies no approval block for operator vault management per the
 // plan).
 func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	pathArg, flagArgs, ok := splitPathArg(args)
-	if !ok {
-		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/<purpose> [--yes] (exactly what vault list prints)")
-		return 1
-	}
 	flags := flag.NewFlagSet("vault delete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	yes := flags.Bool("yes", false, "Skip the confirmation prompt")
-	if err := flags.Parse(flagArgs); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	name, purpose, err := agentPathNameAndPurpose(pathArg)
+	if len(positionals) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/<purpose> [--yes] (exactly what vault list prints)")
+		return 1
+	}
+	name, purpose, err := agentPathNameAndPurpose(positionals[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

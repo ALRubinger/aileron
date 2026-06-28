@@ -89,16 +89,20 @@ func runHub(args []string, stdout, stderr io.Writer) int {
 // `{"suites":[...],"actions":[...],"connectors":[...]}` in combined
 // mode.
 func runHubList(args []string, stdout, stderr io.Writer) int {
-	category, rest := takePositional(args)
 	flags := flag.NewFlagSet("hub list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	asJSON := flags.Bool("json", false, "Render entries as NDJSON (single-type) or one combined JSON object (default mode)")
-	if err := flags.Parse(rest); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 0 {
+	if len(positionals) > 1 {
 		fmt.Fprintln(stderr, "usage: aileron hub list [connectors|actions|suites] [--json]")
 		return 1
+	}
+	category := ""
+	if len(positionals) == 1 {
+		category = positionals[0]
 	}
 	switch category {
 	case "":
@@ -120,19 +124,19 @@ func runHubList(args []string, stdout, stderr io.Writer) int {
 // three catalogs and groups results by type. `--type` narrows to a
 // single catalog when the caller already knows what they want.
 func runHubSearch(args []string, stdout, stderr io.Writer) int {
-	args = reorderArgsFlagsFirst(args, map[string]bool{"type": true})
 	flags := flag.NewFlagSet("hub search", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	asJSON := flags.Bool("json", false, "Render entries as NDJSON (single-type) or one combined JSON object (default mode)")
 	typeFilter := flags.String("type", "", "Restrict search to one catalog: connectors, actions, or suites")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 {
+	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, "usage: aileron hub search <query> [--type connectors|actions|suites] [--json]")
 		return 1
 	}
-	query := flags.Arg(0)
+	query := positionals[0]
 	if strings.TrimSpace(query) == "" {
 		fmt.Fprintln(stderr, "error: query cannot be empty")
 		return 1
@@ -158,19 +162,19 @@ func runHubSearch(args []string, stdout, stderr io.Writer) int {
 // (connector → action → suite) and returning the first hit. `--type`
 // skips the dispatch and queries the named catalog directly.
 func runHubShow(args []string, stdout, stderr io.Writer) int {
-	args = reorderArgsFlagsFirst(args, map[string]bool{"type": true})
 	flags := flag.NewFlagSet("hub show", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	asJSON := flags.Bool("json", false, "Render the entry as a single JSON object")
 	typeFilter := flags.String("type", "", "Skip dispatch and query the named catalog: connectors, actions, or suites")
-	if err := flags.Parse(args); err != nil {
+	positionals, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	if flags.NArg() != 1 {
+	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, "usage: aileron hub show <fqn> [--type connectors|actions|suites] [--json]")
 		return 1
 	}
-	fqn := flags.Arg(0)
+	fqn := positionals[0]
 	if strings.TrimSpace(fqn) == "" {
 		fmt.Fprintln(stderr, "error: fqn cannot be empty")
 		return 1
@@ -190,44 +194,6 @@ func runHubShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "valid values: connectors, actions, suites")
 		return 1
 	}
-}
-
-// takePositional pulls a leading non-flag argument off args and returns
-// it plus the remainder. Lets `hub list connectors --json` work as
-// expected without making `flag.Parse` stumble over the positional.
-func takePositional(args []string) (string, []string) {
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		return args[0], args[1:]
-	}
-	return "", args
-}
-
-// reorderArgsFlagsFirst moves every `--flag` (and its value, for
-// value-flags) ahead of any positional arguments so Go's stdlib
-// `flag.Parse` — which stops scanning at the first non-flag arg — can
-// pick up flags regardless of whether the user typed them before or
-// after the positional. valueFlags names the flags that consume a
-// following arg ("type" → `--type X`); boolean flags ("json") are
-// passed through unchanged.
-func reorderArgsFlagsFirst(args []string, valueFlags map[string]bool) []string {
-	var positional []string
-	var flagPart []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "-") {
-			flagPart = append(flagPart, a)
-			name := strings.TrimLeft(a, "-")
-			// `--flag=value` already self-contained; only consume a
-			// trailing arg when the user typed `--flag value`.
-			if !strings.Contains(name, "=") && valueFlags[name] && i+1 < len(args) {
-				flagPart = append(flagPart, args[i+1])
-				i++
-			}
-			continue
-		}
-		positional = append(positional, a)
-	}
-	return append(flagPart, positional...)
 }
 
 // --- list helpers, one per catalog ---
