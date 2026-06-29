@@ -301,7 +301,7 @@ jobs:
       # ui/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-webapp job) so the baked browser
       # stays compatible with the installed @playwright/test.
-      image: mcr.microsoft.com/playwright:v1.61.0-noble
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
     steps:
       - uses: actions/checkout@v7
 
@@ -404,7 +404,7 @@ jobs:
       # webapp/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-ui job) so the baked browser
       # stays compatible with the installed @playwright/test.
-      image: mcr.microsoft.com/playwright:v1.61.0-noble
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
     steps:
       - uses: actions/checkout@v7
 
