@@ -340,6 +340,88 @@ func TestPrepareAuthSpec_StaticFileLandsRegardlessOfVault(t *testing.T) {
 	}
 }
 
+// TestPrepareAuthSpec_StaticFileRenderContentSeesRenderedEnv proves the
+// StaticFile.RenderContent hook is invoked with the env vars the
+// EnvBindings already rendered, and that its output (not Content) is what
+// the launcher writes. This is the plumbing #1695 relies on: Claude's
+// api-key onboarding stub derives customApiKeyResponses.approved from the
+// ANTHROPIC_API_KEY the EnvBinding rendered moments earlier.
+func TestPrepareAuthSpec_StaticFileRenderContentSeesRenderedEnv(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seedPurpose("claude", "apikey", []byte("sk-ant-rendered-key"))
+
+	var sawEnv map[string]string
+	spec := AuthSpec{
+		EnvBindings: []EnvBinding{{
+			VaultPath: "agents/claude/apikey",
+			Required:  false,
+			Render: func(s vault.Secret) (map[string]string, error) {
+				return map[string]string{"ANTHROPIC_API_KEY": string(s.Value)}, nil
+			},
+		}},
+		StaticFiles: []StaticFile{{
+			ContainerPath: "/home/agent/.claude.json",
+			Mode:          0o644,
+			Content:       []byte("FALLBACK-SHOULD-NOT-BE-WRITTEN"),
+			RenderContent: func(env map[string]string) ([]byte, error) {
+				sawEnv = env
+				return []byte("approved:" + env["ANTHROPIC_API_KEY"]), nil
+			},
+		}},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if sawEnv["ANTHROPIC_API_KEY"] != "sk-ant-rendered-key" {
+		t.Fatalf("RenderContent saw env[ANTHROPIC_API_KEY] = %q, want the rendered key", sawEnv["ANTHROPIC_API_KEY"])
+	}
+
+	var staticSource string
+	for _, m := range prep.Mounts {
+		if m.Target == "/home/agent/.claude.json" {
+			staticSource = m.Source
+		}
+	}
+	if staticSource == "" {
+		t.Fatalf("no file mount for /home/agent/.claude.json; got %+v", prep.Mounts)
+	}
+	got, err := os.ReadFile(staticSource)
+	if err != nil {
+		t.Fatalf("read static: %v", err)
+	}
+	if string(got) != "approved:sk-ant-rendered-key" {
+		t.Fatalf("static content = %q, want the RenderContent output (Content fallback must be ignored)", got)
+	}
+}
+
+// TestPrepareAuthSpec_StaticFileRenderContentErrorAborts proves a
+// RenderContent failure aborts the launch (and cleans up) rather than
+// writing a half-formed onboarding file.
+func TestPrepareAuthSpec_StaticFileRenderContentErrorAborts(t *testing.T) {
+	spec := AuthSpec{
+		StaticFiles: []StaticFile{{
+			ContainerPath: "/home/agent/.claude.json",
+			Mode:          0o644,
+			Content:       []byte("ignored"),
+			RenderContent: func(map[string]string) ([]byte, error) {
+				return nil, errors.New("boom")
+			},
+		}},
+	}
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
+		newTestLogger(), nil, nil, nil, true)
+	if err == nil {
+		t.Fatal("expected RenderContent error to abort the launch")
+	}
+	if !strings.Contains(err.Error(), "render static") {
+		t.Errorf("error = %v, want mention of render static", err)
+	}
+}
+
 func TestPrepareAuthSpec_RequiredVaultMissingFailsLaunch(t *testing.T) {
 	spec := AuthSpec{
 		FileBindings: []FileBinding{{

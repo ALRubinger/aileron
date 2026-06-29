@@ -89,9 +89,10 @@ func TestFileBinding_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestStaticFile_ShapeIsConstant pins the StaticFile invariant: the
-// Content slice is what the launcher writes verbatim into the bind
-// mount on every launch, regardless of vault state. No render hook.
+// TestStaticFile_ShapeIsConstant pins the StaticFile invariant: with no
+// RenderContent hook, the Content slice is what the launcher writes
+// verbatim into the bind mount on every launch, regardless of vault
+// state.
 func TestStaticFile_ShapeIsConstant(t *testing.T) {
 	sf := StaticFile{
 		ContainerPath: "/home/agent/.claude.json",

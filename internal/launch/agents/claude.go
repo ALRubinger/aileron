@@ -181,7 +181,18 @@ func (c Claude) AuthSpec() launch.AuthSpec {
 			StaticFiles: []launch.StaticFile{{
 				ContainerPath: claudeOnboardingContainerPath,
 				Mode:          0o644,
+				// RenderContent makes the onboarding stub key-aware: it
+				// derives customApiKeyResponses.approved from the same
+				// ANTHROPIC_API_KEY the EnvBinding above just rendered, so
+				// Claude Code does not show the interactive "Detected a
+				// custom API key in your environment" prompt (which defaults
+				// to "No") and the hands-off launch is not blocked (#1695).
+				// Content is the fallback the launcher writes if RenderContent
+				// is ever nil; we keep it pointed at the plain stub so a
+				// regression that drops the hook degrades to the pre-#1695
+				// behavior rather than an empty file.
 				Content:       claudeOnboardingStub,
+				RenderContent: claudeAPIKeyOnboardingContent,
 			}},
 		}
 	}

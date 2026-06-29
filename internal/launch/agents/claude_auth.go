@@ -365,28 +365,102 @@ const claudeWorkspacePath = "/home/agent/workspace"
 //     disclaimer inside it is consistent with the pre-accepted trust
 //     dialog above. (#1379)
 //
-// Built from a typed value rather than a string literal so the nested
-// shape stays valid as Anthropic adds onboarding fields.
-var claudeOnboardingStub = mustMarshalOnboardingStub()
+// claudeAPIKeySuffixLen is the number of trailing characters of the raw
+// ANTHROPIC_API_KEY that Claude Code stores in
+// `customApiKeyResponses.approved` to pre-approve an env-supplied key.
+// Claude Code keys the approval on the LAST 20 characters of the raw key
+// (the suffix, not a hash), so a .claude.json carrying that suffix
+// suppresses the interactive "Detected a custom API key in your
+// environment" confirmation that otherwise blocks a hands-off launch.
+const claudeAPIKeySuffixLen = 20
 
-func mustMarshalOnboardingStub() []byte {
-	type projectTrust struct {
-		HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
-	}
-	stub := struct {
-		HasCompletedOnboarding        bool                    `json:"hasCompletedOnboarding"`
-		BypassPermissionsModeAccepted bool                    `json:"bypassPermissionsModeAccepted"`
-		InstallMethod                 string                  `json:"installMethod"`
-		Projects                      map[string]projectTrust `json:"projects"`
-	}{
+// claudeProjectTrust is the per-project onboarding entry; the trust
+// dialog is pre-accepted for the bind-mounted workspace.
+type claudeProjectTrust struct {
+	HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
+}
+
+// claudeCustomAPIKeyResponses pre-approves env-supplied API keys so
+// Claude Code does not prompt "Detected a custom API key in your
+// environment". The "approved" list carries the last
+// claudeAPIKeySuffixLen characters of each approved key.
+type claudeCustomAPIKeyResponses struct {
+	Approved []string `json:"approved"`
+}
+
+// claudeOnboardingDoc is the typed shape of /home/agent/.claude.json.
+// CustomApiKeyResponses uses ",omitempty" with a pointer so subscription
+// mode (which sets it nil) emits a document byte-identical to the
+// pre-#1695 stub — no customApiKeyResponses key at all.
+type claudeOnboardingDoc struct {
+	HasCompletedOnboarding        bool                          `json:"hasCompletedOnboarding"`
+	BypassPermissionsModeAccepted bool                          `json:"bypassPermissionsModeAccepted"`
+	InstallMethod                 string                        `json:"installMethod"`
+	Projects                      map[string]claudeProjectTrust `json:"projects"`
+	CustomApiKeyResponses         *claudeCustomAPIKeyResponses  `json:"customApiKeyResponses,omitempty"`
+}
+
+// newClaudeOnboardingDoc builds the onboarding document shared by both
+// auth modes. The onboarding fields (hasCompletedOnboarding,
+// bypassPermissionsModeAccepted, installMethod, projects trust) are
+// constant; see the field comments in claudeOnboardingStub for why each
+// is pre-accepted. apiKeyApprovals, when non-empty, is attached as
+// customApiKeyResponses.approved.
+func newClaudeOnboardingDoc(apiKeyApprovals []string) claudeOnboardingDoc {
+	doc := claudeOnboardingDoc{
 		HasCompletedOnboarding:        true,
 		BypassPermissionsModeAccepted: true,
 		InstallMethod:                 "global",
-		Projects: map[string]projectTrust{
+		Projects: map[string]claudeProjectTrust{
 			claudeWorkspacePath: {HasTrustDialogAccepted: true},
 		},
 	}
-	b, err := json.Marshal(stub)
+	if len(apiKeyApprovals) > 0 {
+		doc.CustomApiKeyResponses = &claudeCustomAPIKeyResponses{Approved: apiKeyApprovals}
+	}
+	return doc
+}
+
+// claudeOnboardingStub is the payload written to /home/agent/.claude.json
+// in subscription mode (and the base for api-key mode). It short-circuits
+// the first-run interruptions so a vault-rendered sandbox launch is
+// silent end-to-end:
+//
+//   - hasCompletedOnboarding skips the theme picker / first-run wizard.
+//   - installMethod "global" matches the devcontainer's
+//     `npm install -g @anthropic-ai/claude-code`. Claude's `/doctor`
+//     uses installMethod to decide where to verify the binary; "native"
+//     made it look for ~/.local/bin/claude (the native-installer path,
+//     which the npm install never creates) and report the CLI as
+//     "missing or broken". "global" verifies the PATH-resolved global
+//     binary the devcontainer actually installs.
+//   - projects[workspace].hasTrustDialogAccepted pre-accepts the folder
+//     trust dialog ("Is this a project you trust?") for the bind-mounted
+//     workspace, so the agent does not block on it on every launch. The
+//     sandbox container is the trust boundary, so pre-accepting inside
+//     it is safe.
+//   - bypassPermissionsModeAccepted pre-accepts the
+//     "Bypassing Permissions" disclaimer that Claude Code shows the
+//     first time it runs under --dangerously-skip-permissions. The
+//     sandbox launch always passes that flag (Args(ModeSandbox)), so
+//     without this the first launch blocks on an interactive
+//     "do you want to dangerously skip permissions?" confirmation —
+//     defeating the hands-off Cloud startup the flag exists to provide.
+//     The opt-in is already expressed by Aileron passing the flag; the
+//     container is the trust boundary (ADR-0015), so pre-accepting the
+//     disclaimer inside it is consistent with the pre-accepted trust
+//     dialog above. (#1379)
+//
+// In api-key mode the document gets one additional field,
+// customApiKeyResponses.approved, derived per-launch from the rendered
+// key; see claudeAPIKeyOnboardingContent. Subscription mode never carries
+// it (no env key, no prompt). Built from a typed value rather than a
+// string literal so the nested shape stays valid as Anthropic adds
+// onboarding fields.
+var claudeOnboardingStub = mustMarshalOnboardingStub()
+
+func mustMarshalOnboardingStub() []byte {
+	b, err := json.Marshal(newClaudeOnboardingDoc(nil))
 	if err != nil {
 		// The shape is a fixed literal; marshaling it cannot fail at
 		// runtime. Panic so a refactor that breaks it surfaces in tests
@@ -394,6 +468,42 @@ func mustMarshalOnboardingStub() []byte {
 		panic("claude: marshaling onboarding stub: " + err.Error())
 	}
 	return b
+}
+
+// claudeAPIKeySuffix returns the per-key approval token Claude Code
+// stores in customApiKeyResponses.approved: the last
+// claudeAPIKeySuffixLen characters of the key, or the whole key when it
+// is shorter. The key must already be trimmed (claudeAPIKeyRender trims
+// whitespace before rendering into ANTHROPIC_API_KEY) so the suffix
+// matches the value Claude Code actually sees in its env. The suffix is
+// measured in runes, not bytes, so a key with multi-byte characters
+// yields the same trailing characters Claude Code's JS slice would.
+func claudeAPIKeySuffix(key string) string {
+	r := []rune(key)
+	if len(r) <= claudeAPIKeySuffixLen {
+		return key
+	}
+	return string(r[len(r)-claudeAPIKeySuffixLen:])
+}
+
+// claudeAPIKeyOnboardingContent is the StaticFile.RenderContent hook for
+// api-key mode. The launcher invokes it after the EnvBinding renders the
+// vault key into ANTHROPIC_API_KEY, passing the rendered env additions,
+// so the .claude.json carries the suffix of the exact key Claude Code
+// will see. When the env addition is absent (the api-key acquire fell
+// back to the in-container login, so no key was rendered), it emits the
+// plain onboarding stub — there is no env key for Claude Code to prompt
+// about, so no approval is needed.
+func claudeAPIKeyOnboardingContent(env map[string]string) ([]byte, error) {
+	var approvals []string
+	if key := strings.TrimSpace(env[claudeAPIKeyEnv]); key != "" {
+		approvals = []string{claudeAPIKeySuffix(key)}
+	}
+	b, err := json.Marshal(newClaudeOnboardingDoc(approvals))
+	if err != nil {
+		return nil, fmt.Errorf("claude: marshal api-key onboarding doc: %w", err)
+	}
+	return b, nil
 }
 
 // claudeRender writes the vault's stored bytes into the in-container

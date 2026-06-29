@@ -280,8 +280,22 @@ type StaticFile struct {
 	Mode fs.FileMode
 
 	// Content is the file bytes written unconditionally on every
-	// launch.
+	// launch when RenderContent is nil. When RenderContent is non-nil,
+	// it takes precedence and Content is ignored.
 	Content []byte
+
+	// RenderContent, when non-nil, computes the file bytes from the
+	// env vars the spec's EnvBindings already rendered. The launcher
+	// invokes it AFTER the EnvBinding loop populates the env additions,
+	// so a StaticFile can derive content from a freshly-rendered
+	// credential (Claude's api-key mode needs the rendered
+	// ANTHROPIC_API_KEY's suffix to pre-approve Claude Code's
+	// custom-API-key prompt). The map is the same env additions the
+	// agent process receives, so the derived content sees exactly the
+	// value the agent will (including any Render-side trimming). A
+	// non-nil RenderContent supersedes Content; returning an error
+	// aborts the launch.
+	RenderContent func(env map[string]string) ([]byte, error)
 }
 
 // RefreshDeps is the bag of helpers a FileBinding's PreLaunchRefresh
