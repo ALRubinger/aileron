@@ -97,8 +97,15 @@ func renderClaudeAPIKeyLaunchEnv(t *testing.T, rawKey string) (env map[string]st
 	if len(spec.EnvBindings) != 1 {
 		t.Fatalf("api-key AuthSpec EnvBindings = %d, want 1 (the ANTHROPIC_API_KEY binding)", len(spec.EnvBindings))
 	}
-	if len(spec.StaticFiles) != 1 {
-		t.Fatalf("api-key AuthSpec StaticFiles = %d, want 1 (the .claude.json onboarding doc)", len(spec.StaticFiles))
+	// Two StaticFiles in api-key mode: the key-aware .claude.json
+	// onboarding doc (the one carrying RenderContent, selected by path
+	// below) and the /home/agent/.claude/ writable-dir sentinel #1701
+	// added so that directory group-mounts writable. Assert the pair and
+	// select the onboarding doc by ContainerPath rather than index, so
+	// neither file ordering nor a future third state file silently breaks
+	// this probe.
+	if len(spec.StaticFiles) != 2 {
+		t.Fatalf("api-key AuthSpec StaticFiles = %d, want 2 (the .claude.json onboarding doc + the .claude/ writable-dir sentinel)", len(spec.StaticFiles))
 	}
 
 	eb := spec.EnvBindings[0]
@@ -115,7 +122,19 @@ func renderClaudeAPIKeyLaunchEnv(t *testing.T, rawKey string) (env map[string]st
 		t.Fatalf("rendered env = %v, want a %s entry", env, renderedClaudeAPIKeyEnv)
 	}
 
-	sf := spec.StaticFiles[0]
+	const onboardingContainerPath = "/home/agent/.claude.json"
+	onboardingIdx := -1
+	var paths []string
+	for i, candidate := range spec.StaticFiles {
+		paths = append(paths, candidate.ContainerPath)
+		if candidate.ContainerPath == onboardingContainerPath {
+			onboardingIdx = i
+		}
+	}
+	if onboardingIdx < 0 {
+		t.Fatalf("api-key AuthSpec has no StaticFile at %s; got %v", onboardingContainerPath, paths)
+	}
+	sf := spec.StaticFiles[onboardingIdx]
 	if sf.RenderContent == nil {
 		t.Fatal("api-key StaticFile has nil RenderContent; the onboarding doc cannot be made key-aware (#1695)")
 	}
