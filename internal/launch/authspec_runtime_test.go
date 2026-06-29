@@ -340,6 +340,76 @@ func TestPrepareAuthSpec_StaticFileLandsRegardlessOfVault(t *testing.T) {
 	}
 }
 
+// TestPrepareAuthSpec_StaticFileUnderSubdirMountsWritableDir is the #1700
+// regression. Claude's api-key auth mode carries no FileBinding under
+// /home/agent/.claude/ (its credential rides ANTHROPIC_API_KEY on an env
+// var). Subscription mode gets a writable /home/agent/.claude/ for free
+// because its .credentials.json FileBinding lives there and the launcher
+// group-mounts that parent writable. Without a corresponding mount in
+// api-key mode the .claude/ directory is the read-only image dir, so the
+// agent hits EACCES on `mkdir .claude/session-env` and the bypass-
+// permissions prompt reappears (it cannot persist its acceptance state
+// under .claude/).
+//
+// The contract this asserts: a StaticFile whose parent is a subdirectory
+// (not /home/agent) makes prepareAuthSpec emit a WRITABLE directory mount
+// at that parent — exactly the mount subscription mode already produces.
+// This is the mount-assembly seam the api-key sentinel StaticFile relies
+// on; the macOS-only end-to-end EACCES cannot be reproduced in a Linux CI
+// unit test, so we cover the load-bearing mount here. The test fails
+// before the fix (the group was skipped as file-mount-only, yielding no
+// .claude/ mount) and passes after.
+func TestPrepareAuthSpec_StaticFileUnderSubdirMountsWritableDir(t *testing.T) {
+	daemon := newFakeDaemon() // empty vault — no FileBinding at all
+	// Mirror api-key mode: an env-only credential plus two StaticFiles —
+	// the onboarding stub at /home/agent/.claude.json (individual read-
+	// only file mount) and a sentinel under /home/agent/.claude/ (must
+	// force a writable dir mount).
+	spec := AuthSpec{
+		StaticFiles: []StaticFile{
+			{
+				ContainerPath: "/home/agent/.claude.json",
+				Mode:          0o644,
+				Content:       []byte(`{"hasCompletedOnboarding":true}`),
+			},
+			{
+				ContainerPath: "/home/agent/.claude/.aileron-keep",
+				Mode:          0o644,
+				Content:       []byte{},
+			},
+		},
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// The contractual mount: /home/agent/.claude/ bound WRITABLE.
+	var dirMount, fileMount bool
+	for _, m := range prep.Mounts {
+		if m.Target == "/home/agent/.claude" {
+			dirMount = true
+			if m.ReadOnly {
+				t.Errorf("/home/agent/.claude/ mount is ReadOnly; the agent must be able to mkdir .claude/session-env and persist bypass-permissions state (#1700)")
+			}
+		}
+		if m.Target == "/home/agent/.claude.json" {
+			fileMount = true
+			if !m.ReadOnly {
+				t.Errorf("/home/agent/.claude.json mount must stay ReadOnly (individual file mount)")
+			}
+		}
+	}
+	if !dirMount {
+		t.Fatalf("no /home/agent/.claude/ directory mount produced; got %+v", prep.Mounts)
+	}
+	if !fileMount {
+		t.Fatalf("no /home/agent/.claude.json file mount produced; got %+v", prep.Mounts)
+	}
+}
+
 // TestPrepareAuthSpec_StaticFileRenderContentSeesRenderedEnv proves the
 // StaticFile.RenderContent hook is invoked with the env vars the
 // EnvBindings already rendered, and that its output (not Content) is what

@@ -2,6 +2,7 @@ package agents_test
 
 import (
 	"encoding/json"
+	"path"
 	"strings"
 	"testing"
 
@@ -137,10 +138,37 @@ func TestClaude_AuthSpec_APIKeyMode(t *testing.T) {
 	if spec.EnvBindings[0].VaultPath == "agents/claude/oauth" {
 		t.Errorf("api-key EnvBinding references the oauth slot")
 	}
-	// The onboarding StaticFile is shared so an api-key launch is silent
-	// first-run too.
-	if len(spec.StaticFiles) != 1 {
-		t.Errorf("StaticFiles = %d, want 1 (shared onboarding stub)", len(spec.StaticFiles))
+	// API-key mode ships two StaticFiles: the shared onboarding stub at
+	// /home/agent/.claude.json (silent first-run) and a sentinel under
+	// /home/agent/.claude/ whose only purpose is to force a writable
+	// .claude/ directory mount (#1700) — subscription mode gets that mount
+	// for free via its .credentials.json FileBinding, but api-key mode has
+	// no FileBinding under .claude/, so without the sentinel the agent
+	// hits EACCES on mkdir .claude/session-env and the bypass-permissions
+	// prompt reappears.
+	if len(spec.StaticFiles) != 2 {
+		t.Fatalf("StaticFiles = %d, want 2 (onboarding stub + .claude/ writable-dir sentinel)", len(spec.StaticFiles))
+	}
+	var haveOnboarding, haveKeep bool
+	for _, sf := range spec.StaticFiles {
+		switch sf.ContainerPath {
+		case "/home/agent/.claude.json":
+			haveOnboarding = true
+		case "/home/agent/.claude/.aileron-keep":
+			haveKeep = true
+			// The sentinel's parent is /home/agent/.claude/ (not
+			// /home/agent), which is exactly what triggers the writable
+			// group-dir mount in prepareAuthSpec.
+			if got := path.Dir(sf.ContainerPath); got != "/home/agent/.claude" {
+				t.Errorf("sentinel parent = %q, want /home/agent/.claude", got)
+			}
+		}
+	}
+	if !haveOnboarding {
+		t.Error("api-key StaticFiles missing the /home/agent/.claude.json onboarding stub")
+	}
+	if !haveKeep {
+		t.Error("api-key StaticFiles missing the /home/agent/.claude/ writable-dir sentinel (#1700)")
 	}
 }
 

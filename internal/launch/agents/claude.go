@@ -193,6 +193,20 @@ func (c Claude) AuthSpec() launch.AuthSpec {
 				// behavior rather than an empty file.
 				Content:       claudeOnboardingStub,
 				RenderContent: claudeAPIKeyOnboardingContent,
+			}, {
+				// Sentinel under /home/agent/.claude/. Its only effect is to
+				// make the launcher group-mount /home/agent/.claude/ as a
+				// WRITABLE directory, matching subscription mode (whose
+				// .credentials.json FileBinding already forces that mount).
+				// Without a writable .claude/, the api-key-mode agent hits
+				// SessionStart EACCES on `mkdir .claude/session-env` and the
+				// Bypass Permissions prompt reappears because Claude cannot
+				// persist its acceptance state under .claude/ (#1700). Mode
+				// 0o644 so a host-side read is unaffected by the deferred
+				// chown; content is empty because Claude never reads it.
+				ContainerPath: claudeStateDirKeepContainerPath,
+				Mode:          0o644,
+				Content:       []byte{},
 			}},
 		}
 	}

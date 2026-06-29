@@ -138,6 +138,26 @@ const claudeCredentialsContainerPath = "/home/agent/.claude/.credentials.json"
 // silent end-to-end.
 const claudeOnboardingContainerPath = "/home/agent/.claude.json"
 
+// claudeStateDirKeepContainerPath is a zero-byte sentinel placed inside
+// /home/agent/.claude/ in api-key auth mode. Its sole job is to make the
+// launcher group-mount /home/agent/.claude/ as a WRITABLE directory.
+//
+// Subscription mode gets a writable /home/agent/.claude/ for free: its
+// .credentials.json FileBinding lives under that parent, so the launcher's
+// group-mount machinery already binds the directory writable (Claude
+// rotates the OAuth file mid-session). Api-key mode has no such binding —
+// ANTHROPIC_API_KEY rides an env var and the only file it placed under the
+// home tree (.claude.json) is parented at /home/agent, which gets an
+// individual read-only file mount. That left /home/agent/.claude/ as the
+// read-only image directory, so Claude could neither `mkdir
+// .claude/session-env` (SessionStart EACCES) nor persist/read its
+// bypass-permissions acceptance, making the Bypass Permissions prompt
+// reappear every launch (#1700). A static file under .claude/ forces the
+// same writable directory mount subscription mode already gets, fixing
+// both symptoms from the one shared root cause. The file content is
+// irrelevant to Claude; we keep it empty and clearly named.
+const claudeStateDirKeepContainerPath = "/home/agent/.claude/.aileron-keep"
+
 // claudeVaultPath is the canonical vault namespace for Claude's
 // subscription-OAuth credentials per ADR-0025's `agents/<name>/<purpose>`
 // scheme. Subscription mode (Pro/Max) reads/writes the envelope here.

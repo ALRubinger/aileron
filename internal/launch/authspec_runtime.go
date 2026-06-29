@@ -564,7 +564,19 @@ func prepareAuthSpec(
 				Target:   sf.ContainerPath,
 				ReadOnly: true,
 			})
+			continue
 		}
+		// A static file under any other parent (e.g. /home/agent/.claude/)
+		// needs its parent mounted as a writable directory, not as an
+		// individual read-only file. ensureGroup defaults the group to
+		// file-mount-only (only individual file mounts cover it); clearing
+		// that flag here makes the parent-dir mount loop below emit a
+		// writable Volume for the group. Without this, an api-key-mode
+		// launch (whose AuthSpec carries no FileBinding under .claude/ to
+		// flip the flag) would leave /home/agent/.claude/ as the read-only
+		// image directory, so Claude could not mkdir .claude/session-env
+		// and the bypass-permissions acceptance could not persist (#1700).
+		fileMountOnlyGroups[containerParent] = false
 	}
 
 	// Defer the chown of the transient tree to the in-container agent
