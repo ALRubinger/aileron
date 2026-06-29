@@ -429,6 +429,12 @@ tasks:
     cmds:
       - go test -tags=integration_sandbox -race -run 'TestSandboxProxyCurlIntegration|TestSandboxProxyAWSSigV4Integration' ./internal/app/...
 
+  test:integration:launch-anthropic-probe:
+    desc: "Run the composed launch->gateway->Anthropic-probe regression guard (#1699): renders the real api-key AuthSpec (ANTHROPIC_API_KEY + key-aware onboarding doc), stands up the real daemon mux order against a spec-compliant Anthropic upstream (401 without x-api-key, 200+org with it), and asserts Claude Code's GET /api/oauth/profile probe authenticates through the daemon with the rendered key. In-process, no Docker/subprocess prereqs (no self-skip). Fails before #1698, passes after."
+    dir: internal
+    cmds:
+      - go test -tags=integration_sandbox -race -run TestLaunchAnthropicProbe ./app/...
+
   test:integration:auth-github-route:
     desc: "Run the auth github route-drift guard (#1157): stands up the real daemon handler over a MemVault and asserts the CLI's hardcoded vault path still resolves to the spec-registered route. In-process, no external prereqs (no self-skip)."
     dir: cmd/aileron

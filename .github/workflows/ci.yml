@@ -728,6 +728,25 @@ jobs:
         run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
         working-directory: internal
 
+      - name: Run launch->gateway->Anthropic-probe regression guard (#1699)
+        # Composed regression for the launch -> gateway -> Anthropic-probe seam
+        # PR #1698 repaired (#1696). Renders the REAL api-key AuthSpec the
+        # launcher uses (agents.NewClaude(APIKey).AuthSpec() Render +
+        # RenderContent -> ANTHROPIC_API_KEY + the key-aware .claude.json
+        # onboarding doc), stands up the real daemon mux order (scoped /api/
+        # proxy before the webapp catch-all) against a SPEC-COMPLIANT stub
+        # Anthropic upstream (401 without x-api-key, 200 + org body with it),
+        # then points ANTHROPIC_BASE_URL at the daemon and issues Claude Code's
+        # real GET /api/oauth/profile probe with the rendered key — asserting an
+        # authenticated 200 + org object. Closes the two named weaknesses of the
+        # handler-level guard: a bare echo upstream with no auth semantics, and a
+        # literal key that never starts from the rendered launch env. Pure
+        # in-process (no Docker, no subprocess), so it never self-skips. Fails
+        # before #1698, passes after. Additive step so a failure is attributable
+        # to this specific contract.
+        run: go test -tags=integration_sandbox -race -run TestLaunchAnthropicProbe ./app/...
+        working-directory: internal
+
       - name: Run auth github route-drift guard (#1157)
         # Guards against silent drift between the CLI's HARDCODED vault path
         # in cmd/aileron/auth_github.go ("/vault/user/github/credentials") and
