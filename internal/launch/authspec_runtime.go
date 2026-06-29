@@ -538,7 +538,21 @@ func prepareAuthSpec(
 		if mode == 0 {
 			mode = 0o644
 		}
-		if err := os.WriteFile(hostPath, sf.Content, mode); err != nil {
+		// RenderContent (when set) derives the bytes from the env vars the
+		// EnvBinding loop above already rendered into prep.EnvAdditions, so
+		// the static file can be made credential-aware. It runs after that
+		// loop, so the map already holds any freshly-rendered key. A nil
+		// RenderContent preserves the verbatim Content write.
+		content := sf.Content
+		if sf.RenderContent != nil {
+			rendered, rcErr := sf.RenderContent(prep.EnvAdditions)
+			if rcErr != nil {
+				cleanup()
+				return prep, fmt.Errorf("auth spec: render static %s: %w", sf.ContainerPath, rcErr)
+			}
+			content = rendered
+		}
+		if err := os.WriteFile(hostPath, content, mode); err != nil {
 			cleanup()
 			return prep, fmt.Errorf("auth spec: write static %s: %w", hostPath, err)
 		}
