@@ -37,7 +37,9 @@ func TestPrintClaudeAuthBanner_SandboxClaude(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			printClaudeAuthBanner(&buf, claudeModeAgent{name: "claude", mode: tc.mode}, true)
+			// renderedCredential=true: a credential was actually seeded,
+			// so the banner is allowed to assert the active mode.
+			printClaudeAuthBanner(&buf, claudeModeAgent{name: "claude", mode: tc.mode}, true, true)
 			got := strings.TrimRight(buf.String(), "\n")
 			if got != tc.want {
 				t.Errorf("banner = %q, want %q", got, tc.want)
@@ -50,11 +52,36 @@ func TestPrintClaudeAuthBanner_SandboxClaude(t *testing.T) {
 	}
 }
 
+// TestPrintClaudeAuthBanner_NoCredentialRendered is the #1693 regression
+// guard: when no credential was seeded into the container (vault miss +
+// declined/failed host acquire → in-container login fallback), the banner must
+// NOT assert an active auth mode for either display mode. Instead it prints a
+// truthful in-container-login line. Before the fix this printed
+// "Claude auth mode: API key" unconditionally, contradicting the container's
+// actual unauthenticated state.
+func TestPrintClaudeAuthBanner_NoCredentialRendered(t *testing.T) {
+	for _, mode := range []AuthModeDisplay{AuthModeDisplayAPIKey, AuthModeDisplaySubscription} {
+		var buf bytes.Buffer
+		printClaudeAuthBanner(&buf, claudeModeAgent{name: "claude", mode: mode}, true, false)
+		got := strings.TrimRight(buf.String(), "\n")
+		if strings.Contains(got, "Claude auth mode:") {
+			t.Errorf("mode=%d: banner asserted an active mode with no credential rendered: %q", mode, got)
+		}
+		if got != "Claude auth: will authenticate inside the container" {
+			t.Errorf("mode=%d: banner = %q, want in-container-login line", mode, got)
+		}
+		// Still exactly one line.
+		if n := strings.Count(buf.String(), "\n"); n != 1 {
+			t.Errorf("mode=%d: banner emitted %d newlines, want exactly 1: %q", mode, n, buf.String())
+		}
+	}
+}
+
 // TestPrintClaudeAuthBanner_HostSuppressed is the P0 false-signal guard: on
 // host launch (sandboxEnabled=false) the mode is inert, so no banner.
 func TestPrintClaudeAuthBanner_HostSuppressed(t *testing.T) {
 	var buf bytes.Buffer
-	printClaudeAuthBanner(&buf, claudeModeAgent{name: "claude", mode: AuthModeDisplayAPIKey}, false)
+	printClaudeAuthBanner(&buf, claudeModeAgent{name: "claude", mode: AuthModeDisplayAPIKey}, false, true)
 	if buf.Len() != 0 {
 		t.Errorf("host launch emitted a banner: %q", buf.String())
 	}
@@ -64,7 +91,7 @@ func TestPrintClaudeAuthBanner_HostSuppressed(t *testing.T) {
 // non-claude agent never gets the banner even on the sandbox path.
 func TestPrintClaudeAuthBanner_NonClaudeSkipped(t *testing.T) {
 	var buf bytes.Buffer
-	printClaudeAuthBanner(&buf, claudeModeAgent{name: "codex", mode: AuthModeDisplayAPIKey}, true)
+	printClaudeAuthBanner(&buf, claudeModeAgent{name: "codex", mode: AuthModeDisplayAPIKey}, true, true)
 	if buf.Len() != 0 {
 		t.Errorf("non-claude agent emitted a banner: %q", buf.String())
 	}
@@ -75,7 +102,7 @@ func TestPrintClaudeAuthBanner_NonClaudeSkipped(t *testing.T) {
 // fails and the banner is silently skipped rather than panicking.
 func TestPrintClaudeAuthBanner_ClaudeWithoutReaderSkipped(t *testing.T) {
 	var buf bytes.Buffer
-	printClaudeAuthBanner(&buf, emptyClaudeAgent{}, true)
+	printClaudeAuthBanner(&buf, emptyClaudeAgent{}, true, true)
 	if buf.Len() != 0 {
 		t.Errorf("claude agent without AuthModeDisplay emitted a banner: %q", buf.String())
 	}
