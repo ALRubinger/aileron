@@ -421,6 +421,15 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 	openAIProxy := newGatewayProxy(gatewayCfg.OpenAIBaseURL, "openai", log)
 	anthropicProxy := newGatewayProxy(gatewayCfg.AnthropicBaseURL, "anthropic", log)
+	// Anthropic's `/api/*` surface (notably Claude Code's `GET
+	// /api/oauth/profile` login-state probe) is not part of the
+	// `/v1/messages` Messages protocol but the same upstream serves it.
+	// In api-key mode Claude Code points `ANTHROPIC_BASE_URL` at the
+	// daemon, so this probe lands here; without a route it falls through
+	// to the webapp catch-all and Claude Code reports "not logged in"
+	// (#1696). The proxy forwards path/method/body/headers unchanged, so
+	// `x-api-key` rides through to Anthropic exactly like `/v1/messages`.
+	anthropicAPIProxy := newGatewayProxy(gatewayCfg.AnthropicBaseURL, "anthropic-api", log)
 
 	// --- HTTP handler ---
 	mux := http.NewServeMux()
@@ -456,6 +465,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		sourceRegistry:       sourceReg,
 		openAIProxy:          openAIProxy,
 		anthropicProxy:       anthropicProxy,
+		anthropicAPIProxy:    anthropicAPIProxy,
 		localDaemonToken:     cfg.LocalDaemonToken,
 		caveatIssuer:         newCaveatIssuer(cfg.CaveatSigningKey),
 		sandboxProxyStateDir: cfg.SandboxProxyStateDir,
@@ -718,6 +728,17 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	mux.HandleFunc("POST /v1/drafts/", server.handleDraftAction)
 
 	registerDocsRoutes(mux)
+
+	// Anthropic `/api/*` fall-through (#1696). Claude Code's login-state
+	// probe is `GET /api/oauth/profile`; in api-key mode it rides
+	// `ANTHROPIC_BASE_URL` to the daemon. The `/api/` prefix is entirely
+	// Anthropic's namespace (Aileron's own API lives under `/v1/`), so a
+	// scoped reverse proxy here forwards it to the configured Anthropic
+	// upstream instead of letting it fall through to the webapp catch-all
+	// below. Registered before the webapp catch-all so it wins for any
+	// `/api/*` path. `/api/` is not `/v1/`-prefixed, so it already
+	// bypasses localDaemonAuthMiddleware (which gates only `/v1/`).
+	mux.HandleFunc("/api/", server.handleAnthropicAPI)
 
 	// Local webapp (#418): mount the embedded static build at `/`
 	// as a catch-all. ServeMux gives more-specific paths their
