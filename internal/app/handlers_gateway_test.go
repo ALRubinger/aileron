@@ -61,6 +61,19 @@ func muxFor(s *apiServer) *http.ServeMux {
 	return mux
 }
 
+// muxWithAPIFallthrough builds the mux the way New() does for the
+// Anthropic `/api/*` fall-through (#1696): the scoped `/api/` proxy
+// registered *before* the webapp catch-all at `/`. This mirrors the
+// production registration order so the test exercises the real routing
+// — both the proxy reaching upstream and the catch-all ordering.
+func muxWithAPIFallthrough(s *apiServer) *http.ServeMux {
+	mux := http.NewServeMux()
+	api.HandlerFromMux(s, mux)
+	mux.HandleFunc("/api/", s.handleAnthropicAPI)
+	mux.Handle("/", webappHandler())
+	return mux
+}
+
 // --- not-configured edge ---
 
 // ADR-0011: when vaultLocked is set, the gateway endpoints refuse to
@@ -642,5 +655,120 @@ func TestGateway_PassesThroughUnchanged_EvenWithGatedActionInstalled(t *testing.
 	resp.Body.Close()
 	if string(capturedBody) != anthropicBody {
 		t.Errorf("Anthropic gateway modified body:\n got  %s\n want %s", capturedBody, anthropicBody)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Regression (#1696): Anthropic `/api/*` fall-through route.
+//
+// In api-key mode Claude Code points ANTHROPIC_BASE_URL at the daemon.
+// `POST /v1/messages` proxies fine, but Claude Code's login-state probe
+// is `GET /api/oauth/profile`. The daemon registers no `/api/*` route,
+// so before the fix that probe fell through to the webapp catch-all
+// (`mux.Handle("/", webappHandler())`) and Claude Code reported "not
+// logged in". The fix registers a scoped `/api/` reverse proxy to the
+// configured Anthropic upstream, before the catch-all, forwarding
+// `x-api-key` unchanged.
+// ----------------------------------------------------------------------
+
+// TestAnthropicAPIFallthrough_ReachesUpstream is the core regression:
+// GET /api/oauth/profile with x-api-key must reach the configured
+// Anthropic upstream with the header forwarded — not the webapp
+// catch-all. Before the fix the request 404s / hits the webapp; after,
+// the upstream sees the verbatim path and header.
+func TestAnthropicAPIFallthrough_ReachesUpstream(t *testing.T) {
+	var captured struct {
+		method string
+		path   string
+		apiKey string
+		hit    bool
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.hit = true
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		captured.apiKey = r.Header.Get("x-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"organization":{"organization_type":"claude_max"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	s := &apiServer{log: slog.Default()}
+	s.anthropicAPIProxy = newGatewayProxy(upstreamURL, "anthropic-api", s.log)
+	srv := httptest.NewServer(muxWithAPIFallthrough(s))
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/oauth/profile", nil)
+	req.Header.Set("x-api-key", "sk-ant-test-xyz")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if !captured.hit {
+		t.Fatal("upstream was not reached: /api/oauth/profile fell through to the webapp catch-all (the #1696 bug)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if captured.method != http.MethodGet {
+		t.Errorf("upstream method = %q, want GET", captured.method)
+	}
+	if captured.path != "/api/oauth/profile" {
+		t.Errorf("upstream path = %q, want /api/oauth/profile (path must be forwarded verbatim)", captured.path)
+	}
+	if captured.apiKey != "sk-ant-test-xyz" {
+		t.Errorf("upstream x-api-key = %q, want forwarded unchanged", captured.apiKey)
+	}
+}
+
+// TestAnthropicAPIFallthrough_NotConfigured_Returns503 pins the
+// not-configured contract: with no upstream proxy the route returns 503
+// gateway_not_configured rather than 404 / webapp HTML.
+func TestAnthropicAPIFallthrough_NotConfigured_Returns503(t *testing.T) {
+	s := &apiServer{log: slog.Default()} // anthropicAPIProxy nil
+	srv := httptest.NewServer(muxWithAPIFallthrough(s))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/api/oauth/profile")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", resp.StatusCode)
+	}
+	var apiErr api.Error
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if apiErr.Error.Code != "gateway_not_configured" {
+		t.Errorf("error.code = %q, want gateway_not_configured", apiErr.Error.Code)
+	}
+}
+
+// TestAnthropicAPIFallthrough_DoesNotShadowWebapp confirms the scoped
+// `/api/` registration leaves the webapp catch-all intact for non-/api
+// paths, so adding this route does not break the local webapp at `/`.
+func TestAnthropicAPIFallthrough_DoesNotShadowWebapp(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	s.anthropicAPIProxy = newGatewayProxy(&url.URL{Scheme: "http", Host: "127.0.0.1:0"}, "anthropic-api", s.log)
+	srv := httptest.NewServer(muxWithAPIFallthrough(s))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("webapp root status = %d, want 200 (the /api/ route must not shadow the catch-all)", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("webapp root Content-Type = %q, want text/html", ct)
 	}
 }

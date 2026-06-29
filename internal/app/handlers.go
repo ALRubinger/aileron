@@ -72,6 +72,7 @@ type apiServer struct {
 	uiBaseURL            string                      // base URL for the web UI (for constructing unlock links)
 	openAIProxy          http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
 	anthropicProxy       http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
+	anthropicAPIProxy    http.Handler                // upstream proxy for Anthropic's /api/* (e.g. /api/oauth/profile login-state probe); nil disables the route
 	auditStore           audit.EventStore            // ADR-0010 audit store; file-backed by default, MemStore in tests, Postgres post-MVP
 	auditRecorder        audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
 	vaultLocked          bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked

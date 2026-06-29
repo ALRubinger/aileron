@@ -55,6 +55,30 @@ func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
 	s.anthropicProxy.ServeHTTP(w, r)
 }
 
+// handleAnthropicAPI proxies Anthropic's `/api/*` surface to the
+// configured Anthropic upstream. The motivating path is Claude Code's
+// login-state probe, `GET /api/oauth/profile`: in api-key mode Claude
+// Code points `ANTHROPIC_BASE_URL` at the daemon, so this probe lands
+// here rather than at api.anthropic.com. Without this route it falls
+// through to the webapp catch-all and Claude Code reports "not logged
+// in" (#1696).
+//
+// Like PostMessages this is a transparent reverse proxy: path, method,
+// body, and headers (including `x-api-key`) are forwarded unchanged, so
+// the agent's own credential authenticates to Anthropic. The route is
+// scoped to the `/api/` prefix, which is entirely Anthropic's namespace
+// (Aileron's own API lives under `/v1/`). When no upstream is
+// configured (anthropicAPIProxy nil) the endpoint returns 503, matching
+// the gateway's not-configured contract.
+func (s *apiServer) handleAnthropicAPI(w http.ResponseWriter, r *http.Request) {
+	if s.anthropicAPIProxy == nil {
+		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured",
+			"Anthropic gateway upstream is not configured")
+		return
+	}
+	s.anthropicAPIProxy.ServeHTTP(w, r)
+}
+
 // writeVaultLocked emits the canonical FailureEnvelope for "the
 // runtime can't serve this request until the vault is unlocked."
 // `binding_required` is the closest fit in ADR-0010's closed
