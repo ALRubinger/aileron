@@ -199,11 +199,15 @@ func TestVaultListNamesRoundTripIntoDelete(t *testing.T) {
 	}
 }
 
-// Guard the namespace lock survives the bare-name acceptance: a bare
-// value that is path-shaped (contains a slash) must still be rejected so
-// no non-agent key can slip through the new form.
-func TestRunVaultDelete_RejectsBarePathShapedName(t *testing.T) {
-	for _, arg := range []string{"user/github", "internal/secret", "a/b/c"} {
+// vault delete now dispatches every namespace vault list prints, so the
+// only client-side rejections are paths in no deletable namespace: an
+// unrecognized `other` shape. (user/<service> and binding paths now
+// dispatch — see the dedicated dispatch tests.) These must still be
+// rejected before any HTTP call so a typo never silently hits the daemon.
+func TestRunVaultDelete_RejectsUnrecognizedNamespace(t *testing.T) {
+	// internal/secret: two segments, not user/ — classifies as `other`.
+	// _underscore/a/b: IsBindingPath rejects a leading-underscore kind.
+	for _, arg := range []string{"internal/secret", "foobar", "_underscore/a/b"} {
 		called := false
 		fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
 			called = true
@@ -706,6 +710,10 @@ func TestRunVaultList_NoVault(t *testing.T) {
 	}
 }
 
+// internal/secret is an unrecognized `other` namespace: it is not an
+// agent, user, or binding path, so delete still rejects it client-side
+// with no HTTP call. The message must name the real constraint (the
+// supported paths), not the old misleading "must be agents/<name>/<purpose>".
 func TestRunVaultDelete_RejectsNonAgentPath(t *testing.T) {
 	called := false
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -716,10 +724,151 @@ func TestRunVaultDelete_RejectsNonAgentPath(t *testing.T) {
 	code := runVault([]string{"delete", "internal/secret", "--yes"},
 		strings.NewReader(""), &stdout, &stderr)
 	if code == 0 {
-		t.Errorf("exit = 0, want non-zero for non-agent path")
+		t.Errorf("exit = 0, want non-zero for non-deletable path")
 	}
 	if called {
 		t.Errorf("HTTP issued for rejected path")
+	}
+	msg := stderr.String()
+	if strings.Contains(msg, "must be agents/<name>/<purpose>") {
+		t.Errorf("stderr still uses the misleading agents-only message: %q", msg)
+	}
+	// The coherent message names the supported namespaces.
+	for _, want := range []string{"agents/<name>/<purpose>", "user/<service>", "binding"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr = %q, want it to mention %q", msg, want)
+		}
+	}
+}
+
+// Control-plane namespaces (connected-accounts/, llm-config/) appear in
+// `vault list --include-control-plane` but are managed by the control
+// plane; delete rejects them client-side with no HTTP call and names the
+// constraint.
+func TestRunVaultDelete_RejectsControlPlanePath(t *testing.T) {
+	for _, path := range []string{"connected-accounts/acme/github", "llm-config/anthropic/default"} {
+		called := false
+		fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusNoContent)
+		})
+		var stdout, stderr bytes.Buffer
+		code := runVault([]string{"delete", path, "--yes"},
+			strings.NewReader(""), &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("%s: exit = 0, want non-zero", path)
+		}
+		if called {
+			t.Errorf("%s: HTTP issued for rejected control-plane path", path)
+		}
+		if !strings.Contains(stderr.String(), "control plane") {
+			t.Errorf("%s: stderr = %q, want it to name the control plane", path, stderr.String())
+		}
+	}
+}
+
+// vault delete on a user/<service> path dispatches to the daemon's
+// per-service user delete endpoint, DELETE /vault/user/<service>/credentials
+// — symmetric with what `vault list` prints for a user entry.
+func TestRunVaultDelete_UserPathDispatch(t *testing.T) {
+	var gotMethod, gotPath string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "user/github", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/vault/user/github/credentials" {
+		t.Errorf("request = %s %s, want DELETE /vault/user/github/credentials", gotMethod, gotPath)
+	}
+	if !strings.Contains(stdout.String(), "Deleted user/github") {
+		t.Errorf("stdout = %q, want it to confirm deletion", stdout.String())
+	}
+}
+
+// A 404 from the user delete endpoint surfaces a user-scoped not-found
+// message and a non-zero exit.
+func TestRunVaultDelete_UserPathNotFound(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "user/github", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for 404")
+	}
+	if !strings.Contains(stderr.String(), "user/github") {
+		t.Errorf("stderr = %q, want it to name user/github", stderr.String())
+	}
+}
+
+// vault delete on a binding path dispatches to DELETE /bindings/<name>,
+// identical to `aileron binding revoke`, so connector/binding credentials
+// `vault list` surfaces are deletable through the same verb.
+func TestRunVaultDelete_BindingPathDispatch(t *testing.T) {
+	const bindingPath = "aws_sigv4/aileron-connector-athena/aileron"
+	var gotMethod, gotPath string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", bindingPath, "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/bindings/"+bindingPath {
+		t.Errorf("request = %s %s, want DELETE /bindings/%s", gotMethod, gotPath, bindingPath)
+	}
+	if !strings.Contains(stdout.String(), "Deleted "+bindingPath) {
+		t.Errorf("stdout = %q, want it to confirm deletion", stdout.String())
+	}
+}
+
+// A 404 from the binding delete endpoint surfaces a binding-scoped
+// not-found message and a non-zero exit.
+func TestRunVaultDelete_BindingPathNotFound(t *testing.T) {
+	const bindingPath = "aws_sigv4/aileron-connector-athena/aileron"
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", bindingPath, "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for 404")
+	}
+	if !strings.Contains(stderr.String(), "binding not found") {
+		t.Errorf("stderr = %q, want a binding-not-found message", stderr.String())
+	}
+}
+
+// The agent path remains supported and unchanged: agents/<name>/<purpose>
+// dispatches to the agent credential endpoint with the purpose query param.
+func TestRunVaultDelete_AgentPathDispatch(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotQuery = r.Method, r.URL.Path, r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "agents/claude/oauth", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/vault/agents/claude/credentials" || gotQuery != "purpose=oauth" {
+		t.Errorf("request = %s %s?%s, want DELETE /vault/agents/claude/credentials?purpose=oauth",
+			gotMethod, gotPath, gotQuery)
+	}
+	if !strings.Contains(stdout.String(), "Deleted agents/claude/oauth") {
+		t.Errorf("stdout = %q, want it to confirm deletion", stdout.String())
 	}
 }
 
