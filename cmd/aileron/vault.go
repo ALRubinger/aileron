@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -25,23 +26,33 @@ const envVaultPassphrase = "AILERON_VAULT_PASSPHRASE"
 const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/<purpose> --from-file <path>
-  aileron vault delete agents/<name>/<purpose> [--yes]
+  aileron vault delete <path-as-listed> [--yes]
   aileron vault list [--scope agent|user|all] [--prefix agents/] [--include-control-plane] [--json]
 
 vault list with no --scope prints the union of every namespace in the
 vault (agent, user, connector/binding credentials), each line prefixed
 with its scope. --scope narrows to a single typed namespace.
 
-vault delete takes the fully-qualified agents/<name>/<purpose> path
-(e.g. agents/claude/oauth, agents/claude/apikey), exactly what vault
-list prints for an agent entry.`
+vault delete accepts any path vault list prints: an agent entry
+(agents/<name>/<purpose>, e.g. agents/claude/oauth), a user entry
+(user/<service>, e.g. user/github), or a binding
+(<kind>/<service>/<identity>, e.g. aws_sigv4/athena/default). It
+dispatches to the matching namespace's delete endpoint. Control-plane
+entries (connected-accounts/, llm-config/) are managed by the control
+plane, not this CLI.
+
+vault put remains agents-only: you create a binding with ` + "`binding setup`" + `,
+not ` + "`vault put`" + `.`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
 // init opens the local vault file directly (first-run flow); the
-// put/delete/list verbs are thin daemon-backed HTTP clients scoped to
-// the `agents/<name>/<purpose>` namespace per ADR-0025 — they never open
-// the vault file themselves and reject any non-agent path client-side.
+// put/delete/list verbs are thin daemon-backed HTTP clients that never
+// open the vault file themselves. put is namespace-locked to
+// `agents/<name>/<purpose>` (you create a binding with `binding setup`,
+// not `vault put`); delete classifies the path and dispatches to the
+// matching namespace-scoped daemon endpoint (agents/, user/, or a
+// binding), so anything `vault list` prints is deletable.
 func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, vaultUsage)
@@ -72,10 +83,11 @@ var agentCredentialPurposeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // agentPathNameAndPurpose validates that arg names an agents-only
 // credential entry and returns the agent <name> and credential
-// <purpose>. The vault put/delete verbs are namespace-locked: they refuse
-// anything outside the agents namespace client-side before issuing an
-// HTTP call, so the operator CLI can never reach a non-agent vault key
-// (ADR-0025).
+// <purpose>. The vault put verb is namespace-locked: it refuses anything
+// outside the agents namespace client-side before issuing an HTTP call,
+// since you create a binding with `binding setup`, never `vault put`.
+// (vault delete is more general — it dispatches every listed namespace
+// to that namespace's own delete endpoint; see vaultDeleteTargetFor.)
 //
 // Only the fully-qualified path form is accepted, exactly what `vault
 // list` prints for an agent entry (#1317), now generalized to any
@@ -227,11 +239,98 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// runVaultDelete removes the credential envelope at
-// agents/<name>/<purpose> via the daemon. Unless --yes is passed it
-// confirms interactively; this CLI prompt is the only human gate (the
-// daemon applies no approval block for operator vault management per the
-// plan).
+// userServiceRe constrains the `<service>` segment of a `user/<service>`
+// path the CLI accepts for delete. It mirrors the server's allow-list
+// (userServiceRe in handlers_local_vault_user.go) so the CLI classifies
+// exactly the paths the daemon would, client-side, before any HTTP call.
+var userServiceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// vaultDeleteTarget describes a classified, CLI-deletable vault path: the
+// daemon DELETE path to issue, the prompt label, and the namespace-aware
+// success and 404 messages. Each namespace's own namespace-scoped endpoint
+// is reused (agents/, user/, or the binding endpoint that `binding revoke`
+// already drives), so no path-scoping is bypassed (ADR-0025).
+type vaultDeleteTarget struct {
+	httpPath   string // daemon path, e.g. /vault/agents/claude/credentials?purpose=oauth
+	label      string // confirmation/display label, e.g. agents/claude/oauth
+	successMsg string // printed on 204
+	notFound   string // printed on 404
+}
+
+// vaultDeleteTargetFor classifies arg into the matching deletable
+// namespace, mirroring the daemon's classifyVaultPath order so the CLI
+// recognizes exactly what `vault list` surfaces. The order is
+// load-bearing: agents/<name>/<purpose> also matches the binding name
+// grammar, so it must be checked first.
+//
+// It returns (target, true) for a deletable path. For a path in a
+// namespace the CLI cannot delete — the tenant-keyed control-plane
+// namespaces (connected-accounts/, llm-config/), managed by the control
+// plane rather than this CLI, and any unrecognized `other` path — it
+// returns (zero, false); the caller prints the rejection.
+func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
+	// Control-plane namespaces are owned by the control plane, never the
+	// operator CLI; classify them out before the deletable namespaces.
+	if strings.HasPrefix(arg, "connected-accounts/") || strings.HasPrefix(arg, "llm-config/") {
+		return vaultDeleteTarget{}, false
+	}
+	// agents/<name>/<purpose> — reuse the existing agent credential
+	// endpoint. Checked first: it also matches the binding grammar.
+	if name, purpose, err := agentPathNameAndPurpose(arg); err == nil {
+		label := "agents/" + name + "/" + purpose
+		return vaultDeleteTarget{
+			httpPath:   agentCredentialPath(name, purpose),
+			label:      label,
+			successMsg: "Deleted " + label,
+			notFound:   "error: no credential entry for " + label,
+		}, true
+	}
+	// user/<service> — DELETE /vault/user/<service>/credentials.
+	if service, ok := userServiceFromArg(arg); ok {
+		label := "user/" + service
+		return vaultDeleteTarget{
+			httpPath:   "/vault/user/" + url.PathEscape(service) + "/credentials",
+			label:      label,
+			successMsg: "Deleted " + label,
+			notFound:   "error: no credential entry for " + label,
+		}, true
+	}
+	// A binding (<kind>/<service>/<identity>) — DELETE /bindings/<name>,
+	// identical to `aileron binding revoke`.
+	if binding.IsBindingPath(arg) {
+		return vaultDeleteTarget{
+			httpPath:   "/bindings/" + url.PathEscape(arg),
+			label:      arg,
+			successMsg: "Deleted " + arg,
+			notFound:   "error: binding not found: " + arg,
+		}, true
+	}
+	return vaultDeleteTarget{}, false
+}
+
+// userServiceFromArg extracts the service from a `user/<service>` path,
+// returning false for any path that does not match the scheme. Mirrors the
+// daemon's userServiceFromVaultPath so the CLI accepts exactly what the
+// daemon stores.
+func userServiceFromArg(arg string) (service string, ok bool) {
+	const prefix = "user/"
+	if !strings.HasPrefix(arg, prefix) {
+		return "", false
+	}
+	service = arg[len(prefix):]
+	if !userServiceRe.MatchString(service) {
+		return "", false
+	}
+	return service, true
+}
+
+// runVaultDelete removes the credential at the given path via the daemon.
+// The path is classified (agents/<name>/<purpose>, user/<service>, or a
+// binding) and dispatched to that namespace's own delete endpoint, so any
+// path `vault list` prints is deletable — symmetric with list. Unless
+// --yes is passed it confirms interactively; this CLI prompt is the only
+// human gate (the daemon applies no approval block for operator vault
+// management per the plan).
 func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("vault delete", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -241,35 +340,38 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return 1
 	}
 	if len(positionals) != 1 {
-		fmt.Fprintln(stderr, "usage: aileron vault delete agents/<name>/<purpose> [--yes] (exactly what vault list prints)")
+		fmt.Fprintln(stderr, "usage: aileron vault delete <path-as-listed> [--yes] (any path vault list prints)")
 		return 1
 	}
-	name, purpose, err := agentPathNameAndPurpose(positionals[0])
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+
+	target, ok := vaultDeleteTargetFor(positionals[0])
+	if !ok {
+		fmt.Fprintf(stderr, "error: %q is not a CLI-deletable vault path\n", positionals[0])
+		fmt.Fprintln(stderr, "vault delete accepts agents/<name>/<purpose>, user/<service>, or a binding")
+		fmt.Fprintln(stderr, "(<kind>/<service>/<identity>) — exactly what vault list prints. Control-plane")
+		fmt.Fprintln(stderr, "entries (connected-accounts/, llm-config/) are managed by the control plane.")
 		return 1
 	}
 
 	if !*yes {
-		answer := promptLine(stdin, stdout, fmt.Sprintf("Delete agents/%s/%s? [y/N]: ", name, purpose))
+		answer := promptLine(stdin, stdout, fmt.Sprintf("Delete %s? [y/N]: ", target.label))
 		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
 			fmt.Fprintln(stdout, "cancelled")
 			return 0
 		}
 	}
 
-	status, respBody, err := vaultDoRequest(http.MethodDelete,
-		agentCredentialPath(name, purpose), nil)
+	status, respBody, err := vaultDoRequest(http.MethodDelete, target.httpPath, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	switch status {
 	case http.StatusNoContent:
-		fmt.Fprintf(stdout, "Deleted agents/%s/%s\n", name, purpose)
+		fmt.Fprintln(stdout, target.successMsg)
 		return 0
 	case http.StatusNotFound:
-		fmt.Fprintf(stderr, "error: no credential entry for agents/%s/%s\n", name, purpose)
+		fmt.Fprintln(stderr, target.notFound)
 		return 1
 	case http.StatusLocked:
 		fmt.Fprintln(stderr, "error: vault is locked; unlock it first")
