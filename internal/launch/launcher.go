@@ -830,7 +830,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// because the auth mode is inert on host launch (AuthSpec is only
 		// materialized under sandbox), so emitting it there would be a false
 		// signal (P0). Non-claude agents are a no-op.
-		printClaudeAuthBanner(os.Stderr, config.Agent, sandboxEnabled)
+		printClaudeAuthBanner(os.Stderr, config.Agent, sandboxEnabled, authPrep.RenderedAnyCredential)
 
 		// User-level GitHub injection runs on every sandbox launch,
 		// independent of the per-agent AuthSpec: it probes the

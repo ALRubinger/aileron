@@ -30,22 +30,39 @@ type claudeAuthModeReader interface {
 	AuthModeDisplay() AuthModeDisplay
 }
 
-// claudeAuthBannerLine renders the active-mode banner line for the given
-// display mode. The copy is byte-exact per feedback #1331 Q4.
-func claudeAuthBannerLine(mode AuthModeDisplay) string {
+// claudeAuthBannerLine renders the banner line for the given display mode.
+//
+// renderedCredential reports whether a credential was actually seeded into the
+// container for this launch (authPrep.RenderedAnyCredential). The banner may
+// only assert an active auth mode when that is true: in API-key mode the
+// EnvBinding is Required=false, so a vault miss with a declined/failed
+// host-paste acquire leaves the container with no ANTHROPIC_API_KEY and Claude
+// Code falls back to in-container login (#1693). When nothing was rendered the
+// truthful line is that authentication happens inside the container, for both
+// modes. The active-mode copy is byte-exact per feedback #1331 Q4.
+func claudeAuthBannerLine(mode AuthModeDisplay, renderedCredential bool) string {
+	if !renderedCredential {
+		return "Claude auth: will authenticate inside the container"
+	}
 	if mode == AuthModeDisplayAPIKey {
 		return "Claude auth mode: API key"
 	}
 	return "Claude auth mode: subscription (Pro/Max)"
 }
 
-// printClaudeAuthBanner emits exactly one active-mode banner line to w when
-// the launch is a sandbox launch (sandboxEnabled) of the claude agent and
-// the agent exposes its mode via claudeAuthModeReader. On host launch the
-// auth mode is inert (the launcher never materializes AuthSpec there), so no
-// banner is printed to avoid a false signal (P0). Non-claude agents and
-// agents that do not expose a mode are silently skipped.
-func printClaudeAuthBanner(w io.Writer, agent Agent, sandboxEnabled bool) {
+// printClaudeAuthBanner emits exactly one banner line to w when the launch is a
+// sandbox launch (sandboxEnabled) of the claude agent and the agent exposes its
+// mode via claudeAuthModeReader. On host launch the auth mode is inert (the
+// launcher never materializes AuthSpec there), so no banner is printed to avoid
+// a false signal (P0). Non-claude agents and agents that do not expose a mode
+// are silently skipped.
+//
+// renderedCredential (authPrep.RenderedAnyCredential) gates the active-mode
+// claim: the banner asserts "API key" / "subscription (Pro/Max)" only when a
+// credential was actually rendered for this launch; otherwise it prints a
+// truthful in-container-login line so the banner never disagrees with the
+// container's real auth state (#1693).
+func printClaudeAuthBanner(w io.Writer, agent Agent, sandboxEnabled, renderedCredential bool) {
 	if !sandboxEnabled || agent == nil || agent.Name() != "claude" {
 		return
 	}
@@ -53,5 +70,5 @@ func printClaudeAuthBanner(w io.Writer, agent Agent, sandboxEnabled bool) {
 	if !ok {
 		return
 	}
-	fmt.Fprintln(w, claudeAuthBannerLine(reader.AuthModeDisplay()))
+	fmt.Fprintln(w, claudeAuthBannerLine(reader.AuthModeDisplay(), renderedCredential))
 }
