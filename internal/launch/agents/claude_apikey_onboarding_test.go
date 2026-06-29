@@ -5,8 +5,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
+
+// onboardingStaticFile returns the /home/agent/.claude.json onboarding
+// StaticFile from an AuthSpec. Api-key mode also ships a
+// /home/agent/.claude/ writable-dir sentinel (#1700), so callers must
+// select the onboarding file by path rather than assuming it is the only
+// StaticFile.
+func onboardingStaticFile(t *testing.T, spec launch.AuthSpec) launch.StaticFile {
+	t.Helper()
+	for _, sf := range spec.StaticFiles {
+		if sf.ContainerPath == "/home/agent/.claude.json" {
+			return sf
+		}
+	}
+	t.Fatalf("no /home/agent/.claude.json StaticFile in spec; got %+v", spec.StaticFiles)
+	return launch.StaticFile{}
+}
 
 // claudeOnboardingShape mirrors the contractual fields of
 // /home/agent/.claude.json for the AuthSpec-level wiring tests.
@@ -57,10 +74,7 @@ func assertSharedOnboardingFields(t *testing.T, b []byte) claudeOnboardingShape 
 // the rendered env additions).
 func TestClaude_APIKeyAuthSpec_OnboardingIsKeyAware(t *testing.T) {
 	spec := agents.NewClaude(agents.ClaudeAuthModeAPIKey).AuthSpec()
-	if len(spec.StaticFiles) != 1 {
-		t.Fatalf("StaticFiles = %d, want 1", len(spec.StaticFiles))
-	}
-	sf := spec.StaticFiles[0]
+	sf := onboardingStaticFile(t, spec)
 	if sf.RenderContent == nil {
 		t.Fatal("api-key StaticFile must set RenderContent so the onboarding doc is key-aware")
 	}
@@ -106,7 +120,7 @@ func TestClaude_SubscriptionAuthSpec_OnboardingByteIdentical(t *testing.T) {
 	// ever nil) is the same plain stub, so a regression dropping the hook
 	// degrades to the pre-#1695 subscription bytes rather than an empty
 	// file.
-	apiSF := agents.NewClaude(agents.ClaudeAuthModeAPIKey).AuthSpec().StaticFiles[0]
+	apiSF := onboardingStaticFile(t, agents.NewClaude(agents.ClaudeAuthModeAPIKey).AuthSpec())
 	if string(apiSF.Content) != string(subSF.Content) {
 		t.Errorf("api-key Content fallback differs from subscription stub.\n api: %s\n sub: %s", apiSF.Content, subSF.Content)
 	}
