@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -84,6 +85,89 @@ func TestMaterialize_CarrierFromJSONString(t *testing.T) {
 	}
 	if string(art.Content) != "{}" {
 		t.Errorf("content = %q", art.Content)
+	}
+}
+
+func TestMaterialize_RawDataObjectSerialized(t *testing.T) {
+	// A data-producing action-call step whose carrier is a plain object with no
+	// `content` key (e.g. the Athena connector's run_query result) must
+	// materialize the whole object as utf-8 JSON, never a 0-byte file (#1706).
+	p := planWithOutput(Output{Name: "chains.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "chains.json"})
+	step := fileMapStep("chains.json")
+	outputs := map[string]any{"file": map[string]any{
+		"QueryExecutionId": "q-123",
+		"ResultSet":        map[string]any{"rows": float64(2)},
+	}}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(art.Content) == 0 {
+		t.Fatal("a non-file-map data result must not materialize 0 bytes")
+	}
+	if !art.Written || art.Path != "chains.json" {
+		t.Errorf("artifact = %+v", art)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(art.Content, &got); err != nil {
+		t.Fatalf("content is not valid JSON: %v (%q)", err, art.Content)
+	}
+	if got["QueryExecutionId"] != "q-123" {
+		t.Errorf("serialized result missing QueryExecutionId: %q", art.Content)
+	}
+}
+
+func TestMaterialize_RawDataArraySerialized(t *testing.T) {
+	// A data result that is a JSON array must also serialize, not error.
+	p := planWithOutput(Output{Name: "rows.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "rows.json"})
+	step := fileMapStep("rows.json")
+	outputs := map[string]any{"file": []any{
+		map[string]any{"dealer": "a"}, map[string]any{"dealer": "b"},
+	}}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if string(art.Content) != `[{"dealer":"a"},{"dealer":"b"}]` {
+		t.Errorf("content = %q", art.Content)
+	}
+}
+
+func TestMaterialize_RawDataFromJSONString(t *testing.T) {
+	// A carrier emitted as a JSON string for a plain data object also serializes
+	// the underlying object (canonicalized), not the quoted string.
+	p := planWithOutput(Output{Name: "d.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "d.json"})
+	step := fileMapStep("d.json")
+	outputs := map[string]any{"file": `{"id":7,"name":"x"}`}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(art.Content) == 0 {
+		t.Fatal("a JSON-string data result must not materialize 0 bytes")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(art.Content, &got); err != nil {
+		t.Fatalf("content is not valid JSON: %v", err)
+	}
+	if got["name"] != "x" {
+		t.Errorf("serialized result = %q", art.Content)
+	}
+}
+
+func TestMaterialize_EmptyFileMapContentStaysEmpty(t *testing.T) {
+	// A genuine file-map that explicitly emits empty content keeps writing an
+	// empty file: the `content`-key discriminator preserves the ability to
+	// produce a deliberately-empty artifact.
+	p := planWithOutput(Output{Name: "empty.txt", MimeType: "text/plain", Encoding: EncodingUTF8, Target: PublishFile, Path: "empty.txt"})
+	step := fileMapStep("empty.txt")
+	outputs := map[string]any{"file": map[string]any{"content": "", "encoding": "utf-8"}}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if len(art.Content) != 0 {
+		t.Errorf("explicit empty file-map content must stay empty, got %q", art.Content)
 	}
 }
 
