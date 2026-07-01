@@ -21,6 +21,12 @@ func (e *LoadError) Error() string { return "flightplan load: " + e.Reason }
 type LoadedPlan struct {
 	Plan        *Plan
 	ContentHash string
+	// ResolvedImages carries the verified image digest pins from the frozen
+	// lock (rung-1 or rung-2). When non-empty, Run boots the pinned image and
+	// runs the plan inside it; when empty, Run stays on the in-process path.
+	// The pins come from the verified manifest lock block, so the digest booted
+	// is exactly the one the author signature attested.
+	ResolvedImages []freeze.ImagePin
 }
 
 // LoadVerified loads a frozen skill version from the store, verifies it
@@ -58,5 +64,9 @@ func verifyAndDecode(fv store.FrozenVersion) (LoadedPlan, error) {
 	if err != nil {
 		return LoadedPlan{}, err
 	}
-	return LoadedPlan{Plan: plan, ContentHash: verified.ContentHash}, nil
+	return LoadedPlan{
+		Plan:           plan,
+		ContentHash:    verified.ContentHash,
+		ResolvedImages: verified.ResolvedImages,
+	}, nil
 }

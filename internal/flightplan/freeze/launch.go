@@ -18,6 +18,15 @@ type VerifiedFrozen struct {
 	// both the recomputed canonical hash and the value recorded in the
 	// frozen lock block.
 	ContentHash string
+	// ResolvedImages are the resolved image digest pins carried by the
+	// verified manifest lock block (rung-1 `rung1Image.ref` → digest, or
+	// rung-2 composed Features → digest). It is empty for an
+	// instruction-only or no-execution-environment unit. The runtime boots
+	// the pinned image at launch, so this field is the load-bearing bridge
+	// from the signed lock to the container actually entered. It is only ever
+	// populated on the verified path: a tampered digest changes the recomputed
+	// content hash and refuses before this field is read.
+	ResolvedImages []ImagePin
 }
 
 // VerifyFrozen is the Launch-time verification gate (ADR-0027, #1509/#1511).
@@ -114,9 +123,17 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 	}
 
 	// Return a defensive copy of the verified manifest bytes so a later mutation
-	// of the caller's slice can never change what was verified.
+	// of the caller's slice can never change what was verified. The resolved
+	// image pins are copied from the manifest's OWN lock block (the region the
+	// reconstruction above proved consistent against the content hash), so the
+	// digest exposed here is exactly the one the signature attested. A defensive
+	// slice copy keeps the field immune to later mutation of manifestLock.
 	verified := append([]byte(nil), skillMD...)
-	return VerifiedFrozen{SkillMD: verified, ContentHash: recorded}, nil
+	var pins []ImagePin
+	if len(manifestLock.ResolvedImages) > 0 {
+		pins = append([]ImagePin(nil), manifestLock.ResolvedImages...)
+	}
+	return VerifiedFrozen{SkillMD: verified, ContentHash: recorded, ResolvedImages: pins}, nil
 }
 
 // lockFromManifest parses the `aileron.lock` block of a frozen SKILL.md into a

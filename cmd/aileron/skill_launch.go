@@ -23,6 +23,12 @@ var newLaunchDispatcher = func() runtime.ActionDispatcher { return daemonDispatc
 var newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
 var newLaunchAuditSink = func() runtime.AuditSink { return stdoutAuditSink{} }
 
+// newLaunchImageRunner returns the production image runner that boots the
+// verified pinned rung-1/rung-2 image and runs the plan inside it (#1731). It
+// is a package-level seam so CLI tests swap in a fake that records the exact
+// image string and never touches Docker, mirroring the other launch seams.
+var newLaunchImageRunner = func() runtime.ImageRunner { return containerImageRunner{} }
+
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
 // nil by default, which is the v1 contract: a plan with an llm-seam step
 // errors unless a provider is configured, so a default launch reaches no LLM.
@@ -60,6 +66,11 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.String("version", "", "Frozen version id to launch (defaults to the only/most recent version)")
 	outDir := flags.String("out-dir", ".", "Directory file-target artifacts are written to")
+	// storeDir defaults to the process store seam. The in-container re-entry on
+	// the image-boot path passes the bind-mounted store path here so the inner
+	// binary loads the same verified frozen unit from the mount rather than the
+	// (empty) default store inside the image.
+	storeDir := flags.String("store-dir", skillStoreDir, "Skill store directory (defaults to ~/.aileron/skills)")
 	var inputs inputFlag
 	flags.Var(&inputs, "input", "Launch input override as name=value; repeatable")
 	positionals, err := parseInterspersedFlags(flags, args)
@@ -72,7 +83,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	}
 	name := positionals[0]
 
-	s := store.New(skillStoreDir)
+	s := store.New(*storeDir)
 	id, err := resolveLaunchVersion(s, name, *version)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -90,8 +101,12 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// Seam is nil in v1 production: the LLM seam is unwired, so a plan with
 		// an llm-seam step errors unless a provider is supplied. Tests inject a
 		// deterministic seam through launchSeamForTest.
-		Seam:   launchSeamForTest,
-		OutDir: *outDir,
+		Seam: launchSeamForTest,
+		// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the
+		// plan inside it. When the frozen unit pins no image, the runtime never
+		// touches this seam and stays on the in-process path.
+		ImageRunner: newLaunchImageRunner(),
+		OutDir:      *outDir,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

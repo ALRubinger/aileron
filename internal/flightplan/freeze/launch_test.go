@@ -39,6 +39,96 @@ func TestVerifyFrozen_AcceptsUntamperedUnit(t *testing.T) {
 	}
 }
 
+func TestVerifyFrozen_ExposesResolvedImagesForRung2(t *testing.T) {
+	// The worked example is rung-2: freeze composes the capability units to a
+	// single pinned image digest. VerifyFrozen must surface that verified pin so
+	// the runtime can boot the exact image the signature attested.
+	res := freezeExample(t)
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen: %v", err)
+	}
+	if len(v.ResolvedImages) != 1 {
+		t.Fatalf("ResolvedImages = %+v, want exactly one pin", v.ResolvedImages)
+	}
+	if v.ResolvedImages[0].Digest != fakeDigest {
+		t.Errorf("ResolvedImages[0].Digest = %q, want %q", v.ResolvedImages[0].Digest, fakeDigest)
+	}
+	if v.ResolvedImages[0].Ref == "" {
+		t.Error("ResolvedImages[0].Ref must carry the pre-freeze reference")
+	}
+}
+
+func TestVerifyFrozen_ExposesResolvedImagesForRung1(t *testing.T) {
+	// A rung-1 unit names a whole prebuilt image; freeze resolves it to a
+	// digest pin. The verified pin must carry both the ref and the digest.
+	_, keyPath := genSigningKey(t)
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return fakeDigest, nil
+	})
+	res, err := Run(context.Background(), []byte(rung1MD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run rung-1: %v", err)
+	}
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen rung-1: %v", err)
+	}
+	if len(v.ResolvedImages) != 1 {
+		t.Fatalf("ResolvedImages = %+v, want exactly one pin", v.ResolvedImages)
+	}
+	if v.ResolvedImages[0].Digest != fakeDigest {
+		t.Errorf("ResolvedImages[0].Digest = %q, want %q", v.ResolvedImages[0].Digest, fakeDigest)
+	}
+	if v.ResolvedImages[0].Ref != "registry.example.com/runner:1.4" {
+		t.Errorf("ResolvedImages[0].Ref = %q, want the rung1Image.ref", v.ResolvedImages[0].Ref)
+	}
+}
+
+func TestVerifyFrozen_EmptyResolvedImagesForNoExecEnv(t *testing.T) {
+	// A no-execution-environment skill has an aileron block but declares no
+	// image to resolve, so freeze pins none and VerifyFrozen exposes an empty
+	// pin set (the runtime stays on the in-process parity path).
+	_, keyPath := genSigningKey(t)
+	res, err := Run(context.Background(), []byte(noExecEnvMD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run no-exec-env: %v", err)
+	}
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen no-exec-env: %v", err)
+	}
+	if len(v.ResolvedImages) != 0 {
+		t.Errorf("no-exec-env ResolvedImages = %+v, want empty", v.ResolvedImages)
+	}
+}
+
+func TestVerifyFrozen_TamperedDigestRefusesBeforeExposure(t *testing.T) {
+	// Swapping the resolved digest inside the frozen manifest's lock block
+	// changes the recomputed content hash. Verification must refuse before any
+	// pin is exposed, so a tampered image can never reach the runtime.
+	res := freezeExample(t)
+	swapped := "sha256:" + strings.Repeat("b", 64)
+	tampered := bytes.Replace(res.FrozenManifest, []byte(fakeDigest), []byte(swapped), 1)
+	if bytes.Equal(tampered, res.FrozenManifest) {
+		t.Fatal("test setup: worked example lock digest not found to tamper")
+	}
+	v, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey)
+	if err == nil {
+		t.Fatal("a tampered resolved digest must refuse to verify")
+	}
+	if len(v.ResolvedImages) != 0 {
+		t.Errorf("a refused verification must expose no pins, got %+v", v.ResolvedImages)
+	}
+}
+
 func TestVerifyFrozen_RejectsTamperedManifest(t *testing.T) {
 	res := freezeExample(t)
 	// Flip a byte in the Markdown body (after the frontmatter) so the

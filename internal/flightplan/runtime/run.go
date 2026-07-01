@@ -35,6 +35,14 @@ type Options struct {
 	// Seam is the single marked LLM seam. Nil (the v1 default) makes any
 	// llm-seam step error, so a default launch reaches no LLM.
 	Seam LLMSeam
+	// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the
+	// plan inside it. When the loaded plan carries a resolved image pin and this
+	// seam is wired, Run delegates to it; when the plan pins no image, Run stays
+	// on the in-process path and never touches this seam. A plan that pins an
+	// image with no ImageRunner configured is an explicit error, never a silent
+	// in-process fallback (a declared rung must be entered to honor the
+	// attestation).
+	ImageRunner ImageRunner
 
 	// Clock supplies the single launch-time read for dynamic inputs. Nil uses
 	// SystemClock.
@@ -73,6 +81,13 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	lp, err := LoadVerified(opts.Store, opts.Name, opts.Version)
 	if err != nil {
 		return RunResult{}, err
+	}
+	// When the verified lock pins a rung-1/rung-2 image, boot that exact image
+	// and run the plan inside it (#1731). This keeps the boot-vs-in-process
+	// decision in one place; runPlan (Phase A / Phase B / materialize / audit)
+	// is untouched on the parity path.
+	if len(lp.ResolvedImages) > 0 {
+		return runInImage(ctx, lp, opts)
 	}
 	return runPlan(ctx, lp.Plan, lp.ContentHash, opts)
 }

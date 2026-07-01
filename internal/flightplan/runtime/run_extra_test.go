@@ -46,13 +46,21 @@ func TestErrorMessages(t *testing.T) {
 	}
 }
 
-// TestRun_PublicEntryPointThroughStore exercises the public Run from a frozen
-// version on disk: load+verify+resolve+execute+materialize end-to-end.
-func TestRun_PublicEntryPointThroughStore(t *testing.T) {
+// TestRun_InProcessPipelineFromLoadedPlan exercises the in-process pipeline
+// from a frozen version on disk: load+verify then resolve+execute+materialize
+// end-to-end. The worked example is rung-2, so the public Run now boots the
+// pinned image (covered by TestRun_BootsPinnedImageWhenLockPinsRung); this test
+// drives the parity pipeline directly from the loaded plan so the resolve →
+// execute → materialize path stays covered independent of the boot branch.
+func TestRun_InProcessPipelineFromLoadedPlan(t *testing.T) {
 	fv := frozenExample(t)
 	s := store.New(t.TempDir())
 	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
 		t.Fatalf("WriteFrozen: %v", err)
+	}
+	lp, err := LoadVerified(s, "weekly-metrics-digest", "test")
+	if err != nil {
+		t.Fatalf("LoadVerified: %v", err)
 	}
 
 	reg := NewTransformRegistry()
@@ -64,10 +72,7 @@ func TestRun_PublicEntryPointThroughStore(t *testing.T) {
 		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
 	}}
 
-	res, err := Run(context.Background(), Options{
-		Store:      s,
-		Name:       "weekly-metrics-digest",
-		Version:    "test",
+	res, err := runPlan(context.Background(), lp.Plan, lp.ContentHash, Options{
 		Dispatcher: disp,
 		Approver:   &fakeApprover{decision: Decision{Approved: true}},
 		Seam:       fakeSeam{out: map[string]any{"issue_body": "x"}},
@@ -76,10 +81,10 @@ func TestRun_PublicEntryPointThroughStore(t *testing.T) {
 		OutDir:     t.TempDir(),
 	})
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("runPlan: %v", err)
 	}
 	if res.ContentHash == "" {
-		t.Error("Run must surface the verified content hash")
+		t.Error("runPlan must surface the verified content hash")
 	}
 	if len(res.Artifacts) != 2 {
 		t.Errorf("want 2 artifacts, got %d", len(res.Artifacts))
