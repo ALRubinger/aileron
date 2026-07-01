@@ -71,6 +71,44 @@ func TestApprovalDecisionAudit(t *testing.T) {
 	}
 }
 
+func TestBuildLaunchRecord_BindsOutputToDigest(t *testing.T) {
+	// The per-launch record ties each materialized output name to its content
+	// digest and path, a reference (no inline bytes) inside the ADR-0027 audit
+	// boundary. This is what makes a past launch independently verifiable.
+	st := execState{
+		inputs: ResolvedInputs{SourceBindings: map[string]SourceBinding{}},
+		artifacts: []Artifact{
+			{Name: "chains.json", Path: "chains.json", Content: []byte(`{"a":1}`), Digest: "sha256:deadbeef", Written: true},
+			{Name: "kept.json", Content: []byte(`{}`), Digest: "sha256:cafe", Written: false},
+		},
+	}
+	rec := buildLaunchRecord(st)
+	outs, ok := rec.Fields["materializedOutputs"].([]map[string]any)
+	if !ok {
+		t.Fatalf("materializedOutputs = %T, want []map[string]any", rec.Fields["materializedOutputs"])
+	}
+	if len(outs) != 2 {
+		t.Fatalf("want 2 recorded outputs, got %d", len(outs))
+	}
+	if outs[0]["name"] != "chains.json" || outs[0]["path"] != "chains.json" || outs[0]["sha256"] != "sha256:deadbeef" {
+		t.Errorf("output 0 = %v", outs[0])
+	}
+	// The retained (unwritten) output is still recorded by name + digest.
+	if outs[1]["name"] != "kept.json" || outs[1]["sha256"] != "sha256:cafe" {
+		t.Errorf("output 1 = %v", outs[1])
+	}
+	// The record references each output by name/path/sha256 only, never the
+	// dataset bytes inline (ADR-0027 boundary).
+	for _, o := range outs {
+		if len(o) != 3 {
+			t.Errorf("recorded output must carry only name/path/sha256, got %v", o)
+		}
+		if _, hasContent := o["content"]; hasContent {
+			t.Error("the launch record must not carry artifact content inline")
+		}
+	}
+}
+
 // containsValue deep-searches a JSON-shaped value for a string leaf.
 func containsValue(v any, want string) bool {
 	switch t := v.(type) {

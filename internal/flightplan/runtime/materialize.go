@@ -1,14 +1,16 @@
 package runtime
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
 
 // Artifact is one materialized output: the declared output's name, the path it
 // was written to, its mime type, and the bytes. The runtime records it in the
-// audit by name; the bytes are written to disk by the run orchestration when
-// the publish target is `file`.
+// audit by name and content digest; the bytes are written to disk by the run
+// orchestration when the publish target is `file`.
 type Artifact struct {
 	Name     string
 	Path     string
@@ -16,9 +18,25 @@ type Artifact struct {
 	// Content is the materialized utf-8 bytes. Empty for a target:none
 	// artifact (recorded but not written).
 	Content []byte
+	// Digest is the sha256 of Content, formatted `sha256:<hex>`. It is computed
+	// at construction over the exact bytes writeArtifacts lands on disk, so an
+	// operator can independently verify a loose output file against the digest
+	// recorded in the per-launch audit (ADR-0027 snapshot identifier). Empty
+	// content hashes deterministically to the sha256 of zero bytes, so the
+	// digest is always recordable — including for a target:none artifact that
+	// is retained but never written.
+	Digest string
 	// Written reports whether the artifact should be written to disk
 	// (publish target `file`) vs retained in the run record only (`none`).
 	Written bool
+}
+
+// contentDigest returns the `sha256:<hex>` digest of the materialized bytes.
+// It is the audit-safe snapshot identifier for an artifact: it references the
+// exact content without carrying it inline (ADR-0027 audit boundary).
+func contentDigest(content []byte) string {
+	sum := sha256.Sum256(content)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // fileMapEntry is one entry of the typed JSON file-map transport a
@@ -96,6 +114,7 @@ func materialize(p *Plan, step Step, outputs map[string]any) (Artifact, error) {
 		Name:     out.Name,
 		MimeType: out.MimeType,
 		Content:  content,
+		Digest:   contentDigest(content),
 	}
 	if out.Target == PublishFile {
 		// The publish path comes from the declared output, not the file-map,
