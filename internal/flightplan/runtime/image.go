@@ -15,6 +15,13 @@ import (
 // a silent in-process fallback. A rung was declared and pinned; running the
 // plan in-process would enter an environment the attestation never certified.
 func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, error) {
+	// Rung-1/rung-2 resolve exactly one image pin, and the attestation certifies
+	// that single environment. Guard the invariant so a future multi-pin rung
+	// can never silently boot only pins[0] while ignoring the rest.
+	if len(lp.ResolvedImages) != 1 {
+		return RunResult{}, fmt.Errorf(
+			"flightplan: expected exactly one resolved image pin, got %d", len(lp.ResolvedImages))
+	}
 	pin := lp.ResolvedImages[0]
 	if opts.ImageRunner == nil {
 		return RunResult{}, fmt.Errorf(
