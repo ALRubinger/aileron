@@ -277,6 +277,10 @@ var (
 		},
 		allowedFields: []string{
 			"aileron.session.id",
+			"aileron.trust.effect",
+			"aileron.plan.id",
+			"aileron.step.id",
+			"aileron.tool.name",
 		},
 		forbiddenSubstrs: []string{
 			"lin_secret", "Bearer ", "Authorization",
@@ -514,7 +518,11 @@ func TestSandboxProxyAuditShape_ForeignTokenNotSwappedConforms(t *testing.T) {
 	req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
 	req.Method = http.MethodGet
 	upstream, _ := url.Parse("https://api.github.com/user")
-	srv.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, "api.github.com", "bearer", upstream, 200)
+	hb := mustAuditShapeBinding(t, "api.github.com", "bearer",
+		binding.WithTrustContract("read", []string{"secret-host.example.test"}),
+		binding.WithToolIdentity("plan-7", "step-3", "linear.create_issue"),
+	)
+	srv.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200)
 	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
@@ -522,20 +530,41 @@ func TestSandboxProxyAuditShape_ForeignTokenNotSwappedConforms(t *testing.T) {
 	if events[0].EventType != model.EventTypeSandboxProxyForeignTokenNotSwapped {
 		t.Fatalf("event type = %q", events[0].EventType)
 	}
-	sandboxProxyForeignTokenNotSwappedShape.validate(t, events[0].Payload)
+	p := events[0].Payload
+	sandboxProxyForeignTokenNotSwappedShape.validate(t, p)
+	if got := p["aileron.trust.effect"]; got != "read" {
+		t.Errorf("trust.effect = %v, want read", got)
+	}
+	if got := p["aileron.plan.id"]; got != "plan-7" {
+		t.Errorf("plan.id = %v, want plan-7", got)
+	}
+	if got := p["aileron.step.id"]; got != "step-3" {
+		t.Errorf("step.id = %v, want step-3", got)
+	}
+	if got := p["aileron.tool.name"]; got != "linear.create_issue" {
+		t.Errorf("tool.name = %v, want linear.create_issue", got)
+	}
+	payloadJSON, _ := json.Marshal(p)
+	// The AllowedHosts values and the credential-ref must never appear.
+	for _, forbidden := range []string{"secret-host.example.test", "api_key/github/octocat"} {
+		if strings.Contains(string(payloadJSON), forbidden) {
+			t.Errorf("payload leaked %q: %s", forbidden, payloadJSON)
+		}
+	}
 }
 
 func TestSandboxProxyAuditShape_ForeignTokenNotSwappedNilRecorderIsIDSafe(t *testing.T) {
 	upstream, _ := url.Parse("https://api.github.com/user")
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	hb := mustAuditShapeBinding(t, "api.github.com", "bearer")
 
 	srv := &apiServer{newID: func() string { return "minted-id" }}
-	if got := srv.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, "api.github.com", "bearer", upstream, 200); got != "minted-id" {
+	if got := srv.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200); got != "minted-id" {
 		t.Errorf("audit id = %q, want minted-id", got)
 	}
 
 	srvNoID := &apiServer{}
-	if got := srvNoID.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, "api.github.com", "bearer", upstream, 200); strings.TrimSpace(got) == "" {
+	if got := srvNoID.recordSandboxProxyForeignTokenNotSwapped(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200); strings.TrimSpace(got) == "" {
 		t.Error("audit id must be non-empty even with no recorder and no newID")
 	}
 }
