@@ -54,8 +54,11 @@ import (
 const SchemaVersion = "v1"
 
 // EmitMechanisms is the closed set of emit-mechanism values a descriptor
-// may declare at load time. "inject" injects unconditionally at the proxy
-// (the client emits a no-credential request). "sentinel-swap" plants a
+// may declare at load time. "inject" adds the credential at the proxy and
+// covers two client shapes: a request that arrives with no credential (the
+// proxy adds one), and a self-signing client such as `aws`/botocore that
+// emits a placeholder-signed request the `sigv4-resign` scheme strips and
+// re-signs with the vault credential at the boundary. "sentinel-swap" plants a
 // non-secret sentinel the proxy swaps for the real credential at egress;
 // a sentinel-swap binding must declare a `sentinel` block naming the
 // placeholder value and the env-var name the launcher plants it under. A
