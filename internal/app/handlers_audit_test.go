@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,6 +198,115 @@ func TestListAudit_SinceFilterAlone(t *testing.T) {
 	resp := decodeAuditList(t, rec)
 	if len(resp.Events) != 1 || resp.Events[0].AuditId != "new" {
 		t.Errorf("got = %+v; want only 'new'", resp.Events)
+	}
+}
+
+// CreateAudit handler contract:
+//   - POST /v1/audit appends via the recorder and returns 201 + minted id.
+//   - The appended event is readable back through the store.
+//   - Unknown actor.type / malformed body / missing event_type → 400.
+//   - No recorder/store wired → 503 (a write that must persist cannot be
+//     silently acknowledged).
+
+// newAuditWriteServer builds an apiServer with a Mem store and a real
+// recorder backed by it, mirroring the production wiring where the recorder
+// is the single writer over the store.
+func newAuditWriteServer(t *testing.T) (*apiServer, *audit.MemStore) {
+	t.Helper()
+	store := audit.NewMemStore()
+	rec := audit.NewRecorder(store, nil, nil)
+	return &apiServer{
+		log:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		auditStore:    store,
+		auditRecorder: rec,
+	}, store
+}
+
+func TestCreateAudit_AppendsAndIsReadable(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"event_type":"flightplan.launch.action","actor":{"type":"service","id":"flightplan-launch"},"payload":{"actionRef":"aileron:metrics.query_series","rows":3}}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp api.AuditIngestResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.AuditId == "" {
+		t.Fatal("audit_id is empty; recorder must mint one")
+	}
+
+	// Read it back through the store to prove it was persisted intact.
+	getRec := httptest.NewRecorder()
+	srv.GetAudit(getRec, httptest.NewRequest(http.MethodGet, "/v1/audit/"+resp.AuditId, nil), resp.AuditId)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("read-back status = %d, want 200; body = %s", getRec.Code, getRec.Body.String())
+	}
+	var got api.AuditEvent
+	if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode read-back: %v", err)
+	}
+	if got.EventType != "flightplan.launch.action" {
+		t.Errorf("EventType = %q", got.EventType)
+	}
+	if got.Actor.Type != string(model.ActorTypeService) || got.Actor.Id != "flightplan-launch" {
+		t.Errorf("Actor = %+v", got.Actor)
+	}
+	if got.Payload["actionRef"] != "aileron:metrics.query_series" {
+		t.Errorf("Payload[actionRef] = %v", got.Payload["actionRef"])
+	}
+}
+
+func TestCreateAudit_UnknownActorTypeRejected(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"event_type":"flightplan.launch","actor":{"type":"robot","id":"x"},"payload":{}}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAudit_MalformedBodyRejected(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader("{not json")))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAudit_MissingEventTypeRejected(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"actor":{"type":"service","id":"x"},"payload":{}}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAudit_NilStoreReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	body := `{"event_type":"flightplan.launch","actor":{"type":"service","id":"x"},"payload":{}}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateAudit_NilPayloadDefaultsToEmpty proves a null payload is stored as
+// an empty map rather than nil, so the read-back stays well-formed.
+func TestCreateAudit_NilPayloadDefaultsToEmpty(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"event_type":"flightplan.launch","actor":{"type":"service","id":"x"},"payload":null}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

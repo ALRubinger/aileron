@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
+	"github.com/ALRubinger/aileron/internal/model"
 )
 
 // fakeLaunchDispatcher returns canned per-ref results so the launch runs
@@ -25,15 +29,37 @@ func (f *fakeLaunchDispatcher) Dispatch(_ context.Context, ref string, _ map[str
 	return runtime.DispatchResult{Output: f.results[ref]}, nil
 }
 
+// fakeAuditSink records the audit records it receives and returns a
+// deterministic id, keeping launch tests that aren't exercising the daemon
+// audit path hermetic (no POST attempts against a base URL).
+type fakeAuditSink struct {
+	records []runtime.AuditRecord
+}
+
+func (f *fakeAuditSink) Record(_ context.Context, rec runtime.AuditRecord) string {
+	f.records = append(f.records, rec)
+	if rec.ActionRef != "" {
+		return "fake-audit-" + rec.ActionRef
+	}
+	return "fake-audit-summary"
+}
+
 // stubLaunchSeams points the CLI launch seams at fakes. The transform that
 // materializes digest.csv is supplied via the runtime default registry, so the
 // fake dispatcher + a file-map-emitting transform drive the worked example.
-func stubLaunchSeams(t *testing.T, disp runtime.ActionDispatcher) {
+//
+// By default the audit sink is a hermetic recording fake so tests that don't
+// wire a fake daemon never attempt a POST. Passing useRealAudit=true leaves
+// the production daemon-backed sink in place so the acceptance path
+// (runSkillLaunch → sink → fake daemon → back) can be exercised via withDaemon.
+func stubLaunchSeams(t *testing.T, disp runtime.ActionDispatcher, useRealAudit ...bool) {
 	t.Helper()
 	origD, origA, origS := newLaunchDispatcher, newLaunchApprover, newLaunchAuditSink
 	newLaunchDispatcher = func() runtime.ActionDispatcher { return disp }
 	newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
-	newLaunchAuditSink = func() runtime.AuditSink { return stdoutAuditSink{} }
+	if !(len(useRealAudit) > 0 && useRealAudit[0]) {
+		newLaunchAuditSink = func(io.Writer) runtime.AuditSink { return &fakeAuditSink{} }
+	}
 	t.Cleanup(func() {
 		newLaunchDispatcher, newLaunchApprover, newLaunchAuditSink = origD, origA, origS
 	})
@@ -437,6 +463,223 @@ func TestParseResultPayload(t *testing.T) {
 	if got := parseResultPayload(&empty); len(got) != 0 {
 		t.Errorf("empty result = %v, want empty map", got)
 	}
+}
+
+// TestDaemonAuditSink_PostsPerActionRecord proves a record with an ActionRef
+// posts a flightplan.launch.action event to /v1/audit carrying the service
+// actor and the actionRef/fields/sink payload, and threads the 201's minted
+// audit_id back as the Record return value.
+func TestDaemonAuditSink_PostsPerActionRecord(t *testing.T) {
+	var gotPath string
+	var gotBody auditIngestRequest
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode ingest body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"audit_id":"audit-per-action"}`))
+	})
+
+	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+		ActionRef: "aileron:metrics.query_series",
+		Fields:    map[string]any{"rows": 3},
+		Sink:      "customer-store",
+	})
+	if id != "audit-per-action" {
+		t.Errorf("Record returned %q, want the minted id from the 201", id)
+	}
+	if gotPath != "/v1/audit" {
+		t.Errorf("posted to %q, want /v1/audit", gotPath)
+	}
+	if gotBody.EventType != string(model.EventTypeFlightPlanLaunchAction) {
+		t.Errorf("event_type = %q, want %q", gotBody.EventType, model.EventTypeFlightPlanLaunchAction)
+	}
+	if gotBody.Actor.Type != string(model.ActorTypeService) || gotBody.Actor.ID != "flightplan-launch" {
+		t.Errorf("actor = %+v, want {service, flightplan-launch}", gotBody.Actor)
+	}
+	if gotBody.Payload["actionRef"] != "aileron:metrics.query_series" {
+		t.Errorf("payload.actionRef = %v", gotBody.Payload["actionRef"])
+	}
+	if gotBody.Payload["sink"] != "customer-store" {
+		t.Errorf("payload.sink = %v", gotBody.Payload["sink"])
+	}
+	if _, ok := gotBody.Payload["fields"]; !ok {
+		t.Errorf("payload missing fields: %+v", gotBody.Payload)
+	}
+}
+
+// TestDaemonAuditSink_PostsLaunchSummary proves a record with no ActionRef
+// posts the per-launch summary event type.
+func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
+	var gotBody auditIngestRequest
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"audit_id":"audit-summary"}`))
+	})
+
+	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+		Fields: map[string]any{"artifacts": 1},
+	})
+	if id != "audit-summary" {
+		t.Errorf("Record returned %q, want audit-summary", id)
+	}
+	if gotBody.EventType != string(model.EventTypeFlightPlanLaunch) {
+		t.Errorf("event_type = %q, want %q", gotBody.EventType, model.EventTypeFlightPlanLaunch)
+	}
+	if _, ok := gotBody.Payload["actionRef"]; ok {
+		t.Errorf("summary payload must omit actionRef: %+v", gotBody.Payload)
+	}
+}
+
+// TestDaemonAuditSink_Non201LogsAndReturnsEmpty proves a non-201 daemon reply
+// is best-effort: the sink logs to stderr and returns "" rather than failing
+// the launch.
+func TestDaemonAuditSink_Non201LogsAndReturnsEmpty(t *testing.T) {
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"code":"audit_unavailable"}}`))
+	})
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{ActionRef: "aileron:x.y"})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty on non-201", id)
+	}
+	if !strings.Contains(stderr.String(), "launch audit not recorded") {
+		t.Errorf("stderr missing best-effort warning: %q", stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_InProcessRecordsAuditToDaemon is the acceptance path: an
+// in-process launch posts its audit records to /v1/audit through the real
+// daemon-backed sink, and the returned ids surface as the `Audit records: N`
+// count. This proves launch provenance reaches the daemon audit trail.
+func TestRunSkillLaunch_InProcessRecordsAuditToDaemon(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeNoImageForLaunch(t, storeDir)
+
+	var mu sync.Mutex
+	var auditPosts int
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusOK)
+			// The worked example binds file-target outputs from the result.
+			if strings.Contains(r.URL.Path, "query_series") {
+				_, _ = w.Write([]byte(`{"result":"{\"path\":\"digest.csv\",\"mimeType\":\"text/csv\",\"encoding\":\"utf-8\",\"content\":\"name\\ncpu\\n\"}"}`))
+			} else {
+				_, _ = w.Write([]byte(`{"result":"{\"path\":\"filed_issue.json\",\"mimeType\":\"application/json\",\"encoding\":\"utf-8\",\"content\":\"{}\"}"}`))
+			}
+		case r.URL.Path == "/v1/audit" && r.Method == http.MethodPost:
+			mu.Lock()
+			auditPosts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"audit_id":"audit-landed"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// Dispatch goes through the real daemon-backed dispatcher (wired to the fake
+	// daemon by withDaemon); the audit sink is the real daemon-backed sink.
+	stubLaunchSeams(t, daemonDispatcher{}, true)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origRun := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	mu.Lock()
+	posts := auditPosts
+	mu.Unlock()
+	if posts == 0 {
+		t.Fatal("launch recorded no audit events to the daemon")
+	}
+	if !strings.Contains(stdout.String(), "Audit records:") {
+		t.Errorf("stdout missing audit count: %q", stdout.String())
+	}
+}
+
+// TestDaemonAuditSink_BaseURLErrorReturnsEmpty proves an unresolvable daemon
+// base URL is best-effort: the sink logs and returns "" without failing.
+func TestDaemonAuditSink_BaseURLErrorReturnsEmpty(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", context.DeadlineExceeded }
+	t.Cleanup(func() { bindingAPIBaseURL = origBase })
+
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{ActionRef: "aileron:x.y"})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty when base URL is unresolvable", id)
+	}
+	if !strings.Contains(stderr.String(), "resolve daemon URL") {
+		t.Errorf("stderr = %q, want a resolve-URL warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_TransportErrorReturnsEmpty proves a transport failure is
+// best-effort: the sink logs and returns "".
+func TestDaemonAuditSink_TransportErrorReturnsEmpty(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	origClient := actionsHTTPClient
+	bindingAPIBaseURL = func() (string, error) { return "http://127.0.0.1:1/v1", nil }
+	actionsHTTPClient = &http.Client{Transport: errRoundTripper{}}
+	t.Cleanup(func() {
+		bindingAPIBaseURL = origBase
+		actionsHTTPClient = origClient
+	})
+
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty on transport error", id)
+	}
+	if !strings.Contains(stderr.String(), "post audit event") {
+		t.Errorf("stderr = %q, want a post-failure warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_BadJSONResponseReturnsEmpty proves a 201 with an
+// undecodable body is best-effort: the sink logs and returns "".
+func TestDaemonAuditSink_BadJSONResponseReturnsEmpty(t *testing.T) {
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{not json`))
+	})
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty on undecodable 201 body", id)
+	}
+	if !strings.Contains(stderr.String(), "decode audit response") {
+		t.Errorf("stderr = %q, want a decode warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_NilStderrDoesNotPanic proves logErr tolerates a nil
+// writer (the launch always passes one, but the sink must not panic).
+func TestDaemonAuditSink_NilStderrDoesNotPanic(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", context.DeadlineExceeded }
+	t.Cleanup(func() { bindingAPIBaseURL = origBase })
+
+	if id := (daemonAuditSink{}).Record(context.Background(), runtime.AuditRecord{}); id != "" {
+		t.Errorf("Record returned %q, want empty", id)
+	}
+}
+
+// errRoundTripper always fails, so a request never leaves the process.
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.DeadlineExceeded
 }
 
 // fakeCLISeam is a deterministic seam used by CLI launch tests so the llm-seam
