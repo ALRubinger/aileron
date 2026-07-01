@@ -329,11 +329,9 @@ func TestExecutionEnvironmentRung1AndRung2MutuallyExclusive(t *testing.T) {
 }
 
 // TestExecutionEnvironmentRung3OnlyAccepted: an execution environment that
-// declares only the reserved rung3PerStepImages slot (neither rung1Image nor
-// rung2CapabilityUnits) is valid. The schema permits the reserved slot;
-// freeze parses it and reports it as build-deferred rather than building
-// anything (#1510, ADR-0027). An execution environment with no image rung is
-// no longer a schema rejection.
+// declares only the rung3PerStepImages rung (neither rung1Image nor
+// rung2CapabilityUnits) is valid. Rung three is a built image rung: freeze
+// resolves each per-step sibling image to a digest pin (#1732, ADR-0027).
 func TestExecutionEnvironmentRung3OnlyAccepted(t *testing.T) {
 	sch := compileSchema(t)
 	inst := validExampleInstance(t)
@@ -347,6 +345,41 @@ func TestExecutionEnvironmentRung3OnlyAccepted(t *testing.T) {
 	}
 	if err := sch.Validate(inst); err != nil {
 		t.Fatalf("a rung-3-only execution environment must validate:\n%v", err)
+	}
+}
+
+// TestExecutionEnvironmentRung3ExcludesRung1: rung three is now a built image
+// rung, so it is mutually exclusive with rung one and rung two just as they
+// exclude each other. Declaring rung-3 alongside rung-1 is rejected.
+func TestExecutionEnvironmentRung3ExcludesRung1(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	requires := blk["requires"].(map[string]any)
+	env := requires["executionEnvironment"].(map[string]any)
+	delete(env, "rung2CapabilityUnits")
+	env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
+	env["rung3PerStepImages"] = map[string]any{
+		"steps": []any{map[string]any{"image": "registry.example.com/per-step-tool:1"}},
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("declaring rung3PerStepImages alongside rung1Image must be rejected")
+	}
+}
+
+// TestExecutionEnvironmentRung3EmptyStepsRejected: rung three requires a
+// non-empty steps array. An empty steps array is malformed and rejected.
+func TestExecutionEnvironmentRung3EmptyStepsRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	requires := blk["requires"].(map[string]any)
+	env := requires["executionEnvironment"].(map[string]any)
+	delete(env, "rung1Image")
+	delete(env, "rung2CapabilityUnits")
+	env["rung3PerStepImages"] = map[string]any{"steps": []any{}}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("a rung-3 declaration with an empty steps array must be rejected")
 	}
 }
 

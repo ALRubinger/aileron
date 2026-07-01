@@ -105,12 +105,11 @@ Declare the minimum each action needs. The contract is verbose by design. A plan
 
 ### The execution environment
 
-`requires.executionEnvironment` declares the image the Flight Plan runs in, as one rung. The MVP ships two rungs, and they are mutually exclusive.
+`requires.executionEnvironment` declares the image the Flight Plan runs in, as one rung. The three rungs are mutually exclusive, so exactly one is declared.
 
 - `rung1Image.ref` names a whole prebuilt operator-owned image. Freeze resolves a tag to an `image@sha256:` digest pin.
 - `rung2CapabilityUnits.features` declares the capability-unit devcontainer Features composed onto the Aileron agent-free base image. Freeze composes them and pins the built image by digest.
-
-The reserved `rung3PerStepImages` slot may be declared alone. Freeze parses it, builds nothing, and reports it as build-deferred, so a rung-three-only manifest is a told outcome rather than a parse failure.
+- `rung3PerStepImages.steps` declares one sibling image per step, each with an optional `id`, `mount`, and `collect`. Freeze resolves each step's image to an `image@sha256:` digest pin recorded in the lock.
 
 The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 
@@ -202,7 +201,7 @@ After freeze, [launch](/guides/launching-a-flight-plan/) runs the frozen Flight 
 - **More than one seam.** v1 allows exactly one marked seam. Route all reasoning through it.
 - **An `actionRef` with no matching `requires.actions[].ref`.** A step can only call an action the `requires:` block declares. The freeze lint catches the mismatch.
 - **Hand-writing the lock.** The `lock` section is produced by freeze. It is absent before freeze, and you never author it.
-- **A `base64` output in v1.** The `encoding` field reserves `base64`, but the v1 runtime materializes `utf-8` text only. A binary artifact waits on the deferred rung-three boundary.
+- **A `base64` output in v1.** The `encoding` field reserves `base64`, but the v1 runtime materializes `utf-8` text only. A binary artifact waits on the deferred rung-three run-and-collect launch boundary.
 
 ## Where to go next
 

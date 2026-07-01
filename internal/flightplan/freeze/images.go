@@ -56,91 +56,118 @@ func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, features []strin
 	return f(ctx, features)
 }
 
-// rung3Name is the rung label recorded in Result.DeferredRungs when a
-// manifest declares the reserved, build-deferred rung-3 slot.
+// rung3Name is the execution-environment key for rung-3 (per-step
+// sibling-image dispatch).
 const rung3Name = "rung3PerStepImages"
 
 // resolveImages resolves a manifest's execution environment to the pinned
-// image set and resolved capability set, returning the data the lockfile
-// records plus the rungs that were declared but intentionally not built. The
-// cases:
+// image set and resolved capability set the lockfile records. The cases:
 //
 //   - instruction-only / no executionEnvironment: empty pins, no error
 //     (the skill still gets a contentHash and signature);
 //   - rung-1 (rung1Image.ref): resolve the named image to a digest pin;
 //   - rung-2 (rung2CapabilityUnits.features): compose the Features and pin
 //     the built image's digest plus the resolved capability set;
-//   - rung-3 (rung3PerStepImages, no rung-1/rung-2): a reserved,
-//     build-deferred slot (ADR-0027). It parses to an empty image set and is
-//     reported as deferred, never built. This is a first-class outcome, not
-//     an error;
-//   - both rung-1 and rung-2 present, or an executionEnvironment naming
-//     neither an image rung nor rung-3: a malformed manifest the schema
-//     already rejects; guarded here defensively.
+//   - rung-3 (rung3PerStepImages.steps[].image): resolve each per-step
+//     sibling image to a digest pin, one ImagePin per step (ADR-0027);
+//   - more than one image rung present, or an executionEnvironment naming
+//     no rung: a malformed manifest the schema already rejects; guarded here
+//     defensively.
 //
 // Every resolved digest is checked against digestPattern: a resolver that
 // yields a tag rather than a digest is rejected (pin by digest, never tag).
-func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer) (pins []ImagePin, capSet []string, deferred []string, err error) {
+func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer) (pins []ImagePin, capSet []string, err error) {
 	if m == nil || m.InstructionOnly {
-		return nil, nil, nil, nil
+		return nil, nil, nil
 	}
 	env := m.Aileron.Requires.ExecutionEnvironment
 	if len(env) == 0 {
 		// No execution environment declared: an instruction/composition-only
 		// skill freezes with an empty resolvedImages set.
-		return nil, nil, nil, nil
+		return nil, nil, nil
 	}
 
 	rung1, hasRung1 := env["rung1Image"]
 	rung2, hasRung2 := env["rung2CapabilityUnits"]
-	_, hasRung3 := env[rung3Name]
+	rung3, hasRung3 := env[rung3Name]
 	switch {
-	case hasRung1 && hasRung2:
-		return nil, nil, nil, fmt.Errorf("freeze: executionEnvironment declares both rung1Image and rung2CapabilityUnits; exactly one is permitted")
+	case moreThanOne(hasRung1, hasRung2, hasRung3):
+		return nil, nil, fmt.Errorf("freeze: executionEnvironment declares more than one of rung1Image, rung2CapabilityUnits, rung3PerStepImages; exactly one is permitted")
 	case hasRung1:
 		ref, err := rung1ImageRef(rung1)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if dr == nil {
-			return nil, nil, nil, fmt.Errorf("freeze: rung-1 image %q requires a digest resolver", ref)
+			return nil, nil, fmt.Errorf("freeze: rung-1 image %q requires a digest resolver", ref)
 		}
 		digest, err := dr.ResolveDigest(ctx, ref)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("freeze: resolve rung-1 image %q: %w", ref, err)
+			return nil, nil, fmt.Errorf("freeze: resolve rung-1 image %q: %w", ref, err)
 		}
 		if err := requireDigest(ref, digest); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
-		return []ImagePin{{Ref: ref, Digest: digest}}, nil, nil, nil
+		return []ImagePin{{Ref: ref, Digest: digest}}, nil, nil
 	case hasRung2:
 		features, err := rung2Features(rung2)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		if fc == nil {
-			return nil, nil, nil, fmt.Errorf("freeze: rung-2 capability units require a feature composer")
+			return nil, nil, fmt.Errorf("freeze: rung-2 capability units require a feature composer")
 		}
 		digest, err := fc.ComposeDigest(ctx, features)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("freeze: compose rung-2 capability units: %w", err)
+			return nil, nil, fmt.Errorf("freeze: compose rung-2 capability units: %w", err)
 		}
 		if err := requireDigest("rung2:"+joinFeatures(features), digest); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 		// The pre-freeze "ref" for a composed image is the feature set; the
 		// resolved capability set is the same features, pinned.
-		return []ImagePin{{Ref: composedRef(features), Digest: digest}}, append([]string(nil), features...), nil, nil
+		return []ImagePin{{Ref: composedRef(features), Digest: digest}}, append([]string(nil), features...), nil
 	case hasRung3:
-		// Rung-3 (per-step sibling-image dispatch) is a reserved,
-		// build-deferred slot (ADR-0027). Freeze parses it and reports it as
-		// deferred: no image is built, the resolved image set is empty, and
-		// the rung is recorded as intentionally not built. This is a normal
-		// freeze outcome, not an error.
-		return nil, nil, []string{rung3Name}, nil
+		// Rung-3 (per-step sibling-image dispatch) is a built image rung
+		// (ADR-0027): freeze resolves each step's sibling image to a digest
+		// and pins one ImagePin per step. The pins flow into resolvedImages
+		// alongside the rung-1/rung-2 pins, so the plan content hash and
+		// signature cover them.
+		refs, err := rung3StepImages(rung3)
+		if err != nil {
+			return nil, nil, err
+		}
+		if dr == nil {
+			return nil, nil, fmt.Errorf("freeze: rung-3 per-step images require a digest resolver")
+		}
+		out := make([]ImagePin, 0, len(refs))
+		for _, ref := range refs {
+			digest, err := dr.ResolveDigest(ctx, ref)
+			if err != nil {
+				return nil, nil, fmt.Errorf("freeze: resolve rung-3 image %q: %w", ref, err)
+			}
+			if err := requireDigest(ref, digest); err != nil {
+				return nil, nil, err
+			}
+			out = append(out, ImagePin{Ref: ref, Digest: digest})
+		}
+		return out, nil, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("freeze: executionEnvironment declares neither rung1Image nor rung2CapabilityUnits")
+		return nil, nil, fmt.Errorf("freeze: executionEnvironment declares no image rung (rung1Image, rung2CapabilityUnits, or rung3PerStepImages)")
 	}
+}
+
+// moreThanOne reports whether more than one of the given booleans is true. It
+// is the exactly-one-rung guard: the schema already forbids two image rungs,
+// so this is the freeze-time defensive backstop.
+func moreThanOne(bs ...bool) bool {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n > 1
 }
 
 // requireDigest enforces the pin-by-digest invariant: a resolved value that
@@ -189,6 +216,36 @@ func rung2Features(v any) ([]string, error) {
 		features = append(features, strings.TrimSpace(s))
 	}
 	return features, nil
+}
+
+// rung3StepImages extracts each rung3PerStepImages.steps[].image from the
+// untyped execution environment block, returning the per-step image
+// references in declared order. Each step MUST be a mapping carrying a
+// non-empty string image; a non-mapping step, a missing/empty steps list, or
+// a non-string/empty image is rejected rather than stringified so a bad step
+// never silently produces a wrong pin. It mirrors rung2Features.
+func rung3StepImages(v any) ([]string, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("freeze: rung3PerStepImages is not a mapping")
+	}
+	rawList, ok := m["steps"].([]any)
+	if !ok || len(rawList) == 0 {
+		return nil, fmt.Errorf("freeze: rung3PerStepImages.steps is missing or empty")
+	}
+	refs := make([]string, 0, len(rawList))
+	for _, s := range rawList {
+		step, ok := s.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a non-mapping entry")
+		}
+		img, ok := step["image"].(string)
+		if !ok || strings.TrimSpace(img) == "" {
+			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a step with an empty or non-string image")
+		}
+		refs = append(refs, strings.TrimSpace(img))
+	}
+	return refs, nil
 }
 
 // composedRef renders a stable pre-freeze reference for a composed rung-2

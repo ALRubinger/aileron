@@ -77,7 +77,7 @@ An unsatisfied `requires:` entry is a missing-requirement signal the runtime sur
 
 ### `requires.executionEnvironment`
 
-The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). The MVP ships rung one and rung two. When `executionEnvironment` declares an image rung it carries at most one of `rung1Image` or `rung2CapabilityUnits`; the two are mutually exclusive. The reserved `rung3PerStepImages` slot may be declared alone. Freeze parses a rung-three declaration and reports it as build-deferred (it pins no image), so a rung-three-only manifest is valid and is told to the operator rather than failing.
+The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Exactly one of `rung1Image`, `rung2CapabilityUnits`, or `rung3PerStepImages` is declared when `executionEnvironment` is present. The three rungs are mutually exclusive. Freeze resolves the declared rung to content-addressed digest pins recorded in the lock section.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
@@ -85,7 +85,12 @@ The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-se
 | `rung1Image.ref` | string | Yes within `rung1Image` | An OCI image reference. Freeze resolves a tag to an `image@sha256:` digest pin. |
 | `rung2CapabilityUnits` | object | No | Rung two. Declares capability units composed onto the Aileron agent-free base image. |
 | `rung2CapabilityUnits.features` | array | Yes within `rung2CapabilityUnits` | The capability-unit devcontainer Feature references ([ADR-0026](/adr/0026-cli-capability-units)). |
-| `rung3PerStepImages` | object | No | RESERVED and build-deferred. The rung-three per-step sibling-image dispatch slot. Designed as a manifest slot only. Not implemented in v1. May be declared alone: freeze parses it and reports it as build-deferred rather than building anything. |
+| `rung3PerStepImages` | object | No | Rung three. Per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Freeze resolves each step's sibling image to a digest pin recorded in the lock. |
+| `rung3PerStepImages.steps` | array | Yes within `rung3PerStepImages` | The per-step sibling images. Non-empty; freeze pins one digest per step. |
+| `rung3PerStepImages.steps[].image` | string | Yes within a step | An OCI image reference for the per-step sibling tool. Freeze resolves a tag to an `image@sha256:` digest pin. |
+| `rung3PerStepImages.steps[].id` | string | No | An optional step identifier, unique within the rung-three step set. |
+| `rung3PerStepImages.steps[].mount` | object | No | An optional mount declaration for the step's input I/O. `mount.path` is the mount path inside the image. |
+| `rung3PerStepImages.steps[].collect` | object | No | An optional run-and-collect declaration for the step's output I/O. `collect.path` is the path whose contents are collected as the step output. |
 
 ### `requires.actions[].trustContract`
 
@@ -263,4 +268,4 @@ The version is the content hash plus a semver label. The content hash identifies
 
 A Flight Plan runs on a composed execution image assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Rung one pins a whole prebuilt operator-owned image, declared as `rung1Image`. Rung two declares capability units that Aileron composes onto a generic agent-free minimal base image, declared as `rung2CapabilityUnits` whose Features follow [ADR-0026](/adr/0026-cli-capability-units).
 
-The MVP ships rung one and rung two. Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Rung three is designed as the `rung3PerStepImages` manifest slot so a later build can fill it without a format change. Rung three is build-deferred and out of scope here. The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O carried in the `rung3PerStepImages` rung. Freeze resolves each step's sibling image to a content-addressed digest pinned in the lock. The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
