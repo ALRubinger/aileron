@@ -607,6 +607,81 @@ func TestRunSkillLaunch_InProcessRecordsAuditToDaemon(t *testing.T) {
 	}
 }
 
+// TestDaemonAuditSink_BaseURLErrorReturnsEmpty proves an unresolvable daemon
+// base URL is best-effort: the sink logs and returns "" without failing.
+func TestDaemonAuditSink_BaseURLErrorReturnsEmpty(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", context.DeadlineExceeded }
+	t.Cleanup(func() { bindingAPIBaseURL = origBase })
+
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{ActionRef: "aileron:x.y"})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty when base URL is unresolvable", id)
+	}
+	if !strings.Contains(stderr.String(), "resolve daemon URL") {
+		t.Errorf("stderr = %q, want a resolve-URL warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_TransportErrorReturnsEmpty proves a transport failure is
+// best-effort: the sink logs and returns "".
+func TestDaemonAuditSink_TransportErrorReturnsEmpty(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	origClient := actionsHTTPClient
+	bindingAPIBaseURL = func() (string, error) { return "http://127.0.0.1:1/v1", nil }
+	actionsHTTPClient = &http.Client{Transport: errRoundTripper{}}
+	t.Cleanup(func() {
+		bindingAPIBaseURL = origBase
+		actionsHTTPClient = origClient
+	})
+
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty on transport error", id)
+	}
+	if !strings.Contains(stderr.String(), "post audit event") {
+		t.Errorf("stderr = %q, want a post-failure warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_BadJSONResponseReturnsEmpty proves a 201 with an
+// undecodable body is best-effort: the sink logs and returns "".
+func TestDaemonAuditSink_BadJSONResponseReturnsEmpty(t *testing.T) {
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{not json`))
+	})
+	var stderr bytes.Buffer
+	id := daemonAuditSink{stderr: &stderr}.Record(context.Background(), runtime.AuditRecord{})
+	if id != "" {
+		t.Errorf("Record returned %q, want empty on undecodable 201 body", id)
+	}
+	if !strings.Contains(stderr.String(), "decode audit response") {
+		t.Errorf("stderr = %q, want a decode warning", stderr.String())
+	}
+}
+
+// TestDaemonAuditSink_NilStderrDoesNotPanic proves logErr tolerates a nil
+// writer (the launch always passes one, but the sink must not panic).
+func TestDaemonAuditSink_NilStderrDoesNotPanic(t *testing.T) {
+	origBase := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", context.DeadlineExceeded }
+	t.Cleanup(func() { bindingAPIBaseURL = origBase })
+
+	if id := (daemonAuditSink{}).Record(context.Background(), runtime.AuditRecord{}); id != "" {
+		t.Errorf("Record returned %q, want empty", id)
+	}
+}
+
+// errRoundTripper always fails, so a request never leaves the process.
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.DeadlineExceeded
+}
+
 // fakeCLISeam is a deterministic seam used by CLI launch tests so the llm-seam
 // step produces its declared output.
 type fakeCLISeam struct{}
