@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,6 +17,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/vaultscope"
 )
 
 // Environment variable that supplies the vault passphrase non-
@@ -35,11 +37,13 @@ with its scope. --scope narrows to a single typed namespace.
 
 vault delete accepts any path vault list prints: an agent entry
 (agents/<name>/<purpose>, e.g. agents/claude/oauth), a user entry
-(user/<service>, e.g. user/github), or a binding
+(user/<service>, e.g. user/github), a locally-stored secret
+(secret/<name>, e.g. secret/linear_token), or a binding
 (<kind>/<service>/<identity>, e.g. aws_sigv4/athena/default). It
-dispatches to the matching namespace's delete endpoint. Control-plane
-entries (connected-accounts/, llm-config/) are managed by the control
-plane, not this CLI.
+dispatches to the matching namespace's delete endpoint; secret/ entries
+are removed from the local vault (where secret set writes them).
+Control-plane entries (connected-accounts/, llm-config/) are managed by
+the control plane, not this CLI.
 
 vault put remains agents-only: you create a binding with ` + "`binding setup`" + `,
 not ` + "`vault put`" + `.`
@@ -344,11 +348,19 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		return 1
 	}
 
+	// secret/<name> entries (written by `aileron secret set`) live in the
+	// local file vault, not behind a daemon namespace endpoint. Delete them
+	// through the same local-vault access `secret set` uses so
+	// `vault list` and `vault delete` stay symmetric (#1704, #1716).
+	if scope, _ := vaultscope.Classify(positionals[0]); scope == vaultscope.ScopeSecret {
+		return runVaultDeleteSecret(positionals[0], *yes, stdin, stdout, stderr)
+	}
+
 	target, ok := vaultDeleteTargetFor(positionals[0])
 	if !ok {
 		fmt.Fprintf(stderr, "error: %q is not a CLI-deletable vault path\n", positionals[0])
-		fmt.Fprintln(stderr, "vault delete accepts agents/<name>/<purpose>, user/<service>, or a binding")
-		fmt.Fprintln(stderr, "(<kind>/<service>/<identity>) — exactly what vault list prints. Control-plane")
+		fmt.Fprintln(stderr, "vault delete accepts agents/<name>/<purpose>, user/<service>, secret/<name>, or a")
+		fmt.Fprintln(stderr, "binding (<kind>/<service>/<identity>) — exactly what vault list prints. Control-plane")
 		fmt.Fprintln(stderr, "entries (connected-accounts/, llm-config/) are managed by the control plane.")
 		return 1
 	}
@@ -383,6 +395,79 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
 		return 1
 	}
+}
+
+// runVaultDeleteSecret deletes a secret/<name> entry directly from the
+// local file vault, mirroring how `aileron secret set` writes it
+// (launch.DefaultVaultPath + readVaultPassphrase + launch.OpenLocalVault).
+// `vault list` surfaces secret/ entries but the daemon exposes no
+// namespace-scoped delete endpoint for them, so routing this branch to
+// the local vault restores the list/delete symmetry #1704 established
+// (the asymmetry called out in #1716). It is a `vault delete` branch, not
+// a separate `secret rm` command, so operators paste back exactly what
+// `vault list` prints.
+func runVaultDeleteSecret(arg string, yes bool, stdin io.Reader, stdout, stderr io.Writer) int {
+	// secret/<name> is a single-segment namespace, exactly like
+	// `secret set` writes: reject a name that itself contains a '/'.
+	name := strings.TrimPrefix(arg, vaultscope.SecretVaultPrefix)
+	if name == "" || strings.Contains(name, "/") {
+		fmt.Fprintf(stderr, "error: secret name must be a single segment (no '/'): %q\n", arg)
+		return 1
+	}
+	storedPath := vaultscope.SecretVaultPrefix + name
+
+	if !yes {
+		answer := promptLine(stdin, stdout, fmt.Sprintf("Delete %s? [y/N]: ", storedPath))
+		if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+			fmt.Fprintln(stdout, "cancelled")
+			return 0
+		}
+	}
+
+	vaultPath := launch.DefaultVaultPath()
+	passphrase, _, err := readVaultPassphrase("", "Vault passphrase: ", stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if passphrase == "" {
+		fmt.Fprintln(stderr, "error: passphrase cannot be empty")
+		return 1
+	}
+
+	v, err := launch.OpenLocalVault(vaultPath, passphrase)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// The local file vault's Delete is idempotent (no error when the path
+	// is absent), but the daemon-backed branch reports a not-found miss.
+	// Check existence first so `vault delete secret/<name>` gives the same
+	// "no credential entry" signal for a name that was never stored.
+	entries, err := v.List(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	found := false
+	for _, e := range entries {
+		if e.Path == storedPath {
+			found = true
+			break
+		}
+	}
+	if !found {
+		fmt.Fprintf(stderr, "error: no credential entry for %s\n", storedPath)
+		return 1
+	}
+
+	if err := v.Delete(context.Background(), storedPath); err != nil {
+		fmt.Fprintf(stderr, "error deleting secret: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Deleted %s\n", storedPath)
+	return 0
 }
 
 // runVaultList prints the credential entries the daemon holds. Output

@@ -328,3 +328,134 @@ func TestRunSecretSet_HonorsEnvPassphrase(t *testing.T) {
 		t.Errorf("stored value = %q, want %q", string(got.Value), "the-secret-value")
 	}
 }
+
+// setSecretForTest stores secret/<name> in the temp-home vault via the
+// same `aileron secret set` path production uses, so the delete tests
+// exercise a genuinely-written entry. The vault passphrase is supplied
+// through AILERON_VAULT_PASSPHRASE (already set by the caller) and the
+// secret value comes from the scripted prompt.
+func setSecretForTest(t *testing.T, name, value string) {
+	t.Helper()
+	restore := scriptPrompt(value)
+	defer restore()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"secret", "set", name}, newTestRegistry(), &stdout, &stderr); code != 0 {
+		t.Fatalf("secret set %s: exit = %d; stderr=%s", name, code, stderr.String())
+	}
+}
+
+// TestRunVaultDelete_SecretRoundTrip is the #1716 regression guard: a
+// secret written with `aileron secret set` (stored at secret/<name> in
+// the local vault and surfaced by `vault list`) must be deletable with
+// `aileron vault delete secret/<name>`. Before the fix vaultDeleteTargetFor
+// had no secret/ case, so the command returned the not-CLI-deletable
+// rejection — asymmetric with list. This asserts the local-vault delete
+// path removes the entry.
+func TestRunVaultDelete_SecretRoundTrip(t *testing.T) {
+	vaultPath := vaultInitTempHome(t)
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envVaultPassphrase, "from-env-pass")
+
+	setSecretForTest(t, "linear_token", "the-secret-value")
+
+	// Confirm it is present before delete.
+	v, err := vault.Unlock(vaultPath, "from-env-pass")
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if _, err := v.Get(t.Context(), "secret/linear_token"); err != nil {
+		t.Fatalf("precondition Get: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "secret/linear_token", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("vault delete: exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Deleted secret/linear_token") {
+		t.Errorf("stdout = %q; want 'Deleted secret/linear_token'", stdout.String())
+	}
+
+	// The entry must be gone.
+	v2, err := vault.Unlock(vaultPath, "from-env-pass")
+	if err != nil {
+		t.Fatalf("Unlock after delete: %v", err)
+	}
+	if _, err := v2.Get(t.Context(), "secret/linear_token"); err == nil {
+		t.Errorf("secret/linear_token still present after delete")
+	}
+}
+
+// TestRunVaultDelete_SecretNotFound: deleting a secret/ path that was
+// never stored reports the not-found error (exit 1), symmetric with the
+// daemon-backed namespaces' 404 handling rather than silently succeeding
+// on the idempotent local Delete.
+func TestRunVaultDelete_SecretNotFound(t *testing.T) {
+	vaultPath := vaultInitTempHome(t)
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envVaultPassphrase, "from-env-pass")
+
+	// Create the vault with a real entry so OpenLocalVault validates the
+	// passphrase, then target a different, absent name.
+	setSecretForTest(t, "present", "v")
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "secret/absent", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("vault delete absent: exit = %d, want 1; stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no credential entry for secret/absent") {
+		t.Errorf("stderr = %q; want 'no credential entry for secret/absent'", stderr.String())
+	}
+}
+
+// TestRunVaultDelete_SecretRejectsMultiSegment: secret/ is a single-
+// segment namespace (matching `secret set`), so a name containing a '/'
+// is rejected before the vault is touched.
+func TestRunVaultDelete_SecretRejectsMultiSegment(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "secret/foo/bar", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "single segment") {
+		t.Errorf("stderr = %q; want 'single segment' rejection", stderr.String())
+	}
+}
+
+// TestRunVaultDelete_SecretInteractiveCancel: without --yes the secret
+// branch honors the confirmation prompt; a non-y answer cancels and the
+// entry survives.
+func TestRunVaultDelete_SecretInteractiveCancel(t *testing.T) {
+	vaultPath := vaultInitTempHome(t)
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envVaultPassphrase, "from-env-pass")
+	setSecretForTest(t, "keep", "v")
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "secret/keep"},
+		strings.NewReader("n\n"), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cancelled") {
+		t.Errorf("stdout = %q; want 'cancelled'", stdout.String())
+	}
+	v, err := vault.Unlock(vaultPath, "from-env-pass")
+	if err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	if _, err := v.Get(t.Context(), "secret/keep"); err != nil {
+		t.Errorf("secret/keep should survive a cancelled delete: %v", err)
+	}
+}
