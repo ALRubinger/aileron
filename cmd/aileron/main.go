@@ -27,6 +27,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/sandbox/spawnhelper"
 	"github.com/ALRubinger/aileron/internal/suite"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/vaultscope"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
@@ -397,7 +398,12 @@ func runSecretList(args []string, stdout, stderr io.Writer) int {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.Metadata.Type == "secret" {
+		// Filter by the shared vault-scope classifier so `secret list` and
+		// the daemon vault union agree on exactly one definition of what a
+		// `secret/`-scoped entry is. The full path (`secret/<name>`) is
+		// printed, matching what `secret set` reports and the
+		// `vault:secret/<name>` reference it hands back.
+		if scope, _ := vaultscope.Classify(e.Path); scope == vaultscope.ScopeSecret {
 			names = append(names, e.Path)
 		}
 	}

@@ -574,33 +574,8 @@ func TestListAgentCredentials_ListErrorReturns500(t *testing.T) {
 	assertErrorCode(t, rec, "vault_list_failed")
 }
 
-func TestAgentNameAndPurposeFromVaultPath(t *testing.T) {
-	cases := []struct {
-		path        string
-		wantName    string
-		wantPurpose string
-		wantOK      bool
-	}{
-		{"agents/claude/oauth", "claude", "oauth", true},
-		{"agents/codex/oauth", "codex", "oauth", true},
-		{"agents/claude/apikey", "claude", "apikey", true}, // apikey now conforms
-		{"agents//apikey", "", "", false},                  // empty name
-		{"agents/claude", "", "", false},                   // missing purpose segment
-		{"agents/oauth", "", "", false},                    // only two segments
-		{"agents/a/b/oauth", "", "", false},                // nested name / extra segment
-		{"some/other/path", "", "", false},                 // wrong prefix
-		{"user/github", "", "", false},                     // user namespace, not agent
-		{"agents/claude/oauth/extra", "", "", false},       // extra segment
-		{"agents/claude/OAUTH", "", "", false},             // purpose fails the allow-list
-	}
-	for _, c := range cases {
-		gotName, gotPurpose, gotOK := agentNameAndPurposeFromVaultPath(c.path)
-		if gotOK != c.wantOK || gotName != c.wantName || gotPurpose != c.wantPurpose {
-			t.Errorf("agentNameAndPurposeFromVaultPath(%q) = (%q,%q,%v), want (%q,%q,%v)",
-				c.path, gotName, gotPurpose, gotOK, c.wantName, c.wantPurpose, c.wantOK)
-		}
-	}
-}
+// agentNameAndPurposeFromVaultPath moved to internal/vaultscope (as
+// AgentNameAndPurposeFromVaultPath) and is tested there.
 
 func strPtr(s string) *string { return &s }
 

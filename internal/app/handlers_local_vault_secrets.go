@@ -10,6 +10,7 @@ import (
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/vaultscope"
 )
 
 // vaultCredentialSessionHeader is the optional request header the
@@ -175,39 +176,6 @@ func resolveAgentCredentialPurpose(p *string) string {
 // (or supplied the validated default) before reaching here.
 func agentCredentialVaultPath(name, purpose string) string {
 	return "agents/" + name + "/" + purpose
-}
-
-// agentNameAndPurposeFromVaultPath is the inverse of
-// agentCredentialVaultPath: it splits an `agents/<name>/<purpose>` vault
-// path into its name and purpose segments. It accepts any conforming
-// path (any purpose, not just `oauth`) so the list surfaces apikey-only
-// agents that the old `/oauth`-suffix match made invisible. It returns
-// false for any path that does not match the scheme so the list filter
-// ignores non-agent entries (user credentials, bindings, etc.).
-//
-// The purpose segment is re-validated through the same allow-list the
-// write path uses (validateAgentCredentialPurpose) so a malformed stored
-// path can never surface a junk purpose in the list response.
-func agentNameAndPurposeFromVaultPath(path string) (name, purpose string, ok bool) {
-	const prefix = "agents/"
-	if !strings.HasPrefix(path, prefix) {
-		return "", "", false
-	}
-	rest := path[len(prefix):]
-	// Exactly two remaining segments: <name>/<purpose>. A name or purpose
-	// containing a slash (extra segments) is rejected.
-	parts := strings.Split(rest, "/")
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	name, purpose = parts[0], parts[1]
-	if name == "" || purpose == "" {
-		return "", "", false
-	}
-	if !validateAgentCredentialPurpose(purpose) {
-		return "", "", false
-	}
-	return name, purpose, true
 }
 
 // GetAgentCredentials returns the per-agent credential envelope for
@@ -415,7 +383,7 @@ func (s *apiServer) ListAgentCredentials(w http.ResponseWriter, r *http.Request)
 
 	list := api.AgentCredentialsList{Agents: []api.AgentCredentialSummary{}}
 	for _, e := range entries {
-		name, purpose, ok := agentNameAndPurposeFromVaultPath(e.Path)
+		name, purpose, ok := vaultscope.AgentNameAndPurposeFromVaultPath(e.Path)
 		if !ok {
 			continue
 		}
