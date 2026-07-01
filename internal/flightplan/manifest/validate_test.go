@@ -146,14 +146,13 @@ aileron:
 }
 
 // TestExecutionEnvironmentRungValidity locks the rung composition rules at the
-// schema boundary: rung-1-only and rung-2-only are valid, declaring both
-// rung-1 and rung-2 is rejected (the existing exclusivity guarantee), and a
-// rung-3-only declaration is now valid (a reserved, build-deferred slot it is
-// freeze's job to report, not the schema's job to forbid). rung-3 alongside
-// rung-1 is also permitted: rung-3 is a reserved slot and does not weaken the
-// rung-1/rung-2 exclusivity. A present-but-empty executionEnvironment ({}) is
-// rejected: declaring the key obliges naming at least one rung (key omission,
-// not an empty block, is how a skill says it has no execution environment).
+// schema boundary: rung-1-only, rung-2-only, and rung-3-only are each valid,
+// and the three rungs are mutually exclusive. Declaring any two together is
+// rejected (rung-3 is now a built image rung, so it excludes rung-1 and rung-2
+// just as they exclude each other). A malformed rung-3 (empty steps) is
+// rejected. A present-but-empty executionEnvironment ({}) is rejected:
+// declaring the key obliges naming exactly one rung (key omission, not an empty
+// block, is how a skill says it has no execution environment).
 func TestExecutionEnvironmentRungValidity(t *testing.T) {
 	valid := map[string]string{
 		"rung1 only": `      rung1Image:
@@ -161,14 +160,17 @@ func TestExecutionEnvironmentRungValidity(t *testing.T) {
 		"rung2 only": `      rung2CapabilityUnits:
         features:
           - ghcr.io/example/aileron-feature-metrics-cli:1`,
-		"rung3 only (reserved, build-deferred)": `      rung3PerStepImages:
+		"rung3 only": `      rung3PerStepImages:
         steps:
           - image: registry.example.com/per-step-tool:1`,
-		"rung3 alongside rung1": `      rung1Image:
-        ref: registry.example.com/runner:1.4
-      rung3PerStepImages:
+		"rung3 with id and io": `      rung3PerStepImages:
         steps:
-          - image: registry.example.com/per-step-tool:1`,
+          - id: convert
+            image: registry.example.com/per-step-tool:1
+            mount:
+              path: /work
+            collect:
+              path: /work/out`,
 	}
 	for name, env := range valid {
 		t.Run("valid/"+name, func(t *testing.T) {
@@ -184,6 +186,13 @@ func TestExecutionEnvironmentRungValidity(t *testing.T) {
       rung2CapabilityUnits:
         features:
           - ghcr.io/example/aileron-feature-metrics-cli:1`,
+		"rung3 alongside rung1 rejected": `      rung1Image:
+        ref: registry.example.com/runner:1.4
+      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1`,
+		"rung3 with empty steps rejected": `      rung3PerStepImages:
+        steps: []`,
 		"empty executionEnvironment rejected": `      {}`,
 	}
 	for name, env := range invalid {

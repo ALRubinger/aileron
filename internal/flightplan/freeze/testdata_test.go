@@ -123,13 +123,13 @@ aileron:
 # No Exec Env
 `
 
-// rung3MD declares only the reserved, build-deferred rung-3 slot
-// (rung3PerStepImages) with neither rung-1 nor rung-2. The schema permits a
-// rung-3-only declaration and freeze parses it, builds no image, and reports
-// it as deferred (ADR-0027).
+// rung3MD declares a single-step rung-3 execution environment
+// (rung3PerStepImages) with neither rung-1 nor rung-2. Rung three is a built
+// image rung: freeze resolves each per-step sibling image to a digest pin
+// (ADR-0027, #1732).
 const rung3MD = `---
 name: rung3-skill
-description: A skill declaring only the reserved rung-3 slot.
+description: A skill declaring a rung-3 per-step image.
 aileron:
   schemaVersion: aileron.flightplan.v1
   requires:
@@ -155,6 +155,46 @@ aileron:
 ---
 
 # Rung 3 Skill
+`
+
+// rung3MultiStepMD declares a rung-3 execution environment with two steps
+// (each naming a distinct sibling image) plus optional id/mount/collect I/O.
+// It proves freeze pins one digest per step and preserves declared order.
+const rung3MultiStepMD = `---
+name: rung3-multistep-skill
+description: A skill declaring multiple rung-3 per-step images.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - id: extract
+            image: registry.example.com/tool-a:1
+            mount:
+              path: /work
+            collect:
+              path: /work/out
+          - id: convert
+            image: registry.example.com/tool-b:2
+  inputs: []
+  outputs: []
+---
+
+# Rung 3 Multi-Step Skill
 `
 
 // genSigningKey returns a fresh ed25519 private key and writes its PKCS#8

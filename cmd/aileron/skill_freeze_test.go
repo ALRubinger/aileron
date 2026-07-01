@@ -270,16 +270,17 @@ aileron:
 	}
 }
 
-func TestRunSkillFreeze_Rung3ReportedDeferred(t *testing.T) {
+func TestRunSkillFreeze_Rung3PinsPerStepDigest(t *testing.T) {
 	storeDir := withTempStore(t)
 	stubFreezeResolvers(t, fakeFreezeDigest)
 	key := writeSigningKey(t)
 
-	// A skill declaring only the reserved rung-3 slot. Freeze must succeed,
-	// pin no image, and tell the operator the rung is build-deferred.
+	// A skill declaring a rung-3 per-step image. Freeze must succeed, resolve
+	// the per-step sibling image to a digest pin recorded in the lockfile, and
+	// no longer print a build-deferred line.
 	const rung3MD = `---
 name: rung3-skill
-description: Reserved rung-3 declaration.
+description: Rung-3 per-step image declaration.
 aileron:
   schemaVersion: aileron.flightplan.v1
   requires:
@@ -317,17 +318,14 @@ aileron:
 	var stdout, stderr bytes.Buffer
 	code := runSkillFreeze([]string{"--signing-key", key, "rung3-skill"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("a rung-3 freeze must succeed (build-deferred, not an error), exit=%d stderr=%s", code, stderr.String())
+		t.Fatalf("a rung-3 freeze must succeed, exit=%d stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Rung 3 declared: build-deferred") {
-		t.Errorf("operator must be told rung-3 is build-deferred, stdout=%q", out)
-	}
-	if !strings.Contains(out, "ADR-0027") {
-		t.Errorf("the deferred line should cite ADR-0027, stdout=%q", out)
+	if strings.Contains(out, "build-deferred") {
+		t.Errorf("rung-3 is now built; no build-deferred line must be printed, stdout=%q", out)
 	}
 
-	// The frozen lockfile pins no image (nothing was built).
+	// The frozen lockfile pins the per-step digest (rung-3 builds).
 	s := store.New(storeDir)
 	ids, err := s.FrozenVersions("rung3-skill")
 	if err != nil || len(ids) != 1 {
@@ -337,8 +335,11 @@ aileron:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(v.Lockfile), "resolvedImages:") {
-		t.Errorf("a rung-3 freeze must pin no image, lockfile:\n%s", v.Lockfile)
+	if !strings.Contains(string(v.Lockfile), "resolvedImages:") {
+		t.Errorf("a rung-3 freeze must pin the per-step image, lockfile:\n%s", v.Lockfile)
+	}
+	if !strings.Contains(string(v.Lockfile), fakeFreezeDigest) {
+		t.Errorf("a rung-3 freeze must pin the resolved digest, lockfile:\n%s", v.Lockfile)
 	}
 	if len(v.Signature) == 0 {
 		t.Error("a rung-3 freeze must still be signed")

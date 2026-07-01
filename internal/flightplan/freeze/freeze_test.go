@@ -66,6 +66,62 @@ func TestRun_Rung2HappyPath(t *testing.T) {
 	}
 }
 
+func TestRun_Rung3PinsAndSigns(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	digestFor := map[string]string{
+		"registry.example.com/tool-a:1": fakeDigest,
+		"registry.example.com/tool-b:2": fakeDigest2,
+	}
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return digestFor[ref], nil
+	})
+	res, err := Run(context.Background(), []byte(rung3MultiStepMD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// The lockfile records one digest pin per rung-3 step, in declared order.
+	if len(res.Lock.ResolvedImages) != 2 {
+		t.Fatalf("rung-3 must pin one image per step, got %+v", res.Lock.ResolvedImages)
+	}
+	if res.Lock.ResolvedImages[0].Ref != "registry.example.com/tool-a:1" || res.Lock.ResolvedImages[0].Digest != fakeDigest {
+		t.Errorf("first pin = %+v", res.Lock.ResolvedImages[0])
+	}
+	if res.Lock.ResolvedImages[1].Ref != "registry.example.com/tool-b:2" || res.Lock.ResolvedImages[1].Digest != fakeDigest2 {
+		t.Errorf("second pin = %+v", res.Lock.ResolvedImages[1])
+	}
+	if len(res.Lock.ResolvedCapabilitySet) != 0 {
+		t.Errorf("rung-3 pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
+	}
+
+	// The signature verifies over the canonical content bytes, so the rung-3
+	// pins are covered by the plan content hash and signature.
+	lockNoHash := res.Lock.withoutContentHash()
+	mNoHash, err := injectLock([]byte(rung3MultiStepMD), lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lfNoHash, err := MarshalLockfile(lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
+		t.Errorf("signature must verify over the rung-3 pins: %v", err)
+	}
+
+	// The frozen manifest re-parses with the lock present, carrying the pins.
+	fm, err := manifest.Parse(res.FrozenManifest)
+	if err != nil {
+		t.Fatalf("frozen rung-3 manifest must re-parse: %v", err)
+	}
+	if fm.Aileron.Lock["contentHash"] != res.ContentHash {
+		t.Errorf("frozen manifest lock.contentHash = %v, want %v", fm.Aileron.Lock["contentHash"], res.ContentHash)
+	}
+}
+
 func TestRun_Reproducible(t *testing.T) {
 	_, keyPath := genSigningKey(t)
 	opts := Options{Version: "1.0.0", SigningKeyPath: keyPath, Composer: fakeComposer(fakeDigest)}

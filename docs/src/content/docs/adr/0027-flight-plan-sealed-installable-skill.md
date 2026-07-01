@@ -64,9 +64,9 @@ Rung one pins a whole prebuilt image. The skill names an image, and freeze resol
 
 Rung two declares capability units, and Aileron composes them. The skill declares the units it requires on top of a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features onto that base and pins the result. The capability-unit shape is the one defined in [ADR-0026](/adr/0026-cli-capability-units).
 
-The MVP ships rungs one and two. Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Rung three is designed as a manifest slot so a later build can fill it without a format change. Rung three is build-deferred and out of scope here. A manifest may declare the `rung3PerStepImages` slot alone. Freeze parses that declaration, builds no image, and reports the rung as build-deferred to the operator, so a rung-three-only Flight Plan is a told outcome rather than a parse failure or a silent pass.
+Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Each step names a sibling image, and freeze resolves each named image to a content-addressed digest. Freeze records one digest pin per step in the lock alongside the rung-one and rung-two pins. The per-step image is the operator-owned tool the step dispatches to. A manifest may declare the `rung3PerStepImages` rung alone, and freeze pins one digest per step so a rung-three Flight Plan seals to a signed image assertion like every other rung.
 
-The digest pin is load-bearing at launch, not only at freeze. When the verified lock carries a resolved rung-one or rung-two image digest, launch boots that exact pinned image and runs the plan inside it. The digest booted comes from the verified lock, so the image entered corresponds to the lock's signed image assertion rather than any re-resolved tag. A Flight Plan that declares no execution rung has an empty resolved-image set, so its launch runs the step graph in-process instead of booting an image. Rung three stays build-deferred, so a per-step sibling image is not booted at launch.
+The digest pin is load-bearing at launch, not only at freeze. When the verified lock carries a resolved rung-one or rung-two image digest, launch boots that exact pinned image and runs the plan inside it. The digest booted comes from the verified lock, so the image entered corresponds to the lock's signed image assertion rather than any re-resolved tag. A Flight Plan that declares no execution rung has an empty resolved-image set, so its launch runs the step graph in-process instead of booting an image. Rung three records each per-step sibling image as a verified digest pin, so a step that dispatches a sibling image enters it by its signed digest rather than a re-resolved tag.
 
 The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 
@@ -134,7 +134,6 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 ### Negative
 
 - Freeze is rigid. A frozen Flight Plan pins one resolved environment, and changing the environment requires a new freeze and a new version.
-- Rung three is deferred. Per-step sealed sibling-image dispatch with mount and run-and-collect I/O is a manifest slot only, so a Flight Plan cannot yet dispatch per-step sibling images.
 - The single-seam constraint is strict. A Flight Plan that needs LLM reasoning in more than one place must route all of it through the one marked seam or restructure to fit.
 - The trust contract is verbose. Every action carries a full contract block, and authoring a Flight Plan with many actions records many such blocks.
 
@@ -142,7 +141,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 
 The following are out of scope for this ADR and this layer's MVP.
 
-- Rung three build. The per-step sealed sibling-image dispatch with mount and run-and-collect I/O is a forward-declared manifest slot only.
+- Per-step launch dispatch. Freeze pins the rung-three per-step sibling images by digest, but the launch-time runtime that mounts each image, runs it, and collects its output is a follow-up.
 - Binary outputs. The `outputs:` contract reserves the `base64` encoding, but the v1 runtime materializes `utf-8` artifacts only. Binary output is blocked on a host-ABI binary-body field, because the current JSON-string result body coerces arbitrary bytes to valid UTF-8 and corrupts them. The mount and run-and-collect boundary of rung three (#1510) is the escape hatch for large or binary artifacts when a consumer arrives.
 - STS and SSO. Short-lived token services and single sign-on integration are not specified here.
 - Specific connectors. No named connector is specified by this ADR. The trust-contract format applies to any action, and individual connector contracts are authored against this format elsewhere.

@@ -48,14 +48,6 @@ type Result struct {
 	PublicKey []byte
 	// Lock is the structured lockfile record (contentHash included).
 	Lock Lockfile
-	// DeferredRungs records execution-environment rungs that were declared in
-	// the manifest but intentionally not built by freeze. Today this is the
-	// reserved, build-deferred rung-3 slot (rung3PerStepImages, ADR-0027):
-	// when present it is parsed and reported as deferred rather than failing
-	// or silently passing. Empty for a fully-resolved or instruction-only
-	// skill. This lives in the Result and CLI output only; it is not persisted
-	// to the lockfile (no lockfile schema change).
-	DeferredRungs []string
 }
 
 // Options configures a Run.
@@ -101,7 +93,7 @@ func Run(ctx context.Context, raw []byte, opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	pins, capSet, deferred, err := resolveImages(ctx, m, opts.Resolver, opts.Composer)
+	pins, capSet, err := resolveImages(ctx, m, opts.Resolver, opts.Composer)
 	if err != nil {
 		return Result{}, err
 	}
@@ -153,6 +145,5 @@ func Run(ctx context.Context, raw []byte, opts Options) (Result, error) {
 		Signature:      sig,
 		PublicKey:      pubPEM,
 		Lock:           lock,
-		DeferredRungs:  deferred,
 	}, nil
 }
