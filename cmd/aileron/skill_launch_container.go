@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -185,8 +186,11 @@ func (containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunSpe
 		if err := os.MkdirAll(collectHost, 0o755); err != nil {
 			return runtime.ToolRunResult{}, fmt.Errorf("skill launch: create tool collect dir: %w", err)
 		}
-		collectFile = filepath.Base(spec.CollectPath)
-		volumes = append(volumes, sandboxcontainer.Volume{Source: collectHost, Target: filepath.Dir(spec.CollectPath)})
+		// spec.CollectPath is a container-internal (Linux) path, so parse it with
+		// path, not filepath: on Windows filepath.Dir would yield backslashes
+		// (\work\out) and produce an invalid, non-matching container mount target.
+		collectFile = path.Base(spec.CollectPath)
+		volumes = append(volumes, sandboxcontainer.Volume{Source: collectHost, Target: path.Dir(spec.CollectPath)})
 	}
 
 	opts := sandboxcontainer.RunOptions{
