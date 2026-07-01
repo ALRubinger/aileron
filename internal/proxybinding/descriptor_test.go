@@ -283,6 +283,38 @@ func TestParse_SentinelSwapSchema(t *testing.T) {
 	}
 }
 
+// A descriptor may declare an optional per-binding trust scope
+// (allowed_hosts + effect). A valid effect parses and the fields round-trip;
+// an unknown effect is a load-time error; omitting both yields an
+// unconstrained binding.
+func TestParse_TrustContractSchema(t *testing.T) {
+	const base = "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n"
+
+	// A valid effect + allowed_hosts parses and round-trips.
+	scopeYAML := base + "    effect: read\n    allowed_hosts:\n      - api.example.com\n      - other.example.com\n"
+	d, err := Parse([]byte(scopeYAML))
+	if err != nil {
+		t.Fatalf("well-formed trust scope: Parse = %v, want nil", err)
+	}
+	e := d.Bindings[0]
+	if e.Effect != "read" {
+		t.Errorf("effect = %q, want read", e.Effect)
+	}
+	if len(e.AllowedHosts) != 2 || e.AllowedHosts[0] != "api.example.com" {
+		t.Errorf("allowed_hosts = %v, want [api.example.com other.example.com]", e.AllowedHosts)
+	}
+
+	// Omitting both yields an unconstrained binding that still parses.
+	if _, err := Parse([]byte(base)); err != nil {
+		t.Errorf("no trust scope: Parse = %v, want nil", err)
+	}
+
+	// An unknown effect is a load-time error (fail closed).
+	if _, err := Parse([]byte(base + "    effect: mutate\n")); err == nil {
+		t.Error("unknown effect: Parse = nil error, want error")
+	}
+}
+
 // A descriptor carries only a credential reference; no descriptor field
 // resembles a secret. This guards the fail-closed property that the loader
 // never reads secret bytes.

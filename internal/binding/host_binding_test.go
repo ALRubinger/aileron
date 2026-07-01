@@ -104,6 +104,83 @@ func TestNewHostBinding_SentinelIndependentOfScheme(t *testing.T) {
 	}
 }
 
+func TestNewHostBinding_WithTrustContract_ValidEffectAndHosts(t *testing.T) {
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+		binding.WithTrustContract("Read", []string{"API.Example.com", " other.example.com "}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.Effect != binding.EffectRead {
+		t.Errorf("Effect = %q, want read (trimmed+lowercased)", hb.Effect)
+	}
+	want := []string{"api.example.com", "other.example.com"}
+	if len(hb.AllowedHosts) != len(want) {
+		t.Fatalf("AllowedHosts = %v, want %v", hb.AllowedHosts, want)
+	}
+	for i, h := range want {
+		if hb.AllowedHosts[i] != h {
+			t.Errorf("AllowedHosts[%d] = %q, want %q (trimmed+lowercased)", i, hb.AllowedHosts[i], h)
+		}
+	}
+}
+
+func TestNewHostBinding_WithTrustContract_AllEffectsAccepted(t *testing.T) {
+	for _, effect := range []string{
+		binding.EffectRead, binding.EffectWrite, binding.EffectDelete,
+		binding.EffectSpend, binding.EffectExternalSend,
+	} {
+		if _, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+			binding.WithTrustContract(effect, nil)); err != nil {
+			t.Errorf("effect %q rejected: %v", effect, err)
+		}
+	}
+}
+
+func TestNewHostBinding_WithTrustContract_UnknownEffectRejected(t *testing.T) {
+	if _, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+		binding.WithTrustContract("mutate", nil)); err == nil {
+		t.Fatal("expected error for unknown trust-contract effect, got nil")
+	}
+}
+
+func TestNewHostBinding_EmptyTrustContractIsUnconstrained(t *testing.T) {
+	// A binding constructed with no trust-contract option (or empty values)
+	// carries no effect and no allowlist: the proxy applies no gate and the
+	// binding injects exactly as before. This is the back-compat default.
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.Effect != "" {
+		t.Errorf("Effect = %q, want empty (unconstrained)", hb.Effect)
+	}
+	if len(hb.AllowedHosts) != 0 {
+		t.Errorf("AllowedHosts = %v, want empty (unconstrained)", hb.AllowedHosts)
+	}
+
+	// An explicit empty trust contract is equally unconstrained, and empty
+	// allowlist entries are dropped rather than retained.
+	hb2, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+		binding.WithTrustContract("", []string{"", "  "}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb2.Effect != "" || len(hb2.AllowedHosts) != 0 {
+		t.Errorf("explicit-empty contract = (effect %q, hosts %v), want unconstrained", hb2.Effect, hb2.AllowedHosts)
+	}
+}
+
+func TestNewHostBinding_WithToolIdentity_RoundTrips(t *testing.T) {
+	hb, err := binding.NewHostBinding("api.example.com", "user/example", "bearer",
+		binding.WithToolIdentity(" plan-7 ", " step-3 ", " linear.create_issue "))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.PlanID != "plan-7" || hb.StepID != "step-3" || hb.ToolName != "linear.create_issue" {
+		t.Errorf("identity = (%q,%q,%q), want trimmed (plan-7, step-3, linear.create_issue)", hb.PlanID, hb.StepID, hb.ToolName)
+	}
+}
+
 func TestNewHostBinding_RejectsInvalidScheme(t *testing.T) {
 	if _, err := binding.NewHostBinding("api.example.com", "oauth2/github/octocat", "magic"); err == nil {
 		t.Fatal("expected error for unknown scheme, got nil")

@@ -348,6 +348,21 @@ const (
 	// ADR-0019.
 	EventTypeSandboxProxyForeignTokenNotSwapped EventType = "sandbox.proxy.foreign_token_not_swapped"
 
+	// Sandbox proxy event for a bundled-CLI egress request that matched a
+	// host binding carrying a declared per-step trust contract and FAILED
+	// the trust gate at the injection point (#1735). The proxy denied the
+	// request BEFORE resolving or injecting any credential and returned a
+	// 403 to the in-container client; it did NOT fall through to
+	// passthrough. The payload carries the reject reason
+	// (`trust_host_not_allowed` when the upstream host is outside the
+	// binding's `AllowedHosts`, or `trust_effect_not_allowed` when a
+	// mutating method violates a read-effect contract), the declared
+	// `aileron.trust.effect`, the matched host pattern/scheme, the upstream
+	// destination, and the optional plan/step/tool identity triple. It never
+	// carries the credential bytes, the credential-ref, or the AllowedHosts
+	// values (only the effect and reason). See ADR-0019.
+	EventTypeSandboxProxyTrustDenied EventType = "sandbox.proxy.trust_denied"
+
 	// Sandbox proxy event for launches that proceed (or refuse to
 	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
 	// launcher when proxy bootstrap is opted out, preflight fails, or

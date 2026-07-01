@@ -616,13 +616,87 @@ func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Para
 	}
 }
 
+// Stable reject reasons for the per-step trust-contract gate at the
+// bundled-CLI egress injection point (#1735). Wire identifiers carried in
+// the trust_denied audit payload (aileron.proxy.reject_reason) — never a
+// credential byte, the credential-ref, or an AllowedHosts value.
+const (
+	trustRejectHostNotAllowed   = "trust_host_not_allowed"
+	trustRejectEffectNotAllowed = "trust_effect_not_allowed"
+)
+
+// enforceHostBindingTrust gates egress on a matched host binding's declared
+// per-step trust contract BEFORE any credential injection (#1735). It
+// returns (reason, ok): ok=true means the request may proceed (the binding
+// declares no contract, or the upstream host and method satisfy it);
+// ok=false with a stable reason means the request must be denied and audited
+// as a denial (never passed through).
+//
+// Empty-allowlist semantics: an empty AllowedHosts declares no host scope,
+// so the request stays scoped only to the matched HostPattern exactly as
+// before. The allowlist check is skipped entirely — it is NOT passed to
+// sandboxProxyHostAllowed, which returns false for an empty allowlist
+// (deny). Only a NON-empty AllowedHosts is evaluated, so every pre-existing
+// binding remains unconstrained-by-contract and injects as before.
+//
+// Effect semantics: an empty Effect applies no method gate. A read effect
+// admits only HTTP-safe methods (GET/HEAD/OPTIONS); a mutating method is
+// denied. Every write-class effect (write/delete/spend/external-send) admits
+// all methods: the proxy sees only method + host and cannot distinguish
+// write from delete/spend/external-send on the wire, so finer effect
+// narrowing is enforced upstream at the runtime action-call approval seam,
+// not here.
+func enforceHostBindingTrust(hb binding.HostBinding, upstream *url.URL, method string) (string, bool) {
+	if len(hb.AllowedHosts) > 0 && !sandboxProxyHostAllowed(upstream, hb.AllowedHosts) {
+		return trustRejectHostNotAllowed, false
+	}
+	if hb.Effect == binding.EffectRead && !isSafeHTTPMethod(method) {
+		return trustRejectEffectNotAllowed, false
+	}
+	return "", true
+}
+
+// isSafeHTTPMethod reports whether method is one of the HTTP-safe,
+// non-mutating methods (GET/HEAD/OPTIONS) a read-effect trust contract
+// admits. Any other method is treated as mutating at this seam.
+func isSafeHTTPMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+// addHostBindingTrustIdentity stamps the optional, non-secret trust-contract
+// effect and audit-addressing identity triple onto a proxy audit payload
+// when the matched binding declares them. Empty fields are omitted. It
+// carries the declared effect and the plan/step/tool addressing only, never
+// a credential byte, the credential-ref, or an AllowedHosts value.
+func addHostBindingTrustIdentity(payload map[string]any, hb binding.HostBinding) {
+	if hb.Effect != "" {
+		payload["aileron.trust.effect"] = hb.Effect
+	}
+	if hb.PlanID != "" {
+		payload["aileron.plan.id"] = hb.PlanID
+	}
+	if hb.StepID != "" {
+		payload["aileron.step.id"] = hb.StepID
+	}
+	if hb.ToolName != "" {
+		payload["aileron.tool.name"] = hb.ToolName
+	}
+}
+
 // recordSandboxProxyBindingInjected emits sandbox.proxy.binding_injected
 // for a request that matched a host binding and was re-issued upstream
 // with the bound credential injected. The payload carries the matched
-// host pattern, scheme, and upstream destination/status; it never
-// carries the credential bytes or the credential-ref. nil-recorder safe
-// like its siblings.
-func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source, hostPattern, scheme string, upstream *url.URL, upstreamStatus int) string {
+// host pattern, scheme, and upstream destination/status, plus the optional
+// trust-contract effect and plan/step/tool identity triple when the binding
+// declares them (#1735); it never carries the credential bytes, the
+// credential-ref, or the AllowedHosts values. nil-recorder safe like its
+// siblings.
+func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source string, hb binding.HostBinding, upstream *url.URL, upstreamStatus int) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -635,19 +709,63 @@ func (s *apiServer) recordSandboxProxyBindingInjected(r *http.Request, source, h
 		"aileron.proxy.source":          source,
 		"aileron.proxy.decision":        "binding_injected",
 		"aileron.proxy.method":          r.Method,
-		"aileron.proxy.binding.host":    hostPattern,
-		"aileron.proxy.binding.scheme":  scheme,
+		"aileron.proxy.binding.host":    hb.HostPattern,
+		"aileron.proxy.binding.scheme":  hb.Scheme,
 		"aileron.proxy.upstream.scheme": upstream.Scheme,
 		"aileron.proxy.upstream.host":   upstream.Host,
 		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
 		"aileron.proxy.upstream.status": upstreamStatus,
 	}
+	addHostBindingTrustIdentity(payload, hb)
 	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
 		payload["aileron.session.id"] = sessionID
 	}
 	return s.auditRecorder.RecordSuccess(
 		r.Context(),
 		model.EventTypeSandboxProxyBindingInjected,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
+}
+
+// recordSandboxProxyTrustDenied emits sandbox.proxy.trust_denied for a
+// bundled-CLI egress request that matched a host binding carrying a declared
+// per-step trust contract and failed the trust gate at the injection point
+// (#1735). The request was denied BEFORE any credential was resolved or
+// injected and returned a 403 to the in-container client; it did NOT fall
+// through to passthrough. The payload mirrors the binding_injected shape
+// (boundary/mediation/source/decision/method/binding.host/binding.scheme/
+// upstream.*), adds the stable reject reason, the declared trust effect, and
+// the optional plan/step/tool identity triple. It never carries the
+// credential bytes, the credential-ref, the AllowedHosts values, or an
+// upstream query string. nil-recorder safe like its siblings.
+func (s *apiServer) recordSandboxProxyTrustDenied(r *http.Request, source string, hb binding.HostBinding, upstream *url.URL, reason string) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
+		"aileron.proxy.source":          source,
+		"aileron.proxy.decision":        "trust_denied",
+		"aileron.proxy.reject_reason":   reason,
+		"aileron.proxy.method":          r.Method,
+		"aileron.proxy.binding.host":    hb.HostPattern,
+		"aileron.proxy.binding.scheme":  hb.Scheme,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+	}
+	addHostBindingTrustIdentity(payload, hb)
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyTrustDenied,
 		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
 		payload,
 	)

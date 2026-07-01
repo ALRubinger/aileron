@@ -162,6 +162,25 @@ type Entry struct {
 	// SigV4 credential scope, required only for the sigv4-resign scheme. It
 	// is never inferred from the host.
 	Service string `yaml:"service"`
+
+	// AllowedHosts is the optional per-binding trust-contract host
+	// allowlist. Empty means unconstrained: egress on the bound host stays
+	// scoped only to [Entry.Host], exactly as before. A non-empty list gates
+	// egress at the proxy injection point (#1735): the upstream host must
+	// match an entry (host or host:port form) or the request is denied and
+	// audited. Non-secret. Maps onto internal/binding.HostBinding via
+	// [binding.WithTrustContract].
+	AllowedHosts []string `yaml:"allowed_hosts"`
+
+	// Effect is the optional per-binding trust-contract effect, one of
+	// internal/binding.HostBindingEffects (read | write | delete | spend |
+	// external-send), mirroring the runtime's effect vocabulary. Empty means
+	// no effect gate (unconstrained). A `read` effect constrains egress on
+	// the bound host to HTTP-safe methods at the proxy (#1735); a write-class
+	// effect admits all methods (the proxy cannot distinguish write from
+	// delete/spend/external-send on the wire). An unknown effect is a
+	// load-time error (fail closed). Non-secret.
+	Effect string `yaml:"effect"`
 }
 
 // Sentinel is the per-binding sentinel-swap placeholder declaration. It makes

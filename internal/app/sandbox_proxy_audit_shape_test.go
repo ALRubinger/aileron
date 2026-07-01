@@ -12,9 +12,23 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 )
+
+// mustAuditShapeBinding constructs a minimal host binding for the audit
+// shape tests, optionally threading trust-scope/identity construction
+// options so a payload carrying the identity triple or effect can be
+// exercised.
+func mustAuditShapeBinding(t *testing.T, host, scheme string, opts ...binding.HostBindingOption) binding.HostBinding {
+	t.Helper()
+	hb, err := binding.NewHostBinding(host, "api_key/github/octocat", scheme, opts...)
+	if err != nil {
+		t.Fatalf("NewHostBinding: %v", err)
+	}
+	return hb
+}
 
 // sandboxProxyEventShape describes the documented field contract for a
 // sandbox proxy audit event family. Required fields must always be
@@ -209,6 +223,37 @@ var (
 		},
 		allowedFields: []string{
 			"aileron.session.id",
+			"aileron.trust.effect",
+			"aileron.plan.id",
+			"aileron.step.id",
+			"aileron.tool.name",
+		},
+		forbiddenSubstrs: []string{
+			"lin_secret", "Bearer ", "Authorization",
+		},
+	}
+
+	sandboxProxyTrustDeniedShape = sandboxProxyEventShape{
+		eventType: "sandbox.proxy.trust_denied",
+		requiredFields: []string{
+			"aileron.proxy.boundary",
+			"aileron.proxy.mediation",
+			"aileron.proxy.source",
+			"aileron.proxy.decision",
+			"aileron.proxy.reject_reason",
+			"aileron.proxy.method",
+			"aileron.proxy.binding.host",
+			"aileron.proxy.binding.scheme",
+			"aileron.proxy.upstream.scheme",
+			"aileron.proxy.upstream.host",
+			"aileron.proxy.upstream.path",
+		},
+		allowedFields: []string{
+			"aileron.session.id",
+			"aileron.trust.effect",
+			"aileron.plan.id",
+			"aileron.step.id",
+			"aileron.tool.name",
 		},
 		forbiddenSubstrs: []string{
 			"lin_secret", "Bearer ", "Authorization",
@@ -348,7 +393,7 @@ func TestSandboxProxyAuditShape_SandboxProxyBindingInjectedConforms(t *testing.T
 	req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
 	req.Method = http.MethodGet
 	upstream, _ := url.Parse("https://api.example.test/v1/resource")
-	srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200)
+	srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, mustAuditShapeBinding(t, "*.example.test", "bearer"), upstream, 200)
 	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
@@ -357,6 +402,107 @@ func TestSandboxProxyAuditShape_SandboxProxyBindingInjectedConforms(t *testing.T
 		t.Fatalf("event type = %q", events[0].EventType)
 	}
 	sandboxProxyBindingInjectedShape.validate(t, events[0].Payload)
+}
+
+// TestSandboxProxyAuditShape_BindingInjectedCarriesTrustIdentity asserts a
+// binding_injected payload surfaces the declared trust effect and the
+// plan/step/tool identity triple when the matched binding carries them,
+// without leaking the AllowedHosts values or the credential-ref.
+func TestSandboxProxyAuditShape_BindingInjectedCarriesTrustIdentity(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-shape-identity" }),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
+	upstream, _ := url.Parse("https://api.example.test/v1/resource")
+	hb := mustAuditShapeBinding(t, "*.example.test", "bearer",
+		binding.WithTrustContract("write", []string{"secret-host.example.test"}),
+		binding.WithToolIdentity("plan-7", "step-3", "linear.create_issue"),
+	)
+	srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200)
+	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	p := events[0].Payload
+	sandboxProxyBindingInjectedShape.validate(t, p)
+	if got := p["aileron.trust.effect"]; got != "write" {
+		t.Errorf("trust.effect = %v, want write", got)
+	}
+	if got := p["aileron.plan.id"]; got != "plan-7" {
+		t.Errorf("plan.id = %v, want plan-7", got)
+	}
+	if got := p["aileron.step.id"]; got != "step-3" {
+		t.Errorf("step.id = %v, want step-3", got)
+	}
+	if got := p["aileron.tool.name"]; got != "linear.create_issue" {
+		t.Errorf("tool.name = %v, want linear.create_issue", got)
+	}
+	payloadJSON, _ := json.Marshal(p)
+	// The AllowedHosts values and the credential-ref must never appear.
+	for _, forbidden := range []string{"secret-host.example.test", "api_key/github/octocat"} {
+		if strings.Contains(string(payloadJSON), forbidden) {
+			t.Errorf("payload leaked %q: %s", forbidden, payloadJSON)
+		}
+	}
+}
+
+// TestSandboxProxyAuditShape_TrustDeniedConforms pins the
+// sandbox.proxy.trust_denied family: a denial at the trust gate emits the
+// documented shape carrying the reject reason, the declared effect, and the
+// identity triple, with no AllowedHosts value or credential-ref.
+func TestSandboxProxyAuditShape_TrustDeniedConforms(t *testing.T) {
+	for _, reason := range []string{trustRejectHostNotAllowed, trustRejectEffectNotAllowed} {
+		t.Run(reason, func(t *testing.T) {
+			auditStore := audit.NewMemStore()
+			srv := &apiServer{
+				auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-shape-denied" }),
+			}
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
+			upstream, _ := url.Parse("https://api.example.test/v1/resource")
+			hb := mustAuditShapeBinding(t, "*.example.test", "bearer",
+				binding.WithTrustContract("read", []string{"allowed.example.test"}),
+				binding.WithToolIdentity("plan-7", "step-3", "linear.create_issue"),
+			)
+			srv.recordSandboxProxyTrustDenied(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, reason)
+			events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if events[0].EventType != model.EventTypeSandboxProxyTrustDenied {
+				t.Fatalf("event type = %q", events[0].EventType)
+			}
+			p := events[0].Payload
+			sandboxProxyTrustDeniedShape.validate(t, p)
+			if got := p["aileron.proxy.reject_reason"]; got != reason {
+				t.Errorf("reject_reason = %v, want %q", got, reason)
+			}
+			payloadJSON, _ := json.Marshal(p)
+			for _, forbidden := range []string{"allowed.example.test", "api_key/github/octocat"} {
+				if strings.Contains(string(payloadJSON), forbidden) {
+					t.Errorf("payload leaked %q: %s", forbidden, payloadJSON)
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxProxyAuditShape_TrustDeniedNilRecorderIsIDSafe(t *testing.T) {
+	upstream, _ := url.Parse("https://api.example.test/v1/resource")
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	hb := mustAuditShapeBinding(t, "*.example.test", "bearer")
+
+	srv := &apiServer{newID: func() string { return "minted-id" }}
+	if got := srv.recordSandboxProxyTrustDenied(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, trustRejectHostNotAllowed); got != "minted-id" {
+		t.Errorf("audit id = %q, want minted-id", got)
+	}
+
+	srvNoID := &apiServer{}
+	if got := srvNoID.recordSandboxProxyTrustDenied(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, trustRejectHostNotAllowed); strings.TrimSpace(got) == "" {
+		t.Error("audit id must be non-empty even with no recorder and no newID")
+	}
 }
 
 func TestSandboxProxyAuditShape_ForeignTokenNotSwappedConforms(t *testing.T) {
@@ -398,15 +544,17 @@ func TestSandboxProxyAuditShape_BindingInjectedNilRecorderIsIDSafe(t *testing.T)
 	upstream, _ := url.Parse("https://api.example.test/v1/resource")
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 
+	hb := mustAuditShapeBinding(t, "*.example.test", "bearer")
+
 	// With newID wired, the recorder mints from it.
 	srv := &apiServer{newID: func() string { return "minted-id" }}
-	if got := srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200); got != "minted-id" {
+	if got := srv.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200); got != "minted-id" {
 		t.Errorf("audit id = %q, want minted-id", got)
 	}
 
 	// With no newID and no recorder, it falls back to the default ID fn.
 	srvNoID := &apiServer{}
-	if got := srvNoID.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, "*.example.test", "bearer", upstream, 200); strings.TrimSpace(got) == "" {
+	if got := srvNoID.recordSandboxProxyBindingInjected(req, sandboxProxySourceTransparentConnectTLS, hb, upstream, 200); strings.TrimSpace(got) == "" {
 		t.Error("audit id must be non-empty even with no recorder and no newID")
 	}
 }
@@ -524,6 +672,14 @@ func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
 	}
 	const fqn = "github://acme/aileron-connector-linear"
 
+	// A binding whose non-secret trust scope carries credential-shaped
+	// substrings: the AllowedHosts and credential-ref must never echo into a
+	// payload.
+	trustHB := mustAuditShapeBinding(t, "*.example.test", "bearer",
+		binding.WithTrustContract("read", []string{"secret." + linSecret + ".example.test"}),
+		binding.WithToolIdentity("plan-leak", "step-leak", "tool-leak"),
+	)
+
 	proxyReq := poison(httptest.NewRequest(http.MethodConnect, "/", nil))
 	srv.recordSandboxProxyProxied(proxyReq, sandboxProxySourceTransparentConnectTLS, fqn, "linear", "GET", upstream, op, 200)
 	srv.recordSandboxProxyRejected(proxyReq, sandboxProxySourceTransparentConnectTLS, fqn, "linear", "GET", upstream, op, "upstream_transport_failed")
@@ -531,6 +687,8 @@ func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
 	srv.recordSandboxProxyPassthrough(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, 200)
 	srv.recordSandboxProxyUpgrade(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, http.StatusSwitchingProtocols)
 	srv.recordConnectorOperationRejected(proxyReq, fqn, "linear", op)
+	srv.recordSandboxProxyBindingInjected(proxyReq, sandboxProxySourceTransparentConnectTLS, trustHB, upstream, 200)
+	srv.recordSandboxProxyTrustDenied(proxyReq, sandboxProxySourceTransparentConnectTLS, trustHB, upstream, trustRejectHostNotAllowed)
 
 	mode := "docker"
 	disabledBody, err := json.Marshal(api.SandboxProxyDisabledRequest{
@@ -545,8 +703,8 @@ func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
 	srv.RecordSandboxProxyDisabled(httptest.NewRecorder(), disabledReq)
 
 	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
-	if len(events) != 7 {
-		t.Fatalf("events = %d, want 7 (one per emitter)", len(events))
+	if len(events) != 9 {
+		t.Fatalf("events = %d, want 9 (one per emitter)", len(events))
 	}
 	for _, ev := range events {
 		payloadJSON, _ := json.Marshal(ev.Payload)

@@ -167,6 +167,59 @@ func TestToHostBinding_InjectCarriesNoSentinel(t *testing.T) {
 	}
 }
 
+func TestToHostBinding_TrustContractCarriesScope(t *testing.T) {
+	e := Entry{
+		Host:          "api.example.com",
+		CredentialRef: "user/example",
+		Scheme:        binding.SchemeBearer,
+		Effect:        "read",
+		AllowedHosts:  []string{"API.Example.com", "other.example.com"},
+	}
+	hb, err := e.ToHostBinding()
+	if err != nil {
+		t.Fatalf("ToHostBinding: %v", err)
+	}
+	if hb.Effect != binding.EffectRead {
+		t.Errorf("effect = %q, want read", hb.Effect)
+	}
+	want := []string{"api.example.com", "other.example.com"}
+	if len(hb.AllowedHosts) != len(want) {
+		t.Fatalf("allowed hosts = %v, want %v", hb.AllowedHosts, want)
+	}
+	for i := range want {
+		if hb.AllowedHosts[i] != want[i] {
+			t.Errorf("allowed host[%d] = %q, want %q", i, hb.AllowedHosts[i], want[i])
+		}
+	}
+}
+
+func TestToHostBinding_EmptyTrustScopeIsUnconstrained(t *testing.T) {
+	e := Entry{
+		Host:          "api.example.com",
+		CredentialRef: "user/example",
+		Scheme:        binding.SchemeBearer,
+	}
+	hb, err := e.ToHostBinding()
+	if err != nil {
+		t.Fatalf("ToHostBinding: %v", err)
+	}
+	if hb.Effect != "" || len(hb.AllowedHosts) != 0 {
+		t.Errorf("scope = (effect %q, hosts %v), want unconstrained", hb.Effect, hb.AllowedHosts)
+	}
+}
+
+func TestToHostBinding_UnknownEffectErrors(t *testing.T) {
+	e := Entry{
+		Host:          "api.example.com",
+		CredentialRef: "user/example",
+		Scheme:        binding.SchemeBearer,
+		Effect:        "mutate",
+	}
+	if _, err := e.ToHostBinding(); err == nil {
+		t.Fatal("ToHostBinding with unknown effect = nil error, want error")
+	}
+}
+
 // An empty entry slice produces a nil table, which internal/binding treats
 // as a valid empty table whose Match always misses (passthrough preserved).
 func TestToHostBindings_EmptyIsNilPassthrough(t *testing.T) {

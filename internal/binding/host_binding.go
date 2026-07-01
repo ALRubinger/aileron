@@ -55,6 +55,51 @@ const SchemeQueryParam = "query-param"
 // (X-Amz-Security-Token) are a declared follow-up, not supported here.
 const SchemeSigV4Resign = "sigv4-resign"
 
+// HostBindingEffects is the closed set of trust-contract effect strings a
+// host binding may declare. It mirrors the runtime's effect vocabulary,
+// naming both `runtime.Effect` and `runtime.TrustContract` as the source
+// of truth so the two cannot silently diverge: the manifest `trustContract`
+// block declares an effect via `runtime.Effect`, the freeze/launch emit
+// path copies it onto a per-step [HostBinding], and the proxy enforces it.
+//
+// The `binding` package cannot import `runtime` (layering), so the set is
+// redefined here as plain strings with this cross-reference. A binding that
+// names an effect outside this set is a configuration error caught at
+// construction rather than a silent unconstrained egress at the boundary.
+var HostBindingEffects = map[string]struct{}{
+	EffectRead:         {},
+	EffectWrite:        {},
+	EffectDelete:       {},
+	EffectSpend:        {},
+	EffectExternalSend: {},
+}
+
+// EffectRead is the read-class trust-contract effect. It mirrors
+// `runtime.EffectRead`. A binding declaring it constrains egress on the
+// bound host to HTTP-safe methods (GET/HEAD/OPTIONS): a mutating method is
+// denied at the proxy injection point.
+const EffectRead = "read"
+
+// EffectWrite is the write-class trust-contract effect. It mirrors
+// `runtime.EffectWrite`. A binding declaring it (or any other write-class
+// effect below) admits every HTTP method at the proxy: the proxy sees only
+// method + host and cannot distinguish write from delete/spend/external-send
+// on the wire, so finer effect narrowing is enforced upstream at the runtime
+// action-call approval seam, not here.
+const EffectWrite = "write"
+
+// EffectDelete mirrors `runtime.EffectDelete`. It is a write-class effect
+// at the proxy seam (see [EffectWrite]).
+const EffectDelete = "delete"
+
+// EffectSpend mirrors `runtime.EffectSpend`. It is a write-class effect at
+// the proxy seam (see [EffectWrite]).
+const EffectSpend = "spend"
+
+// EffectExternalSend mirrors `runtime.EffectExternalSend`. It is a
+// write-class effect at the proxy seam (see [EffectWrite]).
+const EffectExternalSend = "external-send"
+
 // EmitMechanism names how the in-container client is made to emit a
 // request the proxy can seal at egress (ADR-0019). It is orthogonal to
 // [HostBinding.Scheme], which is how the proxy injects the credential
@@ -182,6 +227,38 @@ type HostBinding struct {
 	// [EmitMechanismSentinelSwap], forbidden for [EmitMechanismInject]. Set
 	// via [WithSentinel].
 	SentinelEnv string
+
+	// Effect is the per-step trust-contract effect the binding was frozen
+	// with, one of [HostBindingEffects] (mirroring `runtime.Effect`; see
+	// [HostBindingEffects] for the source-of-truth cross-reference). The
+	// zero value ("") means the binding declares no effect and the proxy
+	// applies no effect gate (unconstrained, today's behavior). A non-empty
+	// value gates egress at the injection point: [EffectRead] admits only
+	// HTTP-safe methods; every write-class value admits all methods. Set via
+	// [WithTrustContract]. It is a non-secret param, never the credential
+	// bytes.
+	Effect string
+
+	// AllowedHosts is the per-step trust-contract host allowlist the
+	// binding was frozen with (mirroring `runtime.TrustContract.Hosts`). An
+	// empty slice means the binding declares no allowlist and egress stays
+	// scoped only to the matched [HostBinding.HostPattern] (unconstrained by
+	// contract, today's behavior). A non-empty allowlist gates egress at the
+	// injection point: the upstream host must match an entry or the request
+	// is denied. Entries are trimmed and lowercased at construction (host or
+	// host:port form). Set via [WithTrustContract]. Non-secret.
+	AllowedHosts []string
+
+	// PlanID, StepID, and ToolName are the audit-addressing identity triple
+	// the freeze/launch emit path stamps onto a per-step binding so a
+	// binding_injected or trust_denied audit record can name the flight-plan
+	// plan, step, and tool that drove the egress. All three are optional and
+	// non-secret; empty values are omitted from the audit payload. They are
+	// audit addressing, not committed descriptor config, so they ride only on
+	// the runtime-emitted binding. Set via [WithToolIdentity].
+	PlanID   string
+	StepID   string
+	ToolName string
 }
 
 // userRefRe matches the user-level credential namespace `user/<service>`
@@ -267,6 +344,56 @@ func WithSentinel(value, env string) HostBindingOption {
 	}
 }
 
+// WithTrustContract sets the per-step trust scope [HostBinding.Effect] and
+// [HostBinding.AllowedHosts] the proxy enforces at the injection point. Both
+// are optional: an empty effect applies no effect gate and an empty
+// allowedHosts applies no host allowlist, so a binding constructed without
+// this option (or with empty values) stays unconstrained-by-contract and
+// injects exactly as before. A non-empty effect must be a member of
+// [HostBindingEffects] or construction fails closed. allowedHosts entries
+// are trimmed and lowercased. The values are non-secret; they name the
+// scope the manifest `trustContract` declared, never the credential bytes.
+func WithTrustContract(effect string, allowedHosts []string) HostBindingOption {
+	return func(hb *HostBinding) {
+		hb.Effect = strings.TrimSpace(strings.ToLower(effect))
+		hb.AllowedHosts = normalizeAllowedHosts(allowedHosts)
+	}
+}
+
+// WithToolIdentity sets the non-secret audit-addressing triple
+// [HostBinding.PlanID], [HostBinding.StepID], and [HostBinding.ToolName] the
+// freeze/launch emit path stamps onto a per-step binding. All three are
+// optional; empty values are omitted from the audit payload. They are audit
+// addressing, never the credential bytes.
+func WithToolIdentity(planID, stepID, toolName string) HostBindingOption {
+	return func(hb *HostBinding) {
+		hb.PlanID = strings.TrimSpace(planID)
+		hb.StepID = strings.TrimSpace(stepID)
+		hb.ToolName = strings.TrimSpace(toolName)
+	}
+}
+
+// normalizeAllowedHosts trims and lowercases each allowlist entry, dropping
+// empties. It reuses the schema's host vocabulary (host or host:port form)
+// so the allowlist and the matcher agree on casing.
+func normalizeAllowedHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(strings.ToLower(h))
+		if h == "" {
+			continue
+		}
+		out = append(out, h)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // NewHostBinding validates and constructs a HostBinding. It rejects an
 // empty or malformed host pattern, a credential-ref that is neither a
 // connector binding name (`<kind>/<service>/<identity>`) nor a
@@ -313,6 +440,11 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	}
 	if hb.EmitMechanism == EmitMechanismInject && (hb.SentinelValue != "" || hb.SentinelEnv != "") {
 		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism inject must not carry a sentinel (WithSentinel)")
+	}
+	if hb.Effect != "" {
+		if _, ok := HostBindingEffects[hb.Effect]; !ok {
+			return HostBinding{}, fmt.Errorf("host binding: unknown trust-contract effect %q", hb.Effect)
+		}
 	}
 	return hb, nil
 }
