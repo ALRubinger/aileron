@@ -379,4 +379,12 @@ const (
 	EventTypeVaultUserCredentialRead   EventType = "vault.user.credential.read"
 	EventTypeVaultUserCredentialWrite  EventType = "vault.user.credential.write"
 	EventTypeVaultUserCredentialDelete EventType = "vault.user.credential.delete"
+
+	// Flight-Plan launch provenance events (#1751). The in-process launch
+	// runtime's audit sink emits one per-action record (ActionRef set) and
+	// one per-launch summary record so `aileron audit list` / `aileron audit
+	// show` surface launch provenance. Actor is {type: service, id:
+	// "flightplan-launch"}.
+	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
+	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
 )

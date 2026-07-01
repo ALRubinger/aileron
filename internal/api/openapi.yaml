@@ -2323,6 +2323,69 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Audit]
+      summary: Append an audit event
+      description: |
+        Appends a single audit event to the ADR-0010 recorder and
+        returns the minted `audit_id`. This is the write side of the
+        audit trail: the daemon is the single writer and the single
+        id-minter, so clients (e.g. the in-process Flight-Plan launch
+        runtime, which emits per-action and per-launch records) POST
+        here rather than writing the store directly.
+
+        The endpoint is append-only. Each POST mints a new immutable
+        event; there is no update or delete. It is therefore
+        inherently non-idempotent — replaying the same body records a
+        distinct event with a fresh `audit_id` — and carries no
+        `[approval]` gate. The ADR-0009 approval convention governs
+        connector *action* writes declared in `action.md`; an internal
+        audit append is gated by the auth boundary alone (Bearer token,
+        standard 401/403 responses), which is the correct control here.
+
+        `timestamp` is optional and server-authoritative in v1. The
+        recorder stamps the receipt time it commits the event, which is
+        the defensible integrity choice: an audit store recording *when
+        it committed* the event is verifiable, whereas a client-asserted
+        time is not, and the in-process CLI runs on the same host
+        near-simultaneously so there is no skew to preserve. The field
+        is accepted for forward-compatibility (mirroring how Sync
+        accepts `auto_install` without acting on it); the v1 CLI does
+        not send it and the recorder does not honor it.
+      operationId: createAudit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuditIngestRequest"
+      responses:
+        "201":
+          description: The event was appended; body carries the minted id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditIngestResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: |
+            The audit subsystem is not configured, so the event cannot
+            be persisted. A write that must persist cannot be silently
+            acknowledged: returning 201 without persistence would
+            violate the append/single-writer contract (the event would
+            never appear in `GET /v1/audit`). The server understood the
+            request but cannot satisfy it. In production both the audit
+            store and recorder are always wired, so this is a
+            defensive/test-only path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/audit/{audit_id}:
     get:
@@ -4449,6 +4512,43 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AuditEvent"
+
+    AuditIngestRequest:
+      type: object
+      required: [event_type, actor, payload]
+      description: |
+        Request body for `POST /v1/audit`. Mirrors the AuditEvent
+        shape a client wants recorded, minus the server-minted
+        `audit_id`. `timestamp` is optional and server-authoritative:
+        the recorder stamps commit time and does not honor a
+        client-asserted value in v1.
+      properties:
+        event_type:
+          type: string
+          description: |
+            Discriminator for the payload shape (e.g.
+            `flightplan.launch.action`, `flightplan.launch`).
+        actor:
+          $ref: "#/components/schemas/ActorRef"
+        payload:
+          type: object
+          additionalProperties: true
+          description: Event-shaped payload recorded verbatim.
+        timestamp:
+          type: string
+          format: date-time
+          description: |
+            Optional, accepted for forward-compatibility. Ignored in
+            v1; the recorder stamps the server clock at commit time.
+
+    AuditIngestResponse:
+      type: object
+      required: [audit_id]
+      description: Response for a successful `POST /v1/audit` append.
+      properties:
+        audit_id:
+          type: string
+          description: The id the recorder minted for the appended event.
 
     StatusResponse:
       type: object

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
+	"github.com/ALRubinger/aileron/internal/model"
 )
 
 // The Launch SPIs are wired here from package-level seams so CLI tests
@@ -21,7 +22,7 @@ import (
 // returns the daemon-backed implementation in production.
 var newLaunchDispatcher = func() runtime.ActionDispatcher { return daemonDispatcher{} }
 var newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
-var newLaunchAuditSink = func() runtime.AuditSink { return stdoutAuditSink{} }
+var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink { return daemonAuditSink{stderr: stderr} }
 
 // newLaunchImageRunner returns the production image runner that boots the
 // verified pinned rung-1/rung-2 image and runs the plan inside it (#1731). It
@@ -104,7 +105,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		Inputs:     runtime.LaunchArgs(inputs.values),
 		Dispatcher: newLaunchDispatcher(),
 		Approver:   newLaunchApprover(),
-		Audit:      newLaunchAuditSink(),
+		Audit:      newLaunchAuditSink(stderr),
 		// Seam is nil in v1 production: the LLM seam is unwired, so a plan with
 		// an llm-seam step errors unless a provider is supplied. Tests inject a
 		// deterministic seam through launchSeamForTest.
@@ -245,15 +246,101 @@ func (daemonApprover) Approve(_ context.Context, _ runtime.ApprovalRequest) (run
 	return runtime.Decision{Approved: true}, nil
 }
 
-// stdoutAuditSink is a minimal launch audit sink. The customer-owned audit
-// store is the daemon's configured sink; this CLI-side sink records a local
-// summary id so the launch surfaces an audit count. It is replaced by a
-// daemon-backed recorder when the daemon exposes a launch-audit endpoint.
-type stdoutAuditSink struct{}
+// daemonAuditSink persists each launch audit record to the daemon's audit
+// trail via POST /v1/audit, so launch provenance surfaces in
+// `aileron audit list` / `aileron audit show`. The daemon is the single
+// writer and single id-minter; this sink translates the runtime's
+// AuditRecord into the ingest request and threads the minted audit_id back
+// as the Record return value.
+//
+// The AuditSink SPI's Record returns only a string, so a POST failure is
+// best-effort: it logs to stderr and returns "" (the launch continues and
+// simply surfaces a lower Audit-records count). This keeps launch
+// provenance a companion to the run rather than a hard dependency, matching
+// the recorder's own best-effort append discipline (ADR-0010).
+type daemonAuditSink struct {
+	stderr io.Writer
+}
 
-func (stdoutAuditSink) Record(_ context.Context, rec runtime.AuditRecord) string {
+func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) string {
+	eventType := string(model.EventTypeFlightPlanLaunch)
 	if rec.ActionRef != "" {
-		return "launch-audit-" + rec.ActionRef
+		eventType = string(model.EventTypeFlightPlanLaunchAction)
 	}
-	return "launch-audit-summary"
+
+	payload := map[string]any{}
+	if rec.ActionRef != "" {
+		payload["actionRef"] = rec.ActionRef
+	}
+	if len(rec.Fields) > 0 {
+		payload["fields"] = rec.Fields
+	}
+	if rec.Sink != "" {
+		payload["sink"] = rec.Sink
+	}
+
+	body, err := json.Marshal(auditIngestRequest{
+		EventType: eventType,
+		Actor:     auditIngestActor{Type: string(model.ActorTypeService), ID: "flightplan-launch"},
+		Payload:   payload,
+	})
+	if err != nil {
+		s.logErr("encode audit request: %v", err)
+		return ""
+	}
+
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		s.logErr("resolve daemon URL: %v", err)
+		return ""
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/audit", bytes.NewReader(body))
+	if err != nil {
+		s.logErr("build audit request: %v", err)
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	setDaemonAuthorization(req)
+	resp, err := actionsHTTPClient.Do(req)
+	if err != nil {
+		s.logErr("post audit event: %v", err)
+		return ""
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated {
+		s.logErr("daemon returned %d for audit append: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return ""
+	}
+	var out auditIngestResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		s.logErr("decode audit response: %v", err)
+		return ""
+	}
+	return out.AuditID
+}
+
+func (s daemonAuditSink) logErr(format string, args ...any) {
+	if s.stderr == nil {
+		return
+	}
+	fmt.Fprintf(s.stderr, "warning: launch audit not recorded: "+format+"\n", args...)
+}
+
+// auditIngestRequest mirrors the daemon's AuditIngestRequest schema
+// (POST /v1/audit). Kept local to the CLI so the launch path does not
+// import the generated server types.
+type auditIngestRequest struct {
+	EventType string           `json:"event_type"`
+	Actor     auditIngestActor `json:"actor"`
+	Payload   map[string]any   `json:"payload"`
+}
+
+type auditIngestActor struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+type auditIngestResponse struct {
+	AuditID string `json:"audit_id"`
 }
