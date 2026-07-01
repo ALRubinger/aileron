@@ -1,6 +1,10 @@
 package runtime
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+	"html/template"
+)
 
 // Transform is one deterministic, no-LLM transform. It reshapes data already
 // in the graph and has NO host, network, credential, or LLM surface. A
@@ -30,6 +34,7 @@ func NewTransformRegistry() *TransformRegistry {
 	r := &TransformRegistry{byName: map[string]Transform{}}
 	r.byName["identity"] = identityTransform
 	r.byName["passthrough"] = identityTransform
+	r.byName["html-render"] = htmlRenderTransform
 	return r
 }
 
@@ -39,20 +44,27 @@ func (r *TransformRegistry) Register(name string, t Transform) {
 	r.byName[name] = t
 }
 
-// run executes the transform for a step. v1 transform steps do not name a
-// transform in the manifest schema (the transformStep shape carries no
-// transform name), so the runtime applies the registry's `identity` transform
-// by default: it surfaces each binding under the matching declared output
-// name, and for a single-output step with a single binding it maps that
-// binding to the output. A host may override `identity` (or register named
-// transforms) before a run to supply deterministic reshaping; the registry is
-// the single, LLM-free transform vocabulary. This keeps the worked example
-// deterministic and LLM-free while a richer named-transform vocabulary lands
-// later.
+// run executes the transform for a step. A transform step names its transform
+// via step.Transform; an unnamed step falls back to the registry's `identity`
+// transform (the v1 default), which surfaces each binding under the matching
+// declared output name, and for a single-output step with a single binding maps
+// that binding to the output. A named transform is looked up in the closed,
+// LLM-free registry; an unknown name is a hard error (the seam discipline keeps
+// the vocabulary closed rather than silently falling back). A host may override
+// `identity` or register additional deterministic transforms before a run.
 func (r *TransformRegistry) run(step Step, bindings map[string]any) (map[string]any, error) {
-	t, ok := r.byName["identity"]
+	name := step.Transform
+	if name == "" {
+		name = "identity"
+	}
+	t, ok := r.byName[name]
 	if !ok {
-		t = identityTransform
+		if name == "identity" {
+			// The identity default is always available even if a host cleared it.
+			t = identityTransform
+		} else {
+			return nil, fmt.Errorf("flightplan: step %q names transform %q, which is not registered", step.ID, name)
+		}
 	}
 	return t(bindings, step.Outputs)
 }
@@ -78,4 +90,80 @@ func identityTransform(bindings map[string]any, outputs []string) (map[string]an
 		out[name] = deepCopyValue(any(bindings))
 	}
 	return out, nil
+}
+
+// htmlRenderTemplateBinding is the binding name that designates the HTML
+// template source for the html-render transform. Every other binding is a
+// named JSON dataset injected into the template context under its binding name.
+const htmlRenderTemplateBinding = "template"
+
+// htmlRenderPathBinding is an OPTIONAL binding naming the advisory file-map
+// path. Materialization writes to the declared output's path (the file-map path
+// is advisory transport detail, #1519), so this binding only travels through
+// to the emitted entry and never decides where the artifact lands.
+const htmlRenderPathBinding = "path"
+
+// htmlRenderTransform renders a deterministic, auto-escaping HTML report from a
+// designated `template` binding plus named JSON data bindings, emitting a single
+// file-map entry {path, mimeType:"text/html", encoding:"utf-8", content} that
+// materialize.go consumes unchanged (decodeCarrier keys on `content`) to produce
+// a sealed, content-addressed HTML artifact.
+//
+// It is a pure function of its bindings: it reaches no network and no clock, and
+// Go's html/template ranges over map keys in sorted order, so the same bindings
+// always render byte-identical output. html/template auto-escapes every
+// interpolated value, so injected JSON datasets cannot break out of the HTML
+// context. This keeps the transform inside the structural no-LLM guarantee: it
+// holds no host, network, credential, or LLM surface.
+func htmlRenderTransform(bindings map[string]any, outputs []string) (map[string]any, error) {
+	if len(outputs) != 1 {
+		return nil, fmt.Errorf("html-render declares %d outputs; it produces exactly one file-map entry", len(outputs))
+	}
+
+	tmplRaw, ok := bindings[htmlRenderTemplateBinding]
+	if !ok {
+		return nil, fmt.Errorf("html-render requires a %q binding naming the HTML template source", htmlRenderTemplateBinding)
+	}
+	tmplStr, ok := tmplRaw.(string)
+	if !ok {
+		return nil, fmt.Errorf("html-render %q binding must be a string template, got %T", htmlRenderTemplateBinding, tmplRaw)
+	}
+
+	// The advisory transport path, when supplied, is a string. Materialization
+	// ignores it in favor of the declared output path.
+	var path string
+	if raw, present := bindings[htmlRenderPathBinding]; present {
+		s, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("html-render %q binding must be a string, got %T", htmlRenderPathBinding, raw)
+		}
+		path = s
+	}
+
+	// The template context is every remaining binding, keyed by its binding
+	// name, so a template reads a dataset as `.<bindingName>`.
+	data := make(map[string]any, len(bindings))
+	for name, v := range bindings {
+		if name == htmlRenderTemplateBinding || name == htmlRenderPathBinding {
+			continue
+		}
+		data[name] = v
+	}
+
+	tmpl, err := template.New("html-render").Parse(tmplStr)
+	if err != nil {
+		return nil, fmt.Errorf("html-render parse template: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("html-render execute template: %w", err)
+	}
+
+	entry := map[string]any{
+		"path":     path,
+		"mimeType": "text/html",
+		"encoding": string(EncodingUTF8),
+		"content":  buf.String(),
+	}
+	return map[string]any{outputs[0]: entry}, nil
 }

@@ -534,6 +534,12 @@
           "const": "transform",
           "description": "Deterministic no-LLM logic over data already in the graph."
         },
+        "transform": {
+          "type": "string",
+          "$comment": "`transform` names a member of the runtime's closed, deterministic transform vocabulary. It is NOT an llmMarker: freeze/lint.go's llmMarkers set (llm, model, prompt, completion, inference) does not include `transform`, and the registry it selects from contains only pure, no-LLM transforms, so the structural no-LLM guarantee holds. Only a transform step may carry this key; the closed additionalProperties:false shapes of action-call and llm-seam forbid it there.",
+          "description": "OPTIONAL. Names the deterministic transform to apply from the runtime's closed transform vocabulary (for example `html-render`). Absent means the identity passthrough, the v1 default, so a step that reshapes a single binding needs no name. A named transform is a pure function of the step's resolved bindings with no host, network, credential, or LLM surface.",
+          "minLength": 1
+        },
         "bindings": {
           "type": "object",
           "description": "The named inputs to the transform. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",

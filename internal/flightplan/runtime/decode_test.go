@@ -183,6 +183,54 @@ func TestDecode_UnknownStepKind(t *testing.T) {
 	}
 }
 
+func TestDecode_TransformNameCarried(t *testing.T) {
+	m := rawManifest(
+		[]any{litInput("t", "string", "<b>{{.d}}</b>")},
+		nil,
+		[]any{step(map[string]any{
+			"id": "render", "kind": "transform", "transform": "html-render",
+			"bindings": map[string]any{"template": "inputs.t"},
+			"outputs":  []any{"report"},
+		})},
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if p.Steps[0].Transform != "html-render" {
+		t.Errorf("transform name = %q, want html-render", p.Steps[0].Transform)
+	}
+}
+
+func TestDecode_TransformNameOnActionCallRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "call", "kind": "action-call",
+			"actionRef": "aileron:metrics.query_series",
+			"transform": "html-render",
+			"outputs":   []any{"x"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an action-call naming a transform must be refused")
+	} else if !strings.Contains(err.Error(), "transform") {
+		t.Errorf("error = %v, want a transform-name rejection", err)
+	}
+}
+
+func TestDecode_TransformNameOnLLMSeamRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "seam", "kind": "llm-seam",
+			"transform": "html-render",
+			"outputs":   []any{"x"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an llm-seam naming a transform must be refused")
+	}
+}
+
 func TestDecode_MalformedBinding(t *testing.T) {
 	m := rawManifest(
 		[]any{litInput("w", "number", 7)},

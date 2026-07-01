@@ -194,6 +194,11 @@ type Step struct {
 	ID        string
 	Kind      StepKind
 	ActionRef string
+	// Transform names the deterministic transform to apply, selected from the
+	// runtime's closed TransformRegistry. Meaningful only for KindTransform;
+	// empty means the identity passthrough (the v1 default). Never carries an
+	// LLM-backed transform: that is what KindLLMSeam is for.
+	Transform string
 	// Args binds action-call argument names to binding references.
 	Args map[string]Binding
 	// Bindings binds transform / llm-seam input names to binding references.
