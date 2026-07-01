@@ -111,7 +111,7 @@ The keyring is the v1 source of trust for connector signature verification. Ever
 
 | Command | Purpose |
 |---|---|
-| `aileron secret set [--passphrase-file <path>] <name>` | Store a secret in the encrypted vault. The first secret on a new vault prompts to create and confirm the vault passphrase. Reference the stored value as `vault:<name>` in `aileron.yaml`. |
+| `aileron secret set [--passphrase-file <path>] <name>` | Store a secret in the encrypted vault. The first secret on a new vault prompts to create and confirm the vault passphrase. Reference the stored value as `vault:secret/<name>` in `aileron.yaml`. |
 | `aileron secret list [--json]` | List stored secret names. The secret value is never printed. |
 
 ## Bindings

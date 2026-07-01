@@ -124,6 +124,11 @@ func TestValidateTokenRef_Plaintext(t *testing.T) {
 	if !strings.Contains(err.Error(), "slack.bot_token") {
 		t.Errorf("expected field name in error, got %q", err.Error())
 	}
+	// The hint must point at the namespaced reference form so a regression
+	// back to the bare `vault:<name>` form is caught.
+	if !strings.Contains(err.Error(), "vault:secret/<name>") {
+		t.Errorf("expected namespaced hint 'vault:secret/<name>' in error, got %q", err.Error())
+	}
 }
 
 func TestResolveTokens_PlainValues(t *testing.T) {
