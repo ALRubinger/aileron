@@ -169,10 +169,18 @@ func (s *Store) LookupAnyVersion(fqn FQN) (Ref, string, bool) {
 			continue
 		}
 		version := strings.TrimPrefix(k, prefix)
-		if !found || semver.Compare("v"+version, "v"+bestVersion) > 0 {
+		if !found {
+			bestVersion, bestHash, found = version, h, true
+			continue
+		}
+		// SemVer precedence first; on an exact precedence tie (e.g. two
+		// versions differing only in build metadata, which semver.Compare
+		// treats as equal) fall back to lexical version order so the
+		// winner never depends on map iteration order.
+		cmp := semver.Compare("v"+version, "v"+bestVersion)
+		if cmp > 0 || (cmp == 0 && version > bestVersion) {
 			bestVersion = version
 			bestHash = h
-			found = true
 		}
 	}
 	if !found {

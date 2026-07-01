@@ -285,3 +285,31 @@ func TestStore_LookupAnyVersion_ReturnsHighestSemVerDeterministically(t *testing
 		}
 	}
 }
+
+func TestStore_LookupAnyVersion_TieBreakIsStable(t *testing.T) {
+	// Two versions that differ only in SemVer build metadata compare
+	// equal under semver precedence rules. The result must still be
+	// stable across runs rather than depending on map iteration order.
+	dir := t.TempDir()
+	store := NewStore(dir)
+	fqn, _ := ParseFQN("github://acme/x")
+	store.index["github://acme/x@1.0.0+a"] = "sha256:1111"
+	store.index["github://acme/x@1.0.0+b"] = "sha256:2222"
+
+	var firstRef Ref
+	var firstHash string
+	for i := 0; i < 100; i++ {
+		gotRef, gotHash, ok := store.LookupAnyVersion(fqn)
+		if !ok {
+			t.Fatal("LookupAnyVersion = ok=false with versions installed")
+		}
+		if i == 0 {
+			firstRef, firstHash = gotRef, gotHash
+			continue
+		}
+		if gotRef != firstRef || gotHash != firstHash {
+			t.Fatalf("iteration %d: got (%v, %q), want stable (%v, %q)",
+				i, gotRef, gotHash, firstRef, firstHash)
+		}
+	}
+}
