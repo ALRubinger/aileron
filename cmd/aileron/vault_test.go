@@ -309,7 +309,7 @@ func TestRunSecretSet_HonorsEnvPassphrase(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `Stored secret "linear_token"`) {
+	if !strings.Contains(stdout.String(), `Stored secret "secret/linear_token"`) {
 		t.Errorf("stdout = %q; want 'Stored secret ...'", stdout.String())
 	}
 
@@ -320,7 +320,7 @@ func TestRunSecretSet_HonorsEnvPassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unlock with env passphrase: %v", err)
 	}
-	got, err := v.Get(t.Context(), "linear_token")
+	got, err := v.Get(t.Context(), "secret/linear_token")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -2189,8 +2189,82 @@ func TestRunSecretSet_NewVault(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Stored secret") {
 		t.Error("expected success message")
 	}
+	// The reference hint and stored-path message must show the namespaced
+	// path so a regression to the bare form is caught.
+	if !strings.Contains(stdout.String(), "vault:secret/test_token") {
+		t.Errorf("expected namespaced reference hint 'vault:secret/test_token', got: %s", stdout.String())
+	}
 	if !strings.Contains(stderr.String(), "Creating a new Aileron vault") {
 		t.Error("expected new vault warning")
+	}
+
+	// The value must be stored under `secret/test_token`, not the bare
+	// name — re-open the vault and assert the namespaced entry exists with
+	// Type=="secret" and the bare key does not.
+	v, err := launch.OpenLocalVault(launch.DefaultVaultPath(), "mypass")
+	if err != nil {
+		t.Fatalf("re-open vault: %v", err)
+	}
+	got, err := v.Get(context.Background(), "secret/test_token")
+	if err != nil {
+		t.Fatalf("expected entry at secret/test_token: %v", err)
+	}
+	if string(got.Value) != "secret-value" {
+		t.Errorf("value = %q, want %q", string(got.Value), "secret-value")
+	}
+	if got.Metadata.Type != "secret" {
+		t.Errorf("metadata type = %q, want %q", got.Metadata.Type, "secret")
+	}
+	if _, err := v.Get(context.Background(), "test_token"); err == nil {
+		t.Error("expected no entry at bare key test_token")
+	}
+}
+
+func TestRunSecretSet_RejectsSlashName(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "secrets.json")
+	origDefault := launch.DefaultVaultPath
+	launch.DefaultVaultPath = func() string { return vaultPath }
+	defer func() { launch.DefaultVaultPath = origDefault }()
+
+	// No passphrase responses: rejection must happen before any prompt.
+	restore := mockPromptPassphrase(nil)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runSecretSet([]string{"agents/claude/oauth"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit for slash-containing name")
+	}
+	if !strings.Contains(stderr.String(), "single segment") {
+		t.Errorf("expected single-segment error, got: %s", stderr.String())
+	}
+	// Rejection happened before the vault was opened: no file was created.
+	if _, err := os.Stat(vaultPath); !os.IsNotExist(err) {
+		t.Errorf("expected no vault file, stat err = %v", err)
+	}
+}
+
+func TestRunSecretSet_RejectsEmptyName(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "secrets.json")
+	origDefault := launch.DefaultVaultPath
+	launch.DefaultVaultPath = func() string { return vaultPath }
+	defer func() { launch.DefaultVaultPath = origDefault }()
+
+	restore := mockPromptPassphrase(nil)
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runSecretSet([]string{""}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit for empty name")
+	}
+	if !strings.Contains(stderr.String(), "single segment") {
+		t.Errorf("expected single-segment error, got: %s", stderr.String())
+	}
+	if _, err := os.Stat(vaultPath); !os.IsNotExist(err) {
+		t.Errorf("expected no vault file, stat err = %v", err)
 	}
 }
 

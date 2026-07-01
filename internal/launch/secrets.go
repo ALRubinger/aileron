@@ -74,7 +74,7 @@ func ValidateTokenRef(field, value string) error {
 	if value == "" || IsVaultRef(value) {
 		return nil
 	}
-	return fmt.Errorf("%s contains a plaintext token — use 'aileron secret set <name>' and reference it as 'vault:<name>' instead", field)
+	return fmt.Errorf("%s contains a plaintext token — use 'aileron secret set <name>' and reference it as 'vault:secret/<name>' instead", field)
 }
 
 // OpenVaultFunc is the function used to open the vault when vault

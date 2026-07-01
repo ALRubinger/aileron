@@ -13,7 +13,7 @@ import (
 )
 
 // vaultPrefix marks a config value as a reference to a vault entry
-// (e.g. `vault:slack-app-token`). Tokens stored as plaintext are
+// (e.g. `vault:secret/slack-app-token`). Tokens stored as plaintext are
 // rejected at config-load time.
 const vaultPrefix = "vault:"
 

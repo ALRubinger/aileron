@@ -303,6 +303,16 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 	}
 	name := rest[0]
 
+	// Validate the name before touching the vault. Secrets are stored
+	// under the "secret/" namespace, so the name must be a single
+	// segment: reject empty names and any name containing a '/', which
+	// would collide with structured writers (agents/…, user/…, bindings).
+	if name == "" || strings.Contains(name, "/") {
+		fmt.Fprintf(stderr, "error: secret name must be a single segment (no '/'): %q\n", name)
+		return 1
+	}
+	storedPath := "secret/" + name
+
 	// Check if this is a brand-new vault (no existing secrets).
 	vaultPath := launch.DefaultVaultPath()
 	isNewVault := true
@@ -354,13 +364,13 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := v.Put(context.Background(), name, []byte(value), vault.Metadata{Type: "secret"}); err != nil {
+	if err := v.Put(context.Background(), storedPath, []byte(value), vault.Metadata{Type: "secret"}); err != nil {
 		fmt.Fprintf(stderr, "error storing secret: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Stored secret %q\n", name)
-	fmt.Fprintf(stdout, "Use vault:%s in aileron.yaml to reference it.\n", name)
+	fmt.Fprintf(stdout, "Stored secret %q\n", storedPath)
+	fmt.Fprintf(stdout, "Use vault:%s in aileron.yaml to reference it.\n", storedPath)
 	return 0
 }
 

@@ -17,6 +17,7 @@ import (
 const (
 	connectedAccountsVaultPrefix = "connected-accounts/"
 	llmConfigVaultPrefix         = "llm-config/"
+	secretVaultPrefix            = "secret/"
 )
 
 // Vault entry scope labels surfaced in the union view's `scope` field.
@@ -30,14 +31,15 @@ const (
 	vaultScopeBinding          = "binding"
 	vaultScopeConnectedAccount = "connected-account"
 	vaultScopeLlmConfig        = "llm-config"
+	vaultScopeSecret           = "secret"
 	vaultScopeOther            = "other"
 )
 
 // classifyVaultPath maps a raw vault path to its VaultEntry scope label and
 // reports whether it belongs to a control-plane namespace.
 //
-// The locally-owned namespaces (`agents/`, `user/`, and capability
-// bindings — which include connector credentials like
+// The locally-owned namespaces (`agents/`, `user/`, `secret/`, and
+// capability bindings — which include connector credentials like
 // `connectors/<provider>/default` and OAuth bindings like
 // `oauth2/google/...`) are always part of the union. The two tenant-keyed
 // control-plane namespaces (`connected-accounts/`, `llm-config/`) are
@@ -59,6 +61,13 @@ func classifyVaultPath(path string) (scope string, controlPlane bool) {
 		return vaultScopeConnectedAccount, true
 	case strings.HasPrefix(path, llmConfigVaultPrefix):
 		return vaultScopeLlmConfig, true
+	case strings.HasPrefix(path, secretVaultPrefix):
+		// Secrets set via `aileron secret set` are locally-owned, so they
+		// are part of the default union (controlPlane=false). This is
+		// checked before the binding grammar below because a slash-bearing
+		// secret path could otherwise match the three-segment binding
+		// shape.
+		return vaultScopeSecret, false
 	}
 	if _, _, ok := agentNameAndPurposeFromVaultPath(path); ok {
 		return vaultScopeAgent, false

@@ -45,6 +45,13 @@ func TestClassifyVaultPath(t *testing.T) {
 		// Control-plane namespaces: classified but flagged for exclusion.
 		{"connected-accounts/usr_123/slack", vaultScopeConnectedAccount, true},
 		{"llm-config/user/usr_123", vaultScopeLlmConfig, true},
+		// Secrets set via `aileron secret set` live under `secret/` and are
+		// locally-owned (not control-plane).
+		{"secret/foo", vaultScopeSecret, false},
+		// A `secret/`-prefixed path that also looks three-segment must still
+		// classify as `secret`, proving the prefix check wins over the
+		// binding grammar.
+		{"secret/github/repo", vaultScopeSecret, false},
 		// Anything matching no known namespace must still surface as `other`
 		// rather than vanish.
 		{"weird-single-segment", vaultScopeOther, false},
@@ -68,6 +75,7 @@ func TestListVaultEntries_UnionDefaultExcludesControlPlane(t *testing.T) {
 		"user/github":                    "USERSECRET",
 		"connectors/github/default":      "CONNSECRET",
 		"oauth2/google/default":          "OAUTHSECRET",
+		"secret/my_token":                "SETSECRET",
 		"connected-accounts/usr_1/slack": "CPSECRET1",
 		"llm-config/user/usr_1":          "CPSECRET2",
 	}
@@ -105,6 +113,8 @@ func TestListVaultEntries_UnionDefaultExcludesControlPlane(t *testing.T) {
 		"user/github":               vaultScopeUser,
 		"connectors/github/default": vaultScopeBinding,
 		"oauth2/google/default":     vaultScopeBinding,
+		// Locally-owned secrets must appear in the default union view.
+		"secret/my_token": vaultScopeSecret,
 	}
 	for p, scope := range want {
 		if byPath[p] != scope {
