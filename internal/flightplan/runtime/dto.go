@@ -185,6 +185,7 @@ type stepDTO struct {
 	ID                 string            `yaml:"id"`
 	Kind               string            `yaml:"kind"`
 	ActionRef          string            `yaml:"actionRef"`
+	Transform          string            `yaml:"transform"`
 	Args               map[string]string `yaml:"args"`
 	Bindings           map[string]string `yaml:"bindings"`
 	Outputs            []string          `yaml:"outputs"`
@@ -239,6 +240,15 @@ func (d stepDTO) toStep() (Step, error) {
 			return Step{}, err
 		}
 		step.Bindings = binds
+	}
+
+	// A transform name selects which deterministic transform the registry
+	// applies; it is meaningful only on a transform step. Any other kind naming
+	// a transform is a malformed step, refused rather than silently ignored.
+	if kind == KindTransform {
+		step.Transform = d.Transform
+	} else if d.Transform != "" {
+		return Step{}, decodeErrf("step %q: kind %q must not declare a transform (only a transform step names one)", d.ID, d.Kind)
 	}
 
 	// Every kind requires at least one declared output (schema stepOutputs

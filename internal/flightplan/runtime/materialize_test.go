@@ -249,6 +249,45 @@ func TestMaterialize_EmptyFileMapContentStaysEmpty(t *testing.T) {
 	}
 }
 
+func TestMaterialize_HTMLRenderProducesSealedArtifact(t *testing.T) {
+	// Integration: the html-render transform's file-map entry drops straight
+	// into materialize.go unchanged, producing a sealed, writable HTML artifact
+	// whose bytes are a deterministic function of the template and data bindings.
+	p := planWithOutput(Output{
+		Name: "report.html", MimeType: "text/html", Encoding: EncodingUTF8,
+		Target: PublishFile, Path: "report.html",
+	})
+	step := Step{
+		ID: "render", Kind: KindTransform, Transform: "html-render",
+		Outputs: []string{"report"}, MaterializesOutput: "report.html",
+	}
+	reg := NewTransformRegistry()
+	outputs, err := reg.run(step, map[string]any{
+		"template": "<h1>{{ .summary.title }}</h1><ul>{{ range .summary.items }}<li>{{ . }}</li>{{ end }}</ul>",
+		"summary": map[string]any{
+			"title": "Weekly Digest",
+			"items": []any{"alpha", "beta"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("html-render: %v", err)
+	}
+	art, err := materialize(p, step, outputs)
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	want := "<h1>Weekly Digest</h1><ul><li>alpha</li><li>beta</li></ul>"
+	if string(art.Content) != want {
+		t.Errorf("content = %q, want %q", art.Content, want)
+	}
+	if art.MimeType != "text/html" {
+		t.Errorf("mimeType = %q, want text/html", art.MimeType)
+	}
+	if !art.Written || art.Path != "report.html" {
+		t.Errorf("artifact must be sealed to the declared path, got %+v", art)
+	}
+}
+
 func TestMaterialize_NonObjectCarrierRefused(t *testing.T) {
 	p := planWithOutput(Output{Name: "d.csv", MimeType: "text/csv", Encoding: EncodingUTF8, Target: PublishNone})
 	step := fileMapStep("d.csv")
