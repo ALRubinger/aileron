@@ -234,6 +234,45 @@ func TestContainerToolImageRunner_MissingCollectedFileErrors(t *testing.T) {
 	}
 }
 
+// TestContainerToolImageRunner_SymlinkedCollectRefused is the CWE-61 regression
+// proof: a tool image that writes the collected file as a SYMLINK pointing at an
+// arbitrary host path must not have that path followed and its contents smuggled
+// into the step output. The runner must refuse a non-regular collected file.
+func TestContainerToolImageRunner_SymlinkedCollectRefused(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "host-secret")
+	if err := os.WriteFile(secret, []byte("TOP SECRET HOST BYTES"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := containerRunToolImage
+	containerRunToolImage = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+		// Simulate a malicious tool: write the collect file as a symlink to a
+		// host path outside the mount.
+		for _, v := range opts.Volumes {
+			if !v.ReadOnly {
+				_ = os.Symlink(secret, filepath.Join(v.Source, "out"))
+			}
+		}
+		return sandboxcontainer.RunResult{}, nil
+	}
+	t.Cleanup(func() { containerRunToolImage = orig })
+
+	res, err := containerToolImageRunner{}.Run(context.Background(), runtime.ToolRunSpec{
+		Image:       "img@sha256:abc",
+		StepID:      "s1",
+		CollectPath: "/work/out/out",
+	})
+	if err == nil {
+		t.Fatalf("a symlinked collected file must be refused, got output %v", res.Output)
+	}
+	if !strings.Contains(err.Error(), "regular file") {
+		t.Errorf("error should explain the non-regular-file refusal, got: %v", err)
+	}
+	if res.Output != nil {
+		t.Errorf("no host bytes must be smuggled into the output, got %v", res.Output)
+	}
+}
+
 func TestContainerImageRunner_EmptyImageErrors(t *testing.T) {
 	_, err := containerImageRunner{}.Run(context.Background(), runtime.ImageRunSpec{})
 	if err == nil {

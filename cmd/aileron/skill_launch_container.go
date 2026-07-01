@@ -204,7 +204,23 @@ func (containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunSpe
 	if collectHost == "" {
 		return runtime.ToolRunResult{}, nil
 	}
-	out, err := os.ReadFile(filepath.Join(collectHost, collectFile))
+	// The collect dir is bind-mounted writable and the tool controls its
+	// contents. A compromised or malicious tool image could write the collected
+	// file as a SYMLINK pointing at an arbitrary host path (e.g. /etc/passwd)
+	// readable by the aileron process; a naive os.ReadFile would follow it and
+	// smuggle host file contents into the step output (CWE-61), defeating the
+	// isolation this per-step dispatch exists to provide. Lstat first and refuse
+	// anything that is not a regular file, so only bytes the tool actually wrote
+	// into the mount are collected.
+	collectAbs := filepath.Join(collectHost, collectFile)
+	info, err := os.Lstat(collectAbs)
+	if err != nil {
+		return runtime.ToolRunResult{}, fmt.Errorf("skill launch: collect output from %q: %w", spec.CollectPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return runtime.ToolRunResult{}, fmt.Errorf("skill launch: collected output %q is not a regular file (refusing to follow symlinks or read special files)", spec.CollectPath)
+	}
+	out, err := os.ReadFile(collectAbs)
 	if err != nil {
 		return runtime.ToolRunResult{}, fmt.Errorf("skill launch: collect output from %q: %w", spec.CollectPath, err)
 	}
