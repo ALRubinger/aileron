@@ -31,6 +31,14 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 		opts = append(opts, binding.WithSigV4Resign(e.AccessKeyID, e.Region, e.Service))
 	}
 
+	// Carry the optional per-binding trust scope (#1735). Empty effect and
+	// empty allowed_hosts yield an unconstrained binding (today's behavior);
+	// a non-empty effect is validated against the closed set by the
+	// constructor below, the single source of truth for effect legality.
+	if e.Effect != "" || len(e.AllowedHosts) > 0 {
+		opts = append(opts, binding.WithTrustContract(e.Effect, e.AllowedHosts))
+	}
+
 	if e.EmitMechanism == string(binding.EmitMechanismSentinelSwap) {
 		opts = append(opts, binding.WithEmitMechanismSentinelSwap())
 		// A sentinel-swap entry carries the sentinel shape (value + env) it

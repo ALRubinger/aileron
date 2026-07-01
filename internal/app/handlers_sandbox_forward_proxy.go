@@ -248,6 +248,20 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 		return true
 	}
 
+	// Per-step trust-contract gate (#1735). A bound host that carries a
+	// declared trust contract (a non-empty AllowedHosts and/or Effect) is
+	// gated here, BEFORE any credential is resolved or injected, so the gate
+	// covers both the inject and the sentinel-swap-foreign-token branches
+	// below (all egress on a bound host). A binding with no declared
+	// contract passes unconstrained, exactly as before. A gate failure is a
+	// denial: it writes a 403 and returns handled — it never falls through
+	// to passthrough.
+	if reason, ok := enforceHostBindingTrust(hb, upstream, decrypted.Method); !ok {
+		s.recordSandboxProxyTrustDenied(decrypted, sandboxProxySourceTransparentConnectTLS, hb, upstream, reason)
+		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy denied egress: the request violates the host binding's trust contract")
+		return true
+	}
+
 	body, contentType, err := readSandboxForwardProxyRequestBody(decrypted)
 	if err != nil {
 		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, sandboxForwardProxyBodyRejectReason(err))
@@ -309,7 +323,7 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 	}
 	defer dialed.body.Close()
 
-	s.recordSandboxProxyBindingInjected(decrypted, sandboxProxySourceTransparentConnectTLS, hb.HostPattern, hb.Scheme, upstream, dialed.statusCode)
+	s.recordSandboxProxyBindingInjected(decrypted, sandboxProxySourceTransparentConnectTLS, hb, upstream, dialed.statusCode)
 	writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, dialed.resp, dialed.bodyBytes)
 	return true
 }
