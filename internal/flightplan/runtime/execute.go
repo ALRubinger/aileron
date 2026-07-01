@@ -17,6 +17,28 @@ type execState struct {
 	dispatches []actionDispatch
 	// artifacts records materialized output artifacts, in execution order.
 	artifacts []Artifact
+	// outputs records each materialized artifact together with the step that
+	// produced it, in execution order. Unlike artifacts (kept for writing and
+	// the run result), outputs carries the originating step's id/kind/transform
+	// so the audit can emit one `output.materialized` record per artifact with
+	// full provenance. It is populated for BOTH action-call and transform
+	// materializing steps, since the materialize block keys off
+	// step.MaterializesOutput (kind-agnostic).
+	outputs []materializedOutput
+}
+
+// materializedOutput pairs one materialized artifact with the provenance of the
+// step that produced it, so the per-output audit record can name the
+// originating step and (for a transform) the transform applied.
+type materializedOutput struct {
+	// StepID is the id of the step that materialized the artifact.
+	StepID string
+	// StepKind is the step's kind (action-call or transform).
+	StepKind StepKind
+	// Transform is the transform name, set only for a KindTransform step.
+	Transform string
+	// Artifact is the materialized artifact (name, mime, content, digest).
+	Artifact Artifact
 }
 
 // actionDispatch records one action-call's enforced outcome for the audit.
@@ -102,6 +124,16 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 				return st, err
 			}
 			st.artifacts = append(st.artifacts, art)
+			// Capture the artifact with its originating step's provenance. This
+			// block fires for both action-call and transform materializing
+			// steps (it keys off step.MaterializesOutput, not step.Kind), so a
+			// transform-materialized output is captured with no new branch.
+			st.outputs = append(st.outputs, materializedOutput{
+				StepID:    step.ID,
+				StepKind:  step.Kind,
+				Transform: step.Transform,
+				Artifact:  art,
+			})
 		}
 	}
 	return st, nil

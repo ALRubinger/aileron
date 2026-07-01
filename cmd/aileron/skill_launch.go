@@ -263,20 +263,28 @@ type daemonAuditSink struct {
 }
 
 func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) string {
-	eventType := string(model.EventTypeFlightPlanLaunch)
-	if rec.ActionRef != "" {
+	// The record kind is the explicit discriminator (#1752): an output record
+	// carries a flat `aileron.*` payload (top-level attributes, matching the
+	// vault.user.credential.* convention), while action/launch records keep
+	// their existing nested pay["fields"]/actionRef/sink shape so those event
+	// shapes don't churn.
+	var eventType string
+	var payload map[string]any
+	switch rec.Kind {
+	case runtime.RecordKindOutput:
+		eventType = string(model.EventTypeOutputMaterialized)
+		payload = rec.Fields
+		if payload == nil {
+			// A well-formed output record always carries fields, but guard so an
+			// empty record posts an object payload rather than a JSON null.
+			payload = map[string]any{}
+		}
+	case runtime.RecordKindAction:
 		eventType = string(model.EventTypeFlightPlanLaunchAction)
-	}
-
-	payload := map[string]any{}
-	if rec.ActionRef != "" {
-		payload["actionRef"] = rec.ActionRef
-	}
-	if len(rec.Fields) > 0 {
-		payload["fields"] = rec.Fields
-	}
-	if rec.Sink != "" {
-		payload["sink"] = rec.Sink
+		payload = actionOrLaunchPayload(rec)
+	default: // runtime.RecordKindLaunch
+		eventType = string(model.EventTypeFlightPlanLaunch)
+		payload = actionOrLaunchPayload(rec)
 	}
 
 	body, err := json.Marshal(auditIngestRequest{
@@ -318,6 +326,24 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 		return ""
 	}
 	return out.AuditID
+}
+
+// actionOrLaunchPayload builds the nested payload shape shared by the
+// per-action and per-launch summary records: actionRef and sink when present,
+// and the declared audit fields under a "fields" key. The output.materialized
+// record does NOT use this shape; it surfaces its flat aileron.* map directly.
+func actionOrLaunchPayload(rec runtime.AuditRecord) map[string]any {
+	payload := map[string]any{}
+	if rec.ActionRef != "" {
+		payload["actionRef"] = rec.ActionRef
+	}
+	if len(rec.Fields) > 0 {
+		payload["fields"] = rec.Fields
+	}
+	if rec.Sink != "" {
+		payload["sink"] = rec.Sink
+	}
+	return payload
 }
 
 func (s daemonAuditSink) logErr(format string, args ...any) {

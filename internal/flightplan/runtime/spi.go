@@ -56,14 +56,38 @@ type Approver interface {
 	Approve(ctx context.Context, req ApprovalRequest) (Decision, error)
 }
 
+// AuditRecordKind is the closed set of runtime audit record kinds. It is the
+// explicit discriminator the CLI sink switches on to map each record to an
+// internal/model.EventType, so the runtime stays free of an internal/model
+// import while the third (output) kind is explicit rather than overloaded onto
+// ActionRef.
+type AuditRecordKind int
+
+const (
+	// RecordKindAction is one per-action-call dispatch record.
+	RecordKindAction AuditRecordKind = iota
+	// RecordKindLaunch is the per-launch summary record.
+	RecordKindLaunch
+	// RecordKindOutput is one per-materialized-output provenance record (#1752),
+	// emitted for both action-call and transform materializing steps.
+	RecordKindOutput
+)
+
 // AuditRecord is one customer-owned audit entry. Fields holds exactly the
 // declared audit.fields for the action (data reads referenced by resolved
 // binding, never the dataset inline; ADR-0027 audit boundary).
 type AuditRecord struct {
+	// Kind is the record's kind, the explicit discriminator the CLI sink maps
+	// to a model.EventType (RecordKindAction → flightplan.launch.action,
+	// RecordKindLaunch → flightplan.launch, RecordKindOutput →
+	// output.materialized).
+	Kind AuditRecordKind
 	// ActionRef is the action the record describes, or "" for a per-launch
-	// summary record.
+	// summary or per-output record.
 	ActionRef string
-	// Fields holds the declared audit field values.
+	// Fields holds the declared audit field values. For a RecordKindOutput
+	// record it holds the flat `aileron.*` attribute map the sink surfaces as
+	// the top-level event payload.
 	Fields map[string]any
 	// Sink is the customer-owned sink reference from the trust contract.
 	Sink string

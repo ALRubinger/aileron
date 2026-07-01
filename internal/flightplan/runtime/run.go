@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
+	"github.com/google/uuid"
 )
 
 // Options configures a launch. The Store + Name + Version select the frozen
@@ -99,13 +100,15 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	if hasWholePlanImage(lp.ResolvedImages) {
 		return runInImage(ctx, lp, opts)
 	}
-	return runPlan(ctx, lp.Plan, lp.ContentHash, opts)
+	return runPlan(ctx, lp.Plan, lp.ContentHash, lp.SignerFingerprint, opts)
 }
 
 // runPlan executes an already-loaded, verified plan. It is factored out so
 // tests drive the full Phase A/B/materialize/audit pipeline from an in-memory
-// plan without a store on disk, while Run handles the load+verify gate.
-func runPlan(ctx context.Context, plan *Plan, contentHash string, opts Options) (RunResult, error) {
+// plan without a store on disk, while Run handles the load+verify gate. The
+// signerFingerprint is the verified author-key fingerprint threaded onto the
+// per-output audit records as the plan's signer identity (#1752).
+func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint string, opts Options) (RunResult, error) {
 	clk := opts.Clock
 	if clk == nil {
 		clk = SystemClock{}
@@ -128,9 +131,20 @@ func runPlan(ctx context.Context, plan *Plan, contentHash string, opts Options) 
 	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam, toolRunner: opts.ToolImageRunner}
 	st, runErr := x.execute(ctx, inputs)
 
+	// Mint a launch-scoped invocation id so every audit record from this launch
+	// correlates. Provenance is fixed for the launch: reaching runPlan means the
+	// verify gate passed, so the signature status is "verified".
+	prov := launchProvenance{
+		Skill:           plan.Name,
+		ContentHash:     contentHash,
+		SignedBy:        signerFingerprint,
+		SignatureStatus: signatureStatusVerified,
+		InvocationID:    uuid.NewString(),
+	}
+
 	// Emit the audit regardless of run outcome so a mid-run denial is recorded
 	// (the audit is an append-only companion, not gated on success).
-	auditIDs := emitAudit(ctx, opts.Audit, st)
+	auditIDs := emitAudit(ctx, opts.Audit, st, prov)
 
 	if runErr != nil {
 		return RunResult{}, runErr

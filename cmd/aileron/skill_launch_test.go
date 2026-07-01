@@ -520,6 +520,7 @@ func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
 	})
 
 	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+		Kind:   runtime.RecordKindLaunch,
 		Fields: map[string]any{"artifacts": 1},
 	})
 	if id != "audit-summary" {
@@ -530,6 +531,45 @@ func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
 	}
 	if _, ok := gotBody.Payload["actionRef"]; ok {
 		t.Errorf("summary payload must omit actionRef: %+v", gotBody.Payload)
+	}
+}
+
+// TestDaemonAuditSink_PostsOutputMaterializedFlatPayload proves a
+// RecordKindOutput record maps to the output.materialized event type and
+// surfaces its flat aileron.* map as the top-level payload (no "fields"
+// nesting), matching the vault.user.credential.* convention (#1752).
+func TestDaemonAuditSink_PostsOutputMaterializedFlatPayload(t *testing.T) {
+	var gotBody auditIngestRequest
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"audit_id":"audit-output"}`))
+	})
+
+	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+		Kind: runtime.RecordKindOutput,
+		Fields: map[string]any{
+			"aileron.output.name":         "digest.csv",
+			"aileron.output.content_hash": "sha256:abc",
+			"aileron.step.kind":           "transform",
+		},
+	})
+	if id != "audit-output" {
+		t.Errorf("Record returned %q, want audit-output", id)
+	}
+	if gotBody.EventType != string(model.EventTypeOutputMaterialized) {
+		t.Errorf("event_type = %q, want %q", gotBody.EventType, model.EventTypeOutputMaterialized)
+	}
+	// The flat aileron.* keys are top-level payload attributes, not nested under
+	// "fields".
+	if gotBody.Payload["aileron.output.content_hash"] != "sha256:abc" {
+		t.Errorf("payload.aileron.output.content_hash = %v, want it at top level", gotBody.Payload["aileron.output.content_hash"])
+	}
+	if _, nested := gotBody.Payload["fields"]; nested {
+		t.Errorf("output payload must be flat, not nested under fields: %+v", gotBody.Payload)
+	}
+	if gotBody.Payload["aileron.step.kind"] != "transform" {
+		t.Errorf("payload.aileron.step.kind = %v", gotBody.Payload["aileron.step.kind"])
 	}
 }
 
@@ -604,6 +644,84 @@ func TestRunSkillLaunch_InProcessRecordsAuditToDaemon(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Audit records:") {
 		t.Errorf("stdout missing audit count: %q", stdout.String())
+	}
+}
+
+// TestRunSkillLaunch_InProcessEmitsOutputMaterializedPerArtifact is the #1752
+// acceptance + regression path. The worked example materializes two outputs:
+// digest.csv from a `transform` step and filed_issue.json from an action-call
+// step. The launch must POST exactly one output.materialized event per
+// materialized artifact (two total), each carrying the correct aileron.step.kind,
+// and each output's aileron.output.content_hash must equal the digest the launch
+// printed to stdout (the dashboard hash equals the stdout digest).
+func TestRunSkillLaunch_InProcessEmitsOutputMaterializedPerArtifact(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeNoImageForLaunch(t, storeDir)
+
+	var mu sync.Mutex
+	var outputPayloads []map[string]any
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusOK)
+			if strings.Contains(r.URL.Path, "query_series") {
+				_, _ = w.Write([]byte(`{"result":"{\"path\":\"digest.csv\",\"mimeType\":\"text/csv\",\"encoding\":\"utf-8\",\"content\":\"name\\ncpu\\n\"}"}`))
+			} else {
+				_, _ = w.Write([]byte(`{"result":"{\"path\":\"filed_issue.json\",\"mimeType\":\"application/json\",\"encoding\":\"utf-8\",\"content\":\"{}\"}"}`))
+			}
+		case r.URL.Path == "/v1/audit" && r.Method == http.MethodPost:
+			var body auditIngestRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.EventType == string(model.EventTypeOutputMaterialized) {
+				mu.Lock()
+				outputPayloads = append(outputPayloads, body.Payload)
+				mu.Unlock()
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"audit_id":"audit-landed"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	stubLaunchSeams(t, daemonDispatcher{}, true)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origRun := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Exactly one output.materialized per materialized artifact (two total).
+	if len(outputPayloads) != 2 {
+		t.Fatalf("output.materialized events = %d, want exactly 2 (one per materialized artifact)", len(outputPayloads))
+	}
+
+	kinds := map[string]bool{}
+	for _, p := range outputPayloads {
+		kind, _ := p["aileron.step.kind"].(string)
+		kinds[kind] = true
+		hash, _ := p["aileron.output.content_hash"].(string)
+		if hash == "" {
+			t.Errorf("output event missing content_hash: %+v", p)
+			continue
+		}
+		// The audited content hash must equal the digest printed to stdout.
+		if !strings.Contains(stdout.String(), hash) {
+			t.Errorf("content_hash %q not present in launch stdout:\n%s", hash, stdout.String())
+		}
+	}
+	// The two materialized outputs come from a transform step and an action-call
+	// step; both kinds must be represented.
+	if !kinds["transform"] || !kinds["action-call"] {
+		t.Errorf("output step kinds = %v, want both transform and action-call", kinds)
 	}
 }
 

@@ -27,6 +27,11 @@ type LoadedPlan struct {
 	// The pins come from the verified manifest lock block, so the digest booted
 	// is exactly the one the author signature attested.
 	ResolvedImages []freeze.ImagePin
+	// SignerFingerprint is the `sha256:<hex>` fingerprint of the verified
+	// author public key (from freeze.VerifyFrozen). It is threaded into the
+	// launch audit as the plan's signer identity (#1752). Populated only on the
+	// verified path, so it names the key that actually attested this unit.
+	SignerFingerprint string
 }
 
 // LoadVerified loads a frozen skill version from the store, verifies it
@@ -68,8 +73,9 @@ func verifyAndDecode(fv store.FrozenVersion) (LoadedPlan, error) {
 		return LoadedPlan{}, err
 	}
 	return LoadedPlan{
-		Plan:           plan,
-		ContentHash:    verified.ContentHash,
-		ResolvedImages: verified.ResolvedImages,
+		Plan:              plan,
+		ContentHash:       verified.ContentHash,
+		ResolvedImages:    verified.ResolvedImages,
+		SignerFingerprint: verified.SignerFingerprint,
 	}, nil
 }
