@@ -91,6 +91,32 @@ func TestRunInImage_PropagatesRunnerError(t *testing.T) {
 	}
 }
 
+func TestRunInImage_RejectsMultiplePins(t *testing.T) {
+	// The attestation certifies exactly one image environment, so a plan that
+	// somehow carries more than one resolved pin must error rather than silently
+	// boot pins[0] and ignore the rest. Guards the single-pin invariant against a
+	// future multi-pin rung.
+	lp := LoadedPlan{
+		ResolvedImages: []freeze.ImagePin{
+			{Ref: "registry.example.com/runner:1.4", Digest: "sha256:" + strings.Repeat("a", 64)},
+			{Ref: "registry.example.com/runner:2.0", Digest: "sha256:" + strings.Repeat("b", 64)},
+		},
+	}
+	res, err := runInImage(context.Background(), lp, Options{ImageRunner: &fakeImageRunner{}})
+	if err == nil {
+		t.Fatal("a plan with two resolved pins must error")
+	}
+	if !strings.Contains(err.Error(), "expected exactly one resolved image pin") {
+		t.Errorf("error = %q, want a single-pin invariant message", err.Error())
+	}
+	if !strings.Contains(err.Error(), "got 2") {
+		t.Errorf("error = %q, want the observed pin count", err.Error())
+	}
+	if res.ContentHash != "" || len(res.Artifacts) != 0 {
+		t.Errorf("a rejected boot must produce a zero RunResult, got %+v", res)
+	}
+}
+
 func TestImageRef_JoinsRefAndDigest(t *testing.T) {
 	got := imageRef("registry.example.com/runner:1.4", "sha256:abc")
 	if got != "registry.example.com/runner:1.4@sha256:abc" {
