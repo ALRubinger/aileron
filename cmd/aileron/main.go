@@ -380,7 +380,17 @@ func runSecretList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	names := fv.Names()
+	entries, err := fv.List(context.Background())
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Metadata.Type == "secret" {
+			names = append(names, e.Path)
+		}
+	}
 	if len(names) == 0 {
 		if *asJSON {
 			fmt.Fprintln(stdout, "[]")

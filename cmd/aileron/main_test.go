@@ -1202,7 +1202,7 @@ func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"a":{"value":"ZW5j","metadata":{}},"b":{"value":"ZW5j","metadata":{}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"a":{"value":"ZW5j","metadata":{"type":"secret"}},"b":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1228,6 +1228,111 @@ func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
 			t.Errorf("missing name %q in: %v", want, got)
 		}
 	}
+}
+
+// TestRunSecret_ListOnlyReturnsSecretTypedEntries proves `secret list`
+// shows only entries a user stored via `aileron secret set` (tagged
+// Type=="secret") and hides the rest of the vault keyspace (agent
+// creds, OAuth bindings). Regression for the leak where the list path
+// dumped every key via Names().
+func TestRunSecret_ListOnlyReturnsSecretTypedEntries(t *testing.T) {
+	dir := setTestHome(t)
+
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Mixed keyspace: one user secret, one agent cred (empty Type),
+	// one OAuth binding (non-secret Type).
+	seed := `{"salt":"AAAA","secrets":{` +
+		`"api_token":{"value":"ZW5j","metadata":{"type":"secret"}},` +
+		`"agents/claude/oauth":{"value":"ZW5j","metadata":{}},` +
+		`"oauth2/github/work":{"value":"ZW5j","metadata":{"type":"oauth_refresh_token"}}` +
+		`}}`
+	if err := os.WriteFile(vaultPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("plain", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "api_token") {
+			t.Errorf("expected 'api_token' in output, got: %s", out)
+		}
+		if strings.Contains(out, "agents/claude/oauth") {
+			t.Errorf("non-secret agent cred leaked into output: %s", out)
+		}
+		if strings.Contains(out, "oauth2/github/work") {
+			t.Errorf("non-secret binding leaked into output: %s", out)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"secret", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+		got := map[string]bool{}
+		for _, line := range lines {
+			var name string
+			if err := json.Unmarshal([]byte(line), &name); err != nil {
+				t.Errorf("line %q is not JSON: %v", line, err)
+				continue
+			}
+			got[name] = true
+		}
+		want := map[string]bool{"api_token": true}
+		if len(got) != len(want) || !got["api_token"] {
+			t.Errorf("decoded set = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestRunSecret_ListEmptyAfterFilter confirms a vault holding only
+// non-secret entries renders the empty-state messaging: the filter
+// (not just presence) drives the empty branch.
+func TestRunSecret_ListEmptyAfterFilter(t *testing.T) {
+	dir := setTestHome(t)
+
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"salt":"AAAA","secrets":{` +
+		`"agents/claude/oauth":{"value":"ZW5j","metadata":{}},` +
+		`"oauth2/github/work":{"value":"ZW5j","metadata":{"type":"oauth_refresh_token"}}` +
+		`}}`
+	if err := os.WriteFile(vaultPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("plain", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "No secrets stored") {
+			t.Errorf("expected 'No secrets stored', got: %s", stdout.String())
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"secret", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+			t.Errorf("stdout = %q, want %q", got, "[]")
+		}
+	})
 }
 
 // `aileron binding list` reads vault metadata without unlocking, per
