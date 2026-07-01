@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1548,7 +1549,23 @@ func showStatusVault(dir string, w io.Writer) {
 		return
 	}
 
-	names := fv.Names()
+	entries, err := fv.List(context.Background())
+	if err != nil {
+		fmt.Fprintf(w, "  Vault file: %s (error: %v)\n", vaultPath, err)
+		return
+	}
+	// Count and list only `secret/`-scoped entries, using the same
+	// vault-scope classifier that `secret list` (runSecretList) treats as
+	// the single source of truth for "a secret". Without this filter, agent
+	// credentials (agents/<name>/...) and control-plane bindings
+	// (oauth2/<...>) leak into the "Secrets:" count and bullet list.
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if scope, _ := vaultscope.Classify(e.Path); scope == vaultscope.ScopeSecret {
+			names = append(names, e.Path)
+		}
+	}
+	sort.Strings(names)
 	fmt.Fprintf(w, "  Vault file: %s\n", vaultPath)
 	fmt.Fprintf(w, "  Secrets:    %d stored\n", len(names))
 	for _, name := range names {

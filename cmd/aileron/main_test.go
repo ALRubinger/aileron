@@ -961,9 +961,12 @@ func TestRunStatus_Vault(t *testing.T) {
 func TestRunStatus_VaultWithSecrets(t *testing.T) {
 	dir := setTestHome(t)
 
+	// `secret set` stores secrets under the `secret/<name>` path, which is
+	// what the vault-scope classifier recognizes as a secret. The status
+	// view counts and lists only those `secret/`-scoped entries.
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
 	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
-	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"slack_bot":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
+	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"secret/slack_bot":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"status", "vault"}, newTestRegistry(), &stdout, &stderr)
@@ -974,7 +977,7 @@ func TestRunStatus_VaultWithSecrets(t *testing.T) {
 	if !strings.Contains(out, "1 stored") {
 		t.Error("expected '1 stored'")
 	}
-	if !strings.Contains(out, "slack_bot") {
+	if !strings.Contains(out, "secret/slack_bot") {
 		t.Error("expected secret name")
 	}
 }
