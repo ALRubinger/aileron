@@ -264,7 +264,10 @@ func TestRunSkillFreeze_FlagsAfterName(t *testing.T) {
 // honor the flag placed after the name.
 func TestRunSkillLaunch_FlagAfterName(t *testing.T) {
 	storeDir := withTempStore(t)
-	freezeExampleForLaunch(t, storeDir)
+	// Use the no-image variant so this flag-parsing test stays on the
+	// in-process path and materializes filed_issue.json without booting a
+	// container.
+	freezeNoImageForLaunch(t, storeDir)
 	disp := &fakeLaunchDispatcher{results: map[string]map[string]any{
 		"aileron:metrics.query_series": {
 			"path": "digest.csv", "mimeType": "text/csv", "encoding": "utf-8", "content": "name\ncpu\n",
@@ -274,6 +277,7 @@ func TestRunSkillLaunch_FlagAfterName(t *testing.T) {
 		},
 	}}
 	stubLaunchSeams(t, disp)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
 	origRun := launchSeamForTest
 	launchSeamForTest = fakeCLISeam{}
 	t.Cleanup(func() { launchSeamForTest = origRun })

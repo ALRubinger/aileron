@@ -38,7 +38,7 @@ Freeze is the step that turns a skill into a Flight Plan. Freeze resolves every 
 
 A Flight Plan carries two distinct determinism guarantees.
 
-The first is environmental reproducibility. Every image reference is pinned to a digest at freeze. The same Flight Plan resolves the same images on every run. The lockfile is the record of those pins.
+The first is environmental reproducibility. Every image reference is pinned to a digest at freeze. The same Flight Plan resolves the same images on every run. The lockfile is the record of those pins. Launch boots the pinned image from the verified lock, so the environment the plan runs in is the one the signature attested.
 
 The second is behavioral determinism. No LLM runs at Flight Plan runtime by default. An LLM runs only at a single seam that is explicitly marked in the skill and structurally enforced by the runtime. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside the marked seam fails freeze and never becomes a Flight Plan. The marked seam is the one place where non-deterministic reasoning is allowed, and everything outside it is deterministic by construction.
 
@@ -65,6 +65,8 @@ Rung one pins a whole prebuilt image. The skill names an image, and freeze resol
 Rung two declares capability units, and Aileron composes them. The skill declares the units it requires on top of a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features onto that base and pins the result. The capability-unit shape is the one defined in [ADR-0026](/adr/0026-cli-capability-units).
 
 The MVP ships rungs one and two. Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Rung three is designed as a manifest slot so a later build can fill it without a format change. Rung three is build-deferred and out of scope here. A manifest may declare the `rung3PerStepImages` slot alone. Freeze parses that declaration, builds no image, and reports the rung as build-deferred to the operator, so a rung-three-only Flight Plan is a told outcome rather than a parse failure or a silent pass.
+
+The digest pin is load-bearing at launch, not only at freeze. When the verified lock carries a resolved rung-one or rung-two image digest, launch boots that exact pinned image and runs the plan inside it. The digest booted comes from the verified lock, so the image entered corresponds to the lock's signed image assertion rather than any re-resolved tag. A Flight Plan that declares no execution rung has an empty resolved-image set, so its launch runs the step graph in-process instead of booting an image. Rung three stays build-deferred, so a per-step sibling image is not booted at launch.
 
 The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 
@@ -121,7 +123,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 
 ### Positive
 
-- A Flight Plan is reproducible. Every image reference is pinned to a digest at freeze, so the same plan resolves the same environment on every run.
+- A Flight Plan is reproducible. Every image reference is pinned to a digest at freeze, so the same plan resolves the same environment on every run. Launch boots that pinned image from the verified lock, so the environment the plan runs in matches the signed pin.
 - A Flight Plan is auditable. The per-action trust contract records the credential, the network reach, the effect, and the audit-record structure for every action the plan calls.
 - A Flight Plan is behaviorally deterministic. No LLM runs at runtime outside the single marked seam, and the freeze-time lint rejects any unmarked LLM call before the plan is sealed.
 - A Flight Plan is deterministic given its resolved inputs. Inputs are declared with resolution rules, resolved once at launch, and recorded with the outputs. Results vary only with declared, resolved inputs, so every run is explainable from its recorded binding rather than reconstructed from a moving source.

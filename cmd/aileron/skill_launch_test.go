@@ -39,6 +39,38 @@ func stubLaunchSeams(t *testing.T, disp runtime.ActionDispatcher) {
 	})
 }
 
+// fakeLaunchImageRunner records the exact image string and spec it was handed
+// and returns a canned result, so the boot path is testable with no live Docker.
+type fakeLaunchImageRunner struct {
+	called bool
+	spec   runtime.ImageRunSpec
+	result runtime.ImageRunResult
+	err    error
+}
+
+func (f *fakeLaunchImageRunner) Run(_ context.Context, spec runtime.ImageRunSpec) (runtime.ImageRunResult, error) {
+	f.called = true
+	f.spec = spec
+	return f.result, f.err
+}
+
+// stubLaunchImageRunner swaps the production image-runner seam for a fake so a
+// rung-pinned launch never boots a real container. It returns the fake for
+// assertions. When runner is nil the seam yields nil so the runtime's
+// pinned-but-no-runner guard fires.
+func stubLaunchImageRunner(t *testing.T, runner *fakeLaunchImageRunner) *fakeLaunchImageRunner {
+	t.Helper()
+	orig := newLaunchImageRunner
+	newLaunchImageRunner = func() runtime.ImageRunner {
+		if runner == nil {
+			return nil
+		}
+		return runner
+	}
+	t.Cleanup(func() { newLaunchImageRunner = orig })
+	return runner
+}
+
 // freezeExampleForLaunch installs + freezes the worked example into the temp
 // store so a launch has a verifiable frozen version to load.
 func freezeExampleForLaunch(t *testing.T, storeDir string) {
@@ -52,18 +84,114 @@ func freezeExampleForLaunch(t *testing.T, storeDir string) {
 	}
 }
 
-func TestRunSkillLaunch_EndToEnd(t *testing.T) {
+// TestRunSkillLaunch_BootsPinnedRung2Image proves the acceptance property: the
+// worked example is rung-2, so its verified lock pins a composed image digest.
+// Launch boots that exact ref@sha256:<digest-from-lock> through the image runner
+// and exits 0. The recorded image is the load-bearing assertion that the lock's
+// signed-image claim corresponds to the image actually entered.
+// freezeNoImageForLaunch installs a no-execution-environment variant of the
+// worked example (the same stepped plan with the executionEnvironment block
+// removed) and freezes it, so the frozen unit pins no image and the launch
+// stays on the in-process path.
+func freezeNoImageForLaunch(t *testing.T, storeDir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "docs", "schema", "flight-plan-manifest.example.skill.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped := stripExecEnvBlock(t, string(raw))
+	dir := filepath.Join(storeDir, "weekly-metrics-digest")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(stripped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	var out, errOut bytes.Buffer
+	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &out, &errOut); code != 0 {
+		t.Fatalf("freeze no-image variant failed: %s", errOut.String())
+	}
+}
+
+// stripExecEnvBlock removes the `executionEnvironment:` mapping (indented at 4
+// spaces) and its more-deeply-indented children from the worked-example
+// frontmatter, leaving a valid no-rung manifest.
+func stripExecEnvBlock(t *testing.T, md string) string {
+	t.Helper()
+	lines := strings.Split(md, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	for _, ln := range lines {
+		if !skipping {
+			if strings.HasPrefix(ln, "    executionEnvironment:") && strings.TrimSpace(ln) == "executionEnvironment:" {
+				skipping = true
+				continue
+			}
+			out = append(out, ln)
+			continue
+		}
+		trimmed := strings.TrimLeft(ln, " ")
+		indent := len(ln) - len(trimmed)
+		if trimmed == "" || indent > 4 {
+			continue
+		}
+		skipping = false
+		out = append(out, ln)
+	}
+	res := strings.Join(out, "\n")
+	if strings.Contains(res, "executionEnvironment:") {
+		t.Fatal("stripExecEnvBlock left the block in place")
+	}
+	return res
+}
+
+func TestRunSkillLaunch_BootsPinnedRung2Image(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
 
-	// The tracker write materializes filed_issue.json; the metrics read feeds
-	// render_csv. The render_csv transform is the default identity, which for
-	// this worked example forwards the series; to materialize a CSV file-map
-	// the worked example's transform must emit one. We rely on the runtime's
-	// action-call materialization for filed_issue.json and skip CSV bytes by
-	// having the metrics read return a file-map-shaped series the transform
-	// forwards. Simpler: assert the launch loads, verifies, dispatches both
-	// actions, and exits 0.
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	// The dispatcher must never be walked on the boot path; wire it so a stray
+	// in-process dispatch would be observable.
+	disp := &fakeLaunchDispatcher{results: map[string]map[string]any{}}
+	stubLaunchSeams(t, disp)
+
+	outDir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", outDir, "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !runner.called {
+		t.Fatal("launch did not boot the pinned image for a rung-2 unit")
+	}
+	if !strings.HasSuffix(runner.spec.Image, "@"+fakeFreezeDigest) {
+		t.Errorf("booted image = %q, want it to end with @%s (the verified lock digest)", runner.spec.Image, fakeFreezeDigest)
+	}
+	if runner.spec.Name != "weekly-metrics-digest" {
+		t.Errorf("spec.Name = %q, want the launched skill name", runner.spec.Name)
+	}
+	if runner.spec.OutDir != outDir {
+		t.Errorf("spec.OutDir = %q, want %q", runner.spec.OutDir, outDir)
+	}
+	if len(disp.refs) != 0 {
+		t.Errorf("boot path must not dispatch in-process, got %v", disp.refs)
+	}
+	if !strings.Contains(stdout.String(), "Launched \"weekly-metrics-digest\"") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// TestRunSkillLaunch_InProcessWhenNoRung proves parity: a frozen unit that pins
+// no image stays on the in-process path. The image runner is never touched and
+// the dispatcher walks the step graph, materializing artifacts as before.
+func TestRunSkillLaunch_InProcessWhenNoRung(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeNoImageForLaunch(t, storeDir)
+
 	disp := &fakeLaunchDispatcher{results: map[string]map[string]any{
 		"aileron:metrics.query_series": {
 			"path": "digest.csv", "mimeType": "text/csv", "encoding": "utf-8", "content": "name\ncpu\n",
@@ -73,7 +201,7 @@ func TestRunSkillLaunch_EndToEnd(t *testing.T) {
 		},
 	}}
 	stubLaunchSeams(t, disp)
-	// Supply a seam so the llm-seam step runs.
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
 	origRun := launchSeamForTest
 	launchSeamForTest = fakeCLISeam{}
 	t.Cleanup(func() { launchSeamForTest = origRun })
@@ -84,16 +212,14 @@ func TestRunSkillLaunch_EndToEnd(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "Launched \"weekly-metrics-digest\"") {
-		t.Errorf("stdout = %q", out)
+	if runner.called {
+		t.Fatal("a unit that pins no image must not boot the image runner")
 	}
-	if !strings.Contains(out, "ContentHash: sha256:") {
-		t.Errorf("stdout missing content hash: %q", out)
+	if !strings.Contains(stdout.String(), "ContentHash: sha256:") {
+		t.Errorf("stdout missing content hash: %q", stdout.String())
 	}
-	// The worked example dispatches the metrics read twice (once for the
-	// active_metric_set source input in Phase A, once for the query_metrics
-	// step in Phase B) and the tracker write once.
+	// The worked example dispatches the metrics read twice (Phase A source input
+	// + Phase B step) and the tracker write once.
 	var metrics, tracker int
 	for _, ref := range disp.refs {
 		switch ref {
@@ -106,9 +232,28 @@ func TestRunSkillLaunch_EndToEnd(t *testing.T) {
 	if metrics != 2 || tracker != 1 {
 		t.Errorf("dispatch counts: metrics=%d tracker=%d, want 2/1 (%v)", metrics, tracker, disp.refs)
 	}
-	// filed_issue.json materialized to the out dir.
 	if _, err := os.Stat(filepath.Join(outDir, "filed_issue.json")); err != nil {
 		t.Errorf("filed_issue.json not materialized: %v", err)
+	}
+}
+
+// TestRunSkillLaunch_PinnedButNoRunnerErrors proves the guard fires through the
+// CLI: a rung-pinned unit with a misconfigured (nil) image runner refuses with
+// a non-zero exit and a clear error, never silently running in-process.
+func TestRunSkillLaunch_PinnedButNoRunnerErrors(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+
+	stubLaunchImageRunner(t, nil) // nil runner: the guard must fire.
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a rung-pinned unit with no image runner must exit non-zero")
+	}
+	if !strings.Contains(stderr.String(), "no image runner is configured") {
+		t.Errorf("stderr = %q, want a no-runner-configured message", stderr.String())
 	}
 }
 
@@ -124,22 +269,26 @@ func TestRunSkillLaunch_MissingVersionRefuses(t *testing.T) {
 	}
 }
 
-func TestRunSkillLaunch_InputOverride(t *testing.T) {
+// TestRunSkillLaunch_InputOverrideReachesImageRunner proves a --input override
+// threads into the boot path: the worked example is rung-2, so the override must
+// reach the image runner's spec (which carries it into the in-container run)
+// rather than being dropped at the boot boundary.
+func TestRunSkillLaunch_InputOverrideReachesImageRunner(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
-	disp := &fakeLaunchDispatcher{results: map[string]map[string]any{
-		"aileron:metrics.query_series": {"path": "digest.csv", "encoding": "utf-8", "content": "x", "mimeType": "text/csv"},
-		"aileron:tracker.create_issue": {"path": "filed_issue.json", "encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
-	}}
-	stubLaunchSeams(t, disp)
-	origRun := launchSeamForTest
-	launchSeamForTest = fakeCLISeam{}
-	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ResolvedInputs: map[string]any{"window_days": "30"}},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
 
 	var stdout, stderr bytes.Buffer
 	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "--input", "window_days=30", "weekly-metrics-digest"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	if runner.spec.Inputs["window_days"] != "30" {
+		t.Errorf("input override not threaded into the image spec: %v", runner.spec.Inputs)
 	}
 	if !strings.Contains(stdout.String(), "window_days = 30") {
 		t.Errorf("override not reflected in resolved inputs: %q", stdout.String())

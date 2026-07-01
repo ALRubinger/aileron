@@ -58,6 +58,95 @@ func frozenExample(t *testing.T) store.FrozenVersion {
 	}
 }
 
+// frozenNoImage freezes a no-execution-environment variant of the worked
+// example: the same fully-stepped plan with the `executionEnvironment` block
+// removed, so freeze pins no image. The runtime must stay on the in-process
+// path for it. Deriving from the worked example keeps the plan a real,
+// decodable step graph (the minimal no-step manifests Decode rejects) while
+// isolating exactly the no-rung condition.
+func frozenNoImage(t *testing.T) store.FrozenVersion {
+	t.Helper()
+	keyPath := writeSigningKey(t)
+
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.skill.md"))
+	if err != nil {
+		t.Fatalf("read worked example: %v", err)
+	}
+	stripped := stripExecutionEnvironment(t, string(raw))
+
+	res, err := freeze.Run(context.Background(), []byte(stripped), freeze.Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run no-exec-env variant: %v", err)
+	}
+	return store.FrozenVersion{
+		ID:        "test",
+		SkillMD:   res.FrozenManifest,
+		Lockfile:  res.Lockfile,
+		Signature: res.Signature,
+		PublicKey: res.PublicKey,
+	}
+}
+
+// stripExecutionEnvironment removes the `executionEnvironment:` mapping (and
+// its indented children) from the worked-example frontmatter, leaving a valid
+// no-rung manifest. It drops the block by 4-space indent boundary: the block
+// header sits at 4 spaces and its children are more deeply indented, so
+// dropping from the header until the next line at 4-or-fewer spaces excises
+// exactly the block.
+func stripExecutionEnvironment(t *testing.T, md string) string {
+	t.Helper()
+	lines := strings.Split(md, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	for _, ln := range lines {
+		if !skipping {
+			if strings.TrimSpace(ln) == "executionEnvironment:" &&
+				strings.HasPrefix(ln, "    executionEnvironment:") {
+				skipping = true
+				continue
+			}
+			out = append(out, ln)
+			continue
+		}
+		// While skipping: a line indented deeper than 4 spaces (or blank) is a
+		// child of the block; a line at 4-or-fewer spaces ends it.
+		trimmed := strings.TrimLeft(ln, " ")
+		indent := len(ln) - len(trimmed)
+		if trimmed == "" || indent > 4 {
+			continue
+		}
+		skipping = false
+		out = append(out, ln)
+	}
+	res := strings.Join(out, "\n")
+	if strings.Contains(res, "executionEnvironment:") {
+		t.Fatalf("stripExecutionEnvironment left the block in place")
+	}
+	return res
+}
+
+// writeSigningKey generates a fresh ed25519 key, writes its PKCS#8 PEM to a
+// temp file, and returns the path.
+func writeSigningKey(t *testing.T) string {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+	keyPath := filepath.Join(t.TempDir(), "signing-key.pem")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	return keyPath
+}
+
 func TestLoadVerified_UntamperedLoads(t *testing.T) {
 	fv := frozenExample(t)
 	lp, err := verifyAndDecode(fv)
@@ -69,6 +158,57 @@ func TestLoadVerified_UntamperedLoads(t *testing.T) {
 	}
 	if !strings.HasPrefix(lp.ContentHash, "sha256:") {
 		t.Errorf("content hash = %q", lp.ContentHash)
+	}
+}
+
+func TestLoadVerified_PropagatesResolvedImages(t *testing.T) {
+	// The worked example is rung-2: its verified lock pins a composed image
+	// digest. verifyAndDecode must carry that pin onto the LoadedPlan so Run can
+	// boot the exact image the signature attested.
+	fv := frozenExample(t)
+	lp, err := verifyAndDecode(fv)
+	if err != nil {
+		t.Fatalf("verifyAndDecode: %v", err)
+	}
+	if len(lp.ResolvedImages) != 1 {
+		t.Fatalf("ResolvedImages = %+v, want exactly one pin", lp.ResolvedImages)
+	}
+	wantDigest := "sha256:" + strings.Repeat("a", 64)
+	if lp.ResolvedImages[0].Digest != wantDigest {
+		t.Errorf("ResolvedImages[0].Digest = %q, want %q", lp.ResolvedImages[0].Digest, wantDigest)
+	}
+	if lp.ResolvedImages[0].Ref == "" {
+		t.Error("ResolvedImages[0].Ref must carry the pre-freeze reference")
+	}
+}
+
+// fakeImageRunner records the spec it was handed and returns a canned result,
+// so the runtime boot-vs-in-process branch is testable with no live container.
+type fakeImageRunner struct {
+	called bool
+	gotctx context.Context
+	spec   ImageRunSpec
+	result ImageRunResult
+	err    error
+}
+
+func (f *fakeImageRunner) Run(ctx context.Context, spec ImageRunSpec) (ImageRunResult, error) {
+	f.called = true
+	f.gotctx = ctx
+	f.spec = spec
+	return f.result, f.err
+}
+
+func TestImageRunner_FakeSatisfiesInterface(t *testing.T) {
+	// Compile-time and behavioral proof that the SPI is satisfiable by a fake:
+	// the boot path never needs a live container to test.
+	var r ImageRunner = &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:x"}}
+	out, err := r.Run(context.Background(), ImageRunSpec{Image: "img@sha256:x"})
+	if err != nil {
+		t.Fatalf("fake ImageRunner: %v", err)
+	}
+	if out.ContentHash != "sha256:x" {
+		t.Errorf("result ContentHash = %q, want the canned value", out.ContentHash)
 	}
 }
 

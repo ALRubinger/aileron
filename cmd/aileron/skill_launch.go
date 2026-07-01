@@ -23,6 +23,12 @@ var newLaunchDispatcher = func() runtime.ActionDispatcher { return daemonDispatc
 var newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
 var newLaunchAuditSink = func() runtime.AuditSink { return stdoutAuditSink{} }
 
+// newLaunchImageRunner returns the production image runner that boots the
+// verified pinned rung-1/rung-2 image and runs the plan inside it (#1731). It
+// is a package-level seam so CLI tests swap in a fake that records the exact
+// image string and never touches Docker, mirroring the other launch seams.
+var newLaunchImageRunner = func() runtime.ImageRunner { return containerImageRunner{} }
+
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
 // nil by default, which is the v1 contract: a plan with an llm-seam step
 // errors unless a provider is configured, so a default launch reaches no LLM.
@@ -90,8 +96,12 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// Seam is nil in v1 production: the LLM seam is unwired, so a plan with
 		// an llm-seam step errors unless a provider is supplied. Tests inject a
 		// deterministic seam through launchSeamForTest.
-		Seam:   launchSeamForTest,
-		OutDir: *outDir,
+		Seam: launchSeamForTest,
+		// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the
+		// plan inside it. When the frozen unit pins no image, the runtime never
+		// touches this seam and stays on the in-process path.
+		ImageRunner: newLaunchImageRunner(),
+		OutDir:      *outDir,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

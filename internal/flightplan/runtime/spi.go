@@ -93,3 +93,53 @@ type SeamRequest struct {
 type LLMSeam interface {
 	Run(ctx context.Context, req SeamRequest) (map[string]any, error)
 }
+
+// ImageRunSpec is the input to the ImageRunner seam. It carries the verified
+// pinned image (the `ref@digest` string the runtime booted from the signed
+// lock) plus everything the in-container launch needs to run the plan to
+// completion: the frozen-unit selector (Name/Version), the launch input
+// overrides, and the out-dir artifacts are written to.
+type ImageRunSpec struct {
+	// Image is the exact `ref@sha256:<hex>` the verified lock pinned. It is the
+	// load-bearing security value: the runner MUST boot this image verbatim so
+	// the environment entered corresponds to the lock's signed assertion.
+	Image string
+	// Name is the frozen skill name (the store selector).
+	Name string
+	// Version is the frozen version id (the store directory id).
+	Version string
+	// Inputs are the literal input overrides supplied at launch.
+	Inputs LaunchArgs
+	// OutDir is the directory file-target artifacts are written to. Empty skips
+	// writing (artifacts are still recorded in the result).
+	OutDir string
+}
+
+// ImageRunResult maps onto RunResult so the image-boot path returns the same
+// public shape as the in-process path. A caller cannot tell from the result
+// which path produced it, which keeps launch output identical across the
+// boot-vs-in-process branch.
+type ImageRunResult struct {
+	// ContentHash is the verified content hash of the frozen unit that ran.
+	ContentHash string
+	// ResolvedInputs is the frozen resolved-input set.
+	ResolvedInputs map[string]any
+	// StepOutputs maps steps.<id> → its named outputs.
+	StepOutputs map[string]map[string]any
+	// Artifacts are the materialized output artifacts.
+	Artifacts []Artifact
+	// AuditIDs are the audit record ids emitted to the sink.
+	AuditIDs []string
+}
+
+// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the frozen
+// plan to completion inside it (issue #1731). The runtime core depends only on
+// this seam; the CLI (cmd/aileron) wires the production implementation over
+// internal/sandbox/container, so the runtime never imports the container
+// package. Its contract: boot the exact image named in ImageRunSpec.Image,
+// run the selected frozen unit against the given inputs/out-dir, and return the
+// RunResult-shaped outcome. The runtime supplies ImageRunSpec.Image straight
+// from the verified lock, so the runner is handed a pin it must not re-resolve.
+type ImageRunner interface {
+	Run(ctx context.Context, spec ImageRunSpec) (ImageRunResult, error)
+}
