@@ -117,6 +117,34 @@ func TestRunInImage_RejectsMultiplePins(t *testing.T) {
 	}
 }
 
+// TestHasWholePlanImage_RoutesRung3ToInProcess proves the routing guard: a pin
+// set carrying a StepID (rung-3 per-step dispatch) is NOT a whole-plan boot, so
+// Run stays on runPlan and never mis-routes into runInImage. A single pin with
+// no StepID (rung-1/rung-2) IS a whole-plan boot.
+func TestHasWholePlanImage_RoutesRung3ToInProcess(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	cases := []struct {
+		name string
+		pins []freeze.ImagePin
+		want bool
+	}{
+		{"empty", nil, false},
+		{"single whole-plan pin", []freeze.ImagePin{{Ref: "r", Digest: digest}}, true},
+		{"rung-3 single per-step pin", []freeze.ImagePin{{Ref: "r", Digest: digest, StepID: "extract"}}, false},
+		{"rung-3 multi per-step pins", []freeze.ImagePin{
+			{Ref: "a", Digest: digest, StepID: "s1"},
+			{Ref: "b", Digest: digest, StepID: "s2"},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasWholePlanImage(tc.pins); got != tc.want {
+				t.Errorf("hasWholePlanImage = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestImageRef_JoinsRefAndDigest(t *testing.T) {
 	got := imageRef("registry.example.com/runner:1.4", "sha256:abc")
 	if got != "registry.example.com/runner:1.4@sha256:abc" {

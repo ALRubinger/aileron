@@ -265,6 +265,49 @@ func (d stepDTO) toStep() (Step, error) {
 	return step, nil
 }
 
+// ---- rung-3 per-step tool dispatch ----
+
+// rung3EnvDTO mirrors the schema `executionEnvironment.rung3PerStepImages`
+// block. Strict decode (KnownFields) means an unexpected key under the block or
+// a step entry is a decode error, so a typo never silently drops a mount/collect
+// declaration. `id`/`mount`/`collect` are optional in the schema and modeled as
+// such here; only `image` is required.
+type rung3EnvDTO struct {
+	Steps []rung3StepDTO `yaml:"steps"`
+}
+
+// rung3StepDTO is one rung-3 step's declared tool-dispatch I/O. Mount and
+// Collect are pointers so their absence (a step that declares no mount/collect)
+// is distinguishable from an empty mapping.
+type rung3StepDTO struct {
+	ID    string `yaml:"id"`
+	Image string `yaml:"image"`
+	Mount *struct {
+		Path string `yaml:"path"`
+	} `yaml:"mount"`
+	Collect *struct {
+		Path string `yaml:"path"`
+	} `yaml:"collect"`
+}
+
+// mountPath returns the declared mount path, or empty when the step declared no
+// mount. A mount block with an empty path is a decode error at the caller.
+func (d rung3StepDTO) mountPath() string {
+	if d.Mount == nil {
+		return ""
+	}
+	return d.Mount.Path
+}
+
+// collectPath returns the declared collect path, or empty when the step
+// declared no collect.
+func (d rung3StepDTO) collectPath() string {
+	if d.Collect == nil {
+		return ""
+	}
+	return d.Collect.Path
+}
+
 func parseBindings(stepID string, raw map[string]string) (map[string]Binding, error) {
 	if len(raw) == 0 {
 		return nil, nil

@@ -115,6 +115,66 @@ func TestStrippedTopLevelStillValid(t *testing.T) {
 	}
 }
 
+// TestLockResolvedImagesID locks the rung-3 association substrate at the schema
+// boundary: a lock whose resolvedImages[] item carries the optional `id` is
+// valid (the step→pin link), a lock item with only ref+digest stays valid
+// (rung-1/rung-2 pins carry no id), and an unknown key on the item is still
+// rejected (additionalProperties:false is preserved).
+func TestLockResolvedImagesID(t *testing.T) {
+	lockFrontmatter := func(item string) []byte {
+		return []byte(`name: s
+description: d
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+  inputs: []
+  outputs: []
+  lock:
+    resolvedImages:
+` + item + `
+`)
+	}
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("valid/with id", func(t *testing.T) {
+		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        id: extract"
+		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
+			t.Fatalf("a resolvedImages item with id must validate, got: %v", err)
+		}
+	})
+	t.Run("valid/without id", func(t *testing.T) {
+		item := "      - ref: registry.example.com/runner:1.4\n        digest: " + digest
+		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
+			t.Fatalf("a resolvedImages item without id must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/unknown key", func(t *testing.T) {
+		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        stepId: extract"
+		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
+			t.Fatal("an unknown key on a resolvedImages item must be rejected")
+		}
+	})
+	t.Run("invalid/empty id", func(t *testing.T) {
+		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        id: \"\""
+		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
+			t.Fatal("an empty id (minLength:1) must be rejected")
+		}
+	})
+}
+
 // execEnvFrontmatter wraps an executionEnvironment block body into a complete,
 // otherwise-valid aileron frontmatter so a test exercises only the
 // executionEnvironment validity rules. envBlock is the YAML for the

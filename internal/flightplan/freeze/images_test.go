@@ -160,10 +160,10 @@ func TestResolveImages_Rung3ResolvesPerStepDigests(t *testing.T) {
 	if len(pins) != 2 {
 		t.Fatalf("rung-3 must pin one image per step, got %+v", pins)
 	}
-	if pins[0].Ref != "registry.example.com/tool-a:1" || pins[0].Digest != fakeDigest {
+	if pins[0].Ref != "registry.example.com/tool-a:1" || pins[0].Digest != fakeDigest || pins[0].StepID != "extract" {
 		t.Errorf("first step pin = %+v", pins[0])
 	}
-	if pins[1].Ref != "registry.example.com/tool-b:2" || pins[1].Digest != fakeDigest2 {
+	if pins[1].Ref != "registry.example.com/tool-b:2" || pins[1].Digest != fakeDigest2 || pins[1].StepID != "convert" {
 		t.Errorf("second step pin = %+v", pins[1])
 	}
 	if len(capSet) != 0 {
@@ -171,6 +171,77 @@ func TestResolveImages_Rung3ResolvesPerStepDigests(t *testing.T) {
 	}
 	if strings.Join(gotRefs, ",") != "registry.example.com/tool-a:1,registry.example.com/tool-b:2" {
 		t.Errorf("resolver saw refs %v in the wrong order or set", gotRefs)
+	}
+}
+
+// TestResolveImages_Rung3SharedTagPinsDistinctlyByID is the #1739 regression
+// proof: two rung-3 steps naming the SAME image tag must produce two distinct
+// pins linked by their declared step id, not one ref-keyed pin. Association by
+// StepID (not by Ref) is what removes the tag-collision ambiguity. This test
+// fails before Unit 1 (no StepID field) and passes after.
+func TestResolveImages_Rung3SharedTagPinsDistinctlyByID(t *testing.T) {
+	m := parseM(t, []byte(rung3SharedTagMD))
+	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
+		return fakeDigest, nil
+	})
+	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	if err != nil {
+		t.Fatalf("shared-tag rung-3 resolution must succeed: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("two steps sharing a tag must still pin one image per step, got %+v", pins)
+	}
+	// Both steps share the same ref and (fake) digest, so only the StepID
+	// distinguishes them: association must key on the id.
+	if pins[0].StepID != "first" || pins[1].StepID != "second" {
+		t.Errorf("pins must carry the declared step ids, got [%q, %q]", pins[0].StepID, pins[1].StepID)
+	}
+	if pins[0].Ref != pins[1].Ref {
+		t.Fatalf("fixture invariant: both steps must share the same ref, got %q and %q", pins[0].Ref, pins[1].Ref)
+	}
+	if pins[0].StepID == pins[1].StepID {
+		t.Errorf("two steps sharing a tag must pin distinctly by id, both got %q", pins[0].StepID)
+	}
+}
+
+// TestResolveImages_Rung3PositionalIDFallback proves that rung-3 steps with no
+// declared id still get a traceable, distinct positional id stamped onto their
+// pins, so the runtime can associate positionally.
+func TestResolveImages_Rung3PositionalIDFallback(t *testing.T) {
+	m := parseM(t, []byte(rung3NoIDMD))
+	digestFor := map[string]string{
+		"registry.example.com/tool-a:1": fakeDigest,
+		"registry.example.com/tool-b:2": fakeDigest2,
+	}
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return digestFor[ref], nil
+	})
+	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	if err != nil {
+		t.Fatalf("no-id rung-3 resolution must succeed: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("expected two pins, got %+v", pins)
+	}
+	if pins[0].StepID != "#0" || pins[1].StepID != "#1" {
+		t.Errorf("positional fallback ids must be #0/#1, got [%q, %q]", pins[0].StepID, pins[1].StepID)
+	}
+}
+
+// TestResolveImages_Rung1PinCarriesNoStepID proves rung-1 pins leave StepID
+// empty, so the single-pin whole-plan-boot path and its lock bytes are
+// unchanged by the association substrate.
+func TestResolveImages_Rung1PinCarriesNoStepID(t *testing.T) {
+	m := parseM(t, []byte(rung1MD))
+	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
+		return fakeDigest, nil
+	})
+	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	if err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if len(pins) != 1 || pins[0].StepID != "" {
+		t.Errorf("rung-1 pin must carry no StepID, got %+v", pins)
 	}
 }
 

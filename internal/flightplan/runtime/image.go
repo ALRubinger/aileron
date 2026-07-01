@@ -3,7 +3,26 @@ package runtime
 import (
 	"context"
 	"fmt"
+
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 )
+
+// hasWholePlanImage reports whether the verified pins carry a rung-1/rung-2
+// whole-plan-boot image. Those pins boot ONE image and run the whole plan
+// inside it; they carry no per-step StepID. Rung-3 pins are per-step
+// sibling-tool dispatches and every one carries a StepID, so a pin set with any
+// StepID is rung-3 and stays on the in-process runPlan path, not runInImage.
+// This is the routing guard that keeps runInImage's single-pin invariant intact
+// and never mis-routes a rung-3 plan into the whole-plan boot.
+func hasWholePlanImage(pins []freeze.ImagePin) bool {
+	for _, p := range pins {
+		if p.StepID != "" {
+			// Any per-step pin means this is a rung-3 set: not a whole-plan boot.
+			return false
+		}
+	}
+	return len(pins) > 0
+}
 
 // runInImage boots the verified pinned rung-1/rung-2 image and runs the frozen
 // plan inside it (#1731). It is reached only when the loaded plan carries a
