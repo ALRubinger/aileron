@@ -80,12 +80,20 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState) []string {
 }
 
 // buildLaunchRecord builds the per-launch resolved-inputs→outputs record. It
-// references source-input reads by their resolved binding and lists the
-// materialized artifact names, never inline data.
+// references source-input reads by their resolved binding and records each
+// materialized output by name, path, and content digest, never inline data.
+// The sha256 digest is the ADR-0027 snapshot identifier: it binds the output
+// name to the exact bytes the run produced so a past launch is independently
+// verifiable (hash the loose output file, compare to the recorded digest)
+// without duplicating the dataset in the audit.
 func buildLaunchRecord(st execState) AuditRecord {
-	artifacts := make([]string, 0, len(st.artifacts))
+	artifacts := make([]map[string]any, 0, len(st.artifacts))
 	for _, a := range st.artifacts {
-		artifacts = append(artifacts, a.Name)
+		artifacts = append(artifacts, map[string]any{
+			"name":   a.Name,
+			"path":   a.Path,
+			"sha256": a.Digest,
+		})
 	}
 	sources := map[string]any{}
 	for name, sb := range st.inputs.SourceBindings {

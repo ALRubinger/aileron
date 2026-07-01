@@ -111,9 +111,9 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "  Artifacts:")
 		for _, a := range res.Artifacts {
 			if a.Written {
-				fmt.Fprintf(stdout, "    %s -> %s\n", a.Name, a.Path)
+				fmt.Fprintf(stdout, "    %s -> %s  %s\n", a.Name, a.Path, a.Digest)
 			} else {
-				fmt.Fprintf(stdout, "    %s (retained)\n", a.Name)
+				fmt.Fprintf(stdout, "    %s (retained)  %s\n", a.Name, a.Digest)
 			}
 		}
 	}
