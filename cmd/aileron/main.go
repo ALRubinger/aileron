@@ -2225,7 +2225,24 @@ func runConnectorInstall(args []string, stdin io.Reader, stdout, stderr io.Write
 	}
 	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
 		verb, resp.Fqn, resp.Version, resp.Hash, resp.EntryDir)
+	if !resp.AlreadyInstalled {
+		printPinAdvisory(stdout)
+	}
 	return 0
+}
+
+// printPinAdvisory reminds the operator, after a fresh connector install,
+// that Aileron pins connectors by content hash (ADR-0004). Existing
+// actions and flight plans keep running whatever (version, hash) they
+// were published against until they are reinstalled or re-published; a
+// new connector install does not retroactively re-resolve them. This is
+// a static advisory only — nothing re-resolves at execution time.
+func printPinAdvisory(w io.Writer) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Note: connectors are pinned by content hash (ADR-0004).")
+	fmt.Fprintln(w, "  Existing actions and flight plans keep their pinned version until")
+	fmt.Fprintln(w, "  reinstalled or re-published. Run `aileron connector check` to see")
+	fmt.Fprintln(w, "  what is installed and whether newer versions are available.")
 }
 
 // tryHubInstallDecisionFlow asks the daemon for the Hub install-decision
@@ -2728,6 +2745,9 @@ func doConfirmedInstall(fqn, version, expectedHash, fingerprint string, stdout, 
 	}
 	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
 		verb, installed.Fqn, installed.Version, installed.Hash, installed.EntryDir)
+	if !installed.AlreadyInstalled {
+		printPinAdvisory(stdout)
+	}
 	return 0
 }
 

@@ -249,3 +249,39 @@ func TestStore_LookupAnyVersion_ReturnsAnyInstalledVersion(t *testing.T) {
 		t.Errorf("hash = %q", gotHash)
 	}
 }
+
+func TestStore_LookupAnyVersion_ReturnsHighestSemVerDeterministically(t *testing.T) {
+	// Contract: when multiple versions of an FQN are installed,
+	// LookupAnyVersion returns the SemVer-highest one, and does so
+	// deterministically. Go randomizes map iteration, so the previous
+	// "return the first prefix match" behavior could return any installed
+	// version depending on the run. This regression test installs several
+	// versions and asserts the highest is returned on every iteration.
+	dir := t.TempDir()
+	store := NewStore(dir)
+	fqn, _ := ParseFQN("github://acme/x")
+
+	// Populate out of SemVer order to prove the selection is by version,
+	// not insertion or iteration order. 2.0.0 is the highest.
+	store.index["github://acme/x@1.0.0"] = "sha256:aaaa"
+	store.index["github://acme/x@2.0.0"] = "sha256:bbbb"
+	store.index["github://acme/x@1.10.0"] = "sha256:cccc"
+	store.index["github://acme/x@1.2.0"] = "sha256:dddd"
+	// A different FQN sharing the store must never leak into the result.
+	store.index["github://acme/y@9.9.9"] = "sha256:eeee"
+
+	// Repeat so map-iteration randomization would surface any
+	// nondeterminism as a flake rather than a silent pass.
+	for i := 0; i < 100; i++ {
+		gotRef, gotHash, ok := store.LookupAnyVersion(fqn)
+		if !ok {
+			t.Fatal("LookupAnyVersion = ok=false with versions installed")
+		}
+		if gotRef.Version != "2.0.0" {
+			t.Fatalf("iteration %d: Version = %q, want highest 2.0.0", i, gotRef.Version)
+		}
+		if gotHash != "sha256:bbbb" {
+			t.Fatalf("iteration %d: hash = %q, want sha256:bbbb", i, gotHash)
+		}
+	}
+}
