@@ -11,10 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strings"
 
-	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/vaultscope"
@@ -78,13 +76,6 @@ func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-// agentCredentialPurposeRe constrains the `<purpose>` path segment the
-// CLI accepts. It mirrors the server's allow-list
-// (validateAgentCredentialPurpose in handlers_local_vault_secrets.go) so
-// the CLI rejects exactly what the daemon would reject, client-side,
-// before any HTTP call.
-var agentCredentialPurposeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-
 // agentPathNameAndPurpose validates that arg names an agents-only
 // credential entry and returns the agent <name> and credential
 // <purpose>. The vault put verb is namespace-locked: it refuses anything
@@ -99,27 +90,16 @@ var agentCredentialPurposeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 //   - agents/<name>/<purpose>, e.g. `agents/claude/oauth`,
 //     `agents/claude/apikey`
 //
-// The <purpose> segment is constrained to the same allow-list the daemon
-// enforces. Whatever `list` shows for an agent can be pasted straight
-// into delete/put.
+// The parse and the <purpose> allow-list are delegated to the shared
+// classifier (vaultscope.AgentNameAndPurposeFromVaultPath) so the CLI
+// accepts exactly what `vault list` surfaces. This is a thin wrapper that
+// keeps the `(name, purpose, err)` signature the put/delete call sites
+// use; any non-conforming path collapses into the single
+// `agents/<name>/<purpose>` rejection.
 func agentPathNameAndPurpose(arg string) (name, purpose string, err error) {
-	const prefix = "agents/"
-	if !strings.HasPrefix(arg, prefix) {
+	name, purpose, ok := vaultscope.AgentNameAndPurposeFromVaultPath(arg)
+	if !ok {
 		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
-	}
-	rest := arg[len(prefix):]
-	// Exactly two remaining segments: <name>/<purpose>. A name or purpose
-	// that itself contains a slash (a nested key) is rejected.
-	parts := strings.Split(rest, "/")
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
-	}
-	name, purpose = parts[0], parts[1]
-	if name == "" || purpose == "" {
-		return "", "", fmt.Errorf("name must be agents/<name>/<purpose> (got %q)", arg)
-	}
-	if !agentCredentialPurposeRe.MatchString(purpose) {
-		return "", "", fmt.Errorf("purpose must match %s (got %q)", agentCredentialPurposeRe.String(), purpose)
 	}
 	return name, purpose, nil
 }
@@ -243,12 +223,6 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// userServiceRe constrains the `<service>` segment of a `user/<service>`
-// path the CLI accepts for delete. It mirrors the server's allow-list
-// (userServiceRe in handlers_local_vault_user.go) so the CLI classifies
-// exactly the paths the daemon would, client-side, before any HTTP call.
-var userServiceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
-
 // vaultDeleteTarget describes a classified, CLI-deletable vault path: the
 // daemon DELETE path to issue, the prompt label, and the namespace-aware
 // success and 404 messages. Each namespace's own namespace-scoped endpoint
@@ -273,14 +247,17 @@ type vaultDeleteTarget struct {
 // plane rather than this CLI, and any unrecognized `other` path — it
 // returns (zero, false); the caller prints the rejection.
 func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
-	// Control-plane namespaces are owned by the control plane, never the
-	// operator CLI; classify them out before the deletable namespaces.
-	if strings.HasPrefix(arg, "connected-accounts/") || strings.HasPrefix(arg, "llm-config/") {
-		return vaultDeleteTarget{}, false
-	}
-	// agents/<name>/<purpose> — reuse the existing agent credential
-	// endpoint. Checked first: it also matches the binding grammar.
-	if name, purpose, err := agentPathNameAndPurpose(arg); err == nil {
+	// The shared classifier owns namespace detection (its ordering already
+	// checks agents/<name>/<purpose> before the binding grammar, which the
+	// two shapes share). Only the delete-specific HTTP paths, prompt labels,
+	// and success/404 messages are assembled locally.
+	scope, _ := vaultscope.Classify(arg)
+	switch scope {
+	case vaultscope.ScopeAgent:
+		// agents/<name>/<purpose> — reuse the existing agent credential
+		// endpoint. Classify already confirmed the path conforms, so the
+		// wrapper cannot error here.
+		name, purpose, _ := vaultscope.AgentNameAndPurposeFromVaultPath(arg)
 		label := "agents/" + name + "/" + purpose
 		return vaultDeleteTarget{
 			httpPath:   agentCredentialPath(name, purpose),
@@ -288,9 +265,9 @@ func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
 			successMsg: "Deleted " + label,
 			notFound:   "error: no credential entry for " + label,
 		}, true
-	}
-	// user/<service> — DELETE /vault/user/<service>/credentials.
-	if service, ok := userServiceFromArg(arg); ok {
+	case vaultscope.ScopeUser:
+		// user/<service> — DELETE /vault/user/<service>/credentials.
+		service, _ := vaultscope.UserServiceFromVaultPath(arg)
 		label := "user/" + service
 		return vaultDeleteTarget{
 			httpPath:   "/vault/user/" + url.PathEscape(service) + "/credentials",
@@ -298,34 +275,22 @@ func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
 			successMsg: "Deleted " + label,
 			notFound:   "error: no credential entry for " + label,
 		}, true
-	}
-	// A binding (<kind>/<service>/<identity>) — DELETE /bindings/<name>,
-	// identical to `aileron binding revoke`.
-	if binding.IsBindingPath(arg) {
+	case vaultscope.ScopeBinding:
+		// A binding (<kind>/<service>/<identity>) — DELETE /bindings/<name>,
+		// identical to `aileron binding revoke`.
 		return vaultDeleteTarget{
 			httpPath:   "/bindings/" + url.PathEscape(arg),
 			label:      arg,
 			successMsg: "Deleted " + arg,
 			notFound:   "error: binding not found: " + arg,
 		}, true
+	default:
+		// Control-plane namespaces (connected-account, llm-config) are owned
+		// by the control plane, not the operator CLI; secret/ is handled by
+		// the local-vault branch before this call; and `other` is an
+		// unrecognized shape. None is CLI-deletable here.
+		return vaultDeleteTarget{}, false
 	}
-	return vaultDeleteTarget{}, false
-}
-
-// userServiceFromArg extracts the service from a `user/<service>` path,
-// returning false for any path that does not match the scheme. Mirrors the
-// shared vaultscope.UserServiceFromVaultPath so the CLI accepts exactly what
-// the daemon stores.
-func userServiceFromArg(arg string) (service string, ok bool) {
-	const prefix = "user/"
-	if !strings.HasPrefix(arg, prefix) {
-		return "", false
-	}
-	service = arg[len(prefix):]
-	if !userServiceRe.MatchString(service) {
-		return "", false
-	}
-	return service, true
 }
 
 // runVaultDelete removes the credential at the given path via the daemon.
