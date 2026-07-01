@@ -1,6 +1,8 @@
 package freeze
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +29,14 @@ type VerifiedFrozen struct {
 	// populated on the verified path: a tampered digest changes the recomputed
 	// content hash and refuses before this field is read.
 	ResolvedImages []ImagePin
+	// SignerFingerprint is the `sha256:<hex>` fingerprint of the verified
+	// author public-key PEM (the same `pubPEM` the ed25519 signature verified
+	// against). It is the honest signer identity the audit trail carries:
+	// there is no human signer name in the system, so the key fingerprint is
+	// the stable identity value. It is only ever populated on the verified
+	// path, alongside a successful signature check, so the fingerprint names
+	// the key that actually attested the frozen unit.
+	SignerFingerprint string
 }
 
 // VerifyFrozen is the Launch-time verification gate (ADR-0027, #1509/#1511).
@@ -133,7 +143,22 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 	if len(manifestLock.ResolvedImages) > 0 {
 		pins = append([]ImagePin(nil), manifestLock.ResolvedImages...)
 	}
-	return VerifiedFrozen{SkillMD: verified, ContentHash: recorded, ResolvedImages: pins}, nil
+	return VerifiedFrozen{
+		SkillMD:           verified,
+		ContentHash:       recorded,
+		ResolvedImages:    pins,
+		SignerFingerprint: signerFingerprint(pubPEM),
+	}, nil
+}
+
+// signerFingerprint returns the `sha256:<hex>` fingerprint of the verified
+// public-key PEM. It is computed only after Verify succeeds, so the value
+// names the key that actually attested the frozen unit. The same PEM bytes
+// always yield the same fingerprint, and a different key yields a different
+// one, which is what makes it a stable audit identity.
+func signerFingerprint(pubPEM []byte) string {
+	sum := sha256.Sum256(pubPEM)
+	return contentHashPrefix + hex.EncodeToString(sum[:])
 }
 
 // lockFromManifest parses the `aileron.lock` block of a frozen SKILL.md into a

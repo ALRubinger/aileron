@@ -159,6 +159,11 @@ func TestLoadVerified_UntamperedLoads(t *testing.T) {
 	if !strings.HasPrefix(lp.ContentHash, "sha256:") {
 		t.Errorf("content hash = %q", lp.ContentHash)
 	}
+	// The verified signer fingerprint surfaces on the LoadedPlan so the launch
+	// audit can record the plan's signer identity (#1752).
+	if !strings.HasPrefix(lp.SignerFingerprint, "sha256:") {
+		t.Errorf("SignerFingerprint = %q, want a sha256: prefix surfaced from verification", lp.SignerFingerprint)
+	}
 }
 
 func TestLoadVerified_PropagatesResolvedImages(t *testing.T) {

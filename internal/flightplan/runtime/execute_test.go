@@ -107,7 +107,7 @@ func runFixture(t *testing.T, opts Options) (RunResult, *dispatchRouter, *record
 	if opts.Seam != nil {
 		o.Seam = opts.Seam
 	}
-	res, err := runPlan(context.Background(), p, "sha256:test", o)
+	res, err := runPlan(context.Background(), p, "sha256:test", "sha256:signer", o)
 	if err != nil {
 		t.Fatalf("runPlan: %v", err)
 	}
@@ -159,6 +159,70 @@ func TestExecute_WriteThreadsIdempotencyKey(t *testing.T) {
 	writeArgs := disp.calls[1].args
 	if _, ok := writeArgs[idempotencyKeyField]; !ok {
 		t.Error("the write action (idempotencyKey:true) must thread a stable key")
+	}
+}
+
+func TestExecute_CapturesMaterializedOutputProvenance(t *testing.T) {
+	// The fixture materializes two outputs: digest.csv from a transform step and
+	// filed_issue.json from an action-call step. execute must capture one
+	// st.outputs entry per materialized artifact, each carrying the originating
+	// step's id/kind (and the transform name for the transform step). This is the
+	// kind-agnostic capture that makes the transform output auditable (#1752).
+	p := fixturePlan()
+	// Name the transform on the materializing transform step so the captured
+	// provenance carries a concrete transform name (mirrors `transform:
+	// html-render`). render_csv is the transform step (index 1).
+	for i := range p.Steps {
+		if p.Steps[i].ID == "render_csv" {
+			p.Steps[i].Transform = "html-render"
+		}
+	}
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {
+			"path": "filed_issue.json", "mimeType": "application/json", "encoding": "utf-8",
+			"content": `{"url":"https://tracker.example.com/issues/1"}`,
+		},
+	}}
+	reg := NewTransformRegistry()
+	reg.Register("html-render", func(_ map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{
+			"path": "digest.csv", "mimeType": "text/csv", "encoding": "utf-8", "content": "name\ncpu\n",
+		}}, nil
+	})
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: disp, approver: &fakeApprover{decision: Decision{Approved: true}}},
+		transform: reg,
+		seam:      fakeSeam{out: map[string]any{"issue_body": "A short digest."}},
+	}
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.outputs) != 2 {
+		t.Fatalf("captured %d outputs, want 2 (transform + action-call)", len(st.outputs))
+	}
+	byStep := map[string]materializedOutput{}
+	for _, o := range st.outputs {
+		byStep[o.StepID] = o
+	}
+	csv, ok := byStep["render_csv"]
+	if !ok {
+		t.Fatal("transform materializing step render_csv was not captured")
+	}
+	if csv.StepKind != KindTransform || csv.Transform != "html-render" {
+		t.Errorf("transform output = kind %q transform %q, want transform/html-render", csv.StepKind, csv.Transform)
+	}
+	if csv.Artifact.Name != "digest.csv" {
+		t.Errorf("transform artifact name = %q", csv.Artifact.Name)
+	}
+	issue, ok := byStep["file_issue"]
+	if !ok {
+		t.Fatal("action-call materializing step file_issue was not captured")
+	}
+	if issue.StepKind != KindActionCall {
+		t.Errorf("action-call output kind = %q, want action-call", issue.StepKind)
 	}
 }
 

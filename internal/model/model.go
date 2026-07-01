@@ -402,4 +402,14 @@ const (
 	// "flightplan-launch"}.
 	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
 	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
+
+	// EventTypeOutputMaterialized is one per-output-per-step provenance event
+	// (#1752). The in-process launch runtime emits exactly one such record for
+	// each materialized artifact, whether the materializing step is an
+	// action-call or a transform (a `transform: html-render` output surfaces as
+	// its own event rather than being lumped into the launch summary). The
+	// flat `aileron.*` payload carries the output's content hash, mime, byte
+	// count, and originating step provenance plus the plan/invocation identity.
+	// Actor is {type: service, id: "flightplan-launch"}.
+	EventTypeOutputMaterialized EventType = "output.materialized"
 )

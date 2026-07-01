@@ -59,6 +59,52 @@ func TestVerifyFrozen_ExposesResolvedImagesForRung2(t *testing.T) {
 	}
 }
 
+func TestVerifyFrozen_ExposesSignerFingerprint(t *testing.T) {
+	// A successful verification surfaces a `sha256:`-prefixed fingerprint of the
+	// verified author public key. It is the honest signer identity (there is no
+	// human signer name), computed over the same pubPEM the signature verified.
+	res := freezeExample(t)
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen: %v", err)
+	}
+	if !strings.HasPrefix(v.SignerFingerprint, "sha256:") {
+		t.Errorf("SignerFingerprint = %q, want a sha256: prefix", v.SignerFingerprint)
+	}
+	if len(v.SignerFingerprint) != len("sha256:")+64 {
+		t.Errorf("SignerFingerprint = %q, want sha256: + 64 hex chars", v.SignerFingerprint)
+	}
+	// The fingerprint is stable: verifying the same artifacts yields the same value.
+	v2, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen (second): %v", err)
+	}
+	if v2.SignerFingerprint != v.SignerFingerprint {
+		t.Errorf("fingerprint not stable: %q vs %q", v.SignerFingerprint, v2.SignerFingerprint)
+	}
+}
+
+func TestVerifyFrozen_SignerFingerprintDiffersPerKey(t *testing.T) {
+	// A different signing key yields a different fingerprint, so the value names
+	// the specific key that attested the unit.
+	a := freezeExample(t)
+	b := freezeExample(t)
+	va, err := VerifyFrozen(a.FrozenManifest, a.Lockfile, a.Signature, a.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen a: %v", err)
+	}
+	vb, err := VerifyFrozen(b.FrozenManifest, b.Lockfile, b.Signature, b.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen b: %v", err)
+	}
+	if bytes.Equal(a.PublicKey, b.PublicKey) {
+		t.Skip("freeze reused a key; cannot assert per-key difference")
+	}
+	if va.SignerFingerprint == vb.SignerFingerprint {
+		t.Errorf("different keys produced the same fingerprint %q", va.SignerFingerprint)
+	}
+}
+
 func TestVerifyFrozen_ExposesResolvedImagesForRung1(t *testing.T) {
 	// A rung-1 unit names a whole prebuilt image; freeze resolves it to a
 	// digest pin. The verified pin must carry both the ref and the digest.
