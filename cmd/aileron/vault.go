@@ -258,7 +258,7 @@ type vaultDeleteTarget struct {
 }
 
 // vaultDeleteTargetFor classifies arg into the matching deletable
-// namespace, mirroring the daemon's classifyVaultPath order so the CLI
+// namespace, mirroring the shared vaultscope.Classify order so the CLI
 // recognizes exactly what `vault list` surfaces. The order is
 // load-bearing: agents/<name>/<purpose> also matches the binding name
 // grammar, so it must be checked first.
@@ -310,8 +310,8 @@ func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
 
 // userServiceFromArg extracts the service from a `user/<service>` path,
 // returning false for any path that does not match the scheme. Mirrors the
-// daemon's userServiceFromVaultPath so the CLI accepts exactly what the
-// daemon stores.
+// shared vaultscope.UserServiceFromVaultPath so the CLI accepts exactly what
+// the daemon stores.
 func userServiceFromArg(arg string) (service string, ok bool) {
 	const prefix = "user/"
 	if !strings.HasPrefix(arg, prefix) {

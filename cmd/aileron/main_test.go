@@ -1161,7 +1161,7 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 	// Pre-populate the vault file directly (skip encryption for test).
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
 	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
-	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"slack_bot_token":{"value":"ZW5j","metadata":{"type":"secret"}},"discord_token":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
+	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"secret/slack_bot_token":{"value":"ZW5j","metadata":{"type":"secret"}},"secret/discord_token":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
@@ -1169,11 +1169,11 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "slack_bot_token") {
-		t.Errorf("expected 'slack_bot_token' in output, got: %s", out)
+	if !strings.Contains(out, "secret/slack_bot_token") {
+		t.Errorf("expected 'secret/slack_bot_token' in output, got: %s", out)
 	}
-	if !strings.Contains(out, "discord_token") {
-		t.Errorf("expected 'discord_token' in output, got: %s", out)
+	if !strings.Contains(out, "secret/discord_token") {
+		t.Errorf("expected 'secret/discord_token' in output, got: %s", out)
 	}
 }
 
@@ -1202,7 +1202,7 @@ func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"a":{"value":"ZW5j","metadata":{"type":"secret"}},"b":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600); err != nil {
+	if err := os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"secret/a":{"value":"ZW5j","metadata":{"type":"secret"}},"secret/b":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1223,29 +1223,32 @@ func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
 		}
 		got[name] = true
 	}
-	for _, want := range []string{"a", "b"} {
+	for _, want := range []string{"secret/a", "secret/b"} {
 		if !got[want] {
 			t.Errorf("missing name %q in: %v", want, got)
 		}
 	}
 }
 
-// TestRunSecret_ListOnlyReturnsSecretTypedEntries proves `secret list`
-// shows only entries a user stored via `aileron secret set` (tagged
-// Type=="secret") and hides the rest of the vault keyspace (agent
-// creds, OAuth bindings). Regression for the leak where the list path
-// dumped every key via Names().
-func TestRunSecret_ListOnlyReturnsSecretTypedEntries(t *testing.T) {
+// TestRunSecret_ListOnlyReturnsSecretScopedEntries proves `secret list`
+// shows only entries a user stored via `aileron secret set` (which live
+// under the `secret/` namespace) and hides the rest of the vault keyspace
+// (agent creds, OAuth bindings). The filter is now the shared vaultscope
+// classifier (path-based `secret/` scope), not the ad-hoc `Type` tag, so
+// this test seeds a canonical `secret/<name>` entry alongside non-secret
+// decoys. Regression for the leak where the list path dumped every key.
+func TestRunSecret_ListOnlyReturnsSecretScopedEntries(t *testing.T) {
 	dir := setTestHome(t)
 
 	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Mixed keyspace: one user secret, one agent cred (empty Type),
-	// one OAuth binding (non-secret Type).
+	// Mixed keyspace: one user secret under the `secret/` namespace, one
+	// agent cred, one OAuth binding. Only the `secret/`-scoped entry must
+	// surface, regardless of the metadata Type tag.
 	seed := `{"salt":"AAAA","secrets":{` +
-		`"api_token":{"value":"ZW5j","metadata":{"type":"secret"}},` +
+		`"secret/api_token":{"value":"ZW5j","metadata":{"type":"secret"}},` +
 		`"agents/claude/oauth":{"value":"ZW5j","metadata":{}},` +
 		`"oauth2/github/work":{"value":"ZW5j","metadata":{"type":"oauth_refresh_token"}}` +
 		`}}`
@@ -1260,8 +1263,8 @@ func TestRunSecret_ListOnlyReturnsSecretTypedEntries(t *testing.T) {
 			t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "api_token") {
-			t.Errorf("expected 'api_token' in output, got: %s", out)
+		if !strings.Contains(out, "secret/api_token") {
+			t.Errorf("expected 'secret/api_token' in output, got: %s", out)
 		}
 		if strings.Contains(out, "agents/claude/oauth") {
 			t.Errorf("non-secret agent cred leaked into output: %s", out)
@@ -1287,8 +1290,8 @@ func TestRunSecret_ListOnlyReturnsSecretTypedEntries(t *testing.T) {
 			}
 			got[name] = true
 		}
-		want := map[string]bool{"api_token": true}
-		if len(got) != len(want) || !got["api_token"] {
+		want := map[string]bool{"secret/api_token": true}
+		if len(got) != len(want) || !got["secret/api_token"] {
 			t.Errorf("decoded set = %v, want %v", got, want)
 		}
 	})

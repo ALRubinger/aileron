@@ -744,25 +744,5 @@ func TestListUserCredentials_ListErrorReturns500(t *testing.T) {
 	assertErrorCode(t, rec, "vault_list_failed")
 }
 
-func TestUserServiceFromVaultPath(t *testing.T) {
-	cases := []struct {
-		path   string
-		want   string
-		wantOK bool
-	}{
-		{"user/github", "github", true},
-		{"user/git-hub_1", "git-hub_1", true},
-		{"agents/claude/oauth", "", false},
-		{"user/", "", false},
-		{"user/has/slash", "", false},
-		{"user/Bad", "", false},
-		{"other/github", "", false},
-	}
-	for _, c := range cases {
-		got, ok := userServiceFromVaultPath(c.path)
-		if ok != c.wantOK || got != c.want {
-			t.Errorf("userServiceFromVaultPath(%q) = (%q, %v), want (%q, %v)",
-				c.path, got, ok, c.want, c.wantOK)
-		}
-	}
-}
+// userServiceFromVaultPath moved to internal/vaultscope (as
+// UserServiceFromVaultPath) and is tested there.

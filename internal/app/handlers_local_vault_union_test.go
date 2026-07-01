@@ -10,6 +10,7 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/vaultscope"
 )
 
 // GET /v1/vault (union view) contract (#1402):
@@ -17,54 +18,16 @@ import (
 //   - Walks vault.List() once and surfaces EVERY locally-owned namespace
 //     (agent, user, connector/capability-binding), not just the two typed
 //     scopes — connector credentials must no longer be silently hidden.
-//   - Classifies each entry by namespace via classifyVaultPath.
+//   - Classifies each entry by namespace via vaultscope.Classify.
 //   - Excludes the two control-plane namespaces (connected-accounts/,
 //     llm-config/) by default; includes them only with
 //     include_control_plane=true.
 //   - Never returns credential bytes (ADR-0011).
 //   - 503 when the daemon has no vault wired.
 
-// classifyVaultPath is the load-bearing classifier; pin each namespace and
-// the ordering edge case where an agent path also matches the binding
-// grammar.
-func TestClassifyVaultPath(t *testing.T) {
-	cases := []struct {
-		path        string
-		wantScope   string
-		wantControl bool
-	}{
-		{"agents/claude/oauth", vaultScopeAgent, false},
-		{"agents/codex/apikey", vaultScopeAgent, false},
-		{"user/github", vaultScopeUser, false},
-		// Connector + OAuth capability bindings are three-segment binding
-		// names. They are exactly the entries the old typed-endpoint list
-		// silently hid (#1402); the union must classify them as bindings.
-		{"connectors/github/default", vaultScopeBinding, false},
-		{"oauth2/google/default", vaultScopeBinding, false},
-		{"github/repo/me", vaultScopeBinding, false},
-		// Control-plane namespaces: classified but flagged for exclusion.
-		{"connected-accounts/usr_123/slack", vaultScopeConnectedAccount, true},
-		{"llm-config/user/usr_123", vaultScopeLlmConfig, true},
-		// Secrets set via `aileron secret set` live under `secret/` and are
-		// locally-owned (not control-plane).
-		{"secret/foo", vaultScopeSecret, false},
-		// A `secret/`-prefixed path that also looks three-segment must still
-		// classify as `secret`, proving the prefix check wins over the
-		// binding grammar.
-		{"secret/github/repo", vaultScopeSecret, false},
-		// Anything matching no known namespace must still surface as `other`
-		// rather than vanish.
-		{"weird-single-segment", vaultScopeOther, false},
-		{"_internal/reserved", vaultScopeOther, false},
-	}
-	for _, c := range cases {
-		scope, control := classifyVaultPath(c.path)
-		if scope != c.wantScope || control != c.wantControl {
-			t.Errorf("classifyVaultPath(%q) = (%q, %v), want (%q, %v)",
-				c.path, scope, control, c.wantScope, c.wantControl)
-		}
-	}
-}
+// The classifier itself (Classify, and its two predicate helpers) is tested
+// in internal/vaultscope. These daemon-level tests exercise the union
+// endpoint's projection over it.
 
 // The default union view must surface agent, user, AND connector/binding
 // entries together, and must omit the control-plane namespaces.
@@ -109,12 +72,12 @@ func TestListVaultEntries_UnionDefaultExcludesControlPlane(t *testing.T) {
 	}
 	// The locally-owned namespaces must all be present and correctly scoped.
 	want := map[string]string{
-		"agents/claude/oauth":       vaultScopeAgent,
-		"user/github":               vaultScopeUser,
-		"connectors/github/default": vaultScopeBinding,
-		"oauth2/google/default":     vaultScopeBinding,
+		"agents/claude/oauth":       vaultscope.ScopeAgent,
+		"user/github":               vaultscope.ScopeUser,
+		"connectors/github/default": vaultscope.ScopeBinding,
+		"oauth2/google/default":     vaultscope.ScopeBinding,
 		// Locally-owned secrets must appear in the default union view.
-		"secret/my_token": vaultScopeSecret,
+		"secret/my_token": vaultscope.ScopeSecret,
 	}
 	for p, scope := range want {
 		if byPath[p] != scope {
@@ -152,7 +115,7 @@ func TestListVaultEntries_IncludeControlPlane(t *testing.T) {
 	for _, e := range got.Entries {
 		scopes[string(e.Scope)] = true
 	}
-	for _, want := range []string{vaultScopeAgent, vaultScopeConnectedAccount, vaultScopeLlmConfig} {
+	for _, want := range []string{vaultscope.ScopeAgent, vaultscope.ScopeConnectedAccount, vaultscope.ScopeLlmConfig} {
 		if !scopes[want] {
 			t.Errorf("include-control-plane view missing scope %q (got %v)", want, scopes)
 		}
