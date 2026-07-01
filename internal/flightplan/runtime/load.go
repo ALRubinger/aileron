@@ -60,7 +60,10 @@ func verifyAndDecode(fv store.FrozenVersion) (LoadedPlan, error) {
 	if err != nil {
 		return LoadedPlan{}, &LoadError{Reason: fmt.Sprintf("parse verified manifest: %v", err)}
 	}
-	plan, err := Decode(m)
+	// Thread the verified image pins into decode so a rung-3 plan attaches each
+	// step's pinned tool dispatch (a rung-3 step whose pin is absent is refused).
+	// Non-rung-3 plans ignore the pins.
+	plan, err := DecodeWithImages(m, verified.ResolvedImages)
 	if err != nil {
 		return LoadedPlan{}, err
 	}

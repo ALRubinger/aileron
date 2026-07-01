@@ -209,6 +209,30 @@ type Step struct {
 	// MaterializesOutput names a declared output this step's result
 	// materializes into. Empty when the step materializes nothing.
 	MaterializesOutput string
+	// ToolDispatch, when non-nil, routes this step to a pinned rung-3 sibling
+	// tool image with mount → run → collect I/O (ADR-0027 rung three, #1733)
+	// instead of the in-process kind branch. It is orthogonal to Kind: the
+	// executor checks for a tool dispatch first and shells the step out to the
+	// tool runner when present. Nil for every non-rung-3 step.
+	ToolDispatch *ToolDispatch
+}
+
+// ToolDispatch is a step's rung-3 per-step tool-image dispatch: the verified
+// pinned image plus the mount (input) and collect (output) paths. It is
+// attached during decode by matching a graph step's id to a verified rung-3
+// pin; a rung-3 step whose pin is absent is a decode refusal (no tag-shaped or
+// unpinned ref ever reaches a dispatch). Image is always the content-addressed
+// `ref@sha256:<hex>` from the verified lock, never a mutable tag.
+type ToolDispatch struct {
+	// Image is the verified `ref@sha256:<hex>` pin the step dispatches to. The
+	// executor hands this to the ToolImageRunner verbatim.
+	Image string
+	// MountPath is the in-image path the resolved step input is mounted at, or
+	// empty when the step declared no mount.
+	MountPath string
+	// CollectPath is the in-image path whose contents are collected as the
+	// step's output, or empty when the step declared no collect.
+	CollectPath string
 }
 
 // binds returns the step's binding map regardless of kind (Args for

@@ -656,6 +656,11 @@
                 "type": "string",
                 "description": "The resolved content-addressed digest.",
                 "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "id": {
+                "type": "string",
+                "description": "For a rung-3 per-step pin, the id of the step that dispatches to this image (its declared `id`, or a positional fallback). Links the pin to its step so association does not key on the mutable image reference. Absent for rung-1 and rung-2 pins, which boot a single whole-plan image with no per-step linkage.",
+                "minLength": 1
               }
             }
           }

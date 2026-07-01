@@ -3,10 +3,21 @@ package runtime
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 	"gopkg.in/yaml.v3"
 )
+
+// rung3EnvKey is the executionEnvironment key naming the rung-3 per-step
+// sibling-image dispatch block.
+const rung3EnvKey = "rung3PerStepImages"
+
+// imageDigestPattern is the content-addressed digest shape a rung-3 pin's
+// digest must match. It mirrors the freeze-side digest guard so a tag-shaped
+// value can never survive into a per-step dispatch.
+var imageDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 // DecodeError reports a strict-decode refusal. A decode error means the plan
 // is structurally invalid and the runtime refuses to run any step. The
@@ -29,7 +40,23 @@ func decodeErrf(format string, args ...any) error {
 //
 // An instruction-only manifest (no aileron block) has no composition to run
 // and is refused: Launch executes a step graph, and there is none.
+//
+// Decode carries no rung-3 image pins, so a manifest that declares a rung-3
+// per-step execution environment is refused here (its steps have no verified
+// pin to dispatch to). The runtime load path uses DecodeWithImages to thread
+// the verified pins; Decode is the pin-free entry point tests and non-rung-3
+// callers use.
 func Decode(m *manifest.Manifest) (*Plan, error) {
+	return DecodeWithImages(m, nil)
+}
+
+// DecodeWithImages builds a typed Plan and, when the manifest declares a rung-3
+// per-step execution environment, attaches each step's pinned sibling-tool
+// dispatch (image + mount + collect) from the verified image pins (#1733). The
+// pins are the verified `ref@digest` set from the signed lock; a rung-3 step
+// whose pin is absent/unpinned is a hard *DecodeError so no tag-shaped or
+// floating ref is ever dispatched. Non-rung-3 plans ignore pins entirely.
+func DecodeWithImages(m *manifest.Manifest, pins []freeze.ImagePin) (*Plan, error) {
 	if m == nil {
 		return nil, decodeErrf("nil manifest")
 	}
@@ -53,6 +80,9 @@ func Decode(m *manifest.Manifest) (*Plan, error) {
 		return nil, err
 	}
 	if err := decodeSteps(m, p); err != nil {
+		return nil, err
+	}
+	if err := decodeToolDispatch(m, p, pins); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -167,6 +197,106 @@ func decodeSteps(m *manifest.Manifest, p *Plan) error {
 		return err
 	}
 	p.Order = order
+	return nil
+}
+
+// decodeToolDispatch attaches a rung-3 per-step tool dispatch to each declaring
+// graph step from the verified image pins. It is a no-op when the manifest
+// declares no rung-3 execution environment. For a manifest that does:
+//
+//   - each rung3PerStepImages.steps[] entry MUST declare an `id` that names a
+//     graph step (the dispatch has to attach to a specific step in the graph);
+//   - each entry's verified pin is looked up by StepID (the pin freeze stamped
+//     from the same declared id), so association keys on id, never on the
+//     mutable image tag (the #1739 collision);
+//   - a rung-3 step whose pin is absent/unpinned is a hard *DecodeError, so no
+//     tag-shaped or floating ref is ever dispatched (acceptance);
+//   - the attached Image is the pin's `ref@digest` (content-addressed), and the
+//     optional mount/collect paths thread through from the declaration.
+func decodeToolDispatch(m *manifest.Manifest, p *Plan, pins []freeze.ImagePin) error {
+	raw, ok := m.Aileron.Requires.ExecutionEnvironment[rung3EnvKey]
+	if !ok {
+		return nil
+	}
+
+	var env rung3EnvDTO
+	if err := remarshal(raw, &env); err != nil {
+		return decodeErrf("rung3PerStepImages: %v", err)
+	}
+	if len(env.Steps) == 0 {
+		return decodeErrf("rung3PerStepImages declares no steps")
+	}
+
+	// Index the graph steps by id so a rung-3 declaration attaches to exactly
+	// one step.
+	stepByID := map[string]*Step{}
+	for i := range p.Steps {
+		stepByID[p.Steps[i].ID] = &p.Steps[i]
+	}
+
+	// Index the verified pins by StepID. A pin with no StepID is a rung-1/rung-2
+	// whole-plan pin and never participates in per-step association.
+	pinByStepID := map[string]freeze.ImagePin{}
+	for _, pin := range pins {
+		if pin.StepID != "" {
+			pinByStepID[pin.StepID] = pin
+		}
+	}
+
+	seen := map[string]bool{}
+	for i, sd := range env.Steps {
+		if sd.Image == "" {
+			return decodeErrf("rung3PerStepImages step %d: missing image", i)
+		}
+		if sd.ID == "" {
+			return decodeErrf("rung3PerStepImages step %d (image %q): a per-step tool dispatch must declare an id naming the graph step it attaches to", i, sd.Image)
+		}
+		if seen[sd.ID] {
+			return decodeErrf("rung3PerStepImages declares duplicate step id %q", sd.ID)
+		}
+		seen[sd.ID] = true
+
+		step, ok := stepByID[sd.ID]
+		if !ok {
+			return decodeErrf("rung3PerStepImages step %q names no step in the graph", sd.ID)
+		}
+		// A tool dispatch replaces the step's in-process execution. Attaching one
+		// to an action-call would bypass the sealed action boundary (approval,
+		// idempotency, redaction, audit), so an action-call step must NOT carry a
+		// rung-3 dispatch: those effects go through requires.actions, not a tool
+		// image. Refuse rather than silently skip the boundary.
+		if step.Kind == KindActionCall {
+			return decodeErrf("rung3PerStepImages step %q attaches a tool dispatch to an action-call step; action effects go through the sealed action boundary, not a tool image", sd.ID)
+		}
+
+		pin, ok := pinByStepID[sd.ID]
+		if !ok {
+			return decodeErrf("rung3PerStepImages step %q references an unpinned image %q; freeze must pin every rung-3 image by digest before launch", sd.ID, sd.Image)
+		}
+		// Defense in depth: freeze already refuses a non-digest pin, but re-check
+		// here so a tag-shaped digest can never survive into a dispatch.
+		if !imageDigestPattern.MatchString(pin.Digest) {
+			return decodeErrf("rung3PerStepImages step %q pin %q is not a sha256: digest; only digest-pinned images may be dispatched", sd.ID, pin.Digest)
+		}
+
+		// A mount/collect block declared with an empty path is malformed: the
+		// schema requires minLength:1, so an empty path here means the manifest
+		// was tampered past the schema gate. Refuse rather than mount nothing.
+		mountPath := sd.mountPath()
+		if sd.Mount != nil && mountPath == "" {
+			return decodeErrf("rung3PerStepImages step %q declares a mount with an empty path", sd.ID)
+		}
+		collectPath := sd.collectPath()
+		if sd.Collect != nil && collectPath == "" {
+			return decodeErrf("rung3PerStepImages step %q declares a collect with an empty path", sd.ID)
+		}
+
+		step.ToolDispatch = &ToolDispatch{
+			Image:       imageRef(pin.Ref, pin.Digest),
+			MountPath:   mountPath,
+			CollectPath: collectPath,
+		}
+	}
 	return nil
 }
 

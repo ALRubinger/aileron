@@ -41,6 +41,11 @@ type executor struct {
 	enforcer  *enforcer
 	transform *TransformRegistry
 	seam      LLMSeam
+	// toolRunner dispatches a rung-3 per-step tool image (mount → run →
+	// collect). Nil when no tool runner is configured; a step that carries a
+	// ToolDispatch with a nil toolRunner is an explicit error, never a silent
+	// in-process fallback (mirrors the seam/image-runner nil-guard discipline).
+	toolRunner ToolImageRunner
 }
 
 // execute runs Phase B: it walks p.Order, executes each step against the
@@ -60,12 +65,17 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 		}
 
 		var outputs map[string]any
-		switch step.Kind {
-		case KindActionCall:
+		switch {
+		case step.ToolDispatch != nil:
+			// A rung-3 step shells out to its pinned sibling tool image with
+			// mount → run → collect I/O, orthogonal to Kind. It is checked first
+			// so the in-process kind branches never run for a tool-dispatch step.
+			outputs, err = x.runToolDispatch(ctx, step, resolved)
+		case step.Kind == KindActionCall:
 			outputs, err = x.runActionCall(ctx, step, resolved, &st)
-		case KindTransform:
+		case step.Kind == KindTransform:
 			outputs, err = x.transform.run(step, resolved)
-		case KindLLMSeam:
+		case step.Kind == KindLLMSeam:
 			outputs, err = runSeam(ctx, x.seam, step, resolved)
 		default:
 			// Unreachable: decode validated the closed kind enum.
@@ -138,6 +148,49 @@ func (x *executor) runActionCall(ctx context.Context, step Step, args map[string
 		outputs[name] = v
 	}
 	return outputs, nil
+}
+
+// runToolDispatch dispatches a rung-3 step to its pinned sibling tool image
+// with mount → run → collect I/O (ADR-0027 rung three, #1733). It mounts the
+// step's resolved binding input at the declared mount path, runs the pinned
+// tool, and reads back the collected output. The collected value becomes the
+// step's single declared output so downstream steps binding steps.<id>.<output>
+// receive it through the existing resolveBindings path with no new dataflow
+// mechanism.
+//
+// A tool-dispatch step with no configured tool runner is an explicit error,
+// never a silent skip: a declared, pinned dispatch must be entered to honor the
+// attestation (mirrors the ImageRunner/LLMSeam nil-guard discipline).
+func (x *executor) runToolDispatch(ctx context.Context, step Step, resolved map[string]any) (map[string]any, error) {
+	td := step.ToolDispatch
+	if x.toolRunner == nil {
+		return nil, fmt.Errorf("flightplan: step %q dispatches pinned tool image %q but no tool image runner is configured", step.ID, td.Image)
+	}
+	// The mount input is the step's resolved bindings. It is a binding-resolved
+	// value only, never a credential.
+	spec := ToolRunSpec{
+		Image:       td.Image,
+		StepID:      step.ID,
+		MountPath:   td.MountPath,
+		Input:       resolved,
+		CollectPath: td.CollectPath,
+	}
+	res, err := x.toolRunner.Run(ctx, spec)
+	if err != nil {
+		return nil, fmt.Errorf("flightplan: step %q tool dispatch to %q: %w", step.ID, td.Image, err)
+	}
+
+	// The collected output maps to the step's single declared output. A rung-3
+	// dispatch produces one collected value; a step declaring multiple outputs
+	// has no unambiguous mapping for a single collected blob, so that is refused.
+	// A rung-3 dispatch collects exactly one blob, so the step must declare
+	// exactly one output to carry it. Zero outputs (a collect with nowhere to
+	// land) and multiple outputs (an ambiguous mapping for one blob) are both
+	// refused rather than silently dropping or duplicating the collected value.
+	if len(step.Outputs) != 1 {
+		return nil, fmt.Errorf("flightplan: step %q dispatches a tool image and declares %d outputs; a rung-3 tool dispatch produces exactly one collected output", step.ID, len(step.Outputs))
+	}
+	return map[string]any{step.Outputs[0]: res.Output}, nil
 }
 
 // resolveBindings resolves a step's binding map into concrete values against

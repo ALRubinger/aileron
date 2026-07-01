@@ -10,9 +10,19 @@ import (
 // ImagePin pairs a pre-freeze image reference with the content-addressed
 // digest freeze resolved it to. It mirrors the schema
 // `$defs.lock.resolvedImages[]` item exactly.
+//
+// StepID links a rung-3 per-step pin to the step that dispatches to it, so the
+// runtime associates a step to its pin by id rather than by the mutable image
+// tag (which two steps may share). It is empty for rung-1/rung-2 pins, which
+// boot a single whole-plan image and carry no step linkage; `omitempty` keeps
+// those pins' lock bytes byte-identical to the pre-StepID format.
 type ImagePin struct {
 	Ref    string `yaml:"ref" json:"ref"`
 	Digest string `yaml:"digest" json:"digest"`
+	// StepID is the rung-3 declaring step's id (its declared `id`, or a
+	// positional index like "#0" when the step declares none). Empty for
+	// rung-1/rung-2 pins.
+	StepID string `yaml:"id,omitempty" json:"id,omitempty"`
 }
 
 // Lockfile is the resolved lock-and-digest record freeze produces. Its

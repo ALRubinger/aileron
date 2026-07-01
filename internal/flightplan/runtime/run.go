@@ -43,6 +43,13 @@ type Options struct {
 	// in-process fallback (a declared rung must be entered to honor the
 	// attestation).
 	ImageRunner ImageRunner
+	// ToolImageRunner dispatches an individual rung-3 step to its pinned sibling
+	// tool image with mount → run → collect I/O (#1733). Unlike ImageRunner, the
+	// plan orchestration stays in-process (runPlan); only the per-step tool
+	// dispatch shells out. When a loaded plan carries a rung-3 step and this seam
+	// is unset, that step is an explicit error, never a silent skip (mirrors the
+	// ImageRunner nil-guard discipline: a declared tool dispatch must be entered).
+	ToolImageRunner ToolImageRunner
 
 	// Clock supplies the single launch-time read for dynamic inputs. Nil uses
 	// SystemClock.
@@ -82,11 +89,14 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	// When the verified lock pins a rung-1/rung-2 image, boot that exact image
-	// and run the plan inside it (#1731). This keeps the boot-vs-in-process
-	// decision in one place; runPlan (Phase A / Phase B / materialize / audit)
-	// is untouched on the parity path.
-	if len(lp.ResolvedImages) > 0 {
+	// When the verified lock pins a rung-1/rung-2 WHOLE-PLAN image, boot that
+	// exact image and run the plan inside it (#1731). Rung-3 pins are per-step
+	// sibling-tool dispatches (they carry a StepID) and must NOT be mis-routed
+	// into runInImage: the plan orchestration stays in-process and only the
+	// individual step shells out to its tool image (#1733). So the boot branch
+	// fires only for whole-plan pins (no per-step StepID); rung-3 stays on
+	// runPlan, where the executor dispatches each tool step through the seam.
+	if hasWholePlanImage(lp.ResolvedImages) {
 		return runInImage(ctx, lp, opts)
 	}
 	return runPlan(ctx, lp.Plan, lp.ContentHash, opts)
@@ -112,8 +122,10 @@ func runPlan(ctx context.Context, plan *Plan, contentHash string, opts Options) 
 		return RunResult{}, err
 	}
 
-	// Phase B: walk the DAG.
-	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam}
+	// Phase B: walk the DAG. The tool-image runner is threaded so rung-3 steps
+	// dispatch to their pinned sibling image; a rung-3 step with no runner
+	// configured is an explicit error inside the executor.
+	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam, toolRunner: opts.ToolImageRunner}
 	st, runErr := x.execute(ctx, inputs)
 
 	// Emit the audit regardless of run outcome so a mid-run denial is recorded

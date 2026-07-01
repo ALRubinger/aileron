@@ -197,6 +197,76 @@ aileron:
 # Rung 3 Multi-Step Skill
 `
 
+// rung3SharedTagMD declares two rung-3 steps that name the SAME image tag but
+// carry distinct declared ids. It is the #1739 tag-collision fixture: freeze
+// must pin each step distinctly by its id, never collapse the two steps onto a
+// single ref-keyed pin.
+const rung3SharedTagMD = `---
+name: rung3-shared-tag-skill
+description: Two rung-3 steps sharing one image tag.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - id: first
+            image: registry.example.com/shared-tool:1
+          - id: second
+            image: registry.example.com/shared-tool:1
+  inputs: []
+  outputs: []
+---
+
+# Rung 3 Shared Tag Skill
+`
+
+// rung3NoIDMD declares two rung-3 steps with NO declared id, so freeze must
+// stamp a positional fallback id onto each pin.
+const rung3NoIDMD = `---
+name: rung3-no-id-skill
+description: Rung-3 steps with no declared id.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/tool-a:1
+          - image: registry.example.com/tool-b:2
+  inputs: []
+  outputs: []
+---
+
+# Rung 3 No ID Skill
+`
+
 // genSigningKey returns a fresh ed25519 private key and writes its PKCS#8
 // PEM form to a temp file, returning the path. Mirrors the keyring PEM
 // conventions; used to exercise LoadSigningKey + Sign.

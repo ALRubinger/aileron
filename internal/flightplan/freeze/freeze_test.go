@@ -93,6 +93,12 @@ func TestRun_Rung3PinsAndSigns(t *testing.T) {
 	if res.Lock.ResolvedImages[1].Ref != "registry.example.com/tool-b:2" || res.Lock.ResolvedImages[1].Digest != fakeDigest2 {
 		t.Errorf("second pin = %+v", res.Lock.ResolvedImages[1])
 	}
+	// Each rung-3 pin carries its declaring step's id, so the runtime associates
+	// a step to its pin by id (never by the mutable tag). The id is part of the
+	// signed lock, so it is attested alongside the digest.
+	if res.Lock.ResolvedImages[0].StepID != "extract" || res.Lock.ResolvedImages[1].StepID != "convert" {
+		t.Errorf("pins must carry the declared step ids, got [%q, %q]", res.Lock.ResolvedImages[0].StepID, res.Lock.ResolvedImages[1].StepID)
+	}
 	if len(res.Lock.ResolvedCapabilitySet) != 0 {
 		t.Errorf("rung-3 pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
 	}

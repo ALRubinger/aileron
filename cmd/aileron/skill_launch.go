@@ -29,6 +29,13 @@ var newLaunchAuditSink = func() runtime.AuditSink { return stdoutAuditSink{} }
 // image string and never touches Docker, mirroring the other launch seams.
 var newLaunchImageRunner = func() runtime.ImageRunner { return containerImageRunner{} }
 
+// newLaunchToolImageRunner returns the production tool-image runner that
+// dispatches a rung-3 step to its pinned sibling tool image with mount → run →
+// collect I/O (#1733). It is a package-level seam so CLI tests swap in a fake
+// that records the pinned image and mount/collect wiring and never touches
+// Docker, mirroring newLaunchImageRunner.
+var newLaunchToolImageRunner = func() runtime.ToolImageRunner { return containerToolImageRunner{} }
+
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
 // nil by default, which is the v1 contract: a plan with an llm-seam step
 // errors unless a provider is configured, so a default launch reaches no LLM.
@@ -106,7 +113,11 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// plan inside it. When the frozen unit pins no image, the runtime never
 		// touches this seam and stays on the in-process path.
 		ImageRunner: newLaunchImageRunner(),
-		OutDir:      *outDir,
+		// ToolImageRunner dispatches each rung-3 step to its pinned sibling tool
+		// image with mount → run → collect I/O. The plan orchestration stays
+		// in-process; only the per-step tool dispatch shells out.
+		ToolImageRunner: newLaunchToolImageRunner(),
+		OutDir:          *outDir,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

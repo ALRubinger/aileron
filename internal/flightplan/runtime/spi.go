@@ -143,3 +143,56 @@ type ImageRunResult struct {
 type ImageRunner interface {
 	Run(ctx context.Context, spec ImageRunSpec) (ImageRunResult, error)
 }
+
+// ToolRunSpec is the input to the ToolImageRunner seam. It is the per-step
+// rung-3 sibling-tool dispatch (ADR-0027 rung three): unlike ImageRunSpec, it
+// does NOT run the whole plan. The runtime stays on the host and shells a single
+// step out to a pinned sibling tool image with mount → run → collect I/O. The
+// image is booted, the resolved step Input is mounted read-side at MountPath, the
+// tool runs, and the bytes at CollectPath are read back as the step's output.
+type ToolRunSpec struct {
+	// Image is the exact `ref@sha256:<hex>` the verified lock pinned for this
+	// step. It is the load-bearing security value: the runner MUST boot this
+	// image verbatim and MUST NOT re-resolve it, so the tool dispatched
+	// corresponds to the lock's signed assertion.
+	Image string
+	// StepID is the dispatching step's id, for addressable naming and error
+	// context. It carries no security weight (the pin is Image).
+	StepID string
+	// MountPath is the path inside the tool image the resolved Input is mounted
+	// at (the read side of the mount boundary). Empty means the step declared no
+	// mount and the tool receives no mounted input.
+	MountPath string
+	// Input is the step's resolved binding input, mounted at MountPath. It is a
+	// binding-resolved value only, never a credential (credentials are injected
+	// host-side at the action boundary, not here).
+	Input any
+	// CollectPath is the path inside the tool image whose contents are read back
+	// as the step's output (the run-and-collect boundary). Empty means the step
+	// declared no collect and the tool produces no collected output.
+	CollectPath string
+}
+
+// ToolRunResult is the outcome of one rung-3 per-step tool dispatch: the value
+// collected from CollectPath, which becomes the dispatching step's declared
+// output and flows into downstream steps' dataflow unchanged.
+type ToolRunResult struct {
+	// Output is the value read back from the tool's CollectPath. It becomes the
+	// step's named output; a step that declared no collect returns a nil Output.
+	Output any
+}
+
+// ToolImageRunner dispatches a single rung-3 step to its pinned sibling tool
+// image with mount → run → collect I/O (ADR-0027 rung three, issue #1733).
+// Unlike ImageRunner (which boots one image and runs the WHOLE plan inside it),
+// ToolImageRunner is a per-step seam: the plan orchestration stays in-process on
+// the host and only the individual step shells out to the tool image. The
+// contract: boot the exact ToolRunSpec.Image, mount the resolved input at
+// MountPath (read side), run the tool, and read back CollectPath as the step's
+// output. The runtime core depends only on this seam; the CLI wires the
+// container-backed implementation, so the runtime never imports the container
+// package. The runtime supplies ToolRunSpec.Image straight from the verified
+// lock, so the runner is handed a pin it must not re-resolve.
+type ToolImageRunner interface {
+	Run(ctx context.Context, spec ToolRunSpec) (ToolRunResult, error)
+}

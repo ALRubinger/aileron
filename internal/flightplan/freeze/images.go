@@ -133,23 +133,26 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 		// and pins one ImagePin per step. The pins flow into resolvedImages
 		// alongside the rung-1/rung-2 pins, so the plan content hash and
 		// signature cover them.
-		refs, err := rung3StepImages(rung3)
+		steps, err := rung3StepImages(rung3)
 		if err != nil {
 			return nil, nil, err
 		}
 		if dr == nil {
 			return nil, nil, fmt.Errorf("freeze: rung-3 per-step images require a digest resolver")
 		}
-		out := make([]ImagePin, 0, len(refs))
-		for _, ref := range refs {
-			digest, err := dr.ResolveDigest(ctx, ref)
+		out := make([]ImagePin, 0, len(steps))
+		for _, s := range steps {
+			digest, err := dr.ResolveDigest(ctx, s.image)
 			if err != nil {
-				return nil, nil, fmt.Errorf("freeze: resolve rung-3 image %q: %w", ref, err)
+				return nil, nil, fmt.Errorf("freeze: resolve rung-3 image %q: %w", s.image, err)
 			}
-			if err := requireDigest(ref, digest); err != nil {
+			if err := requireDigest(s.image, digest); err != nil {
 				return nil, nil, err
 			}
-			out = append(out, ImagePin{Ref: ref, Digest: digest})
+			// Stamp the step's declared id (or its positional fallback) onto the
+			// pin so the runtime associates a step to its pin by id, never by the
+			// shared image tag (the #1739 tag-collision ambiguity).
+			out = append(out, ImagePin{Ref: s.image, Digest: digest, StepID: s.id})
 		}
 		return out, nil, nil
 	default:
@@ -218,13 +221,23 @@ func rung2Features(v any) ([]string, error) {
 	return features, nil
 }
 
-// rung3StepImages extracts each rung3PerStepImages.steps[].image from the
-// untyped execution environment block, returning the per-step image
-// references in declared order. Each step MUST be a mapping carrying a
-// non-empty string image; a non-mapping step, a missing/empty steps list, or
-// a non-string/empty image is rejected rather than stringified so a bad step
-// never silently produces a wrong pin. It mirrors rung2Features.
-func rung3StepImages(v any) ([]string, error) {
+// rung3StepImage is one rung-3 step's freeze-relevant fields: the sibling
+// image reference and the id used to link the resolved pin back to the step.
+type rung3StepImage struct {
+	id    string
+	image string
+}
+
+// rung3StepImages extracts each rung3PerStepImages.steps[] entry from the
+// untyped execution environment block, returning the per-step image reference
+// and linking id in declared order. Each step MUST be a mapping carrying a
+// non-empty string image; a non-mapping step, a missing/empty steps list, or a
+// non-string/empty image is rejected rather than stringified so a bad step
+// never silently produces a wrong pin. The `id` is optional in the schema: when
+// a step declares one it is carried onto the pin; when absent, a positional
+// fallback (`#<index>`) is used so every pin still traces to exactly one step
+// and the runtime can associate positionally.
+func rung3StepImages(v any) ([]rung3StepImage, error) {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("freeze: rung3PerStepImages is not a mapping")
@@ -233,8 +246,8 @@ func rung3StepImages(v any) ([]string, error) {
 	if !ok || len(rawList) == 0 {
 		return nil, fmt.Errorf("freeze: rung3PerStepImages.steps is missing or empty")
 	}
-	refs := make([]string, 0, len(rawList))
-	for _, s := range rawList {
+	steps := make([]rung3StepImage, 0, len(rawList))
+	for i, s := range rawList {
 		step, ok := s.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a non-mapping entry")
@@ -243,9 +256,24 @@ func rung3StepImages(v any) ([]string, error) {
 		if !ok || strings.TrimSpace(img) == "" {
 			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a step with an empty or non-string image")
 		}
-		refs = append(refs, strings.TrimSpace(img))
+		id := rung3StepID(step, i)
+		steps = append(steps, rung3StepImage{id: id, image: strings.TrimSpace(img)})
 	}
-	return refs, nil
+	return steps, nil
+}
+
+// rung3StepID returns a step's declared `id` when present and a non-empty
+// string, or a positional fallback (`#<index>`) otherwise. The schema makes
+// `id` optional; a non-string or empty id is treated as absent (the schema's
+// minLength:1 rejects an empty string before freeze runs, so this is the
+// defensive backstop) and the positional fallback keeps the pin traceable.
+func rung3StepID(step map[string]any, index int) string {
+	if raw, ok := step["id"].(string); ok {
+		if id := strings.TrimSpace(raw); id != "" {
+			return id
+		}
+	}
+	return fmt.Sprintf("#%d", index)
 }
 
 // composedRef renders a stable pre-freeze reference for a composed rung-2
