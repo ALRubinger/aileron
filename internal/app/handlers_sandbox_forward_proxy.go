@@ -300,7 +300,7 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 			return true
 		}
 		defer resp.body.Close()
-		s.recordSandboxProxyForeignTokenNotSwapped(decrypted, sandboxProxySourceTransparentConnectTLS, hb.HostPattern, hb.Scheme, upstream, resp.statusCode)
+		s.recordSandboxProxyForeignTokenNotSwapped(decrypted, sandboxProxySourceTransparentConnectTLS, hb, upstream, resp.statusCode)
 		writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, resp.resp, resp.bodyBytes)
 		return true
 	case sentinelSwapInject:

@@ -777,10 +777,11 @@ func (s *apiServer) recordSandboxProxyTrustDenied(r *http.Request, source string
 // (non-sentinel) token. The proxy did not swap it: it forwarded the
 // request unchanged with no real credential injected. The payload
 // carries the matched host pattern, scheme, and upstream
-// destination/status; it never carries the foreign token, the sentinel,
-// the real credential, or the credential-ref. nil-recorder safe like its
-// siblings.
-func (s *apiServer) recordSandboxProxyForeignTokenNotSwapped(r *http.Request, source, hostPattern, scheme string, upstream *url.URL, upstreamStatus int) string {
+// destination/status, plus the optional trust-contract effect and
+// plan/step/tool identity triple when the binding declares them (#1735);
+// it never carries the foreign token, the sentinel, the real credential,
+// or the credential-ref. nil-recorder safe like its siblings.
+func (s *apiServer) recordSandboxProxyForeignTokenNotSwapped(r *http.Request, source string, hb binding.HostBinding, upstream *url.URL, upstreamStatus int) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -793,13 +794,14 @@ func (s *apiServer) recordSandboxProxyForeignTokenNotSwapped(r *http.Request, so
 		"aileron.proxy.source":          source,
 		"aileron.proxy.decision":        "foreign_token_not_swapped",
 		"aileron.proxy.method":          r.Method,
-		"aileron.proxy.binding.host":    hostPattern,
-		"aileron.proxy.binding.scheme":  scheme,
+		"aileron.proxy.binding.host":    hb.HostPattern,
+		"aileron.proxy.binding.scheme":  hb.Scheme,
 		"aileron.proxy.upstream.scheme": upstream.Scheme,
 		"aileron.proxy.upstream.host":   upstream.Host,
 		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
 		"aileron.proxy.upstream.status": upstreamStatus,
 	}
+	addHostBindingTrustIdentity(payload, hb)
 	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
 		payload["aileron.session.id"] = sessionID
 	}
