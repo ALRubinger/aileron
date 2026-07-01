@@ -2487,10 +2487,88 @@ func TestRunConnector_InstallHappyPath(t *testing.T) {
 		!strings.Contains(string(seenInstallBody), `"version":"1.0.0"`) {
 		t.Errorf("body = %s", seenInstallBody)
 	}
-	for _, want := range []string{"Connector install preview", "Installed:", "github://acme/x@1.0.0", "sha256:abc", "/path/to/entry"} {
+	for _, want := range []string{
+		"Connector install preview", "Installed:", "github://acme/x@1.0.0",
+		"sha256:abc", "/path/to/entry",
+		// Fresh installs advise that connectors are content-hash-pinned
+		// (ADR-0004) and existing actions/flight plans keep their pinned
+		// version until reinstalled/re-published, pointing at the check cmd.
+		"pinned by content hash", "aileron connector check",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+// TestRunConnector_InstallFreshEmitsPinAdvisory asserts the direct
+// (preview) path emits the content-hash-pin advisory only after a fresh
+// install, so operators learn that already-published actions/flight
+// plans keep their pinned (version, hash) until reinstalled per ADR-0004.
+func TestRunConnector_InstallFreshEmitsPinAdvisory(t *testing.T) {
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path","already_installed":false}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "pinned by content hash") {
+		t.Errorf("fresh install missing pin advisory:\n%s", stdout.String())
+	}
+}
+
+// TestRunConnector_InstallAlreadyInstalledResponseSkipsPinAdvisory asserts
+// the advisory is suppressed when the install endpoint reports the
+// connector was already present. A no-op install must not nag; the
+// advisory is about the effect of adding *new* content.
+func TestRunConnector_InstallAlreadyInstalledResponseSkipsPinAdvisory(t *testing.T) {
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path","already_installed":true}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Already installed") {
+		t.Errorf("expected 'Already installed' in output: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "pinned by content hash") {
+		t.Errorf("advisory should be suppressed on already-installed:\n%s", stdout.String())
+	}
+}
+
+// TestRunConnector_InstallHubPathEmitsPinAdvisory asserts the Hub
+// install-decision path (doConfirmedInstall) also emits the pin advisory
+// after a fresh install, so both install code paths share the same
+// ADR-0004 messaging.
+func TestRunConnector_InstallHubPathEmitsPinAdvisory(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/x","publisher_github":"acme","fingerprint":"AB:CD","trust_state":"trusted"}`)
+		case "/connectors/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path","already_installed":false}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "pinned by content hash") {
+		t.Errorf("hub-path fresh install missing pin advisory:\n%s", stdout.String())
 	}
 }
 

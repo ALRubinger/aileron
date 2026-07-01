@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"golang.org/x/mod/semver"
 )
 
 // Store is the on-disk content-addressed connector store rooted at a
@@ -143,20 +145,48 @@ func (s *Store) ListInstalled() []Ref {
 
 // LookupAnyVersion returns one installed (Ref, hash) pair for the
 // given FQN, or `false` when no version of the connector is installed.
-// Multiple installed versions return an unspecified one — callers that
-// need a specific version should use Lookup. Used by the binding setup
-// flow which is FQN-scoped, not version-scoped.
+// When multiple versions of the FQN are installed it deterministically
+// returns the SemVer-highest one — Go randomizes map iteration, so
+// picking the highest version keeps the result stable across runs
+// rather than depending on iteration order. Callers that need a
+// specific version should use Lookup. Used by the binding setup and
+// preview flows which are FQN-scoped, not version-scoped.
+//
+// Index versions are strict SemVer with no leading "v" (see ADR-0004);
+// golang.org/x/mod/semver requires the "v" prefix, so it is prepended
+// only for comparison.
 func (s *Store) LookupAnyVersion(fqn FQN) (Ref, string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	prefix := fqn.String() + "@"
+	var (
+		bestVersion string
+		bestHash    string
+		found       bool
+	)
 	for k, h := range s.index {
-		if strings.HasPrefix(k, prefix) {
-			version := strings.TrimPrefix(k, prefix)
-			return Ref{FQN: fqn, Version: version}, h, true
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		version := strings.TrimPrefix(k, prefix)
+		if !found {
+			bestVersion, bestHash, found = version, h, true
+			continue
+		}
+		// SemVer precedence first; on an exact precedence tie (e.g. two
+		// versions differing only in build metadata, which semver.Compare
+		// treats as equal) fall back to lexical version order so the
+		// winner never depends on map iteration order.
+		cmp := semver.Compare("v"+version, "v"+bestVersion)
+		if cmp > 0 || (cmp == 0 && version > bestVersion) {
+			bestVersion = version
+			bestHash = h
 		}
 	}
-	return Ref{}, "", false
+	if !found {
+		return Ref{}, "", false
+	}
+	return Ref{FQN: fqn, Version: bestVersion}, bestHash, true
 }
 
 // LoadIndex reads the index file from disk into memory. A missing index
