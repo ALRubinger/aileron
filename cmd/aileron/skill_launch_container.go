@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -74,9 +76,12 @@ func (containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) 
 
 	// Re-enter the aileron binary against the bind-mounted unit. The in-container
 	// run loads the same frozen version from the mounted store and materializes
-	// into the mounted out-dir. The daemon action boundary stays reachable over
-	// the existing network wiring; no credentials cross this boundary.
-	command := []string{"aileron", "skill", "launch", spec.Name}
+	// into the mounted out-dir. --store-dir points the inner binary at the
+	// bind-mounted store so it reads the exact verified bytes rather than the
+	// empty default store inside the image. The daemon action boundary stays
+	// reachable over the existing network wiring; no credentials cross this
+	// boundary.
+	command := []string{"aileron", "skill", "launch", spec.Name, "--store-dir", storeMount}
 	if spec.Version != "" {
 		command = append(command, "--version", spec.Version)
 	}
@@ -105,12 +110,27 @@ func (containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) 
 	}, nil
 }
 
-// flightPlanContainerName builds a deterministic, addressable container name for
-// the boot so a later stop can target it by name.
+// flightPlanContainerName builds an addressable container name for the boot. The
+// name keeps a stable, human-readable base (the skill name and version) and
+// appends a short random suffix so two concurrent launches of the same frozen
+// unit never collide on the container name. A stop/cleanup path reuses the value
+// returned here for a given launch rather than recomputing it.
 func flightPlanContainerName(spec runtime.ImageRunSpec) string {
 	v := spec.Version
 	if v == "" {
 		v = "latest"
 	}
-	return "aileron-flightplan-" + spec.Name + "-" + v
+	return "aileron-flightplan-" + spec.Name + "-" + v + "-" + randomSuffix()
+}
+
+// randomSuffix returns a short hex token for disambiguating container names. On
+// the vanishingly unlikely RNG failure it degrades to a fixed token rather than
+// failing the launch, since the suffix is a collision-avoidance convenience, not
+// a security boundary.
+func randomSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "0000"
+	}
+	return hex.EncodeToString(b[:])
 }

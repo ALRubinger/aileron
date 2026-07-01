@@ -72,6 +72,19 @@ func TestContainerImageRunner_BootsExactImageWithMounts(t *testing.T) {
 	if !strings.Contains(joined, "--version 1.0.0") {
 		t.Errorf("command must pin the version: %v", got.Command)
 	}
+	// The inner binary must be pointed at the bind-mounted store, not the empty
+	// default store inside the image.
+	if !strings.Contains(joined, "--store-dir /aileron/skills") {
+		t.Errorf("command must point the inner binary at the mounted store: %v", got.Command)
+	}
+	// The container name carries a run-unique suffix so concurrent launches of
+	// the same unit never collide.
+	if got.Name == flightPlanContainerName(spec) {
+		t.Error("container name must include a run-unique suffix, not a fully deterministic value")
+	}
+	if !strings.HasPrefix(got.Name, "aileron-flightplan-weekly-metrics-digest-1.0.0-") {
+		t.Errorf("container name = %q, want the stable base prefix plus a suffix", got.Name)
+	}
 	// The result echoes the resolved inputs in v1.
 	if res.ResolvedInputs["window_days"] != "30" {
 		t.Errorf("result inputs = %v, want the launch inputs echoed", res.ResolvedInputs)

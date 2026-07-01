@@ -84,11 +84,6 @@ func freezeExampleForLaunch(t *testing.T, storeDir string) {
 	}
 }
 
-// TestRunSkillLaunch_BootsPinnedRung2Image proves the acceptance property: the
-// worked example is rung-2, so its verified lock pins a composed image digest.
-// Launch boots that exact ref@sha256:<digest-from-lock> through the image runner
-// and exits 0. The recorded image is the load-bearing assertion that the lock's
-// signed-image claim corresponds to the image actually entered.
 // freezeNoImageForLaunch installs a no-execution-environment variant of the
 // worked example (the same stepped plan with the executionEnvironment block
 // removed) and freezes it, so the frozen unit pins no image and the launch
@@ -147,6 +142,11 @@ func stripExecEnvBlock(t *testing.T, md string) string {
 	return res
 }
 
+// TestRunSkillLaunch_BootsPinnedRung2Image proves the acceptance property: the
+// worked example is rung-2, so its verified lock pins a composed image digest.
+// Launch boots that exact ref@sha256:<digest-from-lock> through the image runner
+// and exits 0. The recorded image is the load-bearing assertion that the lock's
+// signed-image claim corresponds to the image actually entered.
 func TestRunSkillLaunch_BootsPinnedRung2Image(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
@@ -254,6 +254,43 @@ func TestRunSkillLaunch_PinnedButNoRunnerErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "no image runner is configured") {
 		t.Errorf("stderr = %q, want a no-runner-configured message", stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_StoreDirFlagRoutesStore proves --store-dir points the
+// launch at an explicit store rather than the default seam. The frozen unit
+// lives only under the flag's directory while the process store seam is empty,
+// so a successful load can only come from honoring the flag. This is the
+// mechanism the in-container re-entry relies on to read the bind-mounted store.
+func TestRunSkillLaunch_StoreDirFlagRoutesStore(t *testing.T) {
+	// Freeze the unit into flagStore (freeze reads the process seam, so point it
+	// there for the freeze), then swap the seam to a different empty store so
+	// only the --store-dir flag can resolve the unit at launch.
+	flagStore := withTempStore(t)
+	freezeNoImageForLaunch(t, flagStore)
+	skillStoreDir = t.TempDir()
+
+	disp := &fakeLaunchDispatcher{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {
+			"path": "digest.csv", "mimeType": "text/csv", "encoding": "utf-8", "content": "name\ncpu\n",
+		},
+		"aileron:tracker.create_issue": {
+			"path": "filed_issue.json", "mimeType": "application/json", "encoding": "utf-8", "content": "{}",
+		},
+	}}
+	stubLaunchSeams(t, disp)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origRun := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--store-dir", flagStore, "--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch with --store-dir exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Launched \"weekly-metrics-digest\"") {
+		t.Errorf("stdout = %q", stdout.String())
 	}
 }
 

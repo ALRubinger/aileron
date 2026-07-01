@@ -66,6 +66,11 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.String("version", "", "Frozen version id to launch (defaults to the only/most recent version)")
 	outDir := flags.String("out-dir", ".", "Directory file-target artifacts are written to")
+	// storeDir defaults to the process store seam. The in-container re-entry on
+	// the image-boot path passes the bind-mounted store path here so the inner
+	// binary loads the same verified frozen unit from the mount rather than the
+	// (empty) default store inside the image.
+	storeDir := flags.String("store-dir", skillStoreDir, "Skill store directory (defaults to ~/.aileron/skills)")
 	var inputs inputFlag
 	flags.Var(&inputs, "input", "Launch input override as name=value; repeatable")
 	positionals, err := parseInterspersedFlags(flags, args)
@@ -78,7 +83,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	}
 	name := positionals[0]
 
-	s := store.New(skillStoreDir)
+	s := store.New(*storeDir)
 	id, err := resolveLaunchVersion(s, name, *version)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

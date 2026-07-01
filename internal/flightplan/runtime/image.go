@@ -40,11 +40,12 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 	}, nil
 }
 
-// imageRef composes the `ref@digest` string the runner boots. When the digest
-// is already a full `ref@sha256:...` (an unusual pin shape) it is returned
-// verbatim; otherwise the pinned ref and digest are joined with `@`. The digest
-// is the content-addressed identity, so a runner handed this string boots the
-// exact image the signature attested rather than resolving the mutable tag.
+// imageRef composes the `ref@digest` string the runner boots. Freeze records
+// the digest as a bare `sha256:<hex>`, so the ref and digest are joined with
+// `@`. An empty digest degrades to the bare ref rather than a dangling `@`. The
+// digest is the content-addressed identity, so a runner handed this string
+// boots the exact image the signature attested rather than resolving the
+// mutable tag.
 func imageRef(ref, digest string) string {
 	if digest == "" {
 		return ref
