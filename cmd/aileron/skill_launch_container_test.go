@@ -150,6 +150,9 @@ func TestContainerImageRunner_InjectsDaemonEnv(t *testing.T) {
 	if got.Env["AILERON_TOKEN"] != "daemon-token" {
 		t.Errorf("AILERON_TOKEN = %q, want the daemon token", got.Env["AILERON_TOKEN"])
 	}
+	if got.Env[envSkillImageBooted] != "1" {
+		t.Errorf("%s = %q, want the boot sentinel alongside the daemon env", envSkillImageBooted, got.Env[envSkillImageBooted])
+	}
 }
 
 // TestContainerImageRunner_PassthroughWhenNoDaemonConfig proves that when the
@@ -172,14 +175,16 @@ func TestContainerImageRunner_PassthroughWhenNoDaemonConfig(t *testing.T) {
 	if _, err := (containerImageRunner{daemonEnv: fake}).Run(context.Background(), spec); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(got.Env) != 0 {
-		t.Errorf("RunOptions.Env = %v, want no injected env on the passthrough (ok=false) boot", got.Env)
+	// Only the boot sentinel: no daemon coordinates on the passthrough boot.
+	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the passthrough (ok=false) boot", got.Env)
 	}
 }
 
 // TestContainerImageRunner_ZeroValueInjectsNoEnv proves the zero-value runner
-// (daemonEnv == nil) injects no env, so the CLI unit tests stay deterministic
-// irrespective of any live ~/.aileron daemon (#1759).
+// (daemonEnv == nil) injects no daemon env, so the CLI unit tests stay
+// deterministic irrespective of any live ~/.aileron daemon (#1759). The boot
+// sentinel is still present: every whole-plan boot marks the re-entry.
 func TestContainerImageRunner_ZeroValueInjectsNoEnv(t *testing.T) {
 	storeDir := t.TempDir()
 	origStore := skillStoreDir
@@ -196,8 +201,8 @@ func TestContainerImageRunner_ZeroValueInjectsNoEnv(t *testing.T) {
 	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(got.Env) != 0 {
-		t.Errorf("RunOptions.Env = %v, want no injected env on the zero-value runner", got.Env)
+	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the zero-value runner", got.Env)
 	}
 }
 

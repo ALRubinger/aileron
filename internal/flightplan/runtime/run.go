@@ -51,6 +51,15 @@ type Options struct {
 	// is unset, that step is an explicit error, never a silent skip (mirrors the
 	// ImageRunner nil-guard discipline: a declared tool dispatch must be entered).
 	ToolImageRunner ToolImageRunner
+	// InPinnedImage marks this run as already executing INSIDE the verified
+	// pinned rung-1/rung-2 image — the image-boot re-entry (#1731). It routes
+	// a whole-plan-pinned unit onto the in-process path instead of booting the
+	// pin again: inside the container, in-process IS the certified
+	// environment, and re-booting would recurse (the image carries no nested
+	// container runtime, and with one it would never terminate). The CLI sets
+	// this from the AILERON_SKILL_IMAGE_BOOTED sentinel the image runner
+	// injects into the boot env.
+	InPinnedImage bool
 
 	// Clock supplies the single launch-time read for dynamic inputs. Nil uses
 	// SystemClock.
@@ -97,7 +106,10 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	// individual step shells out to its tool image (#1733). So the boot branch
 	// fires only for whole-plan pins (no per-step StepID); rung-3 stays on
 	// runPlan, where the executor dispatches each tool step through the seam.
-	if hasWholePlanImage(lp.ResolvedImages) {
+	// The image-boot re-entry (InPinnedImage) also stays in-process: it is
+	// already running inside the booted pin, so in-process IS the certified
+	// environment and booting again would recurse.
+	if hasWholePlanImage(lp.ResolvedImages) && !opts.InPinnedImage {
 		return runInImage(ctx, lp, opts)
 	}
 	return runPlan(ctx, lp.Plan, lp.ContentHash, lp.SignerFingerprint, opts)

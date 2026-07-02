@@ -217,3 +217,48 @@ func TestRun_NoRungStaysInProcess(t *testing.T) {
 		t.Errorf("in-process RunResult.ContentHash = %q, want the verified hash", res.ContentHash)
 	}
 }
+
+// TestRun_InPinnedImageReentryStaysInProcess proves the image-boot re-entry
+// guard: a rung-pinned unit launched with InPinnedImage (the in-container
+// re-entry, #1731) drives the in-process pipeline and never touches the
+// ImageRunner. Without the guard the re-entry would boot the pin again and
+// recurse — the failure mode is "no container runtime found on PATH" inside
+// the booted image.
+func TestRun_InPinnedImageReentryStaysInProcess(t *testing.T) {
+	fv := frozenExample(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "name\ncpu\n", "mimeType": "text/csv"}}, nil
+	})
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
+	}}
+	fake := &fakeImageRunner{}
+	res, err := Run(context.Background(), Options{
+		Store:         s,
+		Name:          "weekly-metrics-digest",
+		Version:       "test",
+		ImageRunner:   fake,
+		InPinnedImage: true,
+		Dispatcher:    disp,
+		Approver:      &fakeApprover{decision: Decision{Approved: true}},
+		Seam:          fakeSeam{out: map[string]any{"issue_body": "x"}},
+		Clock:         FixedClock{},
+		Transforms:    reg,
+		OutDir:        t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Run re-entry path: %v", err)
+	}
+	if fake.called {
+		t.Fatal("the image-boot re-entry must not boot the pin again")
+	}
+	if !strings.HasPrefix(res.ContentHash, "sha256:") {
+		t.Errorf("re-entry RunResult.ContentHash = %q, want the verified hash", res.ContentHash)
+	}
+}

@@ -48,6 +48,13 @@ type containerImageRunner struct {
 	daemonEnv imageDaemonEnv
 }
 
+// envSkillImageBooted marks the image-boot re-entry (#1731). The image runner
+// injects it into every whole-plan boot, and runSkillLaunch reads it into
+// runtime.Options.InPinnedImage so the in-container re-entry runs the plan
+// in-process instead of booting the verified pin a second time (which would
+// recurse — the image carries no nested container runtime).
+const envSkillImageBooted = "AILERON_SKILL_IMAGE_BOOTED"
+
 // containerRunFlightPlan boots the pinned image and runs the plan inside it. It
 // is a package variable purely for symmetry with sandboxRunContainer; the
 // production launch swaps the whole runtime.ImageRunner via newLaunchImageRunner
@@ -112,6 +119,11 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		Volumes: volumes,
 		Command: command,
 		Name:    flightPlanContainerName(spec),
+		// The sentinel tells the in-container re-entry it is ALREADY inside
+		// the booted pin: it must run the plan in-process rather than boot
+		// the pin again (which would recurse — the image carries no nested
+		// container runtime, and with one it would never terminate).
+		Env: map[string]string{envSkillImageBooted: "1"},
 	}
 
 	// Daemon-audit reachability (#1759): inject the host daemon coordinates so the

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -127,6 +128,11 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// plan inside it. When the frozen unit pins no image, the runtime never
 		// touches this seam and stays on the in-process path.
 		ImageRunner: newLaunchImageRunner(),
+		// InPinnedImage: the image-boot re-entry runs with the sentinel its
+		// booting runner injected; it is already inside the certified
+		// environment and must run the plan in-process, not boot the pin
+		// again.
+		InPinnedImage: os.Getenv(envSkillImageBooted) != "",
 		// ToolImageRunner dispatches each rung-3 step to its pinned sibling tool
 		// image with mount → run → collect I/O. The plan orchestration stays
 		// in-process; only the per-step tool dispatch shells out.
