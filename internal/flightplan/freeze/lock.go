@@ -23,6 +23,14 @@ type ImagePin struct {
 	// positional index like "#0" when the step declares none). Empty for
 	// rung-1/rung-2 pins.
 	StepID string `yaml:"id,omitempty" json:"id,omitempty"`
+	// Hosts is the network reach freeze sealed from the rung-3 step's declared
+	// trust contract (its `hosts`). Freeze stamps it here so the content hash
+	// and signature cover it: a resolved, signed assertion of the step's reach
+	// that cannot be re-supplied at launch. It is the single canonical signed
+	// source #1769 stamps onto the launch host allow-list. `omitempty` keeps
+	// rung-1/rung-2 pins and rung-3 pins with no declared contract byte-identical
+	// to the pre-reach lock format.
+	Hosts []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
 }
 
 // Lockfile is the resolved lock-and-digest record freeze produces. Its

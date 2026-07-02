@@ -233,6 +233,15 @@ type ToolDispatch struct {
 	// CollectPath is the in-image path whose contents are collected as the
 	// step's output, or empty when the step declared no collect.
 	CollectPath string
+	// TrustContract, when non-nil, is the step's declared per-step trust
+	// contract: its Hosts declare the step's network reach (the access-scope
+	// boundary) and Effect the operation effect, validated at decode exactly
+	// like an action's trust contract. It is CARRIED here, not consumed: this
+	// runtime never stamps the reach onto a host allow-list or emit path.
+	// Consuming it (writing binding.HostBinding.AllowedHosts, fail-closed emit)
+	// is #1769; the egress firewall is #1736. Nil when the rung-3 step declared
+	// no trust contract (declares no reach).
+	TrustContract *TrustContract
 }
 
 // binds returns the step's binding map regardless of kind (Args for

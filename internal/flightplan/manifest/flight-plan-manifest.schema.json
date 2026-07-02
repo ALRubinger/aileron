@@ -194,6 +194,10 @@
                         "minLength": 1
                       }
                     }
+                  },
+                  "trustContract": {
+                    "$ref": "#/$defs/trustContract",
+                    "description": "The optional per-step trust contract for this rung-3 sibling image. It reuses the per-action trust-contract shape: its `hosts` declare the step's network reach, the access-scope declaration that IS the security boundary, and `effect` records the operation effect. Freeze seals the declared reach onto the step's lock pin so it is covered by the signature and not re-suppliable at launch. Optional: a rung-3 step with no trust contract declares no reach; a declared contract must be non-empty (hosts minItems:1)."
                   }
                 }
               }
@@ -661,6 +665,15 @@
                 "type": "string",
                 "description": "For a rung-3 per-step pin, the id of the step that dispatches to this image (its declared `id`, or a positional fallback). Links the pin to its step so association does not key on the mutable image reference. Absent for rung-1 and rung-2 pins, which boot a single whole-plan image with no per-step linkage.",
                 "minLength": 1
+              },
+              "hosts": {
+                "type": "array",
+                "description": "For a rung-3 per-step pin, the network reach freeze sealed from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary. Freeze stamps the declared reach here so it is covered by the content hash and signature: a resolved, signed assertion of the step's reach that cannot be re-supplied at launch. Absent for rung-1/rung-2 pins and for a rung-3 step that declares no trust contract.",
+                "items": {
+                  "type": "string",
+                  "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
+                  "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+                }
               }
             }
           }

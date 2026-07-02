@@ -223,6 +223,128 @@ func TestDecode_IgnoresPinsForNonRung3(t *testing.T) {
 	}
 }
 
+// --- #1775: per-step trust contract carried onto the dispatch ---
+
+// trustContract builds the untyped per-step trust-contract map of the shape
+// the manifest carries, with the given hosts and effect and the minimal
+// credential/idempotency/audit the shared validator requires.
+func trustContract(effect string, hosts ...string) map[string]any {
+	hs := make([]any, len(hosts))
+	for i, h := range hosts {
+		hs[i] = h
+	}
+	return map[string]any{
+		"credential":  map[string]any{"kind": "none"},
+		"hosts":       hs,
+		"effect":      effect,
+		"idempotency": map[string]any{"safeToRetry": true},
+		"audit":       map[string]any{"fields": []any{"result"}},
+	}
+}
+
+// TestDecodeToolDispatch_CarriesTrustContract proves a rung-3 step declaring a
+// per-step trust contract decodes with ToolDispatch.TrustContract carrying the
+// declared hosts and effect. The reach is CARRIED, not consumed: nothing here
+// stamps it onto a host allow-list (#1769).
+func TestDecodeToolDispatch_CarriesTrustContract(t *testing.T) {
+	env := map[string]any{"steps": []any{
+		map[string]any{
+			"id":            "extract",
+			"image":         "registry.example.com/tool-a:1",
+			"trustContract": trustContract("read", "api.example.com", "api.example.com:443"),
+		},
+	}}
+	steps := []any{step(map[string]any{"id": "extract", "kind": "transform", "outputs": []any{"result"}})}
+	m := rung3EnvManifest(env, nil, steps)
+	pins := []freeze.ImagePin{{Ref: "registry.example.com/tool-a:1", Digest: digestA, StepID: "extract"}}
+
+	p, err := DecodeWithImages(m, pins)
+	if err != nil {
+		t.Fatalf("DecodeWithImages: %v", err)
+	}
+	td := p.Steps[0].ToolDispatch
+	if td == nil || td.TrustContract == nil {
+		t.Fatalf("rung-3 step must carry a trust contract, got %+v", p.Steps[0])
+	}
+	if td.TrustContract.Effect != EffectRead {
+		t.Errorf("carried effect = %q, want read", td.TrustContract.Effect)
+	}
+	if strings.Join(td.TrustContract.Hosts, ",") != "api.example.com,api.example.com:443" {
+		t.Errorf("carried hosts = %v, want the declared reach", td.TrustContract.Hosts)
+	}
+}
+
+// TestDecodeToolDispatch_NoTrustContractNil is the regression guard that the
+// per-step contract is optional: a rung-3 step with no trustContract decodes
+// with a nil TrustContract (declares no reach), never a zero-valued contract.
+func TestDecodeToolDispatch_NoTrustContractNil(t *testing.T) {
+	env := map[string]any{"steps": []any{
+		map[string]any{"id": "s1", "image": "registry.example.com/tool-a:1"},
+	}}
+	steps := []any{step(map[string]any{"id": "s1", "kind": "transform", "outputs": []any{"out"}})}
+	m := rung3EnvManifest(env, nil, steps)
+	pins := []freeze.ImagePin{{Ref: "registry.example.com/tool-a:1", Digest: digestA, StepID: "s1"}}
+
+	p, err := DecodeWithImages(m, pins)
+	if err != nil {
+		t.Fatalf("DecodeWithImages: %v", err)
+	}
+	td := p.Steps[0].ToolDispatch
+	if td == nil {
+		t.Fatal("step must still carry a tool dispatch")
+	}
+	if td.TrustContract != nil {
+		t.Errorf("a step with no trust contract must leave TrustContract nil, got %+v", td.TrustContract)
+	}
+}
+
+// TestDecodeToolDispatch_EmptyHostsRefused proves a declared per-step contract
+// with no hosts is refused with the same access-scope message the action path
+// emits (shared toContract validation).
+func TestDecodeToolDispatch_EmptyHostsRefused(t *testing.T) {
+	env := map[string]any{"steps": []any{
+		map[string]any{
+			"id":            "s1",
+			"image":         "registry.example.com/tool-a:1",
+			"trustContract": trustContract("read"), // no hosts
+		},
+	}}
+	steps := []any{step(map[string]any{"id": "s1", "kind": "transform", "outputs": []any{"out"}})}
+	m := rung3EnvManifest(env, nil, steps)
+	pins := []freeze.ImagePin{{Ref: "registry.example.com/tool-a:1", Digest: digestA, StepID: "s1"}}
+
+	_, err := DecodeWithImages(m, pins)
+	if err == nil {
+		t.Fatal("a per-step trust contract with no hosts must be refused")
+	}
+	if !strings.Contains(err.Error(), "no hosts") {
+		t.Errorf("error should cite the access-scope boundary, got: %v", err)
+	}
+}
+
+// TestDecodeToolDispatch_UnknownEffectRefused proves a declared per-step
+// contract with an unknown effect is refused, exactly like the action path.
+func TestDecodeToolDispatch_UnknownEffectRefused(t *testing.T) {
+	env := map[string]any{"steps": []any{
+		map[string]any{
+			"id":            "s1",
+			"image":         "registry.example.com/tool-a:1",
+			"trustContract": trustContract("teleport", "api.example.com"),
+		},
+	}}
+	steps := []any{step(map[string]any{"id": "s1", "kind": "transform", "outputs": []any{"out"}})}
+	m := rung3EnvManifest(env, nil, steps)
+	pins := []freeze.ImagePin{{Ref: "registry.example.com/tool-a:1", Digest: digestA, StepID: "s1"}}
+
+	_, err := DecodeWithImages(m, pins)
+	if err == nil {
+		t.Fatal("a per-step trust contract with an unknown effect must be refused")
+	}
+	if !strings.Contains(err.Error(), "unknown effect") {
+		t.Errorf("error should cite the unknown effect, got: %v", err)
+	}
+}
+
 // --- Unit 4: executor dispatch ---
 
 // toolDispatchPlan builds a two-step plan: a rung-3 tool step (extract) that

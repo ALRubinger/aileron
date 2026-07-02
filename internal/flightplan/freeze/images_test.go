@@ -228,6 +228,46 @@ func TestResolveImages_Rung3PositionalIDFallback(t *testing.T) {
 	}
 }
 
+// TestResolveImages_Rung3SealsTrustContractHosts is the #1775 acceptance proof:
+// a rung-3 step declaring a per-step trustContract has its declared hosts sealed
+// onto the resolved pin (keyed to the right step id), and a step declaring no
+// trustContract produces a pin with nil hosts (omitted from the marshaled lock).
+func TestResolveImages_Rung3SealsTrustContractHosts(t *testing.T) {
+	m := parseM(t, []byte(rung3TrustContractMD))
+	digestFor := map[string]string{
+		"registry.example.com/tool-a:1": fakeDigest,
+		"registry.example.com/tool-b:2": fakeDigest2,
+	}
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return digestFor[ref], nil
+	})
+	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	if err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("expected two pins, got %+v", pins)
+	}
+	if pins[0].StepID != "reach" {
+		t.Fatalf("first pin must be the reach step, got %+v", pins[0])
+	}
+	if strings.Join(pins[0].Hosts, ",") != "api.upstream.example.com,api.upstream.example.com:443" {
+		t.Errorf("reach pin must seal the declared hosts, got %v", pins[0].Hosts)
+	}
+	if pins[1].StepID != "noreach" || len(pins[1].Hosts) != 0 {
+		t.Errorf("a step with no trust contract must pin with nil hosts, got %+v", pins[1])
+	}
+
+	// The nil-hosts pin omits `hosts` from the marshaled lock (byte-stability).
+	lf, err := MarshalLockfile(Lockfile{ResolvedImages: pins[1:]})
+	if err != nil {
+		t.Fatalf("marshal lockfile: %v", err)
+	}
+	if strings.Contains(string(lf), "hosts") {
+		t.Errorf("a no-reach pin must omit hosts from the lock, got:\n%s", lf)
+	}
+}
+
 // TestResolveImages_Rung1PinCarriesNoStepID proves rung-1 pins leave StepID
 // empty, so the single-pin whole-plan-boot path and its lock bytes are
 // unchanged by the association substrate.

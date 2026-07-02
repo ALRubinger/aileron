@@ -175,6 +175,132 @@ aileron:
 	})
 }
 
+// TestRung3StepTrustContract locks the per-step trust contract at the schema
+// boundary (#1775): a rung-3 step may carry a trustContract reusing the
+// per-action $def, so a declared hosts+effect validates, an empty hosts list
+// (violating the $def hosts minItems:1) is rejected, an unknown effect is
+// rejected, and an unknown key on the step item is still rejected
+// (additionalProperties:false on the step item is preserved by admitting only
+// the one trustContract key).
+func TestRung3StepTrustContract(t *testing.T) {
+	t.Run("valid/hosts and effect", func(t *testing.T) {
+		env := `      rung3PerStepImages:
+        steps:
+          - id: reach
+            image: registry.example.com/per-step-tool:1
+            trustContract:
+              credential:
+                kind: none
+              hosts:
+                - api.example.com
+              effect: read
+              idempotency:
+                safeToRetry: true
+              audit:
+                fields:
+                  - result`
+		if err := validateFrontmatter(execEnvFrontmatter(env)); err != nil {
+			t.Fatalf("a rung-3 step with a trustContract must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/empty hosts", func(t *testing.T) {
+		env := `      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1
+            trustContract:
+              credential:
+                kind: none
+              hosts: []
+              effect: read
+              idempotency:
+                safeToRetry: true
+              audit:
+                fields:
+                  - result`
+		if err := validateFrontmatter(execEnvFrontmatter(env)); err == nil {
+			t.Fatal("a trustContract with empty hosts (minItems:1) must be rejected")
+		}
+	})
+	t.Run("invalid/unknown effect", func(t *testing.T) {
+		env := `      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1
+            trustContract:
+              credential:
+                kind: none
+              hosts:
+                - api.example.com
+              effect: teleport
+              idempotency:
+                safeToRetry: true
+              audit:
+                fields:
+                  - result`
+		if err := validateFrontmatter(execEnvFrontmatter(env)); err == nil {
+			t.Fatal("a trustContract with an unknown effect must be rejected")
+		}
+	})
+	t.Run("invalid/unknown key on step item", func(t *testing.T) {
+		env := `      rung3PerStepImages:
+        steps:
+          - image: registry.example.com/per-step-tool:1
+            bogus: nope`
+		if err := validateFrontmatter(execEnvFrontmatter(env)); err == nil {
+			t.Fatal("an unknown key on a rung-3 step item must be rejected (additionalProperties:false)")
+		}
+	})
+}
+
+// TestLockResolvedImagesHosts locks the per-pin sealed reach at the schema
+// boundary (#1775): a lock resolvedImages[] item may carry the optional
+// `hosts` array (freeze's sealed reach), a malformed host (a scheme-prefixed
+// entry) is rejected by the host pattern, and the item stays
+// additionalProperties:false.
+func TestLockResolvedImagesHosts(t *testing.T) {
+	lockFrontmatter := func(item string) []byte {
+		return []byte(`name: s
+description: d
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+  inputs: []
+  outputs: []
+  lock:
+    resolvedImages:
+` + item + `
+`)
+	}
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("valid/with hosts", func(t *testing.T) {
+		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest +
+			"\n        id: reach\n        hosts:\n          - api.example.com\n          - api.example.com:443"
+		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
+			t.Fatalf("a resolvedImages item with hosts must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/scheme-prefixed host", func(t *testing.T) {
+		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest +
+			"\n        hosts:\n          - https://api.example.com"
+		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
+			t.Fatal("a scheme-prefixed host must be rejected by the host pattern")
+		}
+	})
+}
+
 // execEnvFrontmatter wraps an executionEnvironment block body into a complete,
 // otherwise-valid aileron frontmatter so a test exercises only the
 // executionEnvironment validity rules. envBlock is the YAML for the

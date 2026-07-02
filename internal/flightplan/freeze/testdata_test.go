@@ -267,6 +267,55 @@ aileron:
 # Rung 3 No ID Skill
 `
 
+// rung3TrustContractMD declares two rung-3 steps: the first carries a per-step
+// trustContract whose hosts declare the step's network reach; the second
+// declares no trustContract (no reach). Freeze must seal the first step's hosts
+// onto its pin and leave the second pin's hosts empty (#1775).
+const rung3TrustContractMD = `---
+name: rung3-trust-contract-skill
+description: A rung-3 skill with a per-step trust contract.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung3PerStepImages:
+        steps:
+          - id: reach
+            image: registry.example.com/tool-a:1
+            trustContract:
+              credential:
+                kind: none
+              hosts:
+                - api.upstream.example.com
+                - api.upstream.example.com:443
+              effect: read
+              idempotency:
+                safeToRetry: true
+              audit:
+                fields:
+                  - result
+          - id: noreach
+            image: registry.example.com/tool-b:2
+  inputs: []
+  outputs: []
+---
+
+# Rung 3 Trust Contract Skill
+`
+
 // genSigningKey returns a fresh ed25519 private key and writes its PKCS#8
 // PEM form to a temp file, returning the path. Mirrors the keyring PEM
 // conventions; used to exercise LoadSigningKey + Sign.

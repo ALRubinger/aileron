@@ -291,11 +291,26 @@ func decodeToolDispatch(m *manifest.Manifest, p *Plan, pins []freeze.ImagePin) e
 			return decodeErrf("rung3PerStepImages step %q declares a collect with an empty path", sd.ID)
 		}
 
-		step.ToolDispatch = &ToolDispatch{
+		td := &ToolDispatch{
 			Image:       imageRef(pin.Ref, pin.Digest),
 			MountPath:   mountPath,
 			CollectPath: collectPath,
 		}
+
+		// A declared per-step trust contract is validated exactly like an
+		// action's contract (effect enum, non-empty hosts, redaction kinds) and
+		// carried onto the dispatch. It is not consumed here: stamping the reach
+		// onto a host allow-list or emit path is #1769. A step with no contract
+		// leaves TrustContract nil (declares no reach).
+		if sd.TrustContract != nil {
+			tc, err := sd.TrustContract.toContract("rung3 step " + sd.ID)
+			if err != nil {
+				return err
+			}
+			td.TrustContract = &tc
+		}
+
+		step.ToolDispatch = td
 	}
 	return nil
 }
