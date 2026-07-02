@@ -270,32 +270,41 @@ func resolveActor(o materializedOutput, dispatchByStep map[string]actionDispatch
 }
 
 // agreedUpstreamActor walks a transform output's BindStep inputs to their
-// producing dispatches and returns the single agreed actor when every
-// data-producing upstream shares one non-empty identity_label and one
-// credential_binding. It returns ok=false when there is no such agreement (no
-// upstream dispatch, no identity resolved, or a divergence across upstreams),
-// so the caller omits the actor keys rather than attributing the output to one
-// of several identities.
+// producing dispatches and returns the single agreed actor only when EVERY
+// BindStep upstream carries complete actor provenance and they all agree on the
+// full tuple (identity_label, credential_binding, connector_version,
+// connector_hash, consent). It returns ok=false the moment any upstream is
+// missing its dispatch, resolved no identity/binding, or diverges from the
+// others on any tuple field — so a transform that mixes an attributable read
+// with an unattributable or differently-authorized one is never mislabeled with
+// a single actor. The walk-back to identity still resolves through
+// aileron.step.inputs, so omitting the actor keeps the record truthful rather
+// than guessing one actor for a genuinely multi-source transform.
 func agreedUpstreamActor(o materializedOutput, dispatchByStep map[string]actionDispatch) (actionDispatch, bool) {
 	var chosen actionDispatch
 	found := false
 	for _, b := range o.Binds {
 		if b.Kind != BindStep {
+			// A non-step binding (a launch input) is not a data-producing actor.
 			continue
 		}
 		d, ok := dispatchByStep[b.StepID]
-		if !ok || d.IdentityLabel == "" {
-			// An upstream that produced no dispatch or resolved no identity is
-			// not a data-producing action-call with an attributable actor.
-			continue
+		if !ok || d.IdentityLabel == "" || d.CredentialBinding == "" {
+			// A data-producing upstream with no dispatch or incomplete actor
+			// provenance means there is no single truthful actor for the output.
+			return actionDispatch{}, false
 		}
 		if !found {
 			chosen = d
 			found = true
 			continue
 		}
-		if d.IdentityLabel != chosen.IdentityLabel || d.CredentialBinding != chosen.CredentialBinding {
-			// Divergent identities across upstreams: no single truthful actor.
+		if d.IdentityLabel != chosen.IdentityLabel ||
+			d.CredentialBinding != chosen.CredentialBinding ||
+			d.ConnectorVersion != chosen.ConnectorVersion ||
+			d.ConnectorHash != chosen.ConnectorHash ||
+			d.ConsentDecision != chosen.ConsentDecision {
+			// Divergent provenance across upstreams: no single truthful actor.
 			return actionDispatch{}, false
 		}
 	}

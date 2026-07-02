@@ -384,6 +384,37 @@ func TestResolveActor_DivergentUpstreamsOmitActor(t *testing.T) {
 	}
 }
 
+func TestResolveActor_TransformOmitsActorWhenAnUpstreamIsUnattributable(t *testing.T) {
+	// A transform that binds one attributable action-call AND one upstream with
+	// no dispatch (e.g. an intermediate transform's output) has no single
+	// truthful actor across ALL its data inputs, so the actor keys are omitted
+	// — not attributed solely to the one identified upstream. step.inputs still
+	// records both bindings for the walk-back.
+	o := materializedOutput{
+		StepID:   "compose_dashboard",
+		StepKind: KindTransform,
+		Artifact: Artifact{Name: "dash.html", Content: []byte("x"), Digest: "sha256:c"},
+		Binds: map[string]Binding{
+			"rows":    {Kind: BindStep, Raw: "steps.query.rows", StepID: "query", Output: "rows"},
+			"summary": {Kind: BindStep, Raw: "steps.reshape.summary", StepID: "reshape", Output: "summary"},
+		},
+		Resolved: map[string]any{"rows": map[string]any{"x": 1}, "summary": map[string]any{"y": 2}},
+	}
+	dispatchByStep := map[string]actionDispatch{
+		// Only the query step has a dispatch; "reshape" is a transform with none.
+		"query": {StepID: "query", IdentityLabel: "work", CredentialBinding: "aws_sigv4/athena/work",
+			ConnectorVersion: "2.3.1", ConnectorHash: "sha256:conn"},
+	}
+	rec := buildOutputRecord(o, launchProvenance{}, dispatchByStep, map[string]any{})
+	if _, present := rec.Fields["aileron.actor.identity_label"]; present {
+		t.Error("a transform with an unattributable upstream must omit the actor identity, not attribute solely to the identified one")
+	}
+	inputs, ok := rec.Fields["aileron.step.inputs"].([]map[string]any)
+	if !ok || len(inputs) != 2 {
+		t.Errorf("step.inputs must still record both bindings, got %v", rec.Fields["aileron.step.inputs"])
+	}
+}
+
 func TestBuildOutputRecord_ResolvedInputsExcludeSourceDatasets(t *testing.T) {
 	// resolved_inputs carries launch config (literal/dynamic) only; a
 	// source-resolved dataset is referenced by binding elsewhere and never

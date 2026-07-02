@@ -299,7 +299,19 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 				ConnectorVersion: connectorVersionFor(manifest, step.Connector),
 				ConnectorHash:    connHash,
 			}
-			prov.IdentityLabel, prov.CredentialBinding = e.actorIdentityFor(ctx, connManifest, step.Connector)
+			var identityErr error
+			prov.IdentityLabel, prov.CredentialBinding, identityErr = e.actorIdentityFor(ctx, connManifest, step.Connector)
+			if identityErr != nil {
+				// An unexpected binding-lookup failure (not the expected
+				// not-found / ambiguous cases) leaves the identity omitted, but
+				// it is surfaced on the span rather than silently swallowed so
+				// the observability trail reflects that a real lookup problem —
+				// not a credential-less action — is why the actor identity is
+				// absent. Provenance stays best-effort: it never fails the
+				// action, mirroring the resolver path's fail-open discipline.
+				span.AddEvent("aileron.provenance.identity_unresolved",
+					trace.WithAttributes(attribute.String("aileron.error", identityErr.Error())))
+			}
 			return Result{Content: string(body), Provenance: prov}, nil
 		}
 	}
@@ -506,26 +518,34 @@ func connectorVersionFor(m *Manifest, connectorFQN string) string {
 
 // actorIdentityFor resolves the non-secret identity provenance of the
 // credential binding the named connector would use: the binding's identity
-// label and its name. It returns ("", "") — an honest omission rather than a
-// guess — when the connector declares no credential capability, no binding
-// store is wired, or resolution finds no single matching binding (absent or
-// ambiguous). It never returns the credential value; Resolve reads only the
-// binding's plaintext metadata, not its encrypted bytes.
-func (e *SandboxExecutor) actorIdentityFor(ctx context.Context, connManifest *cstore.Manifest, connectorFQN string) (identityLabel, credentialBinding string) {
+// label and its name. It returns ("", "", nil) — an honest omission rather than
+// a guess — when the connector declares no credential capability, no binding
+// store is wired, or resolution finds no single matching binding (the expected
+// binding.ErrNotFound / binding.ErrAmbiguous outcomes). Any OTHER resolution
+// error (e.g. a vault I/O failure) is returned so the caller can surface it
+// observably instead of masking a real lookup problem as a credential-less
+// action; the identity is still omitted (provenance is best-effort and never
+// fails the action). It never returns the credential value; Resolve reads only
+// the binding's plaintext metadata, not its encrypted bytes.
+func (e *SandboxExecutor) actorIdentityFor(ctx context.Context, connManifest *cstore.Manifest, connectorFQN string) (identityLabel, credentialBinding string, err error) {
 	if connManifest == nil || connManifest.Capabilities.Credential == nil {
-		return "", ""
+		return "", "", nil
 	}
 	if e.Bindings == nil {
-		return "", ""
+		return "", "", nil
 	}
-	b, err := e.Bindings.Resolve(ctx, connectorFQN, connManifest.Capabilities.Credential.Kind)
-	if err != nil {
-		// ErrNotFound or *AmbiguousError: no single identity to attribute
-		// the read to, so omit rather than guess (the connector build still
-		// pins the actor via version + hash).
-		return "", ""
+	b, rErr := e.Bindings.Resolve(ctx, connectorFQN, connManifest.Capabilities.Credential.Kind)
+	if rErr != nil {
+		// not-found / ambiguous are the expected "no single identity to
+		// attribute the read to" outcomes: omit rather than guess (the
+		// connector build still pins the actor via version + hash). Any other
+		// error is unexpected and is surfaced to the caller.
+		if errors.Is(rErr, binding.ErrNotFound) || errors.Is(rErr, binding.ErrAmbiguous) {
+			return "", "", nil
+		}
+		return "", "", rErr
 	}
-	return b.Identity, b.Name.String()
+	return b.Identity, b.Name.String(), nil
 }
 
 // mergeArgs combines the call-time args with the action's declared
