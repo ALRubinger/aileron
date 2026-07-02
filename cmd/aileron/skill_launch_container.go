@@ -31,7 +31,22 @@ import (
 // out-dir writable, then re-enters the aileron binary against the bind-mounted
 // unit so the in-container run reaches the same daemon action boundary over the
 // existing network wiring.
-type containerImageRunner struct{}
+//
+// Daemon-audit reachability (#1759): when daemonEnv is non-nil it injects the
+// host daemon coordinates (AILERON_API_URL + AILERON_TOKEN) into the booted
+// container's env so the re-entered `aileron skill launch` reaches the SAME host
+// daemon action + audit boundary — a record emitted inside the image then
+// surfaces in the host `aileron audit list`. Without it the inner binary sees no
+// daemon env and resolves/spawns an ephemeral in-container daemon nothing on the
+// host can query. A zero-value runner has daemonEnv == nil and injects no env,
+// keeping the CLI unit tests deterministic irrespective of any live ~/.aileron
+// daemon; production wires the daemon-backed resolver via newLaunchImageRunner.
+type containerImageRunner struct {
+	// daemonEnv, when non-nil, resolves the daemon env injected into the boot so
+	// the in-container launch reaches the host daemon. nil (the zero value) is
+	// passthrough (no injected env).
+	daemonEnv imageDaemonEnv
+}
 
 // containerRunFlightPlan boots the pinned image and runs the plan inside it. It
 // is a package variable purely for symmetry with sandboxRunContainer; the
@@ -46,7 +61,7 @@ var containerRunFlightPlan = func(ctx context.Context, runtimeName string, stdou
 	}.Run(ctx, opts)
 }
 
-func (containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) (runtime.ImageRunResult, error) {
+func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) (runtime.ImageRunResult, error) {
 	if spec.Image == "" {
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: image runner requires a pinned image")
 	}
@@ -98,6 +113,28 @@ func (containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) 
 		Command: command,
 		Name:    flightPlanContainerName(spec),
 	}
+
+	// Daemon-audit reachability (#1759): inject the host daemon coordinates so the
+	// re-entered in-container launch posts its actions + audit records to the SAME
+	// host daemon rather than an ephemeral in-container one. The resolver is
+	// spawn-free and gates on config presence: when no daemon URL/token resolves
+	// it returns ok=false and the boot carries no injected env, keeping a
+	// no-daemon launch working. --add-host host.docker.internal:host-gateway is
+	// inherited unconditionally from the shared Builder.Run path on docker+linux
+	// (runtime.go runArgs), so the rewritten host is reachable without any new
+	// emission here.
+	if r.daemonEnv != nil {
+		if env, ok := r.daemonEnv.Env(runtimeName); ok {
+			if opts.Env == nil {
+				opts.Env = env
+			} else {
+				for k, v := range env {
+					opts.Env[k] = v
+				}
+			}
+		}
+	}
+
 	if _, err := containerRunFlightPlan(ctx, runtimeName, os.Stdout, os.Stderr, opts); err != nil {
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: run pinned image %q: %w", spec.Image, err)
 	}
