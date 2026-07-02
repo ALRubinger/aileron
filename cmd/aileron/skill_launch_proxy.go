@@ -73,6 +73,15 @@ const (
 // daemon stays passthrough rather than forcing a daemon boot. When config
 // resolves it provisions the session CA via launch.PrepareToolContainerProxy
 // and assembles the env map.
+//
+// Activation gates on daemon-config PRESENCE (token + base URL from
+// AILERON_TOKEN/AILERON_API_URL or ~/.aileron discovery), not on daemon
+// LIVENESS: a stale ~/.aileron discovery entry (token present) with no daemon
+// actually listening still enriches HTTPS_PROXY/CA and routes every rung-3 tool
+// step through a non-existent proxy, failing with CONNECT connection-refused — a
+// regression versus direct-egress passthrough. Config-presence gating is
+// accepted; liveness-probing / fail-open is deferred to a follow-up. See
+// ADR-0019, "Rung-3 tool-container egress reuses the data plane".
 type daemonToolProxyBootstrapper struct{}
 
 func (daemonToolProxyBootstrapper) Prepare(runtimeName, stepID string) (toolProxyBootstrap, func(), bool, error) {
