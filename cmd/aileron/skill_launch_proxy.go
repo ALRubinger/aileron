@@ -124,6 +124,69 @@ func (daemonToolProxyBootstrapper) Prepare(runtimeName, stepID string) (toolProx
 	return toolProxyBootstrap{Env: env, Mount: prepared.CAMount}, cleanup, true, nil
 }
 
+// imageDaemonEnv is the seam the Flight Plan image-boot path (#1759) uses to
+// inject the host daemon coordinates into the booted container's environment so
+// the re-entered `aileron skill launch` inside the image reaches the SAME host
+// daemon action + audit boundary rather than resolving/spawning an ephemeral
+// in-container daemon nothing on the host can query. It is injected onto
+// containerImageRunner rather than read from ambient config: a zero-value runner
+// has daemonEnv == nil and stays passthrough (no injected env), which keeps the
+// CLI unit tests deterministic irrespective of any live ~/.aileron daemon.
+// Production wires the daemon-backed resolver via newLaunchImageRunner.
+type imageDaemonEnv interface {
+	// Env resolves the daemon env map (AILERON_API_URL + AILERON_TOKEN) for a
+	// container boot on the named runtime, WITHOUT spawning a daemon. ok=false
+	// means daemon config is absent (URL or token unresolvable) and the boot must
+	// carry no injected env rather than break a no-daemon launch.
+	Env(runtimeName string) (map[string]string, bool)
+}
+
+// daemonImageEnv is the production imageDaemonEnv. It resolves the daemon base
+// URL + auth token from AILERON_API_URL / AILERON_TOKEN or ~/.aileron discovery
+// WITHOUT triggering a daemon spawn (it reads env/discovery only), so a launch
+// with no running daemon stays passthrough rather than forcing a daemon boot.
+//
+// Activation gates on daemon-config PRESENCE (token + base URL), not on daemon
+// LIVENESS: a stale ~/.aileron discovery entry (token present) with no daemon
+// actually listening still injects env, and the inner launch's audit POST fails
+// with connection-refused — a regression versus the ephemeral in-container
+// daemon. Config-presence gating is accepted; liveness-probing / fail-open is
+// deferred to a follow-up, mirroring daemonToolProxyBootstrapper.
+type daemonImageEnv struct{}
+
+func (daemonImageEnv) Env(runtimeName string) (map[string]string, bool) {
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return nil, false
+	}
+	root, ok := resolveDaemonRootURL(stateDir)
+	if !ok {
+		return nil, false
+	}
+	token, ok := resolveDaemonProxyToken(stateDir)
+	if !ok {
+		return nil, false
+	}
+	return map[string]string{
+		"AILERON_API_URL": daemonImageAPIURL(root, runtimeName),
+		"AILERON_TOKEN":   token,
+	}, true
+}
+
+// daemonImageAPIURL builds the AILERON_API_URL injected into the booted
+// container: the daemon root (no /v1) is loopback-rewritten to
+// host.docker.internal so the in-container process reaches the host-bound
+// daemon, then the /v1 API prefix is appended. The inner launch's
+// bindingAPIBaseURL uses this value directly as `base + "/actions/..."` and
+// `base + "/audit"`, so the injected value MUST carry the /v1 suffix (the host
+// rewrite is applied to the host portion only and preserves the path). This is
+// the container-facing analogue of internal/launch's daemonAPIBaseURL over
+// ContainerURLForRuntime.
+func daemonImageAPIURL(root, runtimeName string) string {
+	rewritten := launch.ContainerURLForRuntime(root, runtimeName)
+	return strings.TrimRight(rewritten, "/") + "/v1"
+}
+
 // resolveDaemonRootURL resolves the daemon root URL (WITHOUT the /v1 suffix)
 // from AILERON_API_URL or discovery, without spawning a daemon. It returns
 // ok=false when neither source yields a URL.

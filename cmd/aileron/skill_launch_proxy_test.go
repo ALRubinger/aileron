@@ -199,3 +199,92 @@ func TestSanitizeSessionSegment(t *testing.T) {
 		}
 	}
 }
+
+func TestDaemonImageEnv_RewritesHostAndAppendsV1FromEnv(t *testing.T) {
+	withHomeAndEnv(t)
+	// A loopback AILERON_API_URL carrying the /v1 API prefix, no daemon spawn.
+	t.Setenv("AILERON_API_URL", "http://127.0.0.1:48123/v1")
+	t.Setenv("AILERON_TOKEN", "env-token")
+
+	env, ok := daemonImageEnv{}.Env("docker")
+	if !ok {
+		t.Fatal("Env must resolve when URL + token are set")
+	}
+	// The injected URL is host.docker.internal-rewritten and carries the /v1
+	// suffix the inner bindingAPIBaseURL uses directly as base + "/audit".
+	if got := env["AILERON_API_URL"]; got != "http://host.docker.internal:48123/v1" {
+		t.Errorf("AILERON_API_URL = %q, want host.docker.internal-rewritten /v1 URL", got)
+	}
+	if got := env["AILERON_TOKEN"]; got != "env-token" {
+		t.Errorf("AILERON_TOKEN = %q, want the resolved daemon token", got)
+	}
+}
+
+func TestDaemonImageEnv_ResolvesFromDiscovery(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	// Discovery carries a loopback root URL (no /v1) + token; no daemon spawn.
+	writeDiscovery(t, stateDir, "http://localhost:55555", "discovery-token")
+
+	env, ok := daemonImageEnv{}.Env("docker")
+	if !ok {
+		t.Fatal("Env must resolve from discovery when env is unset")
+	}
+	if got := env["AILERON_API_URL"]; got != "http://host.docker.internal:55555/v1" {
+		t.Errorf("AILERON_API_URL = %q, want host.docker.internal-rewritten /v1 URL", got)
+	}
+	if got := env["AILERON_TOKEN"]; got != "discovery-token" {
+		t.Errorf("AILERON_TOKEN = %q, want the discovery token", got)
+	}
+}
+
+func TestDaemonImageEnv_NonLoopbackHostUnchanged(t *testing.T) {
+	withHomeAndEnv(t)
+	// A non-loopback host must not be rewritten, but must still carry /v1.
+	t.Setenv("AILERON_API_URL", "https://daemon.internal.example:8721")
+	t.Setenv("AILERON_TOKEN", "t")
+
+	env, ok := daemonImageEnv{}.Env("docker")
+	if !ok {
+		t.Fatal("Env must resolve for a non-loopback host")
+	}
+	if got := env["AILERON_API_URL"]; got != "https://daemon.internal.example:8721/v1" {
+		t.Errorf("AILERON_API_URL = %q, want the non-loopback host unchanged with /v1", got)
+	}
+}
+
+func TestDaemonImageEnv_NoURLPassthrough(t *testing.T) {
+	withHomeAndEnv(t)
+	// Neither env nor discovery yields a URL: passthrough (no injected env).
+	t.Setenv("AILERON_TOKEN", "t")
+
+	if env, ok := (daemonImageEnv{}).Env("docker"); ok || env != nil {
+		t.Errorf("Env = (%v, %v), want (nil, false) when no URL resolves", env, ok)
+	}
+}
+
+func TestDaemonImageEnv_NoTokenPassthrough(t *testing.T) {
+	withHomeAndEnv(t)
+	// A URL but no token: the daemon action/audit POST would be unauthenticated,
+	// so the resolver stays passthrough.
+	t.Setenv("AILERON_API_URL", "http://127.0.0.1:48123/v1")
+
+	if env, ok := (daemonImageEnv{}).Env("docker"); ok || env != nil {
+		t.Errorf("Env = (%v, %v), want (nil, false) when no token resolves", env, ok)
+	}
+}
+
+func TestDaemonImageAPIURL(t *testing.T) {
+	cases := map[string]string{
+		// loopback roots (no /v1) are rewritten and get /v1 appended
+		"http://127.0.0.1:48123":  "http://host.docker.internal:48123/v1",
+		"http://localhost:48123":  "http://host.docker.internal:48123/v1",
+		"http://127.0.0.1:48123/": "http://host.docker.internal:48123/v1",
+		// non-loopback host is left as-is, /v1 appended
+		"https://daemon.example:8721": "https://daemon.example:8721/v1",
+	}
+	for in, want := range cases {
+		if got := daemonImageAPIURL(in, "docker"); got != want {
+			t.Errorf("daemonImageAPIURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

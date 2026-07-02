@@ -28,7 +28,14 @@ var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink { return daemo
 // verified pinned rung-1/rung-2 image and runs the plan inside it (#1731). It
 // is a package-level seam so CLI tests swap in a fake that records the exact
 // image string and never touches Docker, mirroring the other launch seams.
-var newLaunchImageRunner = func() runtime.ImageRunner { return containerImageRunner{} }
+// The production runner injects the daemon-backed env resolver so the
+// re-entered in-container launch reaches the SAME host daemon action + audit
+// boundary and its records surface in the host `aileron audit list` (#1759).
+// The resolver stays passthrough (injects no env) when no daemon config is
+// resolvable, gating on config presence, so a no-daemon launch still boots.
+var newLaunchImageRunner = func() runtime.ImageRunner {
+	return containerImageRunner{daemonEnv: daemonImageEnv{}}
+}
 
 // newLaunchToolImageRunner returns the production tool-image runner that
 // dispatches a rung-3 step to its pinned sibling tool image with mount → run →

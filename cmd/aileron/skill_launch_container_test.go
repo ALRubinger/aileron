@@ -93,6 +93,127 @@ func TestContainerImageRunner_BootsExactImageWithMounts(t *testing.T) {
 	}
 }
 
+// fakeImageDaemonEnv is a canned imageDaemonEnv for the runner tests: it returns
+// the recorded env map and ok flag so the runner's RunOptions.Env wiring is
+// asserted with no live daemon and no Docker.
+type fakeImageDaemonEnv struct {
+	env        map[string]string
+	ok         bool
+	gotRuntime string
+	callCount  int
+}
+
+func (f *fakeImageDaemonEnv) Env(runtimeName string) (map[string]string, bool) {
+	f.callCount++
+	f.gotRuntime = runtimeName
+	return f.env, f.ok
+}
+
+// TestContainerImageRunner_InjectsDaemonEnv proves that when a daemon-env
+// resolver is wired and resolves, the booted container carries the host daemon
+// coordinates so the re-entered in-container launch reaches the host daemon
+// action + audit boundary (#1759).
+func TestContainerImageRunner_InjectsDaemonEnv(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	fake := &fakeImageDaemonEnv{
+		env: map[string]string{
+			"AILERON_API_URL": "http://host.docker.internal:48123/v1",
+			"AILERON_TOKEN":   "daemon-token",
+		},
+		ok: true,
+	}
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+	}
+	if _, err := (containerImageRunner{daemonEnv: fake}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fake.callCount != 1 {
+		t.Fatalf("resolver called %d times, want 1", fake.callCount)
+	}
+	// The resolver is passed the resolved runtime name so it can host-rewrite the
+	// daemon URL for that runtime.
+	if fake.gotRuntime == "" {
+		t.Error("resolver must be passed the resolved runtime name")
+	}
+	if got.Env["AILERON_API_URL"] != "http://host.docker.internal:48123/v1" {
+		t.Errorf("AILERON_API_URL = %q, want the host-rewritten /v1 daemon URL", got.Env["AILERON_API_URL"])
+	}
+	if got.Env["AILERON_TOKEN"] != "daemon-token" {
+		t.Errorf("AILERON_TOKEN = %q, want the daemon token", got.Env["AILERON_TOKEN"])
+	}
+}
+
+// TestContainerImageRunner_PassthroughWhenNoDaemonConfig proves that when the
+// resolver reports ok=false (no daemon config), the boot carries no injected env
+// so a no-daemon launch is unaffected (#1759).
+func TestContainerImageRunner_PassthroughWhenNoDaemonConfig(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	fake := &fakeImageDaemonEnv{ok: false}
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+	}
+	if _, err := (containerImageRunner{daemonEnv: fake}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(got.Env) != 0 {
+		t.Errorf("RunOptions.Env = %v, want no injected env on the passthrough (ok=false) boot", got.Env)
+	}
+}
+
+// TestContainerImageRunner_ZeroValueInjectsNoEnv proves the zero-value runner
+// (daemonEnv == nil) injects no env, so the CLI unit tests stay deterministic
+// irrespective of any live ~/.aileron daemon (#1759).
+func TestContainerImageRunner_ZeroValueInjectsNoEnv(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+	}
+	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(got.Env) != 0 {
+		t.Errorf("RunOptions.Env = %v, want no injected env on the zero-value runner", got.Env)
+	}
+}
+
+// TestNewLaunchImageRunner_WiresDaemonEnvResolver proves the production seam
+// wires the daemon-backed env resolver so production boots carry the host daemon
+// coordinates (#1759), mirroring newLaunchToolImageRunner's proxy wiring.
+func TestNewLaunchImageRunner_WiresDaemonEnvResolver(t *testing.T) {
+	runner, ok := newLaunchImageRunner().(containerImageRunner)
+	if !ok {
+		t.Fatalf("newLaunchImageRunner returned %T, want containerImageRunner", newLaunchImageRunner())
+	}
+	if _, ok := runner.daemonEnv.(daemonImageEnv); !ok {
+		t.Errorf("daemonEnv = %T, want daemonImageEnv (the production resolver)", runner.daemonEnv)
+	}
+}
+
 // stubContainerToolBoot swaps the single real-Docker call site for the tool
 // image runner with a recorder that also simulates the tool writing its output
 // to the collect mount, so the runner's spec-construction and collect-readback
