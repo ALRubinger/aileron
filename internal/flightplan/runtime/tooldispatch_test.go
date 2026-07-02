@@ -540,6 +540,187 @@ func setExtractContract(p *Plan, tc *TrustContract) {
 	p.Steps[0].ToolDispatch.TrustContract = tc
 }
 
+// --- Unit 1 (#1762): tool provenance threaded onto materializedOutput ---
+
+// toolMaterializePlan builds a single-step rung-3 plan whose tool step (extract)
+// materializes a declared file-map output. The tool runner returns a file-map
+// carrier as the collected output, so the existing materialize path produces one
+// artifact. It is the fixture for proving a tool-materialized output carries the
+// pinned image (ToolImage) and the collected-output digest.
+func toolMaterializePlan() *Plan {
+	mb := func(s string) Binding { b, _ := ParseBinding(s); return b }
+	p := &Plan{
+		Name:    "rung3-plan",
+		Actions: map[string]Action{},
+		Outputs: map[string]Output{
+			"extract.txt": {Name: "extract.txt", MimeType: "text/plain", Encoding: EncodingUTF8, Target: PublishFile, Path: "extract.txt"},
+		},
+		Inputs: []Input{
+			{Name: "payload", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: "hello"}},
+		},
+		Steps: []Step{
+			{
+				ID:                 "extract",
+				Kind:               KindTransform,
+				Bindings:           map[string]Binding{"payload": mb("inputs.payload")},
+				Outputs:            []string{"result"},
+				MaterializesOutput: "extract.txt",
+				ToolDispatch: &ToolDispatch{
+					Image:       "registry.example.com/tool-a:1@" + digestA,
+					MountPath:   "/work",
+					CollectPath: "/work/out",
+				},
+			},
+		},
+	}
+	order, err := topoSort(p, map[string]int{"extract": 0})
+	if err != nil {
+		panic(err)
+	}
+	p.Order = order
+	return p
+}
+
+// toolFileMap is the file-map carrier a tool image "collects": the shape the
+// materialize path expects for a utf-8 file output.
+func toolFileMap(content string) map[string]any {
+	return map[string]any{
+		"path": "extract.txt", "mimeType": "text/plain", "encoding": "utf-8", "content": content,
+	}
+}
+
+// TestExecute_ToolMaterializedOutputCarriesImage proves a rung-3 tool step that
+// materializes an output captures a materializedOutput whose ToolImage is the
+// pinned ref@digest and whose Artifact.Digest is the collected-output digest.
+// This is the discriminator the audit layer reads to emit kind="tool".
+func TestExecute_ToolMaterializedOutputCarriesImage(t *testing.T) {
+	p := toolMaterializePlan()
+	runner := &fakeToolRunner{outputs: map[string]any{"extract": toolFileMap("collected-bytes\n")}}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.outputs) != 1 {
+		t.Fatalf("outputs = %d, want exactly 1 materialized output", len(st.outputs))
+	}
+	o := st.outputs[0]
+	if o.ToolImage != "registry.example.com/tool-a:1@"+digestA {
+		t.Errorf("ToolImage = %q, want the pinned ref@digest", o.ToolImage)
+	}
+	// The captured artifact digest is the digest of the collected output content.
+	wantDigest := contentDigest([]byte("collected-bytes\n"))
+	if o.Artifact.Digest != wantDigest {
+		t.Errorf("Artifact.Digest = %q, want the collected-output digest %q", o.Artifact.Digest, wantDigest)
+	}
+}
+
+// TestExecute_NonToolMaterializedOutputHasEmptyToolImage is the regression guard
+// that the tool marker is tool-only: a plain transform materializing step
+// captures a materializedOutput with ToolImage == "".
+func TestExecute_NonToolMaterializedOutputHasEmptyToolImage(t *testing.T) {
+	mb := func(s string) Binding { b, _ := ParseBinding(s); return b }
+	p := &Plan{
+		Name:    "transform-plan",
+		Actions: map[string]Action{},
+		Outputs: map[string]Output{
+			"out.txt": {Name: "out.txt", MimeType: "text/plain", Encoding: EncodingUTF8, Target: PublishFile, Path: "out.txt"},
+		},
+		Inputs: []Input{
+			{Name: "payload", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: "hi"}},
+		},
+		Steps: []Step{
+			{
+				ID:                 "render",
+				Kind:               KindTransform,
+				Transform:          "mk",
+				Bindings:           map[string]Binding{"payload": mb("inputs.payload")},
+				Outputs:            []string{"file"},
+				MaterializesOutput: "out.txt",
+			},
+		},
+	}
+	order, err := topoSort(p, map[string]int{"render": 0})
+	if err != nil {
+		t.Fatalf("topoSort: %v", err)
+	}
+	p.Order = order
+
+	reg := NewTransformRegistry()
+	reg.Register("mk", func(_ map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{
+			"path": "out.txt", "mimeType": "text/plain", "encoding": "utf-8", "content": "plain\n",
+		}}, nil
+	})
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: reg, toolRunner: nil}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hi"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.outputs) != 1 {
+		t.Fatalf("outputs = %d, want 1", len(st.outputs))
+	}
+	if st.outputs[0].ToolImage != "" {
+		t.Errorf("ToolImage = %q, want empty for a non-tool step", st.outputs[0].ToolImage)
+	}
+}
+
+// --- Unit 3 (#1762): end-to-end emit through the recording sink ---
+
+// TestEmitAudit_ToolStepEmitsToolProvenance proves the full path emits exactly
+// one output.materialized record for a rung-3 tool step, carrying kind="tool",
+// the pinned image, the collected-output content_hash, and the input walk-back,
+// and NO aileron.step.calls anywhere. The assertion is on the emitted record
+// (the contract), not implementation internals.
+func TestEmitAudit_ToolStepEmitsToolProvenance(t *testing.T) {
+	p := toolMaterializePlan()
+	runner := &fakeToolRunner{outputs: map[string]any{"extract": toolFileMap("collected-bytes\n")}}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	sink := &recordingSink{}
+	prov := launchProvenance{Skill: "rung3-plan", ContentHash: "sha256:plan", InvocationID: "inv-1"}
+	emitAudit(context.Background(), sink, st, prov)
+
+	var out *AuditRecord
+	for i := range sink.records {
+		if sink.records[i].Kind == RecordKindOutput {
+			if out != nil {
+				t.Fatal("more than one output.materialized record emitted")
+			}
+			out = &sink.records[i]
+		}
+	}
+	if out == nil {
+		t.Fatal("no output.materialized record emitted for the tool step")
+	}
+	f := out.Fields
+	if f["aileron.step.kind"] != "tool" {
+		t.Errorf("step.kind = %v, want tool", f["aileron.step.kind"])
+	}
+	if f["aileron.step.image"] != "registry.example.com/tool-a:1@"+digestA {
+		t.Errorf("step.image = %v, want the pinned ref@digest", f["aileron.step.image"])
+	}
+	if f["aileron.output.content_hash"] != contentDigest([]byte("collected-bytes\n")) {
+		t.Errorf("content_hash = %v, want the collected-output digest", f["aileron.output.content_hash"])
+	}
+	if _, present := f["aileron.step.inputs"]; !present {
+		t.Error("tool step record must carry aileron.step.inputs (the input walk-back)")
+	}
+	if _, present := f["aileron.step.calls"]; present {
+		t.Error("aileron.step.calls[] is out of scope (Half B) and must be absent")
+	}
+	if _, present := f["aileron.step.command"]; present {
+		t.Error("aileron.step.command is not synthesized; the pin is the command identity")
+	}
+}
+
 // --- Unit 2 (#1784): declared reach captured at rung-3 dispatch ---
 
 // TestExecute_ToolDispatchCapturesDeclaredReach proves a rung-3 step whose

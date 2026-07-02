@@ -58,6 +58,16 @@ type materializedOutput struct {
 	// the exact inputs that produced it — by hash, never by inlining the
 	// dataset.
 	Resolved map[string]any
+	// ToolImage is the pinned `ref@sha256:<hex>` tool image, set ONLY when the
+	// producing step dispatched a rung-3 tool image (step.ToolDispatch != nil).
+	// It is empty for every non-tool (in-process action-call or transform)
+	// step. Its presence is the discriminator the audit layer uses to flip
+	// `aileron.step.kind` to the literal "tool" and to record
+	// `aileron.step.image` with this pin. The content-addressed pin fully and
+	// verifiably identifies what ran (the image's baked-in entrypoint), so it
+	// carries the executed-command identity a rung-3 dispatch has (there is no
+	// separate command in the rung-3 model, issue #1762).
+	ToolImage string
 }
 
 // reachRecord captures one rung-3 dispatch's declared network reach for the
@@ -183,10 +193,28 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 				// inputs are precisely what produced this artifact.
 				Binds:    step.binds(),
 				Resolved: resolved,
+				// Carry the pinned tool image ONLY when this step dispatched a
+				// rung-3 tool (issue #1762). Empty for every non-tool step; its
+				// presence flips the audit record's step.kind to "tool" and adds
+				// aileron.step.image. The rung-3 model carries no separate
+				// command, so the content-addressed pin is the executed-command
+				// identity.
+				ToolImage: toolImage(step),
 			})
 		}
 	}
 	return st, nil
+}
+
+// toolImage returns the step's pinned `ref@sha256:<hex>` tool image when the
+// step dispatched a rung-3 tool, or "" for any in-process (action-call or
+// transform) step. It is the tool-materialized discriminator the audit layer
+// reads to distinguish a tool-produced output from a connector/transform one.
+func toolImage(step Step) string {
+	if step.ToolDispatch == nil {
+		return ""
+	}
+	return step.ToolDispatch.Image
 }
 
 // runActionCall dispatches an action-call through the enforced boundary and

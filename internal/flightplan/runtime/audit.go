@@ -187,9 +187,26 @@ func buildOutputRecord(o materializedOutput, prov launchProvenance, dispatchBySt
 		"aileron.plan.signature_status": prov.SignatureStatus,
 		"aileron.invocation.id":         prov.InvocationID,
 	}
+	// A tool-materialized output (rung-3 dispatch, issue #1762) overrides the
+	// step-kind with the literal "tool" and records the pinned image. StepKind
+	// stays a closed 3-member enum (the no-LLM guarantee); tool dispatch is
+	// orthogonal to Kind, so the tool marker is the pinned image on the
+	// materialized output, not a new enum member. The image is the
+	// content-addressed `ref@sha256:<hex>` pin, which fully identifies what ran
+	// (the baked-in entrypoint). No aileron.step.command is synthesized — the
+	// rung-3 model carries no command; the pin IS the executed-command identity.
+	// aileron.step.calls[] (per-egress attribution, Half B) is out of scope and
+	// omitted entirely.
+	if o.ToolImage != "" {
+		fields["aileron.step.kind"] = "tool"
+		fields["aileron.step.image"] = o.ToolImage
+	}
 	// The transform name is meaningful only for a transform step; omit it for an
-	// action-call so the record does not carry an empty value.
-	if o.StepKind == KindTransform && o.Transform != "" {
+	// action-call so the record does not carry an empty value. A tool step's
+	// output is the collected blob, never a transform result, so a tool step
+	// never carries aileron.step.transform even if its Kind happens to be
+	// transform (the rung-3 dispatch is checked before the kind branches).
+	if o.ToolImage == "" && o.StepKind == KindTransform && o.Transform != "" {
 		fields["aileron.step.transform"] = o.Transform
 	}
 	// The input walk-back: the producing step's bindings, each hashed. Present
