@@ -95,6 +95,11 @@ const (
 	// RecordKindOutput is one per-materialized-output provenance record (#1752),
 	// emitted for both action-call and transform materializing steps.
 	RecordKindOutput
+	// RecordKindReach is one per rung-3 dispatch record declaring the step's
+	// per-step network reach (#1784): the trust contract's Effect and Hosts,
+	// marked `enforced:false`. It is audit-only, never an enforcement seam —
+	// egress stays passthrough and the credential is injected per host binding.
+	RecordKindReach
 )
 
 // AuditRecord is one customer-owned audit entry. Fields holds exactly the
@@ -104,7 +109,7 @@ type AuditRecord struct {
 	// Kind is the record's kind, the explicit discriminator the CLI sink maps
 	// to a model.EventType (RecordKindAction → flightplan.launch.action,
 	// RecordKindLaunch → flightplan.launch, RecordKindOutput →
-	// output.materialized).
+	// output.materialized, RecordKindReach → flightplan.launch.reach).
 	Kind AuditRecordKind
 	// ActionRef is the action the record describes, or "" for a per-launch
 	// summary or per-output record.

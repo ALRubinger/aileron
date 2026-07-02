@@ -533,3 +533,124 @@ func TestExecute_ToolRunnerErrorPropagates(t *testing.T) {
 		t.Fatal("a tool-runner error must propagate")
 	}
 }
+
+// setExtractContract attaches a per-step trust contract to the extract (rung-3)
+// step of a toolDispatchPlan, so the reach-capture path (#1784) can be exercised.
+func setExtractContract(p *Plan, tc *TrustContract) {
+	p.Steps[0].ToolDispatch.TrustContract = tc
+}
+
+// --- Unit 2 (#1784): declared reach captured at rung-3 dispatch ---
+
+// TestExecute_ToolDispatchCapturesDeclaredReach proves a rung-3 step whose
+// ToolDispatch carries a trust contract captures exactly one st.reaches entry
+// with the step id, declared effect, and declared hosts. The capture is
+// audit-only; nothing is enforced.
+func TestExecute_ToolDispatchCapturesDeclaredReach(t *testing.T) {
+	p := toolDispatchPlan()
+	setExtractContract(p, &TrustContract{
+		Effect: EffectExternalSend,
+		Hosts:  []string{"api.example.com", "cdn.example.com"},
+	})
+	runner := &fakeToolRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.reaches) != 1 {
+		t.Fatalf("reaches = %d, want exactly 1", len(st.reaches))
+	}
+	r := st.reaches[0]
+	if r.StepID != "extract" {
+		t.Errorf("reach step id = %q, want extract", r.StepID)
+	}
+	if r.Effect != EffectExternalSend {
+		t.Errorf("reach effect = %q, want external-send", r.Effect)
+	}
+	if len(r.Hosts) != 2 || r.Hosts[0] != "api.example.com" || r.Hosts[1] != "cdn.example.com" {
+		t.Errorf("reach hosts = %v, want the two declared hosts", r.Hosts)
+	}
+}
+
+// TestExecute_ToolDispatchNoContractCapturesNoReach proves a rung-3 step with a
+// nil trust contract captures zero reach entries: a step that declares no reach
+// emits no record, never a synthesized empty contract.
+func TestExecute_ToolDispatchNoContractCapturesNoReach(t *testing.T) {
+	p := toolDispatchPlan() // toolDispatchPlan's extract step has no TrustContract.
+	runner := &fakeToolRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.reaches) != 0 {
+		t.Fatalf("reaches = %d, want 0 for a step with no trust contract", len(st.reaches))
+	}
+}
+
+// TestExecute_ToolDispatchEmptyHostsStillCaptures proves the reach guard keys on
+// TrustContract != nil, not on a non-empty Hosts: a contract with a set effect
+// but empty hosts still captures one entry.
+func TestExecute_ToolDispatchEmptyHostsStillCaptures(t *testing.T) {
+	p := toolDispatchPlan()
+	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: nil})
+	runner := &fakeToolRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(st.reaches) != 1 {
+		t.Fatalf("reaches = %d, want 1 even for empty hosts", len(st.reaches))
+	}
+	if st.reaches[0].Effect != EffectRead {
+		t.Errorf("reach effect = %q, want read", st.reaches[0].Effect)
+	}
+	if len(st.reaches[0].Hosts) != 0 {
+		t.Errorf("reach hosts = %v, want empty", st.reaches[0].Hosts)
+	}
+}
+
+// TestExecute_ToolDispatchReachCapturedDespiteRunnerError proves the declared
+// reach is recorded even when the dispatch itself fails: the declaration is
+// captured before the runner call, so a runner error (or nil runner) does not
+// suppress the reach record. The execState is returned alongside the error, so
+// the captured entry is observable.
+func TestExecute_ToolDispatchReachCapturedDespiteRunnerError(t *testing.T) {
+	p := toolDispatchPlan()
+	setExtractContract(p, &TrustContract{Effect: EffectExternalSend, Hosts: []string{"api.example.com"}})
+	runner := &fakeToolRunner{forceErr: context.DeadlineExceeded}
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err == nil {
+		t.Fatal("a tool-runner error must propagate")
+	}
+	if len(st.reaches) != 1 {
+		t.Fatalf("reaches = %d, want 1 despite the dispatch error", len(st.reaches))
+	}
+	if st.reaches[0].StepID != "extract" {
+		t.Errorf("reach step id = %q, want extract", st.reaches[0].StepID)
+	}
+}
+
+// TestExecute_ToolDispatchReachCapturedDespiteNilRunner proves the reach is
+// recorded before the nil-runner guard, so even a step that cannot dispatch
+// still surfaces its declared reach for audit.
+func TestExecute_ToolDispatchReachCapturedDespiteNilRunner(t *testing.T) {
+	p := toolDispatchPlan()
+	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: []string{"api.example.com"}})
+	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: nil}
+
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err == nil {
+		t.Fatal("a tool dispatch with no runner must error")
+	}
+	if len(st.reaches) != 1 {
+		t.Fatalf("reaches = %d, want 1 despite the nil runner", len(st.reaches))
+	}
+}

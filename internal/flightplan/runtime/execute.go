@@ -17,6 +17,12 @@ type execState struct {
 	dispatches []actionDispatch
 	// artifacts records materialized output artifacts, in execution order.
 	artifacts []Artifact
+	// reaches records the declared per-step network reach captured at each
+	// rung-3 dispatch, in execution order. It is audit-only: the runtime never
+	// enforces the declared reach (egress stays passthrough), it only surfaces
+	// the declaration as a `flightplan.launch.reach` record marked
+	// `enforced:false` (#1784).
+	reaches []reachRecord
 	// outputs records each materialized artifact together with the step that
 	// produced it, in execution order. Unlike artifacts (kept for writing and
 	// the run result), outputs carries the originating step's id/kind/transform
@@ -52,6 +58,16 @@ type materializedOutput struct {
 	// the exact inputs that produced it — by hash, never by inlining the
 	// dataset.
 	Resolved map[string]any
+}
+
+// reachRecord captures one rung-3 dispatch's declared network reach for the
+// audit: the step id and the trust contract's Effect and Hosts. It is
+// audit-only, recorded regardless of dispatch outcome, and NEVER an enforcement
+// seam — no host is bound, blocked, or correlated from it (#1784, descope #1783).
+type reachRecord struct {
+	StepID string
+	Effect Effect
+	Hosts  []string
 }
 
 // actionDispatch records one action-call's enforced outcome for the audit.
@@ -119,7 +135,7 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 			// A rung-3 step shells out to its pinned sibling tool image with
 			// mount → run → collect I/O, orthogonal to Kind. It is checked first
 			// so the in-process kind branches never run for a tool-dispatch step.
-			outputs, err = x.runToolDispatch(ctx, step, resolved)
+			outputs, err = x.runToolDispatch(ctx, step, resolved, &st)
 		case step.Kind == KindActionCall:
 			outputs, err = x.runActionCall(ctx, step, resolved, &st)
 		case step.Kind == KindTransform:
@@ -236,8 +252,20 @@ func (x *executor) runActionCall(ctx context.Context, step Step, args map[string
 // A tool-dispatch step with no configured tool runner is an explicit error,
 // never a silent skip: a declared, pinned dispatch must be entered to honor the
 // attestation (mirrors the ImageRunner/LLMSeam nil-guard discipline).
-func (x *executor) runToolDispatch(ctx context.Context, step Step, resolved map[string]any) (map[string]any, error) {
+func (x *executor) runToolDispatch(ctx context.Context, step Step, resolved map[string]any, st *execState) (map[string]any, error) {
 	td := step.ToolDispatch
+	// Record the step's declared network reach before the dispatch, so the
+	// declaration is captured regardless of the dispatch outcome (a nil runner,
+	// a runner error). This is audit-only: the reach is never enforced. A step
+	// that declared no trust contract records nothing (never a synthesized empty
+	// contract).
+	if td.TrustContract != nil {
+		st.reaches = append(st.reaches, reachRecord{
+			StepID: step.ID,
+			Effect: td.TrustContract.Effect,
+			Hosts:  td.TrustContract.Hosts,
+		})
+	}
 	if x.toolRunner == nil {
 		return nil, fmt.Errorf("flightplan: step %q dispatches pinned tool image %q but no tool image runner is configured", step.ID, td.Image)
 	}

@@ -36,15 +36,27 @@ aileron audit list             # newest events first
 aileron audit get <audit-id>   # full event by id
 ```
 
-Today, five families of events land in the log:
+Today, six families of events land in the log:
 
 - **Install consent:** Every connector and action install records artifact FQN, version, hash, signature status, and the user's decision ([ADR-0007](/adr/0007-install-consent)).
 - **Action execution:** Every invocation records which connector it called, which capability it exercised, and which binding identity satisfied it ([ADR-0003](/adr/0003-action-model), [ADR-0011](/adr/0011-local-credential-vault)). Credential bytes are never recorded.
 - **Failure:** Every failure surfaces with a stable `class`, `boundary`, retry, and `audit_id` ([ADR-0010](/adr/0010-failure-handling)). The same `audit_id` is stamped onto the agent-visible tool-result envelope, so the LLM's "what went wrong?" reaction can be traced back to a specific event.
 - **Approval lifecycle:** Three event types: `approval.requested`, `approval.approved`, `approval.denied`. Each carries the same `aileron.approval.id` so a request and its decision are trivially correlated.
+- **Flight Plan launch provenance:** A Flight Plan launch records its provenance to the audit trail. The `flightplan.launch` summary and the per-action `flightplan.launch.action` records name the actions the plan dispatched. Each materialized artifact surfaces as an `output.materialized` record carrying the output's content hash, mime, byte count, and originating-step provenance. Each rung-3 tool-dispatch step that declares a per-step trust contract surfaces a `flightplan.launch.reach` record naming the step's declared network reach. That reach record is audit-only. It is marked `enforced: false` and adds no egress enforcement; egress stays passthrough and the credential is injected per host binding at the proxy boundary ([ADR-0019](/adr/0019-v4-https-data-plane), [ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)).
 - **Sandbox HTTPS data plane:** Generated connector shims and transparent sandbox proxy requests emit proxy audit events. `connector.proxy.proxied` and `connector.proxy.rejected` identify the resolved connector operation, upstream scheme/host/path, decision, proxy source, and response status or rejection reason. `sandbox.proxy.passthrough` records cooperative HTTPS requests whose upstream did not uniquely match an installed connector spec; the proxy forwards them unmodified and audits the upstream host, path, method, and response status. `sandbox.proxy.upgrade` records WebSocket (and other HTTP Upgrade) handshakes forwarded through the passthrough boundary; the proxy preserves the upgrade headers, relays the upstream `101 Switching Protocols`, and opens a bidirectional byte tunnel. `sandbox.proxy.rejected` records protocol-level failures in the transparent proxy path (non-CONNECT request, missing session CA, connector specs invalid or unavailable, upstream unreachable during passthrough). `sandbox.proxy.binding_injected` records a bundled-CLI request that matched a user-level host binding and was re-issued upstream with the bound credential injected; when the binding carries a per-step trust contract the record also names the declared effect and the plan/step/tool identity. `sandbox.proxy.trust_denied` records a bundled-CLI request that matched a host binding carrying a declared trust contract but violated it (an upstream host outside the binding's allowlist, or a mutating method against a read-effect contract); the request is denied with a `403` before any credential is resolved or injected, and is never passed through. `sandbox.proxy.disabled` records launch sessions that start with the v4 HTTPS proxy not in force (operator opt-out, preflight failure, or unsupported sandbox mode). These events never record credential bytes, request bodies, raw headers, query strings, full upstream URLs, or the binding's allowed-host values.
 
 The schema is durable. Every payload field uses the OpenTelemetry-namespaced key shape (`aileron.connector.fqn`, `aileron.binding.name`, `aileron.failure.class`, etc.). Consumers (log shippers, trace tools, custom queries) read the same vocabulary regardless of which surface they came in through.
+
+**Flight Plan declared reach** (`flightplan.launch.reach`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.step.id` | The dispatching rung-3 step's id. |
+| `aileron.reach.effect` | The step's declared operation effect (`read`, `write`, `delete`, `spend`, `external-send`). |
+| `aileron.reach.hosts` | The step's declared reachable hosts, as a list. Empty when the contract declares an effect but no hosts. |
+| `aileron.reach.enforced` | Always the literal `false`. This is the not-enforced marker. The record surfaces the declaration for observability and adds no egress enforcement. |
+
+One record is emitted per rung-3 tool-dispatch step whose per-step trust contract declares a reach. A step that declares no contract emits no reach record.
 
 ## OpenTelemetry traces (opt-in)
 

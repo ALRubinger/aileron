@@ -410,6 +410,17 @@ const (
 	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
 	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
 
+	// EventTypeFlightPlanLaunchReach is one per-rung-3-dispatch declared-reach
+	// event (#1784). The in-process launch runtime emits one such record for each
+	// rung-3 tool-dispatch step whose per-step trust contract declares a network
+	// reach (its Effect and Hosts). The flat `aileron.*` payload carries the
+	// dispatching step id, the declared effect, the declared hosts, and the
+	// literal `aileron.reach.enforced: false` marker. The record is audit-only:
+	// the declared reach is surfaced for observability and is NOT enforced (egress
+	// stays passthrough; the credential is injected per host binding). Actor is
+	// {type: service, id: "flightplan-launch"}.
+	EventTypeFlightPlanLaunchReach EventType = "flightplan.launch.reach"
+
 	// EventTypeOutputMaterialized is one per-output-per-step provenance event
 	// (#1752). The in-process launch runtime emits exactly one such record for
 	// each materialized artifact, whether the materializing step is an
