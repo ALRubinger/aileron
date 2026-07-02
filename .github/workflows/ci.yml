@@ -728,6 +728,20 @@ jobs:
         run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
         working-directory: internal
 
+      - name: Run rung-3 tool-container credential-injection e2e (#1769)
+        # Proves the #1769 substrate end to end: a real `docker run
+        # amazon/aws-cli` reaches an in-process sigv4-resign forward proxy
+        # through host.docker.internal (--add-host host-gateway), trusting a
+        # mounted session CA via AWS_CA_BUNDLE, and the proxy re-signs with the
+        # vault secret. Asserts a cryptographically valid SigV4 reached the fake
+        # upstream with NO credential bytes in the container image/env/mounts/
+        # args, and a single sandbox.proxy.binding_injected audit event. Docker
+        # is available on the ubuntu runner; the container image is pulled at
+        # run time (no host `aws` needed). Additive step so a failure is
+        # attributable to this specific contract.
+        run: go test -tags=integration_sandbox -race -run TestSandboxProxyToolContainerIntegration ./app/...
+        working-directory: internal
+
       - name: Run launch->gateway->Anthropic-probe regression guard (#1699)
         # Composed regression for the launch -> gateway -> Anthropic-probe seam
         # PR #1698 repaired (#1696). Renders the REAL api-key AuthSpec the

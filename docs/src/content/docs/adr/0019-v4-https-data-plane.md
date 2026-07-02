@@ -131,6 +131,12 @@ v4 is Docker-only. Podman is deferred to a later track, not rejected. The runtim
 
 The same finishing work adds a **fail-fast preflight**: when the proxy is requested but the BYO image does not meet the proxy contract (`aileron-install-proxy-ca` + `aileron-run-with-proxy-ca` on `PATH` + a writable trust store), launch refuses to start the container, prints an actionable error citing the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) docs and `--sandbox-proxy=off`, and emits `sandbox.proxy.disabled` with reason `preflight_failed`. Silent fallback from "proxy requested" to "proxy disabled" was rejected explicitly — silent fallback would break the credential-sealing claim with no operator-visible signal. Non-Docker sandbox modes emit `sandbox.proxy.disabled` with reason `unsupported_sandbox_mode`; `--sandbox-proxy=on` against an unsupported mode fails preflight.
 
+### Rung-3 tool-container egress reuses the data plane
+
+Flight Plan rung-3 steps ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)) dispatch a single step to a pinned sibling tool image with a bare mount-run-collect lifecycle. That tool container's HTTPS egress reaches the same daemon forward proxy this ADR defines, so a matched host binding injects the operator's vault-bound credential at the boundary. The wiring differs from the `aileron launch` agent path in one respect: the tool container is trusted through **env-based CA trust** alone. The dispatch mounts the session CA read-only at `/etc/aileron/proxy/ca.pem`, points the standard CA-bundle environment variables (`AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`) at that path, and sets `HTTPS_PROXY` to the session-authenticated proxy URL. It runs no in-container preflight and never overrides the tool image's own entrypoint, so `aileron-install-proxy-ca` / `aileron-run-with-proxy-ca` are not required on the tool image. No credential bytes enter the tool image, its environment, its mounts, or its arguments. The credential is attached only at the proxy boundary, per host binding.
+
+The rung-3 dispatch attaches the credential on the way out. It does not enforce per-step egress: the declared network reach of a rung-3 step is audit metadata, not a live `AllowedHosts` firewall at the tool-container boundary. Per-step egress enforcement is descoped ([#1783](https://github.com/ALRubinger/aileron/issues/1783)); surfacing declared reach in the audit trail is tracked separately ([#1784](https://github.com/ALRubinger/aileron/issues/1784)). Tools that honor no CA-bundle environment variable and consult only the system trust store are out of scope for this wiring; the supported set is the closed injection-scheme set this ADR defines.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.
@@ -158,6 +164,10 @@ The proxy/data-plane implementation stands on its own; it never depended on shel
 - [ADR-0017](/adr/0017-sandbox-composition) — current sandbox runtime cut
 - [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
 - [ADR-0024](/adr/0024-sandbox-mcp-parity) — `aileron-mcp` as the sole in-container tool surface; raw CLIs are not MCP tools, so the substrate seals them at the host boundary
+- [ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) — Flight Plan rung-3 tool steps whose HTTPS egress is proxy-wired here
+- [Issue #1769](https://github.com/ALRubinger/aileron/issues/1769) — rung-3 tool-container egress wired into the data plane via env-based CA trust
+- [Issue #1783](https://github.com/ALRubinger/aileron/issues/1783) — per-step egress enforcement descoped (audit-only)
+- [Issue #1784](https://github.com/ALRubinger/aileron/issues/1784) — surfacing declared rung-3 network reach in the audit trail
 - [Issue #959](https://github.com/ALRubinger/aileron/issues/959) — retirement of the rendered CLI-shim surface
 - [Umbrella #1191](https://github.com/ALRubinger/aileron/issues/1191) — credential-sealing substrate generalization; this amendment is wave 1
 - [Feedback #1181](https://github.com/ALRubinger/aileron/issues/1181) — the dogfooding feedback that motivated generalizing Model A into a substrate

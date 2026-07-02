@@ -690,7 +690,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	agentEndpointURL := daemonURL
 	if sandboxEnabled {
-		agentEndpointURL = containerURLForRuntime(daemonURL, sandboxPlan.Runtime)
+		agentEndpointURL = ContainerURLForRuntime(daemonURL, sandboxPlan.Runtime)
 	}
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), agentEndpointURL)
 	var proxyBootstrap sandboxProxyBootstrap
@@ -938,7 +938,15 @@ func firstAgentBinary(agent Agent) string {
 	return names[0]
 }
 
-func containerURLForRuntime(rawURL, runtimeName string) string {
+// ContainerURLForRuntime rewrites a daemon URL whose host is a loopback
+// address (localhost / 127.0.0.1 / ::1) to host.docker.internal so a process
+// inside a container can reach the host-bound daemon. Non-loopback and
+// unparseable URLs are returned unchanged. runtimeName is retained as the
+// runtime seam; v4 is Docker-only, so the loopback host always rewrites to
+// host.docker.internal. It is exported so the rung-3 tool-container proxy
+// bootstrap can compute the container-facing proxy URL without duplicating the
+// loopback-rewrite rule.
+func ContainerURLForRuntime(rawURL, runtimeName string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Host == "" {
 		return rawURL

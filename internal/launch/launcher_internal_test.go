@@ -112,8 +112,8 @@ func TestContainerURLForRuntimeRewritesLoopbackAliases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := containerURLForRuntime(tt.rawURL, tt.runtime); got != tt.want {
-				t.Fatalf("containerURLForRuntime(%q, %q) = %q, want %q", tt.rawURL, tt.runtime, got, tt.want)
+			if got := ContainerURLForRuntime(tt.rawURL, tt.runtime); got != tt.want {
+				t.Fatalf("ContainerURLForRuntime(%q, %q) = %q, want %q", tt.rawURL, tt.runtime, got, tt.want)
 			}
 		})
 	}
