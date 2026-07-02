@@ -64,6 +64,39 @@ type Result struct {
 	// layer renders the failure into the provider-shaped tool-result
 	// the LLM sees.
 	Failure *failure.Failure
+
+	// Provenance carries the non-secret actor provenance of the
+	// connector call that produced this result: the connector build
+	// (version + content hash) and, when the action resolved a
+	// credential binding, the non-secret identity label and binding
+	// name it used. It is the actor half of the walk-back an
+	// `output.materialized` audit event records (issue #1753): a caller
+	// threads it back so a materialized output's digest resolves to the
+	// exact connector build and identity that authorized the read. Zero
+	// for a credential-less action or when no binding resolved.
+	Provenance ActorProvenance
+}
+
+// ActorProvenance is the non-secret provenance of the connector call that
+// produced a [Result]: the pinned connector build and, when a credential
+// binding resolved, the non-secret identity label and binding name. It
+// never carries the credential value — only references (a version, a
+// content hash, a label, a binding name). Populated from the action's
+// resolved `[[requires.connectors]]` entry and the credential binding the
+// executor used; left zero when the action holds no binding.
+type ActorProvenance struct {
+	// ConnectorVersion is the pinned semantic version of the connector
+	// that produced the result, from the manifest's requires entry.
+	ConnectorVersion string
+	// ConnectorHash is the connector's content hash (`sha256:<hex>`),
+	// from the manifest's requires entry.
+	ConnectorHash string
+	// IdentityLabel is the non-secret identity label of the resolved
+	// credential binding, or "" when no binding resolved.
+	IdentityLabel string
+	// CredentialBinding is the name of the credential binding the action
+	// used (a reference, never the secret), or "" when none resolved.
+	CredentialBinding string
 }
 
 // StubExecutor returns a placeholder JSON result describing what
@@ -251,7 +284,8 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		}
 		stepOutputs[step.ID] = stepRes.Output
 
-		// Last step's output is the action's output by convention.
+		// Last step's output is the action's output by convention, so its
+		// connector is the actor recorded on the result's provenance.
 		if i == len(manifest.Execute)-1 {
 			body, mErr := json.Marshal(map[string]any{
 				"action": name,
@@ -261,7 +295,24 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 			if mErr != nil {
 				return Result{}, mErr
 			}
-			return Result{Content: string(body)}, nil
+			prov := ActorProvenance{
+				ConnectorVersion: connectorVersionFor(manifest, step.Connector),
+				ConnectorHash:    connHash,
+			}
+			var identityErr error
+			prov.IdentityLabel, prov.CredentialBinding, identityErr = e.actorIdentityFor(ctx, connManifest, step.Connector)
+			if identityErr != nil {
+				// An unexpected binding-lookup failure (not the expected
+				// not-found / ambiguous cases) leaves the identity omitted, but
+				// it is surfaced on the span rather than silently swallowed so
+				// the observability trail reflects that a real lookup problem —
+				// not a credential-less action — is why the actor identity is
+				// absent. Provenance stays best-effort: it never fails the
+				// action, mirroring the resolver path's fail-open discipline.
+				span.AddEvent("aileron.provenance.identity_unresolved",
+					trace.WithAttributes(attribute.String("aileron.error", identityErr.Error())))
+			}
+			return Result{Content: string(body), Provenance: prov}, nil
 		}
 	}
 	// Unreachable: every loop iteration either errors or, on the last
@@ -449,6 +500,52 @@ func (e *SandboxExecutor) resolverFor(ctx context.Context, connManifest *cstore.
 		return nil
 	}
 	return e.Bindings.ResolverFor(ctx, connectorFQN, connManifest.Capabilities.Credential.Kind)
+}
+
+// connectorVersionFor returns the pinned semantic version of the named
+// connector from the action manifest's [[requires.connectors]] block, or ""
+// when the connector is not declared. This is the same entry connectorFor
+// reads for the hash, so version and hash come from one authoritative
+// source (the verified manifest pin), never re-resolved.
+func connectorVersionFor(m *Manifest, connectorFQN string) string {
+	for i := range m.Requires.Connectors {
+		if m.Requires.Connectors[i].Name == connectorFQN {
+			return m.Requires.Connectors[i].Version
+		}
+	}
+	return ""
+}
+
+// actorIdentityFor resolves the non-secret identity provenance of the
+// credential binding the named connector would use: the binding's identity
+// label and its name. It returns ("", "", nil) — an honest omission rather than
+// a guess — when the connector declares no credential capability, no binding
+// store is wired, or resolution finds no single matching binding (the expected
+// binding.ErrNotFound / binding.ErrAmbiguous outcomes). Any OTHER resolution
+// error (e.g. a vault I/O failure) is returned so the caller can surface it
+// observably instead of masking a real lookup problem as a credential-less
+// action; the identity is still omitted (provenance is best-effort and never
+// fails the action). It never returns the credential value; Resolve reads only
+// the binding's plaintext metadata, not its encrypted bytes.
+func (e *SandboxExecutor) actorIdentityFor(ctx context.Context, connManifest *cstore.Manifest, connectorFQN string) (identityLabel, credentialBinding string, err error) {
+	if connManifest == nil || connManifest.Capabilities.Credential == nil {
+		return "", "", nil
+	}
+	if e.Bindings == nil {
+		return "", "", nil
+	}
+	b, rErr := e.Bindings.Resolve(ctx, connectorFQN, connManifest.Capabilities.Credential.Kind)
+	if rErr != nil {
+		// not-found / ambiguous are the expected "no single identity to
+		// attribute the read to" outcomes: omit rather than guess (the
+		// connector build still pins the actor via version + hash). Any other
+		// error is unexpected and is surfaced to the caller.
+		if errors.Is(rErr, binding.ErrNotFound) || errors.Is(rErr, binding.ErrAmbiguous) {
+			return "", "", nil
+		}
+		return "", "", rErr
+	}
+	return b.Identity, b.Name.String(), nil
 }
 
 // mergeArgs combines the call-time args with the action's declared

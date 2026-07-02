@@ -39,6 +39,32 @@ func contentDigest(content []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// canonicalValueDigest returns the `sha256:<hex>` digest of a bound value's
+// canonical JSON form. It reuses decodeCarrier's canonicalization
+// (marshal → unmarshal to a generic value → marshal) so object keys are
+// emitted in Go's sorted order: the digest is therefore reproducible across
+// runs for an equal value, and a value equal to a downstream carrier hashes
+// identically to that carrier's data-result content (both canonicalize the
+// same way). This is the input-side snapshot identifier the per-output audit
+// record records for each binding, so a materialized output walks back to the
+// exact inputs by hash without inlining the dataset (ADR-0027 audit boundary,
+// issue #1753).
+func canonicalValueDigest(v any) (string, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("encode bound value: %w", err)
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return "", fmt.Errorf("decode bound value: %w", err)
+	}
+	canonical, err := json.Marshal(generic)
+	if err != nil {
+		return "", fmt.Errorf("re-encode bound value: %w", err)
+	}
+	return contentDigest(canonical), nil
+}
+
 // fileMapEntry is one entry of the typed JSON file-map transport a
 // materializesOutput step produces: {path, mimeType, encoding, content}
 // (#1519). Materialization is pure deterministic code; no LLM interprets the

@@ -127,7 +127,7 @@ func TestBuildOutputRecord_TransformCarriesFullProvenance(t *testing.T) {
 		Transform: "html-render",
 		Artifact:  Artifact{Name: "digest.csv", Path: "digest.csv", MimeType: "text/csv", Content: content, Digest: "sha256:abc"},
 	}
-	rec := buildOutputRecord(o, prov)
+	rec := buildOutputRecord(o, prov, nil, nil)
 	if rec.Kind != RecordKindOutput {
 		t.Fatalf("Kind = %v, want RecordKindOutput", rec.Kind)
 	}
@@ -165,7 +165,7 @@ func TestBuildOutputRecord_ActionCallOmitsTransform(t *testing.T) {
 		StepKind: KindActionCall,
 		Artifact: Artifact{Name: "filed_issue.json", MimeType: "application/json", Content: []byte("{}"), Digest: "sha256:d"},
 	}
-	rec := buildOutputRecord(o, launchProvenance{})
+	rec := buildOutputRecord(o, launchProvenance{}, nil, nil)
 	if rec.Fields["aileron.step.kind"] != "action-call" {
 		t.Errorf("step.kind = %v, want action-call", rec.Fields["aileron.step.kind"])
 	}
@@ -214,6 +214,251 @@ func TestEmitAudit_NilSinkEmitsNothing(t *testing.T) {
 	st := execState{outputs: []materializedOutput{{StepID: "s", StepKind: KindTransform}}}
 	if ids := emitAudit(context.Background(), nil, st, launchProvenance{}); ids != nil {
 		t.Errorf("nil sink returned ids = %v, want nil", ids)
+	}
+}
+
+func TestBuildOutputRecord_TransformResolvesUpstreamActorAndInputs(t *testing.T) {
+	// The illustrative record (#1753): a transform-materialized output
+	// (render_dashboard) carries the actor identity resolved from its upstream
+	// query action-call, a step.inputs walk-back with content_hash and a
+	// query_execution_id for the query input, resolved_inputs limited to
+	// launch config (literal/dynamic), and the consent decision.
+	prov := launchProvenance{
+		Skill: "weekly-metrics-digest", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		SignatureStatus: "verified", InvocationID: "inv-123",
+	}
+	// The upstream query dispatch carries the actor provenance the daemon
+	// surfaced (a single-connector, single-identity read).
+	queryDispatch := actionDispatch{
+		StepID:            "query_metrics",
+		ActionRef:         "aileron:athena.query",
+		IdentityLabel:     "work",
+		CredentialBinding: "aws_sigv4/athena/work",
+		ConnectorVersion:  "2.3.1",
+		ConnectorHash:     "sha256:conn",
+		ConsentDecision:   "unattended",
+	}
+	dispatchByStep := map[string]actionDispatch{"query_metrics": queryDispatch}
+
+	// The query result the transform bound: an Athena-style object carrying a
+	// QueryExecutionId, which the record lifts (not synthesizes).
+	rowsValue := map[string]any{
+		"QueryExecutionId": "qeid-123",
+		"ResultSet":        []any{map[string]any{"name": "cpu"}},
+	}
+	o := materializedOutput{
+		StepID:    "render_dashboard",
+		StepKind:  KindTransform,
+		Transform: "render",
+		Artifact:  Artifact{Name: "dashboard.html", MimeType: "text/html", Content: []byte("<html/>"), Digest: "sha256:out"},
+		Binds: map[string]Binding{
+			"rows": {Kind: BindStep, Raw: "steps.query_metrics.rows", StepID: "query_metrics", Output: "rows"},
+		},
+		Resolved: map[string]any{"rows": rowsValue},
+	}
+	resolvedInputs := map[string]any{"window_days": 7}
+
+	rec := buildOutputRecord(o, prov, dispatchByStep, resolvedInputs)
+	f := rec.Fields
+
+	// Actor resolved from the upstream query dispatch.
+	if f["aileron.actor.identity_label"] != "work" {
+		t.Errorf("actor.identity_label = %v, want work (from upstream query)", f["aileron.actor.identity_label"])
+	}
+	if f["aileron.actor.credential_binding"] != "aws_sigv4/athena/work" {
+		t.Errorf("actor.credential_binding = %v", f["aileron.actor.credential_binding"])
+	}
+	if f["aileron.actor.connector_version"] != "2.3.1" || f["aileron.actor.connector_hash"] != "sha256:conn" {
+		t.Errorf("actor connector build = %v/%v", f["aileron.actor.connector_version"], f["aileron.actor.connector_hash"])
+	}
+	if f["aileron.consent.decision"] != "unattended" {
+		t.Errorf("consent.decision = %v, want unattended", f["aileron.consent.decision"])
+	}
+
+	// step.inputs: one entry, binding+source+content_hash+query_execution_id.
+	inputs, ok := f["aileron.step.inputs"].([]map[string]any)
+	if !ok || len(inputs) != 1 {
+		t.Fatalf("step.inputs = %v, want one entry", f["aileron.step.inputs"])
+	}
+	entry := inputs[0]
+	if entry["binding"] != "rows" || entry["source"] != "steps.query_metrics.rows" {
+		t.Errorf("step.inputs[0] binding/source = %v/%v", entry["binding"], entry["source"])
+	}
+	wantHash, err := canonicalValueDigest(rowsValue)
+	if err != nil {
+		t.Fatalf("canonicalValueDigest: %v", err)
+	}
+	if entry["content_hash"] != wantHash {
+		t.Errorf("step.inputs[0] content_hash = %v, want %v", entry["content_hash"], wantHash)
+	}
+	if entry["query_execution_id"] != "qeid-123" {
+		t.Errorf("step.inputs[0] query_execution_id = %v, want qeid-123", entry["query_execution_id"])
+	}
+
+	// resolved_inputs carries only the launch config.
+	ri, ok := f["aileron.resolved_inputs"].(map[string]any)
+	if !ok || ri["window_days"] != 7 {
+		t.Errorf("resolved_inputs = %v, want {window_days:7}", f["aileron.resolved_inputs"])
+	}
+
+	// The full walk-back chain is present on one record: output digest →
+	// producing step → input content_hash/query_execution_id → connector
+	// version+hash+identity → plan content_hash + signer.
+	if f["aileron.output.content_hash"] != "sha256:out" || f["aileron.step.id"] != "render_dashboard" ||
+		f["aileron.plan.content_hash"] != "sha256:plan" || f["aileron.plan.signed_by"] != "sha256:key" {
+		t.Errorf("walk-back chain incomplete: %v", f)
+	}
+}
+
+func TestBuildStepInputs_ContentHashReproducibleAndNonQueryOmitsQEID(t *testing.T) {
+	// The input-binding content_hash is reproducible: the same bound value
+	// across two independently-built outputs yields the identical sha256
+	// digest. A non-query input (a template literal) omits query_execution_id.
+	build := func() materializedOutput {
+		return materializedOutput{
+			StepID:   "render",
+			StepKind: KindTransform,
+			Binds: map[string]Binding{
+				"rows":     {Kind: BindStep, Raw: "steps.q.rows", StepID: "q", Output: "rows"},
+				"template": {Kind: BindInput, Raw: "inputs.template", Name: "template"},
+			},
+			Resolved: map[string]any{
+				"rows":     map[string]any{"QueryExecutionId": "qeid-9", "ResultSet": []any{1, 2, 3}},
+				"template": "a literal template string",
+			},
+		}
+	}
+	first := buildStepInputs(build())
+	second := buildStepInputs(build())
+
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("want 2 input entries each, got %d/%d", len(first), len(second))
+	}
+	// Sorted by binding name: "rows" before "template".
+	if first[0]["binding"] != "rows" || first[1]["binding"] != "template" {
+		t.Fatalf("entries not sorted by binding: %v", first)
+	}
+	if first[0]["content_hash"] != second[0]["content_hash"] {
+		t.Errorf("rows content_hash not reproducible: %v vs %v", first[0]["content_hash"], second[0]["content_hash"])
+	}
+	if first[1]["content_hash"] != second[1]["content_hash"] {
+		t.Errorf("template content_hash not reproducible")
+	}
+	// The query input lifts a query_execution_id; the template literal does not.
+	if first[0]["query_execution_id"] != "qeid-9" {
+		t.Errorf("rows query_execution_id = %v, want qeid-9", first[0]["query_execution_id"])
+	}
+	if _, present := first[1]["query_execution_id"]; present {
+		t.Error("a non-query template input must omit query_execution_id, not guess one")
+	}
+}
+
+func TestResolveActor_DivergentUpstreamsOmitActor(t *testing.T) {
+	// A transform whose data-producing upstreams disagree on identity has no
+	// single truthful actor, so the actor keys are omitted — but the record
+	// still carries step.inputs (the walk-back to identity resolves there).
+	o := materializedOutput{
+		StepID:   "merge_dashboard",
+		StepKind: KindTransform,
+		Artifact: Artifact{Name: "merged.html", Content: []byte("x"), Digest: "sha256:m"},
+		Binds: map[string]Binding{
+			"a": {Kind: BindStep, Raw: "steps.qa.rows", StepID: "qa", Output: "rows"},
+			"b": {Kind: BindStep, Raw: "steps.qb.rows", StepID: "qb", Output: "rows"},
+		},
+		Resolved: map[string]any{"a": map[string]any{"x": 1}, "b": map[string]any{"y": 2}},
+	}
+	dispatchByStep := map[string]actionDispatch{
+		"qa": {StepID: "qa", IdentityLabel: "work", CredentialBinding: "b/work"},
+		"qb": {StepID: "qb", IdentityLabel: "personal", CredentialBinding: "b/personal"},
+	}
+	rec := buildOutputRecord(o, launchProvenance{}, dispatchByStep, map[string]any{})
+	if _, present := rec.Fields["aileron.actor.identity_label"]; present {
+		t.Error("divergent-identity transform must omit actor.identity_label")
+	}
+	if _, present := rec.Fields["aileron.actor.credential_binding"]; present {
+		t.Error("divergent-identity transform must omit actor.credential_binding")
+	}
+	// step.inputs still present for the walk-back.
+	if _, present := rec.Fields["aileron.step.inputs"]; !present {
+		t.Error("step.inputs must still be recorded even when the actor is omitted")
+	}
+}
+
+func TestResolveActor_TransformOmitsActorWhenAnUpstreamIsUnattributable(t *testing.T) {
+	// A transform that binds one attributable action-call AND one upstream with
+	// no dispatch (e.g. an intermediate transform's output) has no single
+	// truthful actor across ALL its data inputs, so the actor keys are omitted
+	// — not attributed solely to the one identified upstream. step.inputs still
+	// records both bindings for the walk-back.
+	o := materializedOutput{
+		StepID:   "compose_dashboard",
+		StepKind: KindTransform,
+		Artifact: Artifact{Name: "dash.html", Content: []byte("x"), Digest: "sha256:c"},
+		Binds: map[string]Binding{
+			"rows":    {Kind: BindStep, Raw: "steps.query.rows", StepID: "query", Output: "rows"},
+			"summary": {Kind: BindStep, Raw: "steps.reshape.summary", StepID: "reshape", Output: "summary"},
+		},
+		Resolved: map[string]any{"rows": map[string]any{"x": 1}, "summary": map[string]any{"y": 2}},
+	}
+	dispatchByStep := map[string]actionDispatch{
+		// Only the query step has a dispatch; "reshape" is a transform with none.
+		"query": {StepID: "query", IdentityLabel: "work", CredentialBinding: "aws_sigv4/athena/work",
+			ConnectorVersion: "2.3.1", ConnectorHash: "sha256:conn"},
+	}
+	rec := buildOutputRecord(o, launchProvenance{}, dispatchByStep, map[string]any{})
+	if _, present := rec.Fields["aileron.actor.identity_label"]; present {
+		t.Error("a transform with an unattributable upstream must omit the actor identity, not attribute solely to the identified one")
+	}
+	inputs, ok := rec.Fields["aileron.step.inputs"].([]map[string]any)
+	if !ok || len(inputs) != 2 {
+		t.Errorf("step.inputs must still record both bindings, got %v", rec.Fields["aileron.step.inputs"])
+	}
+}
+
+func TestBuildOutputRecord_ResolvedInputsExcludeSourceDatasets(t *testing.T) {
+	// resolved_inputs carries launch config (literal/dynamic) only; a
+	// source-resolved dataset is referenced by binding elsewhere and never
+	// inlined here (ADR-0027 audit boundary).
+	st := execState{
+		inputs: ResolvedInputs{
+			Values: map[string]any{
+				"window_days": 7,
+				"dataset":     []any{map[string]any{"secret": "value"}},
+			},
+			SourceBindings: map[string]SourceBinding{
+				"dataset": {ActionRef: "aileron:athena.query", Select: "ResultSet"},
+			},
+		},
+		outputs: []materializedOutput{
+			{StepID: "render", StepKind: KindTransform, Transform: "render",
+				Artifact: Artifact{Name: "d.html", Content: []byte("x"), Digest: "sha256:1"}},
+		},
+	}
+	sink := &recordingSink{}
+	emitAudit(context.Background(), sink, st, launchProvenance{InvocationID: "inv"})
+
+	var outRec *AuditRecord
+	for i := range sink.records {
+		if sink.records[i].Kind == RecordKindOutput {
+			outRec = &sink.records[i]
+			break
+		}
+	}
+	if outRec == nil {
+		t.Fatal("no output record emitted")
+	}
+	ri, ok := outRec.Fields["aileron.resolved_inputs"].(map[string]any)
+	if !ok {
+		t.Fatalf("resolved_inputs = %T, want map", outRec.Fields["aileron.resolved_inputs"])
+	}
+	if ri["window_days"] != 7 {
+		t.Errorf("resolved_inputs must carry the literal window_days, got %v", ri)
+	}
+	if _, present := ri["dataset"]; present {
+		t.Error("resolved_inputs must NOT inline a source-resolved dataset")
+	}
+	if containsValue(ri, "value") {
+		t.Error("the source dataset's values must not appear in resolved_inputs")
 	}
 }
 
