@@ -131,6 +131,36 @@ func TestBypassesVault(t *testing.T) {
 // --- ensureVaultUnlocked: state machine ---
 
 // State 1: daemon running, vault unlocked → no-op.
+// Externally provided daemon: AILERON_API_URL set → the whole state
+// machine stands down. This is the image-boot re-entry contract (#1731 /
+// #1759): the host runs the state machine, then injects the daemon
+// coordinates into the container; the in-container CLI has no ~/.aileron
+// discovery and must not classify that as first-run (it would prompt for
+// a NEW vault passphrase on a TTY the container doesn't have).
+func TestEnsureVaultUnlocked_EnvProvidedDaemon_StandsDown(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv("AILERON_API_URL", "http://host.docker.internal:51434/v1")
+
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead: func(string) (discovery.Info, error) {
+			t.Error("discovery should not be read when AILERON_API_URL is set")
+			return discovery.Info{}, errors.New("unreachable")
+		},
+		postUnlock: func(string, string) error {
+			t.Error("postVaultUnlock should not be called when AILERON_API_URL is set")
+			return nil
+		},
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr should be empty, got: %q", stderr.String())
+	}
+}
+
 func TestEnsureVaultUnlocked_RunningUnlocked_NoOp(t *testing.T) {
 	scopeHomeAndAPIURL(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

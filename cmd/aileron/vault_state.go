@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +38,24 @@ import (
 // because flag parsing belongs to the dispatched command. The env var
 // path remains active either way.
 func ensureVaultUnlocked(passphraseFile string, stderr io.Writer) error {
+	// An externally provided daemon stands the state machine down. The
+	// four states below manage the lifecycle of the LOCAL ~/.aileron
+	// daemon — spawn, vault init, unlock — but AILERON_API_URL means some
+	// other owner manages that daemon and its vault. The load-bearing
+	// case is the image-boot launch path (#1731): the host CLI runs this
+	// state machine itself and THEN injects AILERON_API_URL/AILERON_TOKEN
+	// into the booted container (#1759), so by the time the in-container
+	// re-entry starts, the host daemon's vault is already unlocked. The
+	// container has no ~/.aileron discovery, so without this gate the
+	// re-entry misclassifies as first-run and dies prompting for a new
+	// vault passphrase on a TTY the container doesn't have. If the
+	// env-provided daemon's vault IS locked, the dispatched command
+	// surfaces the daemon's vault-locked error — the correct shape for
+	// "the daemon's owner hasn't unlocked it."
+	if strings.TrimSpace(os.Getenv("AILERON_API_URL")) != "" {
+		return nil
+	}
+
 	stateDir, err := defaultStateDir()
 	if err != nil {
 		return err
