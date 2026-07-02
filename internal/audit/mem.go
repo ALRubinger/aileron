@@ -33,6 +33,17 @@ type EventFilter struct {
 	// don't record a class), so a Class filter naturally narrows
 	// to failures.
 	Class string
+	// OutputName, when non-empty, matches `output.materialized`
+	// events whose payload carries this artifact name under
+	// `aileron.output.name`. Has no effect on other event types
+	// (they don't record an output name), so it naturally narrows
+	// to materialized outputs.
+	OutputName string
+	// ContentHash, when non-empty, matches the `output.materialized`
+	// event whose payload carries this content hash under
+	// `aileron.output.content_hash` (a full `sha256:<hex>` digest).
+	// Matching is exact string equality.
+	ContentHash string
 	// Limit caps the number of events returned. <=0 means no cap.
 	Limit int
 }
@@ -78,6 +89,18 @@ func matchEventFilter(ev Event, f EventFilter) bool {
 	}
 	if f.ConnectorFQN != "" && !payloadMatchesConnector(ev.Payload, f.ConnectorFQN) {
 		return false
+	}
+	if f.OutputName != "" {
+		got, _ := ev.Payload["aileron.output.name"].(string)
+		if got != f.OutputName {
+			return false
+		}
+	}
+	if f.ContentHash != "" {
+		got, _ := ev.Payload["aileron.output.content_hash"].(string)
+		if got != f.ContentHash {
+			return false
+		}
 	}
 	return true
 }

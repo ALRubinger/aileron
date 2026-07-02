@@ -114,6 +114,80 @@ func TestListAudit_FiltersForwardedToStore(t *testing.T) {
 	}
 }
 
+func newMaterializedEvent(id, name, hash string, ts time.Time) audit.Event {
+	return audit.Event{
+		EventID:   id,
+		EventType: model.EventType("output.materialized"),
+		Payload: map[string]any{
+			"aileron.output.name":         name,
+			"aileron.output.content_hash": hash,
+			"aileron.output.path":         "/artifacts/" + name,
+		},
+		Timestamp: ts,
+	}
+}
+
+func TestListAudit_OutputNameFilterForwarded(t *testing.T) {
+	now := time.Now()
+	srv, _ := newAuditTestServer(t,
+		newMaterializedEvent("out-report", "report.pdf", "sha256:aaa", now),
+		newMaterializedEvent("out-summary", "summary.txt", "sha256:bbb", now),
+		audit.Event{
+			EventID:   "install",
+			EventType: model.EventTypeActionInstalled,
+			Payload:   map[string]any{"aileron.action.name": "ship-update"},
+			Timestamp: now,
+		},
+	)
+	rec := httptest.NewRecorder()
+	name := "report.pdf"
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		OutputName: &name,
+	})
+	resp := decodeAuditList(t, rec)
+	if len(resp.Events) != 1 || resp.Events[0].AuditId != "out-report" {
+		t.Errorf("events = %+v; want only 'out-report'", resp.Events)
+	}
+}
+
+func TestListAudit_ContentHashFilterForwarded(t *testing.T) {
+	const digest = "sha256:0123456789abcdef"
+	now := time.Now()
+	srv, _ := newAuditTestServer(t,
+		newMaterializedEvent("match", "report.pdf", digest, now),
+		newMaterializedEvent("other", "report.pdf", "sha256:ffff", now),
+	)
+	rec := httptest.NewRecorder()
+	hash := digest
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		ContentHash: &hash,
+	})
+	resp := decodeAuditList(t, rec)
+	if len(resp.Events) != 1 || resp.Events[0].AuditId != "match" {
+		t.Errorf("events = %+v; want only 'match'", resp.Events)
+	}
+}
+
+func TestListAudit_ContentHashComposesWithSince(t *testing.T) {
+	const digest = "sha256:cafe"
+	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	srv, _ := newAuditTestServer(t,
+		newMaterializedEvent("want", "report.pdf", digest, t0.Add(time.Hour)),
+		newMaterializedEvent("too-old", "report.pdf", digest, t0.Add(-time.Hour)),
+	)
+	rec := httptest.NewRecorder()
+	hash := digest
+	since := t0
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		ContentHash: &hash,
+		Since:       &since,
+	})
+	resp := decodeAuditList(t, rec)
+	if len(resp.Events) != 1 || resp.Events[0].AuditId != "want" {
+		t.Errorf("events = %+v; want only 'want'", resp.Events)
+	}
+}
+
 func TestListAudit_LimitClamps(t *testing.T) {
 	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	srv, _ := newAuditTestServer(t,

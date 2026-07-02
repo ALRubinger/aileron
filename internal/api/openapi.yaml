@@ -2269,9 +2269,12 @@ paths:
         events that name the FQN under any of the recorded payload
         keys (`connector_fqn`, `fqn`, or `details.connector`). `class`
         matches the failure class on failure events (no effect on
-        success events). `audit_id` collapses the result to the single
-        event with that id, mirroring `/v1/audit/{audit_id}` but in a
-        list shape so callers can branch on length without a 404.
+        success events). `output_name` and `content_hash` match
+        `output.materialized` events by the artifact's name and its
+        content hash (`sha256:<hex>`) respectively. `audit_id`
+        collapses the result to the single event with that id,
+        mirroring `/v1/audit/{audit_id}` but in a list shape so callers
+        can branch on length without a 404.
 
         For now the recorder is in-memory; events are scoped to the
         running daemon process and disappear on restart. Persistent
@@ -2303,6 +2306,18 @@ paths:
           schema:
             type: string
           description: Match failure events with this `class` (e.g. `binding_required`).
+        - name: output_name
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match `output.materialized` events for this output name.
+        - name: content_hash
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match the `output.materialized` event with this content hash (`sha256:<hex>`).
         - name: limit
           in: query
           required: false
