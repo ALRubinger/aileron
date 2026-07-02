@@ -128,6 +128,66 @@ func TestRun_Rung3PinsAndSigns(t *testing.T) {
 	}
 }
 
+// TestRun_Rung3SealsTrustContractReach is the #1775 end-to-end acceptance: a
+// full freeze over a rung-3 manifest with a per-step trust contract records the
+// declared hosts on the step's lock pin, and the produced signature verifies
+// over the bytes that include those hosts. The reach is sealed, not
+// re-suppliable: a verifier accepts only the signed, host-bearing lock.
+func TestRun_Rung3SealsTrustContractReach(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	digestFor := map[string]string{
+		"registry.example.com/tool-a:1": fakeDigest,
+		"registry.example.com/tool-b:2": fakeDigest2,
+	}
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return digestFor[ref], nil
+	})
+	res, err := Run(context.Background(), []byte(rung3TrustContractMD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Lock.ResolvedImages) != 2 {
+		t.Fatalf("rung-3 must pin one image per step, got %+v", res.Lock.ResolvedImages)
+	}
+	// The reach step's pin carries the sealed hosts; the no-reach step's does not.
+	reach := res.Lock.ResolvedImages[0]
+	if reach.StepID != "reach" || strings.Join(reach.Hosts, ",") != "api.upstream.example.com,api.upstream.example.com:443" {
+		t.Errorf("reach pin must seal the declared hosts, got %+v", reach)
+	}
+	if len(res.Lock.ResolvedImages[1].Hosts) != 0 {
+		t.Errorf("the no-reach pin must carry no hosts, got %+v", res.Lock.ResolvedImages[1])
+	}
+
+	// The signature covers the sealed reach: it verifies over the canonical
+	// content bytes that include the hosts.
+	lockNoHash := res.Lock.withoutContentHash()
+	mNoHash, err := injectLock([]byte(rung3TrustContractMD), lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lfNoHash, err := MarshalLockfile(lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(lfNoHash), "api.upstream.example.com") {
+		t.Fatal("fixture invariant: the marshaled lock must carry the sealed hosts")
+	}
+	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
+		t.Errorf("signature must verify over the sealed reach: %v", err)
+	}
+
+	// Tampering the sealed reach out of the lock breaks the signature: the reach
+	// is not re-suppliable at launch.
+	tampered := strings.ReplaceAll(string(lfNoHash), "api.upstream.example.com", "evil.example.com")
+	if err := Verify(canonicalContent(mNoHash, []byte(tampered)), res.Signature, res.PublicKey); err == nil {
+		t.Error("a tampered reach must fail signature verification")
+	}
+}
+
 func TestRun_Reproducible(t *testing.T) {
 	_, keyPath := genSigningKey(t)
 	opts := Options{Version: "1.0.0", SigningKeyPath: keyPath, Composer: fakeComposer(fakeDigest)}

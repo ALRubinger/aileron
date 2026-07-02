@@ -91,6 +91,7 @@ The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-se
 | `rung3PerStepImages.steps[].id` | string | No | An optional step identifier, unique within the rung-three step set. |
 | `rung3PerStepImages.steps[].mount` | object | No | An optional mount declaration for the step's input I/O. `mount.path` is the mount path inside the image. |
 | `rung3PerStepImages.steps[].collect` | object | No | An optional run-and-collect declaration for the step's output I/O. `collect.path` is the path whose contents are collected as the step output. |
+| `rung3PerStepImages.steps[].trustContract` | object | No | An optional per-step trust contract reusing the per-action shape. Its `hosts` declare the step's network reach. Freeze seals the declared reach onto the step's lock pin so the signature covers it. A declared contract must be non-empty. |
 
 ### `requires.actions[].trustContract`
 
@@ -257,7 +258,7 @@ The `lock` section is absent before freeze. Freeze populates it and writes an im
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `resolvedImages` | array | No | The resolved image digest pins. Each entry pairs a pre-freeze `ref` with its resolved `digest`. |
+| `resolvedImages` | array | No | The resolved image digest pins. Each entry pairs a pre-freeze `ref` with its resolved `digest`. A rung-three per-step pin also carries the dispatching step's `id` and, when the step declared a trust contract, the sealed `hosts` reach. |
 | `resolvedCapabilitySet` | array | No | The resolved capability set the freeze pinned. |
 | `contentHash` | string | No | The content hash identifying the exact frozen manifest bytes. |
 | `version` | string | No | The human-facing semver label for this frozen version. |

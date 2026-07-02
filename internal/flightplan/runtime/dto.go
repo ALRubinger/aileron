@@ -52,13 +52,20 @@ var validRedactKinds = map[string]RedactionKind{
 	"hash": RedactHash,
 }
 
-func (d trustContractDTO) toAction(ref string) (Action, error) {
+// toContract validates the trust-contract fields and builds the typed
+// TrustContract. It is the single validation body shared by the action path
+// (toAction) and the rung-3 per-step path (decodeToolDispatch): the effect
+// must be a known enum, the hosts must be non-empty (the access scope is the
+// boundary), and each redaction rule must be a known kind. ref names the
+// offending element in any error so a rung-3 step and an action report the
+// same failures identically.
+func (d trustContractDTO) toContract(ref string) (TrustContract, error) {
 	eff, ok := validEffects[d.Effect]
 	if !ok {
-		return Action{}, decodeErrf("action %q: unknown effect %q", ref, d.Effect)
+		return TrustContract{}, decodeErrf("%s: unknown effect %q", ref, d.Effect)
 	}
 	if len(d.Hosts) == 0 {
-		return Action{}, decodeErrf("action %q: trust contract declares no hosts (access scope is the boundary)", ref)
+		return TrustContract{}, decodeErrf("%s: trust contract declares no hosts (access scope is the boundary)", ref)
 	}
 	tc := TrustContract{
 		CredentialKind: d.Credential.Kind,
@@ -72,9 +79,17 @@ func (d trustContractDTO) toAction(ref string) (Action, error) {
 	for _, r := range d.Redaction {
 		rk, ok := validRedactKinds[r.Rule]
 		if !ok {
-			return Action{}, decodeErrf("action %q: unknown redaction rule %q on field %q", ref, r.Rule, r.Field)
+			return TrustContract{}, decodeErrf("%s: unknown redaction rule %q on field %q", ref, r.Rule, r.Field)
 		}
 		tc.Redaction = append(tc.Redaction, RedactionRule{Field: r.Field, Rule: rk})
+	}
+	return tc, nil
+}
+
+func (d trustContractDTO) toAction(ref string) (Action, error) {
+	tc, err := d.toContract("action " + ref)
+	if err != nil {
+		return Action{}, err
 	}
 	return Action{Ref: ref, TrustContract: tc}, nil
 }
@@ -288,6 +303,11 @@ type rung3StepDTO struct {
 	Collect *struct {
 		Path string `yaml:"path"`
 	} `yaml:"collect"`
+	// TrustContract is the step's optional per-step trust contract, declaring
+	// its network reach (hosts) and effect. Nil when the step declares none; a
+	// declared contract is validated at decode via toContract exactly like an
+	// action's trust contract.
+	TrustContract *trustContractDTO `yaml:"trustContract"`
 }
 
 // mountPath returns the declared mount path, or empty when the step declared no

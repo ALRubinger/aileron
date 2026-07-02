@@ -125,6 +125,42 @@ func TestResolveImages_Rung3StepNonStringImage(t *testing.T) {
 	}
 }
 
+func TestResolveImages_Rung3TrustContractNotMapping(t *testing.T) {
+	m := mWithExecEnv(map[string]any{"rung3PerStepImages": map[string]any{"steps": []any{
+		map[string]any{"image": "b:1", "trustContract": "scalar"},
+	}}})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), nil); err == nil {
+		t.Error("a rung-3 step whose trustContract is not a mapping must error")
+	}
+}
+
+func TestResolveImages_Rung3TrustContractNoHosts(t *testing.T) {
+	m := mWithExecEnv(map[string]any{"rung3PerStepImages": map[string]any{"steps": []any{
+		map[string]any{"image": "b:1", "trustContract": map[string]any{"effect": "read"}},
+	}}})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), nil); err == nil {
+		t.Error("a rung-3 trustContract with no hosts must error")
+	}
+}
+
+func TestResolveImages_Rung3TrustContractNonStringHost(t *testing.T) {
+	m := mWithExecEnv(map[string]any{"rung3PerStepImages": map[string]any{"steps": []any{
+		map[string]any{"image": "b:1", "trustContract": map[string]any{"hosts": []any{42}}},
+	}}})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), nil); err == nil {
+		t.Error("a rung-3 trustContract with a non-string host must error")
+	}
+}
+
+func TestResolveImages_Rung3TrustContractEmptyHosts(t *testing.T) {
+	m := mWithExecEnv(map[string]any{"rung3PerStepImages": map[string]any{"steps": []any{
+		map[string]any{"image": "b:1", "trustContract": map[string]any{"hosts": []any{}}},
+	}}})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), nil); err == nil {
+		t.Error("a rung-3 trustContract with an empty hosts list must error")
+	}
+}
+
 func TestResolveImages_NeitherRung(t *testing.T) {
 	m := mWithExecEnv(map[string]any{"somethingElse": map[string]any{}})
 	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {

@@ -151,8 +151,10 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 			}
 			// Stamp the step's declared id (or its positional fallback) onto the
 			// pin so the runtime associates a step to its pin by id, never by the
-			// shared image tag (the #1739 tag-collision ambiguity).
-			out = append(out, ImagePin{Ref: s.image, Digest: digest, StepID: s.id})
+			// shared image tag (the #1739 tag-collision ambiguity). The declared
+			// trust-contract hosts are sealed onto the pin so the reach is covered
+			// by the content hash and signature (#1775).
+			out = append(out, ImagePin{Ref: s.image, Digest: digest, StepID: s.id, Hosts: s.hosts})
 		}
 		return out, nil, nil
 	default:
@@ -222,10 +224,13 @@ func rung2Features(v any) ([]string, error) {
 }
 
 // rung3StepImage is one rung-3 step's freeze-relevant fields: the sibling
-// image reference and the id used to link the resolved pin back to the step.
+// image reference, the id used to link the resolved pin back to the step, and
+// the declared trust-contract hosts freeze seals onto the pin (nil when the
+// step declares no trust contract).
 type rung3StepImage struct {
 	id    string
 	image string
+	hosts []string
 }
 
 // rung3StepImages extracts each rung3PerStepImages.steps[] entry from the
@@ -257,9 +262,49 @@ func rung3StepImages(v any) ([]rung3StepImage, error) {
 			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a step with an empty or non-string image")
 		}
 		id := rung3StepID(step, i)
-		steps = append(steps, rung3StepImage{id: id, image: strings.TrimSpace(img)})
+		hosts, err := rung3StepHosts(step)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, rung3StepImage{id: id, image: strings.TrimSpace(img), hosts: hosts})
 	}
 	return steps, nil
+}
+
+// rung3StepHosts extracts the declared trust-contract hosts from a rung-3
+// step's untyped map. It returns nil when the step declares no trustContract
+// (an optional block: absent means the step declares no reach). A declared
+// trustContract whose hosts are missing, empty, or carry a non-string/empty
+// entry is rejected rather than sealing a partial reach: the same guard the
+// image extraction applies, so a malformed reach never silently produces a
+// wrong pin. The schema's hosts minItems:1 rejects an empty declared list
+// before freeze runs; this is the freeze-time defensive backstop.
+func rung3StepHosts(step map[string]any) ([]string, error) {
+	raw, ok := step["trustContract"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	tc, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("freeze: rung3PerStepImages.steps contains a step whose trustContract is not a mapping")
+	}
+	hostsRaw, ok := tc["hosts"]
+	if !ok || hostsRaw == nil {
+		return nil, fmt.Errorf("freeze: rung3PerStepImages.steps declares a trustContract with no hosts (access scope is the boundary)")
+	}
+	list, ok := hostsRaw.([]any)
+	if !ok || len(list) == 0 {
+		return nil, fmt.Errorf("freeze: rung3PerStepImages.steps declares a trustContract with an empty or non-array hosts")
+	}
+	hosts := make([]string, 0, len(list))
+	for _, h := range list {
+		s, ok := h.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			return nil, fmt.Errorf("freeze: rung3PerStepImages.steps declares a trustContract host that is empty or not a string")
+		}
+		hosts = append(hosts, strings.TrimSpace(s))
+	}
+	return hosts, nil
 }
 
 // rung3StepID returns a step's declared `id` when present and a non-empty
