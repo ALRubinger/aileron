@@ -228,6 +228,35 @@ func TestListEvents_FilterByContentHashIsExact(t *testing.T) {
 	}
 }
 
+// TestListEvents_FilterByContentHashIgnoresPlanKey locks that the
+// ContentHash filter matches only on `aileron.output.content_hash` and
+// never on `aileron.plan.content_hash`. The plan-level content hash is a
+// real key emitted by the flight-plan runtime (see
+// internal/flightplan/runtime/audit.go), so a matcher that read it would
+// return output.materialized events whose OUTPUT hash differs from the
+// requested digest.
+func TestListEvents_FilterByContentHashIgnoresPlanKey(t *testing.T) {
+	const digest = "sha256:0123456789abcdef"
+	store := seedEvents(t,
+		// Plan hash equals the requested digest, but the output hash
+		// differs — this event must NOT be returned.
+		audit.Event{
+			EventID:   "plan-hash-only",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.plan.content_hash":   digest,
+				"aileron.output.content_hash": "sha256:ffff",
+			},
+			Timestamp: time.Now(),
+		},
+	)
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: digest})
+	if len(got) != 0 {
+		t.Errorf("plan-level content_hash must not match output filter, got %+v", got)
+	}
+}
+
 func TestListEvents_OutputFiltersCompose(t *testing.T) {
 	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	const digest = "sha256:cafe"
