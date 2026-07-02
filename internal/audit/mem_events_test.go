@@ -188,6 +188,42 @@ func TestListEvents_FilterByOutputNameMatchesMaterialized(t *testing.T) {
 	}
 }
 
+// TestListEvents_ToolStepOutputIsQueryableByExistingFilters proves the store is
+// producer-agnostic (#1762): an output.materialized event produced by a rung-3
+// tool step — carrying aileron.step.kind:"tool" and aileron.step.image alongside
+// the standard output name/content_hash — is found by the SAME --content-hash and
+// --output filters the connector path uses, with no new query path. A different
+// content-hash does not match (negative).
+func TestListEvents_ToolStepOutputIsQueryableByExistingFilters(t *testing.T) {
+	const toolDigest = "sha256:0011223344556677"
+	store := seedEvents(t,
+		audit.Event{
+			EventID:   "tool-out",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "extract.txt",
+				"aileron.output.content_hash": toolDigest,
+				"aileron.step.kind":           "tool",
+				"aileron.step.image":          "registry.example.com/tool-a:1@sha256:beef",
+			},
+			Timestamp: time.Now(),
+		},
+	)
+
+	byHash, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: toolDigest})
+	if len(byHash) != 1 || byHash[0].EventID != "tool-out" {
+		t.Errorf("--content-hash must surface the tool-step record, got %+v", byHash)
+	}
+	byName, _ := store.ListEvents(context.Background(), audit.EventFilter{OutputName: "extract.txt"})
+	if len(byName) != 1 || byName[0].EventID != "tool-out" {
+		t.Errorf("--output must surface the tool-step record, got %+v", byName)
+	}
+	miss, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: "sha256:deadbeef"})
+	if len(miss) != 0 {
+		t.Errorf("a different content-hash must not match, got %+v", miss)
+	}
+}
+
 func TestListEvents_FilterByContentHashIsExact(t *testing.T) {
 	const digest = "sha256:0123456789abcdef"
 	store := seedEvents(t,

@@ -174,6 +174,97 @@ func TestBuildOutputRecord_ActionCallOmitsTransform(t *testing.T) {
 	}
 }
 
+func TestBuildOutputRecord_ToolStepCarriesImageAndKind(t *testing.T) {
+	// A tool-materialized output (rung-3 dispatch, #1762) carries the literal
+	// step.kind="tool" (overriding the closed StepKind enum), the pinned image,
+	// the collected-output content_hash, the input walk-back, and the plan /
+	// invocation identity — every other field identical to the connector path.
+	// It carries NO aileron.step.transform, NO aileron.step.calls, and NO
+	// aileron.step.command.
+	prov := launchProvenance{
+		Skill: "rung3-plan", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		SignatureStatus: "verified", InvocationID: "inv-9",
+	}
+	inputValue := map[string]any{"payload": "hello"}
+	o := materializedOutput{
+		StepID:   "extract",
+		StepKind: KindTransform, // rung-3 dispatch is checked before the kind branch; Kind is incidental.
+		Artifact: Artifact{Name: "extract.txt", MimeType: "text/plain", Content: []byte("collected"), Digest: "sha256:abc"},
+		Binds: map[string]Binding{
+			"payload": {Kind: BindInput, Raw: "inputs.payload", Name: "payload"},
+		},
+		Resolved:  map[string]any{"payload": inputValue},
+		ToolImage: "registry.example.com/tool-a:1@" + digestA,
+	}
+	rec := buildOutputRecord(o, prov, nil, nil)
+	f := rec.Fields
+
+	if f["aileron.step.kind"] != "tool" {
+		t.Errorf("step.kind = %v, want the literal tool", f["aileron.step.kind"])
+	}
+	if f["aileron.step.image"] != "registry.example.com/tool-a:1@"+digestA {
+		t.Errorf("step.image = %v, want the pinned ref@digest", f["aileron.step.image"])
+	}
+	if f["aileron.output.content_hash"] != "sha256:abc" {
+		t.Errorf("content_hash = %v, want the Artifact.Digest verbatim", f["aileron.output.content_hash"])
+	}
+	// The input walk-back is present with the bound input's content_hash.
+	inputs, ok := f["aileron.step.inputs"].([]map[string]any)
+	if !ok || len(inputs) != 1 {
+		t.Fatalf("step.inputs = %v, want one entry", f["aileron.step.inputs"])
+	}
+	wantHash, err := canonicalValueDigest(inputValue)
+	if err != nil {
+		t.Fatalf("canonicalValueDigest: %v", err)
+	}
+	if inputs[0]["content_hash"] != wantHash {
+		t.Errorf("step.inputs[0] content_hash = %v, want %v", inputs[0]["content_hash"], wantHash)
+	}
+	// Plan / invocation identity present.
+	if f["aileron.plan.content_hash"] != "sha256:plan" || f["aileron.invocation.id"] != "inv-9" ||
+		f["aileron.step.id"] != "extract" {
+		t.Errorf("plan/invocation/step identity incomplete: %v", f)
+	}
+	// A tool step carries none of these.
+	if _, present := f["aileron.step.transform"]; present {
+		t.Error("a tool step record must not carry aileron.step.transform")
+	}
+	if _, present := f["aileron.step.calls"]; present {
+		t.Error("aileron.step.calls[] (Half B) must be absent")
+	}
+	if _, present := f["aileron.step.command"]; present {
+		t.Error("aileron.step.command must not be synthesized")
+	}
+}
+
+func TestBuildOutputRecord_NonToolOutputOmitsImage(t *testing.T) {
+	// A connector/transform output (ToolImage == "") still emits its own StepKind
+	// and NO aileron.step.image — the regression guard that the image key is
+	// tool-only.
+	for _, tc := range []struct {
+		name string
+		kind StepKind
+	}{
+		{"transform", KindTransform},
+		{"action-call", KindActionCall},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := materializedOutput{
+				StepID:   "s",
+				StepKind: tc.kind,
+				Artifact: Artifact{Name: "o.json", Digest: "sha256:d"},
+			}
+			rec := buildOutputRecord(o, launchProvenance{}, nil, nil)
+			if rec.Fields["aileron.step.kind"] != string(tc.kind) {
+				t.Errorf("step.kind = %v, want %v", rec.Fields["aileron.step.kind"], tc.kind)
+			}
+			if _, present := rec.Fields["aileron.step.image"]; present {
+				t.Error("a non-tool output record must not carry aileron.step.image")
+			}
+		})
+	}
+}
+
 func TestEmitAudit_OneOutputRecordPerArtifact(t *testing.T) {
 	// emitAudit emits exactly one RecordKindOutput per st.outputs entry, then the
 	// launch summary. This includes a transform-only materializing output with no
