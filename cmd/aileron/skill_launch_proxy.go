@@ -206,6 +206,16 @@ func resolveDaemonRootURL(stateDir string) (string, bool) {
 // yields a token: the CONNECT handshake authenticates password=daemonToken, so
 // a missing token means the proxy would 407 and the dispatch must stay
 // passthrough.
+//
+// The token resolved here is the FULL daemon token, and daemonImageEnv.Env
+// injects it verbatim as AILERON_TOKEN into the booted container. This differs
+// from the agent-sandbox path (internal/launch/launcher.go:720-726), which
+// injects a session-scoped caveat token carrying only the capabilities the
+// session uses. Injecting the full token on the Flight Plan image-boot path is
+// a deliberate, readiness-brief-sanctioned choice: this path has no
+// session-caveat minting step, so no narrowed token exists to hand the
+// container. Future hardening could mint a session-scoped caveat token for the
+// image boot and inject that here instead.
 func resolveDaemonProxyToken(stateDir string) (string, bool) {
 	if t := strings.TrimSpace(os.Getenv("AILERON_TOKEN")); t != "" {
 		return t, true
