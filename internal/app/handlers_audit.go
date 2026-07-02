@@ -107,6 +107,16 @@ func (s *apiServer) CreateAudit(w http.ResponseWriter, r *http.Request) {
 		payload = map[string]any{}
 	}
 	actor := model.ActorRef{Type: actorType, ID: req.Actor.Id}
+	// Normalize actor provenance onto the Actor object at ingest: the runtime
+	// emits flat `aileron.actor.*` payload keys, and the daemon is the single
+	// normalization point that lifts them onto event.Actor so provenance lives
+	// on the actor rather than scattered across Payload (residual #1770).
+	if v, ok := payloadString(payload, "aileron.actor.identity_label"); ok {
+		actor.IdentityLabel = v
+	}
+	if v, ok := payloadString(payload, "aileron.actor.credential_binding"); ok {
+		actor.CredentialBinding = v
+	}
 	id, err := s.auditRecorder.RecordEvent(r.Context(), model.EventType(req.EventType), actor, payload)
 	if err != nil {
 		// The ingest path surfaces the append error rather than
@@ -153,5 +163,25 @@ func toAPIAuditEvent(e audit.Event) api.AuditEvent {
 	}
 	out.Actor.Type = api.ActorRefType(e.Actor.Type)
 	out.Actor.Id = e.Actor.ID
+	if e.Actor.IdentityLabel != "" {
+		out.Actor.IdentityLabel = &e.Actor.IdentityLabel
+	}
+	if e.Actor.CredentialBinding != "" {
+		out.Actor.CredentialBinding = &e.Actor.CredentialBinding
+	}
 	return out
+}
+
+// payloadString returns the string value at key in payload, reporting false
+// when the key is absent or its value is not a non-empty string.
+func payloadString(payload map[string]any, key string) (string, bool) {
+	v, ok := payload[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		return "", false
+	}
+	return s, true
 }

@@ -8,10 +8,17 @@ package model
 import "time"
 
 // ActorRef identifies who or what performed an action.
+//
+// IdentityLabel and CredentialBinding carry the actor provenance the daemon
+// normalizes onto the event at ingest from the runtime's flat
+// `aileron.actor.*` payload keys, so provenance lives on the Actor object
+// rather than being scattered across Payload.
 type ActorRef struct {
-	ID          string    `json:"id"`
-	Type        ActorType `json:"type"`
-	DisplayName string    `json:"display_name"`
+	ID                string    `json:"id"`
+	Type              ActorType `json:"type"`
+	DisplayName       string    `json:"display_name"`
+	IdentityLabel     string    `json:"identity_label,omitempty"`
+	CredentialBinding string    `json:"credential_binding,omitempty"`
 }
 
 // ActorType classifies the actor.

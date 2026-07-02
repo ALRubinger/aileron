@@ -4754,6 +4754,18 @@ components:
           type: string
           enum: [agent, human, service, connector_runtime]
         display_name: { type: string }
+        identity_label:
+          type: string
+          description: >-
+            The connector identity label whose credential the action ran under.
+            Normalized onto the actor by the daemon at ingest from the runtime's
+            `aileron.actor.identity_label` payload key.
+        credential_binding:
+          type: string
+          description: >-
+            The credential binding the action's identity resolved to.
+            Normalized onto the actor by the daemon at ingest from the runtime's
+            `aileron.actor.credential_binding` payload key.
 
     ActionTarget:
       type: object

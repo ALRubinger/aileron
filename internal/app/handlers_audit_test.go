@@ -343,6 +343,42 @@ func TestCreateAudit_AppendsAndIsReadable(t *testing.T) {
 	}
 }
 
+// TestCreateAudit_ActorProvenanceNormalizedOntoActor proves the daemon lifts
+// the runtime's flat `aileron.actor.*` payload keys onto the event's Actor
+// object at ingest (residual #1770): a POST carrying
+// aileron.actor.identity_label and aileron.actor.credential_binding in its
+// payload persists and reads them back on Actor.IdentityLabel /
+// Actor.CredentialBinding, not only in Payload.
+func TestCreateAudit_ActorProvenanceNormalizedOntoActor(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"event_type":"flightplan.launch.action","actor":{"type":"service","id":"flightplan-launch"},"payload":{"aileron.actor.identity_label":"prod-reader","aileron.actor.credential_binding":"aws-athena-prod"}}`
+	w := httptest.NewRecorder()
+	srv.CreateAudit(w, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", w.Code, w.Body.String())
+	}
+	var resp api.AuditIngestResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	getW := httptest.NewRecorder()
+	srv.GetAudit(getW, httptest.NewRequest(http.MethodGet, "/v1/audit/"+resp.AuditId, nil), resp.AuditId)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("read-back status = %d, want 200; body = %s", getW.Code, getW.Body.String())
+	}
+	var got api.AuditEvent
+	if err := json.Unmarshal(getW.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode read-back: %v", err)
+	}
+	if got.Actor.IdentityLabel == nil || *got.Actor.IdentityLabel != "prod-reader" {
+		t.Errorf("Actor.IdentityLabel = %v, want \"prod-reader\"", got.Actor.IdentityLabel)
+	}
+	if got.Actor.CredentialBinding == nil || *got.Actor.CredentialBinding != "aws-athena-prod" {
+		t.Errorf("Actor.CredentialBinding = %v, want \"aws-athena-prod\"", got.Actor.CredentialBinding)
+	}
+}
+
 // TestAuditEvent_ActorSharesActorRefEnum proves the read model's actor is
 // the shared, enum-typed ActorRef schema (reconciled with the ingest
 // request side): a persisted actor.type round-trips as a known

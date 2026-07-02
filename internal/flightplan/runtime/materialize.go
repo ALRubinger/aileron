@@ -43,12 +43,16 @@ func contentDigest(content []byte) string {
 // canonical JSON form. It reuses decodeCarrier's canonicalization
 // (marshal → unmarshal to a generic value → marshal) so object keys are
 // emitted in Go's sorted order: the digest is therefore reproducible across
-// runs for an equal value, and a value equal to a downstream carrier hashes
-// identically to that carrier's data-result content (both canonicalize the
-// same way). This is the input-side snapshot identifier the per-output audit
-// record records for each binding, so a materialized output walks back to the
-// exact inputs by hash without inlining the dataset (ADR-0027 audit boundary,
-// issue #1753).
+// runs for an equal value. This is the input-side snapshot identifier the
+// per-output audit record records for each binding, so a materialized output
+// walks back to the exact inputs by hash without inlining the dataset
+// (ADR-0027 audit boundary, issue #1753).
+//
+// This digest is over the whole bound value object. It equals a downstream
+// carrier's digest only for a plain-data carrier that hashes its entire
+// content the same way; it does not equal a file-map carrier's Digest, which
+// materialize() computes over each entry.Content rather than the enclosing
+// {path, mimeType, encoding, content} object.
 func canonicalValueDigest(v any) (string, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
