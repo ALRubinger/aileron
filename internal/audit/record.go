@@ -24,8 +24,17 @@ type Recorder interface {
 	RecordFailure(ctx context.Context, f *failure.Failure, actor model.ActorRef) string
 
 	// RecordSuccess persists a non-failure event with the given type
-	// and payload. Returns the minted event_id.
+	// and payload. Returns the minted event_id. The store append error
+	// is swallowed: these are best-effort action-audit writes per
+	// ADR-0010 and must not block the response they accompany.
 	RecordSuccess(ctx context.Context, eventType model.EventType, actor model.ActorRef, payload map[string]any) string
+
+	// RecordEvent persists a client-supplied event durably and returns
+	// the minted event_id together with the store append error. Unlike
+	// RecordSuccess it surfaces the persistence outcome, so the
+	// `POST /v1/audit` ingest path can return a non-2xx when the append
+	// fails rather than acknowledging a write that never committed.
+	RecordEvent(ctx context.Context, eventType model.EventType, actor model.ActorRef, payload map[string]any) (string, error)
 }
 
 // NewRecorder returns a Recorder backed by the given Store. clk
@@ -102,15 +111,26 @@ func (r *recorder) RecordFailure(ctx context.Context, f *failure.Failure, actor 
 	return id
 }
 
-// RecordSuccess appends a non-failure event with the given type.
+// RecordSuccess appends a non-failure event with the given type. The
+// store append error is intentionally swallowed: per ADR-0010 these are
+// best-effort action-audit writes that must not block the response they
+// accompany. Callers that need the persistence outcome use RecordEvent.
 func (r *recorder) RecordSuccess(ctx context.Context, eventType model.EventType, actor model.ActorRef, payload map[string]any) string {
+	id, _ := r.RecordEvent(ctx, eventType, actor, payload)
+	return id
+}
+
+// RecordEvent mints an id, appends the event, and returns the id together
+// with the store append error so the ingest path can surface a durable
+// failure instead of acknowledging an event that never committed.
+func (r *recorder) RecordEvent(ctx context.Context, eventType model.EventType, actor model.ActorRef, payload map[string]any) (string, error) {
 	id := r.idFn()
-	_ = r.store.Append(ctx, Event{
+	err := r.store.Append(ctx, Event{
 		EventID:   id,
 		EventType: eventType,
 		Actor:     actor,
 		Payload:   payload,
 		Timestamp: r.clk.Now(),
 	})
-	return id
+	return id, err
 }

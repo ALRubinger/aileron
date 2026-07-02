@@ -2376,7 +2376,11 @@ paths:
               $ref: "#/components/schemas/AuditIngestRequest"
       responses:
         "201":
-          description: The event was appended; body carries the minted id.
+          description: |
+            The event was durably appended to the store; body carries
+            the minted id. 201 means the append committed — the event
+            is guaranteed to appear in `GET /v1/audit`. A store append
+            that fails surfaces as 500, never a 201.
           content:
             application/json:
               schema:
@@ -2387,6 +2391,19 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          description: |
+            The audit subsystem is wired but the store append failed, so
+            the event could not be persisted. On this ingest path the
+            append error is surfaced rather than swallowed: returning 201
+            without a durable write would violate the append/single-writer
+            contract (the event would never appear in `GET /v1/audit`).
+            This differs from the fire-and-forget action-audit recorders
+            (ADR-0010), whose best-effort writes never reach this path.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "503":
           description: |
             The audit subsystem is not configured, so the event cannot
@@ -4497,15 +4514,7 @@ components:
           format: date-time
           description: When the event was recorded; RFC 3339, UTC.
         actor:
-          type: object
-          required: [type, id]
-          properties:
-            type:
-              type: string
-              description: Actor kind (`human`, `agent`, `connector_runtime`, etc.)
-            id:
-              type: string
-              description: Stable identifier within the actor type.
+          $ref: "#/components/schemas/ActorRef"
         payload:
           type: object
           additionalProperties: true
