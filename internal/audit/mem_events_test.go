@@ -154,6 +154,122 @@ func TestListEvents_FilterByConnectorFQNAcrossKnownKeys(t *testing.T) {
 	}
 }
 
+func TestListEvents_FilterByOutputNameMatchesMaterialized(t *testing.T) {
+	store := seedEvents(t,
+		audit.Event{
+			EventID:   "out-report",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": "sha256:aaa",
+			},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			EventID:   "out-summary",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "summary.txt",
+				"aileron.output.content_hash": "sha256:bbb",
+			},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			// Non-output event carries no output name — must be excluded.
+			EventID:   "install",
+			EventType: model.EventTypeActionInstalled,
+			Payload:   map[string]any{"aileron.action.name": "ship-update"},
+			Timestamp: time.Now(),
+		},
+	)
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{OutputName: "report.pdf"})
+	if len(got) != 1 || got[0].EventID != "out-report" {
+		t.Errorf("got = %+v; want only out-report", got)
+	}
+}
+
+func TestListEvents_FilterByContentHashIsExact(t *testing.T) {
+	const digest = "sha256:0123456789abcdef"
+	store := seedEvents(t,
+		audit.Event{
+			EventID:   "match",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			EventID:   "other-hash",
+			EventType: model.EventType("output.materialized"),
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": "sha256:ffff",
+			},
+			Timestamp: time.Now(),
+		},
+	)
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: digest})
+	if len(got) != 1 || got[0].EventID != "match" {
+		t.Errorf("got = %+v; want only match", got)
+	}
+
+	// A partial/prefix hash must not match — equality is exact.
+	partial, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: "sha256:0123"})
+	if len(partial) != 0 {
+		t.Errorf("partial hash should not match, got %+v", partial)
+	}
+
+	// A hash present on no event returns empty.
+	none, _ := store.ListEvents(context.Background(), audit.EventFilter{ContentHash: "sha256:deadbeef"})
+	if len(none) != 0 {
+		t.Errorf("unknown hash should return empty, got %+v", none)
+	}
+}
+
+func TestListEvents_OutputFiltersCompose(t *testing.T) {
+	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const digest = "sha256:cafe"
+	store := seedEvents(t,
+		// Match: right name, right hash, after Since.
+		audit.Event{
+			EventID: "want",
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: t0.Add(time.Hour),
+		},
+		// Right name + hash, but BEFORE Since.
+		audit.Event{
+			EventID: "too-old",
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: t0.Add(-time.Hour),
+		},
+		// Right name + Since, but different hash.
+		audit.Event{
+			EventID: "wrong-hash",
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": "sha256:beef",
+			},
+			Timestamp: t0.Add(time.Hour),
+		},
+	)
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{
+		Since:       t0,
+		OutputName:  "report.pdf",
+		ContentHash: digest,
+	})
+	if len(got) != 1 || got[0].EventID != "want" {
+		t.Errorf("got = %+v; want one event 'want'", got)
+	}
+}
+
 func TestListEvents_LimitTruncatesAfterFiltering(t *testing.T) {
 	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	var seed []audit.Event

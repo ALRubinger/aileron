@@ -7799,6 +7799,8 @@ func TestRunAudit_FlagsForwardedToFetcher(t *testing.T) {
 		"--audit-id", "audit-xyz",
 		"--connector", "github://aileron/slack",
 		"--class", "binding_required",
+		"--output", "report.pdf",
+		"--content-hash", "sha256:cafe",
 		"--limit", "50",
 	}
 	code := run(args, newTestRegistry(), &stdout, &stderr)
@@ -7809,6 +7811,8 @@ func TestRunAudit_FlagsForwardedToFetcher(t *testing.T) {
 		seen.auditID != "audit-xyz" ||
 		seen.connector != "github://aileron/slack" ||
 		seen.class != "binding_required" ||
+		seen.output != "report.pdf" ||
+		seen.contentHash != "sha256:cafe" ||
 		seen.limit != 50 {
 		t.Errorf("query = %+v; some flags didn't reach fetcher", seen)
 	}
@@ -7891,6 +7895,44 @@ func TestRunAuditShow_HappyPath(t *testing.T) {
 	}
 	if got.AuditID != "audit-xyz" || got.EventType != "action.installed" {
 		t.Errorf("got = %+v", got)
+	}
+}
+
+// TestRunAuditShow_RendersFullMaterializedRecord locks the acceptance
+// guarantee that `audit show` renders the complete output.materialized
+// event, including every aileron.output.* provenance key, verbatim.
+func TestRunAuditShow_RendersFullMaterializedRecord(t *testing.T) {
+	prev := auditGetFetcher
+	auditGetFetcher = func(_ string) (*auditEventWire, int, error) {
+		return &auditEventWire{
+			AuditID:   "out-1",
+			EventType: "output.materialized",
+			Timestamp: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			Payload: map[string]any{
+				"aileron.output.name":         "report.pdf",
+				"aileron.output.content_hash": "sha256:cafe",
+				"aileron.output.path":         "/artifacts/report.pdf",
+				"aileron.output.mime":         "application/pdf",
+				"aileron.output.bytes":        1234,
+			},
+		}, http.StatusOK, nil
+	}
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show", "out-1"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, key := range []string{
+		"aileron.output.name",
+		"aileron.output.content_hash",
+		"aileron.output.path",
+	} {
+		if !strings.Contains(out, key) {
+			t.Errorf("rendered output missing %q; got:\n%s", key, out)
+		}
 	}
 }
 
@@ -8049,11 +8091,13 @@ func TestFetchAuditList_BuildsURL(t *testing.T) {
 	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
 
 	_, err := fetchAuditList(auditListQuery{
-		since:     "2026-05-01T00:00:00Z",
-		auditID:   "audit-x",
-		connector: "github://aileron/slack",
-		class:     "binding_required",
-		limit:     25,
+		since:       "2026-05-01T00:00:00Z",
+		auditID:     "audit-x",
+		connector:   "github://aileron/slack",
+		class:       "binding_required",
+		output:      "report.pdf",
+		contentHash: "sha256:cafe",
+		limit:       25,
 	})
 	if err != nil {
 		t.Fatalf("fetchAuditList: %v", err)
@@ -8063,6 +8107,8 @@ func TestFetchAuditList_BuildsURL(t *testing.T) {
 		"audit_id":      "audit-x",
 		"connector_fqn": "github://aileron/slack",
 		"class":         "binding_required",
+		"output_name":   "report.pdf",
+		"content_hash":  "sha256:cafe",
 		"limit":         "25",
 	} {
 		if got := sawQuery.Get(k); got != want {
