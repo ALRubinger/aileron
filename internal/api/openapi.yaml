@@ -6703,6 +6703,45 @@ components:
             as a tool result when the action runs through the gateway's
             intercept path. Typically a JSON document; may be plain
             prose for actions whose output is naturally a sentence.
+        connector_version:
+          type: string
+          description: |
+            Pinned semantic version of the connector that produced this
+            result, copied from the action manifest's
+            `[[requires.connectors]]` entry. Present when the action is
+            connector-backed. Part of the actor provenance a caller records
+            on an `output.materialized` event so an output digest walks back
+            to the exact connector build that produced it (issue #1753).
+        connector_hash:
+          type: string
+          description: |
+            Content hash (`sha256:<hex>`) of the connector binary plus its
+            manifest, copied from the action manifest's
+            `[[requires.connectors]]` entry. Present when the action is
+            connector-backed. Pairs with `connector_version` as the
+            actor-side content-addressed provenance for the produced output.
+        identity_label:
+          type: string
+          description: |
+            Non-secret identity label of the credential binding the action
+            resolved at the boundary (never the credential itself). Present
+            only when the action resolved a single credential binding;
+            omitted for a credential-less action or when no binding resolved.
+        credential_binding:
+          type: string
+          description: |
+            Name of the credential binding the action used at the boundary
+            (a reference, never the secret). Present only when a binding
+            resolved; omitted otherwise. Lets an audited output walk back to
+            the exact identity that authorized the read.
+        consent_decision:
+          type: string
+          description: |
+            Consent posture under which the action ran. Always `unattended`
+            on this synchronous 200 path: an approval-gated action returns
+            202 with an `ActionRunPendingResponse` and never reaches this
+            success shape, so a result surfaced here ran without an
+            interactive approval.
 
     ActionRunPendingResponse:
       type: object

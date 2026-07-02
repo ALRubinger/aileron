@@ -201,7 +201,19 @@ func (daemonDispatcher) Dispatch(ctx context.Context, ref string, args map[strin
 		if err := json.Unmarshal(raw, &out); err != nil {
 			return runtime.DispatchResult{}, fmt.Errorf("decode action result: %w", err)
 		}
-		return runtime.DispatchResult{Output: parseResultPayload(out.Result)}, nil
+		// Thread the daemon's non-secret actor provenance into the runtime so
+		// the per-output audit record can attribute the produced artifact to
+		// the exact connector build and identity (issue #1753). These are
+		// references only; credentials are injected host-side and never reach
+		// the dispatcher.
+		return runtime.DispatchResult{
+			Output:            parseResultPayload(out.Result),
+			ConnectorVersion:  out.ConnectorVersion,
+			ConnectorHash:     out.ConnectorHash,
+			IdentityLabel:     out.IdentityLabel,
+			CredentialBinding: out.CredentialBinding,
+			ConsentDecision:   out.ConsentDecision,
+		}, nil
 	case http.StatusAccepted:
 		return runtime.DispatchResult{}, fmt.Errorf("action %q requires approval; approve it (aileron approval list) and re-launch", ref)
 	default:

@@ -17,6 +17,30 @@ type DispatchResult struct {
 	// Output is the action's result payload, a JSON-shaped map the runtime
 	// binds downstream steps against and redacts before surfacing.
 	Output map[string]any
+
+	// The following carry the non-secret actor provenance the daemon
+	// surfaced on the action-run response (issue #1753). They are references
+	// (a version, a content hash, a label, a binding name, a consent
+	// posture), never credentials: the host injects credentials at the
+	// boundary and this SPI never sees them. Each is "" when the daemon did
+	// not populate it (a credential-less action, an unresolved binding).
+	// The runtime records them per dispatch so a materialized output's audit
+	// record walks back to the connector build and identity that produced it.
+
+	// ConnectorVersion is the pinned semantic version of the connector that
+	// produced the result.
+	ConnectorVersion string
+	// ConnectorHash is the connector's content hash (`sha256:<hex>`).
+	ConnectorHash string
+	// IdentityLabel is the non-secret identity label of the credential
+	// binding the action used, or "" when none resolved.
+	IdentityLabel string
+	// CredentialBinding is the name of the credential binding the action
+	// used (a reference, never the secret), or "" when none resolved.
+	CredentialBinding string
+	// ConsentDecision is the consent posture the action ran under
+	// (`unattended` on the synchronous read path), or "" when unset.
+	ConsentDecision string
 }
 
 // ActionDispatcher dispatches a declared action through the sealed action

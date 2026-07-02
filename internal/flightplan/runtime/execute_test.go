@@ -226,6 +226,58 @@ func TestExecute_CapturesMaterializedOutputProvenance(t *testing.T) {
 	}
 }
 
+func TestExecute_CapturesMaterializedOutputInputs(t *testing.T) {
+	// A materializing step captures the binding references and resolved values
+	// it executed against, for BOTH an action-call and a transform step, so the
+	// per-output audit record can walk back to the exact inputs (#1753).
+	p := fixturePlan()
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {
+			"path": "filed_issue.json", "mimeType": "application/json", "encoding": "utf-8",
+			"content": `{"url":"https://tracker.example.com/issues/1"}`,
+		},
+	}}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(_ map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{
+			"path": "digest.csv", "mimeType": "text/csv", "encoding": "utf-8", "content": "name\ncpu\n",
+		}}, nil
+	})
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: disp, approver: &fakeApprover{decision: Decision{Approved: true}}},
+		transform: reg,
+		seam:      fakeSeam{out: map[string]any{"issue_body": "A short digest."}},
+	}
+	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	byStep := map[string]materializedOutput{}
+	for _, o := range st.outputs {
+		byStep[o.StepID] = o
+	}
+
+	// Transform step render_csv binds series → steps.query_metrics.series.
+	csv := byStep["render_csv"]
+	if got := csv.Binds["series"].Raw; got != "steps.query_metrics.series" {
+		t.Errorf("render_csv binding source = %q, want steps.query_metrics.series", got)
+	}
+	if _, ok := csv.Resolved["series"]; !ok {
+		t.Error("render_csv resolved inputs must carry the resolved series value")
+	}
+
+	// Action-call step file_issue binds body → steps.summarize.issue_body.
+	issue := byStep["file_issue"]
+	if got := issue.Binds["body"].Raw; got != "steps.summarize.issue_body" {
+		t.Errorf("file_issue binding source = %q, want steps.summarize.issue_body", got)
+	}
+	if issue.Resolved["body"] != "A short digest." {
+		t.Errorf("file_issue resolved body = %v, want the seam output", issue.Resolved["body"])
+	}
+}
+
 func TestExecute_MultiOutputActionMissingFieldErrors(t *testing.T) {
 	p := &Plan{
 		Name:    "t",

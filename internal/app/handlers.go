@@ -1482,6 +1482,28 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		content := result.Content
 		resp.Result = &content
 	}
+	// Actor provenance (issue #1753). Surface the connector build and the
+	// non-secret identity/binding the executor used so a caller can record
+	// the walk-back from a materialized output's digest to the exact
+	// connector version+hash and identity that produced it. Each field is
+	// set only when the executor populated it (omitted, not guessed, for a
+	// credential-less action or an unresolved binding). Consent is
+	// `unattended` on this synchronous 200 path: an approval-gated action
+	// returns 202 above and never reaches this success shape.
+	if v := result.Provenance.ConnectorVersion; v != "" {
+		resp.ConnectorVersion = &v
+	}
+	if h := result.Provenance.ConnectorHash; h != "" {
+		resp.ConnectorHash = &h
+	}
+	if id := result.Provenance.IdentityLabel; id != "" {
+		resp.IdentityLabel = &id
+	}
+	if cb := result.Provenance.CredentialBinding; cb != "" {
+		resp.CredentialBinding = &cb
+	}
+	consent := "unattended"
+	resp.ConsentDecision = &consent
 	writeJSON(w, http.StatusOK, resp)
 }
 

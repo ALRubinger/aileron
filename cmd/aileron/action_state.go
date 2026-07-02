@@ -50,6 +50,17 @@ type actionRunRequest struct {
 type actionRunResponse struct {
 	AuditID string  `json:"audit_id"`
 	Result  *string `json:"result,omitempty"`
+
+	// Actor provenance the daemon surfaces on the 200 run response (issue
+	// #1753). Decoded here so the launch dispatcher can thread it into the
+	// runtime's DispatchResult and, from there, onto the per-output audit
+	// record. All references, never credentials; omitted by the daemon
+	// (and left "") for a credential-less action or an unresolved binding.
+	ConnectorVersion  string `json:"connector_version,omitempty"`
+	ConnectorHash     string `json:"connector_hash,omitempty"`
+	IdentityLabel     string `json:"identity_label,omitempty"`
+	CredentialBinding string `json:"credential_binding,omitempty"`
+	ConsentDecision   string `json:"consent_decision,omitempty"`
 }
 
 type actionRunPendingResponse struct {

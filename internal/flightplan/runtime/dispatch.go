@@ -38,6 +38,20 @@ type dispatchOutcome struct {
 	Approved bool
 	// ApprovalRequested reports whether the action routed through approval.
 	ApprovalRequested bool
+
+	// The following carry the non-secret actor provenance the dispatcher
+	// surfaced for this call (issue #1753): the connector build and the
+	// identity/binding it used, plus the consent posture. They are copied
+	// straight from the DispatchResult and recorded on the actionDispatch so
+	// a materialized output's audit record can attribute the produced
+	// artifact to the connector version+hash and identity that produced it.
+	// Zero on a deny or a dispatcher error, where no call reached a
+	// connector.
+	ConnectorVersion  string
+	ConnectorHash     string
+	IdentityLabel     string
+	CredentialBinding string
+	ConsentDecision   string
 }
 
 // dispatch runs one action through the enforcement pipeline. action is the
@@ -94,6 +108,16 @@ func (e *enforcer) dispatch(ctx context.Context, callID string, action Action, a
 	// Redaction runs on the dispatch result BEFORE it enters the graph or any
 	// audit summary (#1507). The original result is never surfaced unredacted.
 	out.Result = applyRedaction(res.Output, tc.Redaction)
+	// Carry the non-secret actor provenance the dispatcher surfaced (issue
+	// #1753) so the recorded dispatch can attribute a materialized output to
+	// the connector build and identity that produced it. Redaction does not
+	// touch these: they are references (version, hash, label, binding name,
+	// consent), never dataset fields.
+	out.ConnectorVersion = res.ConnectorVersion
+	out.ConnectorHash = res.ConnectorHash
+	out.IdentityLabel = res.IdentityLabel
+	out.CredentialBinding = res.CredentialBinding
+	out.ConsentDecision = res.ConsentDecision
 	return out, nil
 }
 

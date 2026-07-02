@@ -8,10 +8,13 @@ import (
 
 // fakeDispatcher records calls and returns a canned result. It is the action
 // boundary stand-in; secrets never reach it because bindings are references.
+// provenance, when set, is copied onto the returned DispatchResult so tests can
+// assert the enforcer threads the daemon's actor provenance through (#1753).
 type fakeDispatcher struct {
-	calls   []dispatchCall
-	result  map[string]any
-	failErr error
+	calls      []dispatchCall
+	result     map[string]any
+	failErr    error
+	provenance DispatchResult
 }
 
 type dispatchCall struct {
@@ -28,7 +31,14 @@ func (f *fakeDispatcher) Dispatch(_ context.Context, ref string, args map[string
 	if res == nil {
 		res = map[string]any{"ok": true}
 	}
-	return DispatchResult{Output: res}, nil
+	return DispatchResult{
+		Output:            res,
+		ConnectorVersion:  f.provenance.ConnectorVersion,
+		ConnectorHash:     f.provenance.ConnectorHash,
+		IdentityLabel:     f.provenance.IdentityLabel,
+		CredentialBinding: f.provenance.CredentialBinding,
+		ConsentDecision:   f.provenance.ConsentDecision,
+	}, nil
 }
 
 // fakeApprover returns a fixed decision and records the requests it saw.
@@ -184,5 +194,50 @@ func TestDispatch_DispatcherErrorSurfaces(t *testing.T) {
 	e := &enforcer{dispatcher: disp, approver: &fakeApprover{}}
 	if _, err := e.dispatch(context.Background(), "test", readAction("aileron:m.read"), nil, 1); err == nil {
 		t.Fatal("a dispatcher error must surface")
+	}
+}
+
+func TestDispatch_CarriesActorProvenance(t *testing.T) {
+	// The enforcer threads the daemon's non-secret actor provenance from the
+	// DispatchResult onto the dispatchOutcome so the recorded dispatch can
+	// attribute a materialized output to the connector build and identity
+	// that produced it (#1753).
+	disp := &fakeDispatcher{provenance: DispatchResult{
+		ConnectorVersion:  "2.3.1",
+		ConnectorHash:     "sha256:conn",
+		IdentityLabel:     "work",
+		CredentialBinding: "aws_sigv4/athena/work",
+		ConsentDecision:   "unattended",
+	}}
+	e := &enforcer{dispatcher: disp, approver: &fakeApprover{}}
+	out, err := e.dispatch(context.Background(), "test", readAction("aileron:athena.query"), nil, 1)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if out.ConnectorVersion != "2.3.1" || out.ConnectorHash != "sha256:conn" {
+		t.Errorf("connector build = %q/%q, want 2.3.1/sha256:conn", out.ConnectorVersion, out.ConnectorHash)
+	}
+	if out.IdentityLabel != "work" || out.CredentialBinding != "aws_sigv4/athena/work" {
+		t.Errorf("identity/binding = %q/%q", out.IdentityLabel, out.CredentialBinding)
+	}
+	if out.ConsentDecision != "unattended" {
+		t.Errorf("consent = %q, want unattended", out.ConsentDecision)
+	}
+}
+
+func TestDispatch_DenyLeavesProvenanceZero(t *testing.T) {
+	// A denied action never reaches a connector, so the outcome carries no
+	// actor provenance — the zero value, not a stale/guessed one.
+	disp := &fakeDispatcher{provenance: DispatchResult{IdentityLabel: "should-not-appear"}}
+	app := &fakeApprover{decision: Decision{Approved: false, Reason: "no"}}
+	del := Action{Ref: "aileron:t.delete", TrustContract: TrustContract{Effect: EffectDelete, Hosts: []string{"h"}}}
+	e := &enforcer{dispatcher: disp, approver: app}
+	out, err := e.dispatch(context.Background(), "test", del, nil, 1)
+	var de *DenyError
+	if !errors.As(err, &de) {
+		t.Fatalf("a denied delete must return a *DenyError, got %v", err)
+	}
+	if out.IdentityLabel != "" || out.ConnectorVersion != "" || out.CredentialBinding != "" {
+		t.Errorf("a denied action must leave actor provenance zero, got %+v", out)
 	}
 }

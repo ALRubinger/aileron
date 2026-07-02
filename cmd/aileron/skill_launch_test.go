@@ -406,6 +406,38 @@ func TestDaemonDispatcher_OKResult(t *testing.T) {
 	}
 }
 
+func TestDaemonDispatcher_SurfacesActorProvenance(t *testing.T) {
+	// The daemon's 200 run response carries actor provenance (#1753); the
+	// launch dispatcher threads it onto the runtime DispatchResult so a
+	// materialized output's audit record can attribute the connector build
+	// and identity that produced it.
+	withDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"audit_id":"a1",
+			"result":"{\"QueryExecutionId\":\"qeid-1\"}",
+			"connector_version":"2.3.1",
+			"connector_hash":"sha256:conn",
+			"identity_label":"work",
+			"credential_binding":"aws_sigv4/athena/work",
+			"consent_decision":"unattended"
+		}`))
+	})
+	res, err := daemonDispatcher{}.Dispatch(context.Background(), "aileron:athena.query", nil)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if res.ConnectorVersion != "2.3.1" || res.ConnectorHash != "sha256:conn" {
+		t.Errorf("connector build = %q/%q, want 2.3.1/sha256:conn", res.ConnectorVersion, res.ConnectorHash)
+	}
+	if res.IdentityLabel != "work" || res.CredentialBinding != "aws_sigv4/athena/work" {
+		t.Errorf("identity/binding = %q/%q", res.IdentityLabel, res.CredentialBinding)
+	}
+	if res.ConsentDecision != "unattended" {
+		t.Errorf("consent = %q, want unattended", res.ConsentDecision)
+	}
+}
+
 func TestDaemonDispatcher_PendingApprovalErrors(t *testing.T) {
 	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
@@ -722,6 +754,109 @@ func TestRunSkillLaunch_InProcessEmitsOutputMaterializedPerArtifact(t *testing.T
 	// step; both kinds must be represented.
 	if !kinds["transform"] || !kinds["action-call"] {
 		t.Errorf("output step kinds = %v, want both transform and action-call", kinds)
+	}
+}
+
+// TestRunSkillLaunch_OutputMaterializedCarriesActorProvenanceEndToEnd is the
+// #1753 full-chain acceptance through the launch orchestration with a fake
+// daemon: the daemon returns actor provenance on the query action-call run
+// response, and the transform-materialized output.materialized event walks that
+// actor back through its upstream binding — surfacing the connector build and
+// identity, the step.inputs content_hash, and the consent decision on the same
+// record that already carried the output digest and plan identity.
+func TestRunSkillLaunch_OutputMaterializedCarriesActorProvenanceEndToEnd(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeNoImageForLaunch(t, storeDir)
+
+	var mu sync.Mutex
+	byOutputName := map[string]map[string]any{}
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusOK)
+			if strings.Contains(r.URL.Path, "query_series") {
+				// The read action-call carries the actor provenance the daemon
+				// resolved: a single-connector, single-identity Athena-style read.
+				_, _ = w.Write([]byte(`{
+					"result":"{\"path\":\"digest.csv\",\"mimeType\":\"text/csv\",\"encoding\":\"utf-8\",\"content\":\"name\\ncpu\\n\"}",
+					"connector_version":"2.3.1",
+					"connector_hash":"sha256:conn",
+					"identity_label":"work",
+					"credential_binding":"aws_sigv4/athena/work",
+					"consent_decision":"unattended"
+				}`))
+			} else {
+				_, _ = w.Write([]byte(`{"result":"{\"path\":\"filed_issue.json\",\"mimeType\":\"application/json\",\"encoding\":\"utf-8\",\"content\":\"{}\"}"}`))
+			}
+		case r.URL.Path == "/v1/audit" && r.Method == http.MethodPost:
+			var body auditIngestRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.EventType == string(model.EventTypeOutputMaterialized) {
+				name, _ := body.Payload["aileron.output.name"].(string)
+				mu.Lock()
+				byOutputName[name] = body.Payload
+				mu.Unlock()
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"audit_id":"audit-landed"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	stubLaunchSeams(t, daemonDispatcher{}, true)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origRun := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The transform output digest.csv binds the query action-call's output, so
+	// its record walks the actor back to that read's identity + connector build.
+	csv, ok := byOutputName["digest.csv"]
+	if !ok {
+		t.Fatalf("no output.materialized for digest.csv; saw %v", byOutputName)
+	}
+	if csv["aileron.actor.identity_label"] != "work" {
+		t.Errorf("actor.identity_label = %v, want work (walked back from upstream query)", csv["aileron.actor.identity_label"])
+	}
+	if csv["aileron.actor.credential_binding"] != "aws_sigv4/athena/work" {
+		t.Errorf("actor.credential_binding = %v", csv["aileron.actor.credential_binding"])
+	}
+	if csv["aileron.actor.connector_version"] != "2.3.1" || csv["aileron.actor.connector_hash"] != "sha256:conn" {
+		t.Errorf("actor connector build = %v/%v", csv["aileron.actor.connector_version"], csv["aileron.actor.connector_hash"])
+	}
+	if csv["aileron.consent.decision"] != "unattended" {
+		t.Errorf("consent.decision = %v, want unattended", csv["aileron.consent.decision"])
+	}
+	// The step.inputs walk-back is present with a content_hash for the bound
+	// upstream value (JSON round-trips the []map to []any).
+	inputs, ok := csv["aileron.step.inputs"].([]any)
+	if !ok || len(inputs) == 0 {
+		t.Fatalf("step.inputs = %v, want at least one entry", csv["aileron.step.inputs"])
+	}
+	entry, _ := inputs[0].(map[string]any)
+	if entry["source"] != "steps.query_metrics.series" {
+		t.Errorf("step.inputs[0].source = %v, want steps.query_metrics.series", entry["source"])
+	}
+	if ch, _ := entry["content_hash"].(string); !strings.HasPrefix(ch, "sha256:") {
+		t.Errorf("step.inputs[0].content_hash = %v, want a sha256: digest", entry["content_hash"])
+	}
+	// The record still carries the output digest and plan identity: the full
+	// chain lives on one event.
+	if ch, _ := csv["aileron.output.content_hash"].(string); !strings.Contains(stdout.String(), ch) {
+		t.Errorf("output content_hash %q not present in launch stdout", csv["aileron.output.content_hash"])
+	}
+	if csv["aileron.plan.signature_status"] != "verified" {
+		t.Errorf("plan.signature_status = %v, want verified", csv["aileron.plan.signature_status"])
 	}
 }
 

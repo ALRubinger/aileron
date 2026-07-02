@@ -39,6 +39,19 @@ type materializedOutput struct {
 	Transform string
 	// Artifact is the materialized artifact (name, mime, content, digest).
 	Artifact Artifact
+	// Binds is the producing step's binding reference map (input name →
+	// Binding), captured at materialize time. It is the reference half of the
+	// input walk-back the per-output audit record emits (issue #1753): each
+	// Binding names where the value came from (an input or a prior step
+	// output) without inlining the value.
+	Binds map[string]Binding
+	// Resolved is the producing step's resolved binding values (input name →
+	// value), captured at materialize time. Paired with Binds it lets the
+	// audit record hash each bound value (content_hash) and lift a
+	// QueryExecutionId when present, so a materialized output walks back to
+	// the exact inputs that produced it — by hash, never by inlining the
+	// dataset.
+	Resolved map[string]any
 }
 
 // actionDispatch records one action-call's enforced outcome for the audit.
@@ -51,6 +64,20 @@ type actionDispatch struct {
 	Result            map[string]any
 	AuditFields       []string
 	Sink              string
+
+	// The following carry the non-secret actor provenance the dispatcher
+	// surfaced for this call (issue #1753): the connector build and the
+	// identity/binding it used, plus the consent posture. They let a
+	// materialized output's audit record attribute the produced artifact to
+	// the connector version+hash and identity that produced it, whether the
+	// materializing step is this action-call itself or a downstream transform
+	// that binds this step's output. Zero when the daemon did not populate
+	// them (a credential-less action, an unresolved binding, a deny).
+	ConnectorVersion  string
+	ConnectorHash     string
+	IdentityLabel     string
+	CredentialBinding string
+	ConsentDecision   string
 }
 
 // executor walks the topologically-ordered step graph. It has EXACTLY three
@@ -133,6 +160,13 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 				StepKind:  step.Kind,
 				Transform: step.Transform,
 				Artifact:  art,
+				// Capture the producing step's binding references and their
+				// resolved values so the per-output audit record can walk back
+				// to the exact inputs (issue #1753). `resolved` is the same
+				// name→value map the step just executed against, so the audited
+				// inputs are precisely what produced this artifact.
+				Binds:    step.binds(),
+				Resolved: resolved,
 			})
 		}
 	}
@@ -155,6 +189,15 @@ func (x *executor) runActionCall(ctx context.Context, step Step, args map[string
 		Result:            outcome.Result,
 		AuditFields:       action.TrustContract.Audit.Fields,
 		Sink:              action.TrustContract.Audit.Sink,
+		// Carry the actor provenance the dispatcher surfaced (issue #1753) so
+		// a materialized output produced by this step — or by a downstream
+		// transform binding it — can attribute the connector build and
+		// identity that produced it.
+		ConnectorVersion:  outcome.ConnectorVersion,
+		ConnectorHash:     outcome.ConnectorHash,
+		IdentityLabel:     outcome.IdentityLabel,
+		CredentialBinding: outcome.CredentialBinding,
+		ConsentDecision:   outcome.ConsentDecision,
 	}
 	st.dispatches = append(st.dispatches, rec)
 	if err != nil {
