@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,15 @@ import (
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/model"
 )
+
+// failingAppendStore embeds a MemStore but forces Append to fail, so the
+// ingest path can be exercised when the durable write does not commit.
+type failingAppendStore struct {
+	*audit.MemStore
+	err error
+}
+
+func (f failingAppendStore) Append(context.Context, audit.Event) error { return f.err }
 
 // Audit handler contract:
 //   - GET /v1/audit returns events newest-first as AuditListResponse.
@@ -232,7 +242,7 @@ func TestGetAudit_FoundReturnsEvent(t *testing.T) {
 	if got.EventType != string(model.EventTypeActionInstalled) {
 		t.Errorf("EventType = %q", got.EventType)
 	}
-	if got.Actor.Id != "user" || got.Actor.Type != string(model.ActorTypeHuman) {
+	if got.Actor.Id != "user" || got.Actor.Type != api.ActorRefType(model.ActorTypeHuman) {
 		t.Errorf("Actor = %+v", got.Actor)
 	}
 	if got.Payload["aileron.action.name"] != "ship-update" {
@@ -325,11 +335,42 @@ func TestCreateAudit_AppendsAndIsReadable(t *testing.T) {
 	if got.EventType != "flightplan.launch.action" {
 		t.Errorf("EventType = %q", got.EventType)
 	}
-	if got.Actor.Type != string(model.ActorTypeService) || got.Actor.Id != "flightplan-launch" {
+	if got.Actor.Type != api.ActorRefType(model.ActorTypeService) || got.Actor.Id != "flightplan-launch" {
 		t.Errorf("Actor = %+v", got.Actor)
 	}
 	if got.Payload["actionRef"] != "aileron:metrics.query_series" {
 		t.Errorf("Payload[actionRef] = %v", got.Payload["actionRef"])
+	}
+}
+
+// TestAuditEvent_ActorSharesActorRefEnum proves the read model's actor is
+// the shared, enum-typed ActorRef schema (reconciled with the ingest
+// request side): a persisted actor.type round-trips as a known
+// ActorRefType member rather than a bare string.
+func TestAuditEvent_ActorSharesActorRefEnum(t *testing.T) {
+	srv, _ := newAuditWriteServer(t)
+	body := `{"event_type":"flightplan.launch","actor":{"type":"agent","id":"claude"},"payload":{}}`
+	w := httptest.NewRecorder()
+	srv.CreateAudit(w, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", w.Code, w.Body.String())
+	}
+	var resp api.AuditIngestResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	getW := httptest.NewRecorder()
+	srv.GetAudit(getW, httptest.NewRequest(http.MethodGet, "/v1/audit/"+resp.AuditId, nil), resp.AuditId)
+	var got api.AuditEvent
+	if err := json.Unmarshal(getW.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode read-back: %v", err)
+	}
+	if got.Actor.Type != api.Agent {
+		t.Errorf("Actor.Type = %q, want the api.Agent enum member", got.Actor.Type)
+	}
+	if !got.Actor.Type.Valid() {
+		t.Errorf("Actor.Type %q is not a known ActorRefType member", got.Actor.Type)
 	}
 }
 
@@ -359,6 +400,24 @@ func TestCreateAudit_MissingEventTypeRejected(t *testing.T) {
 	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCreateAudit_AppendFailureReturns500 proves the ingest path no
+// longer acknowledges a write that never committed: when the recorder's
+// store append fails, CreateAudit returns 500 rather than a false 201.
+func TestCreateAudit_AppendFailureReturns500(t *testing.T) {
+	store := failingAppendStore{MemStore: audit.NewMemStore(), err: errors.New("disk full")}
+	srv := &apiServer{
+		log:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		auditStore:    store,
+		auditRecorder: audit.NewRecorder(store, nil, nil),
+	}
+	body := `{"event_type":"flightplan.launch","actor":{"type":"service","id":"x"},"payload":{}}`
+	rec := httptest.NewRecorder()
+	srv.CreateAudit(rec, httptest.NewRequest(http.MethodPost, "/v1/audit", strings.NewReader(body)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

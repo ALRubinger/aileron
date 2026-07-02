@@ -2,6 +2,7 @@ package audit_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,16 @@ import (
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/model"
 )
+
+// failingAppendStore embeds a MemStore but forces Append to fail, so the
+// recorder's persistence-outcome behavior can be exercised: RecordEvent
+// must surface the error while RecordSuccess must swallow it.
+type failingAppendStore struct {
+	*audit.MemStore
+	err error
+}
+
+func (f failingAppendStore) Append(context.Context, audit.Event) error { return f.err }
 
 // Recorder contract:
 //   - RecordFailure mints an audit_id, stamps it on the failure, and
@@ -19,7 +30,9 @@ import (
 //     OTel-aligned audit schema (issue #390 Phase 6.5).
 //   - RecordSuccess appends an event with the given type/payload.
 //   - Clock and idFn are injectable for deterministic tests.
-//   - Store.Append errors are swallowed (best-effort audit per ADR-0010).
+//   - RecordSuccess swallows Store.Append errors (best-effort action
+//     audit per ADR-0010); RecordEvent surfaces them so the ingest path
+//     can return a non-2xx on a failed durable write.
 
 type fixedClock struct{ t time.Time }
 
@@ -100,6 +113,48 @@ func TestRecordSuccess_AppendsEvent(t *testing.T) {
 	}
 	if ev.Payload["tool"] != "ship_update" {
 		t.Errorf("payload.tool = %v", ev.Payload["tool"])
+	}
+}
+
+func TestRecordEvent_SurfacesAppendError(t *testing.T) {
+	want := errors.New("append failed")
+	r := audit.NewRecorder(failingAppendStore{MemStore: audit.NewMemStore(), err: want}, nil, nil)
+	id, err := r.RecordEvent(context.Background(),
+		model.EventTypeIntentSubmitted, model.ActorRef{}, nil)
+	if id == "" {
+		t.Error("RecordEvent should still mint an id even when the append fails")
+	}
+	if !errors.Is(err, want) {
+		t.Errorf("err = %v, want %v", err, want)
+	}
+}
+
+func TestRecordEvent_SuccessReturnsIDAndNilError(t *testing.T) {
+	store, r, _ := newRecorderWithMem(t)
+	id, err := r.RecordEvent(context.Background(),
+		model.EventTypeToolCallIntercepted,
+		model.ActorRef{ID: "aileron", Type: model.ActorTypeService},
+		map[string]any{"tool": "ship_update"},
+	)
+	if err != nil {
+		t.Fatalf("RecordEvent returned error on a durable append: %v", err)
+	}
+	if _, ok := store.GetByEventID(id); !ok {
+		t.Fatalf("event %q not persisted", id)
+	}
+}
+
+// TestRecordSuccess_SwallowsAppendError proves the fire-and-forget
+// action-audit contract (ADR-0010) survives: a failed store append does
+// not stop RecordSuccess from minting and returning an id.
+func TestRecordSuccess_SwallowsAppendError(t *testing.T) {
+	r := audit.NewRecorder(
+		failingAppendStore{MemStore: audit.NewMemStore(), err: errors.New("append failed")},
+		nil, nil)
+	id := r.RecordSuccess(context.Background(),
+		model.EventTypeIntentSubmitted, model.ActorRef{}, nil)
+	if id == "" {
+		t.Error("RecordSuccess should still mint an id despite the swallowed append error")
 	}
 }
 

@@ -75,8 +75,9 @@ func (s *apiServer) GetAudit(w http.ResponseWriter, _ *http.Request, auditID str
 //
 // The generated std-http server does no runtime schema validation, so the
 // handler enforces the contract: an unknown `actor.type` is rejected with
-// 400, and a missing audit subsystem returns 503 (a write that must
-// persist cannot be silently acknowledged).
+// 400, a missing audit subsystem returns 503, and a store append that
+// fails returns 500 (a write that must persist cannot be silently
+// acknowledged). 201 is emitted only after the append durably commits.
 func (s *apiServer) CreateAudit(w http.ResponseWriter, r *http.Request) {
 	if s.auditRecorder == nil || s.auditStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "audit_unavailable",
@@ -106,7 +107,16 @@ func (s *apiServer) CreateAudit(w http.ResponseWriter, r *http.Request) {
 		payload = map[string]any{}
 	}
 	actor := model.ActorRef{Type: actorType, ID: req.Actor.Id}
-	id := s.auditRecorder.RecordSuccess(r.Context(), model.EventType(req.EventType), actor, payload)
+	id, err := s.auditRecorder.RecordEvent(r.Context(), model.EventType(req.EventType), actor, payload)
+	if err != nil {
+		// The ingest path surfaces the append error rather than
+		// swallowing it (as the fire-and-forget action-audit recorders
+		// do): 201 is reserved for a durable append, so a failed write
+		// returns 500 and the event is never falsely acknowledged.
+		writeError(w, http.StatusInternalServerError, "audit_append_failed",
+			"failed to persist the audit event: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusCreated, api.AuditIngestResponse{AuditId: id})
 }
 
@@ -141,7 +151,7 @@ func toAPIAuditEvent(e audit.Event) api.AuditEvent {
 		Timestamp: e.Timestamp,
 		Payload:   payload,
 	}
-	out.Actor.Type = string(e.Actor.Type)
+	out.Actor.Type = api.ActorRefType(e.Actor.Type)
 	out.Actor.Id = e.Actor.ID
 	return out
 }
