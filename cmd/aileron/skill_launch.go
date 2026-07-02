@@ -297,6 +297,18 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 			// empty record posts an object payload rather than a JSON null.
 			payload = map[string]any{}
 		}
+	case runtime.RecordKindReach:
+		// A declared-reach record (#1784) carries the same flat `aileron.*`
+		// payload treatment as an output record: the reach attributes surface as
+		// top-level keys (including `aileron.reach.enforced: false`), not nested
+		// under `fields`. It is audit-only and enforces nothing.
+		eventType = string(model.EventTypeFlightPlanLaunchReach)
+		payload = rec.Fields
+		if payload == nil {
+			// A well-formed reach record always carries fields, but guard so an
+			// empty record posts an object payload rather than a JSON null.
+			payload = map[string]any{}
+		}
 	case runtime.RecordKindAction:
 		eventType = string(model.EventTypeFlightPlanLaunchAction)
 		payload = actionOrLaunchPayload(rec)

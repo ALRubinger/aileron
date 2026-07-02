@@ -488,3 +488,122 @@ func containsValue(v any, want string) bool {
 	}
 	return false
 }
+
+// --- Unit 3 (#1784): declared-reach record build + emit ---
+
+// TestBuildReachRecord_CarriesDeclaredReachAndNotEnforcedMarker proves
+// buildReachRecord produces a RecordKindReach record whose flat aileron.* fields
+// carry the step id, effect, hosts, and the fixed `aileron.reach.enforced: false`
+// marker that states the declaration is audit-only.
+func TestBuildReachRecord_CarriesDeclaredReachAndNotEnforcedMarker(t *testing.T) {
+	rec := buildReachRecord(reachRecord{
+		StepID: "extract",
+		Effect: EffectExternalSend,
+		Hosts:  []string{"api.example.com", "cdn.example.com"},
+	})
+	if rec.Kind != RecordKindReach {
+		t.Fatalf("kind = %v, want RecordKindReach", rec.Kind)
+	}
+	if rec.Fields["aileron.step.id"] != "extract" {
+		t.Errorf("step id = %v, want extract", rec.Fields["aileron.step.id"])
+	}
+	if rec.Fields["aileron.reach.effect"] != "external-send" {
+		t.Errorf("effect = %v, want external-send", rec.Fields["aileron.reach.effect"])
+	}
+	hosts, ok := rec.Fields["aileron.reach.hosts"].([]string)
+	if !ok || len(hosts) != 2 || hosts[0] != "api.example.com" || hosts[1] != "cdn.example.com" {
+		t.Errorf("hosts = %v, want the two declared hosts", rec.Fields["aileron.reach.hosts"])
+	}
+	enforced, ok := rec.Fields["aileron.reach.enforced"].(bool)
+	if !ok || enforced {
+		t.Errorf("enforced = %v, want literal false (the not-enforced marker)", rec.Fields["aileron.reach.enforced"])
+	}
+}
+
+// TestBuildReachRecord_EmptyHostsStillEnforcedFalse proves the enforced marker is
+// always present and false even for a contract with no declared hosts.
+func TestBuildReachRecord_EmptyHostsStillEnforcedFalse(t *testing.T) {
+	rec := buildReachRecord(reachRecord{StepID: "s", Effect: EffectRead, Hosts: nil})
+	if v, ok := rec.Fields["aileron.reach.enforced"].(bool); !ok || v {
+		t.Errorf("enforced = %v, want false", rec.Fields["aileron.reach.enforced"])
+	}
+	if rec.Fields["aileron.reach.effect"] != "read" {
+		t.Errorf("effect = %v, want read", rec.Fields["aileron.reach.effect"])
+	}
+}
+
+// TestEmitAudit_OneReachRecordPerReachEntry proves emitAudit emits exactly one
+// RecordKindReach per st.reaches entry, in order, and returns one id per record
+// including the dispatch, output, and launch records.
+func TestEmitAudit_OneReachRecordPerReachEntry(t *testing.T) {
+	st := execState{
+		inputs: ResolvedInputs{SourceBindings: map[string]SourceBinding{}},
+		dispatches: []actionDispatch{
+			{StepID: "call", ActionRef: "aileron:m.read", Effect: EffectRead},
+		},
+		reaches: []reachRecord{
+			{StepID: "extract", Effect: EffectExternalSend, Hosts: []string{"a.example.com"}},
+			{StepID: "publish", Effect: EffectRead, Hosts: []string{"b.example.com"}},
+		},
+		outputs: []materializedOutput{
+			{StepID: "render", StepKind: KindTransform, Transform: "html-render",
+				Artifact: Artifact{Name: "d.csv", Content: []byte("x"), Digest: "sha256:1"}},
+		},
+	}
+	sink := &recordingSink{}
+	ids := emitAudit(context.Background(), sink, st, launchProvenance{InvocationID: "inv"})
+
+	var reachRecords, actionRecords, outputRecords, launchRecords int
+	var reachStepOrder []string
+	for _, r := range sink.records {
+		switch r.Kind {
+		case RecordKindReach:
+			reachRecords++
+			reachStepOrder = append(reachStepOrder, r.Fields["aileron.step.id"].(string))
+		case RecordKindAction:
+			actionRecords++
+		case RecordKindOutput:
+			outputRecords++
+		case RecordKindLaunch:
+			launchRecords++
+		}
+	}
+	if reachRecords != 2 {
+		t.Errorf("reach records = %d, want 2 (one per st.reaches entry)", reachRecords)
+	}
+	if len(reachStepOrder) != 2 || reachStepOrder[0] != "extract" || reachStepOrder[1] != "publish" {
+		t.Errorf("reach records out of order: %v, want [extract publish]", reachStepOrder)
+	}
+	if actionRecords != 1 || outputRecords != 1 || launchRecords != 1 {
+		t.Errorf("other records action=%d output=%d launch=%d, want 1/1/1", actionRecords, outputRecords, launchRecords)
+	}
+	if len(ids) != len(sink.records) {
+		t.Errorf("emitAudit returned %d ids for %d records", len(ids), len(sink.records))
+	}
+}
+
+// TestEmitAudit_NoReachesEmitsNoReachRecords proves an execState with no reaches
+// emits no reach records (only the existing dispatch/output/launch records).
+func TestEmitAudit_NoReachesEmitsNoReachRecords(t *testing.T) {
+	st := execState{
+		inputs:  ResolvedInputs{SourceBindings: map[string]SourceBinding{}},
+		outputs: []materializedOutput{{StepID: "render", StepKind: KindTransform, Artifact: Artifact{Digest: "sha256:1"}}},
+	}
+	sink := &recordingSink{}
+	emitAudit(context.Background(), sink, st, launchProvenance{})
+	for _, r := range sink.records {
+		if r.Kind == RecordKindReach {
+			t.Fatalf("emitted a reach record for a plan with no reaches")
+		}
+	}
+}
+
+// TestEmitAudit_NilSinkEmitsNothingWithReaches proves the nil-sink short-circuit
+// covers reach: a nil sink emits nothing and returns no ids even when reaches
+// are present.
+func TestEmitAudit_NilSinkEmitsNothingWithReaches(t *testing.T) {
+	st := execState{reaches: []reachRecord{{StepID: "extract", Effect: EffectRead}}}
+	if ids := emitAudit(context.Background(), nil, st, launchProvenance{}); ids != nil {
+		t.Errorf("nil sink returned ids = %v, want nil", ids)
+	}
+}

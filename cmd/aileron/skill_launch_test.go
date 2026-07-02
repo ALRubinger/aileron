@@ -605,6 +605,51 @@ func TestDaemonAuditSink_PostsOutputMaterializedFlatPayload(t *testing.T) {
 	}
 }
 
+// TestDaemonAuditSink_PostsReachFlatPayload proves a RecordKindReach record
+// (#1784) maps to the flightplan.launch.reach event type and surfaces its flat
+// aileron.* map as the top-level payload (no "fields" nesting), including the
+// literal not-enforced marker `aileron.reach.enforced: false`.
+func TestDaemonAuditSink_PostsReachFlatPayload(t *testing.T) {
+	var gotBody auditIngestRequest
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"audit_id":"audit-reach"}`))
+	})
+
+	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+		Kind: runtime.RecordKindReach,
+		Fields: map[string]any{
+			"aileron.step.id":        "extract",
+			"aileron.reach.effect":   "external-send",
+			"aileron.reach.hosts":    []string{"api.example.com"},
+			"aileron.reach.enforced": false,
+		},
+	})
+	if id != "audit-reach" {
+		t.Errorf("Record returned %q, want audit-reach", id)
+	}
+	if gotBody.EventType != string(model.EventTypeFlightPlanLaunchReach) {
+		t.Errorf("event_type = %q, want %q", gotBody.EventType, model.EventTypeFlightPlanLaunchReach)
+	}
+	// The flat aileron.* keys are top-level payload attributes, not nested under
+	// "fields".
+	if _, nested := gotBody.Payload["fields"]; nested {
+		t.Errorf("reach payload must be flat, not nested under fields: %+v", gotBody.Payload)
+	}
+	if gotBody.Payload["aileron.step.id"] != "extract" {
+		t.Errorf("payload.aileron.step.id = %v, want extract", gotBody.Payload["aileron.step.id"])
+	}
+	if gotBody.Payload["aileron.reach.effect"] != "external-send" {
+		t.Errorf("payload.aileron.reach.effect = %v, want external-send", gotBody.Payload["aileron.reach.effect"])
+	}
+	// The not-enforced marker must survive round-trip as a literal false.
+	enforced, ok := gotBody.Payload["aileron.reach.enforced"].(bool)
+	if !ok || enforced {
+		t.Errorf("payload.aileron.reach.enforced = %v, want literal false", gotBody.Payload["aileron.reach.enforced"])
+	}
+}
+
 // TestDaemonAuditSink_Non201LogsAndReturnsEmpty proves a non-201 daemon reply
 // is best-effort: the sink logs to stderr and returns "" rather than failing
 // the launch.

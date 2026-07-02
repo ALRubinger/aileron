@@ -60,6 +60,25 @@ func buildActionRecord(d actionDispatch) AuditRecord {
 	return AuditRecord{Kind: RecordKindAction, ActionRef: d.ActionRef, Fields: fields, Sink: d.Sink}
 }
 
+// buildReachRecord builds one per-rung-3-dispatch declared-reach record (#1784)
+// from a captured reachRecord. The flat `aileron.*` field map carries the
+// dispatching step's id, the declared operation effect, the declared reachable
+// hosts, and the literal `aileron.reach.enforced: false` marker. That marker is
+// the point of the record: it states the declaration is surfaced for audit and
+// is NOT enforced (egress stays passthrough; the credential is injected per host
+// binding). `enforced` is always present and always false.
+func buildReachRecord(r reachRecord) AuditRecord {
+	return AuditRecord{
+		Kind: RecordKindReach,
+		Fields: map[string]any{
+			"aileron.step.id":        r.StepID,
+			"aileron.reach.effect":   string(r.Effect),
+			"aileron.reach.hosts":    r.Hosts,
+			"aileron.reach.enforced": false,
+		},
+	}
+}
+
 // signatureStatusVerified is the single `aileron.plan.signature_status` value
 // the runtime records. Reaching runPlan means LoadVerified → freeze.VerifyFrozen
 // succeeded (both the ed25519 signature and the content-hash gate passed), so a
@@ -84,11 +103,12 @@ type launchProvenance struct {
 	InvocationID string
 }
 
-// emitAudit records every per-action audit record, then one output.materialized
-// record per materialized artifact, then one per-launch summary record through
-// the sink, returning the minted record ids in order. The sink is the
-// customer-owned audit store (wired by the CLI). A nil sink emits nothing and
-// returns no ids.
+// emitAudit records every per-action audit record, then one declared-reach
+// record per rung-3 dispatch that carried a trust contract (#1784), then one
+// output.materialized record per materialized artifact, then one per-launch
+// summary record through the sink, returning the minted record ids in order.
+// The sink is the customer-owned audit store (wired by the CLI). A nil sink
+// emits nothing and returns no ids.
 func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchProvenance) []string {
 	if sink == nil {
 		return nil
@@ -96,6 +116,12 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchPro
 	var ids []string
 	for _, d := range st.dispatches {
 		ids = append(ids, sink.Record(ctx, buildActionRecord(d)))
+	}
+	// One declared-reach record per rung-3 dispatch that carried a trust
+	// contract (#1784). Audit-only: each record is marked `enforced:false`; no
+	// host is bound or blocked from it.
+	for _, r := range st.reaches {
+		ids = append(ids, sink.Record(ctx, buildReachRecord(r)))
 	}
 	// Index the dispatches by producing step id so an output record can resolve
 	// the actor for its materializing step (an action-call attributes its own
