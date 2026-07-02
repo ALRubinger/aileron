@@ -35,7 +35,13 @@ var newLaunchImageRunner = func() runtime.ImageRunner { return containerImageRun
 // collect I/O (#1733). It is a package-level seam so CLI tests swap in a fake
 // that records the pinned image and mount/collect wiring and never touches
 // Docker, mirroring newLaunchImageRunner.
-var newLaunchToolImageRunner = func() runtime.ToolImageRunner { return containerToolImageRunner{} }
+// The production runner injects the daemon-backed proxy bootstrapper so a
+// rung-3 tool step's HTTPS egress is routed through the ADR-0019 daemon forward
+// proxy for host-binding credential injection (#1769). The bootstrapper stays
+// passthrough when no daemon config is resolvable.
+var newLaunchToolImageRunner = func() runtime.ToolImageRunner {
+	return containerToolImageRunner{proxy: daemonToolProxyBootstrapper{}}
+}
 
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
 // nil by default, which is the v1 contract: a plan with an llm-seam step

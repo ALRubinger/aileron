@@ -121,8 +121,21 @@ func (containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) 
 // declared CollectPath's parent, runs the tool, then reads back the collected
 // file as the step's output. The real-Docker call goes through the same
 // containerRunToolImage indirection so CLI tests swap a fake and never touch
-// Docker. No credentials cross this boundary (scope note #1733).
-type containerToolImageRunner struct{}
+// Docker.
+//
+// Credential injection (#1769): when proxy is non-nil the runner routes the
+// tool container's HTTPS egress through the ADR-0019 daemon forward proxy via
+// env-based CA trust, so a matched host binding injects the operator's
+// vault-bound credential at the boundary. No credential BYTES cross this
+// boundary in the image, env, mounts, or args: only a read-only CA and
+// placeholder (non-secret) creds are set. A zero-value runner has proxy == nil
+// and stays passthrough (no CA mount, no env), which keeps the CLI unit tests
+// deterministic irrespective of any live ~/.aileron daemon.
+type containerToolImageRunner struct {
+	// proxy, when non-nil, enriches the dispatch with proxy egress + CA trust.
+	// nil (the zero value) is passthrough.
+	proxy toolProxyBootstrapper
+}
 
 // containerToolInputFile is the filename the resolved step input is written to
 // inside the mount dir. The tool reads its input from MountPath/<this>.
@@ -140,7 +153,7 @@ var containerRunToolImage = func(ctx context.Context, runtimeName string, stdout
 	}.Run(ctx, opts)
 }
 
-func (containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunSpec) (runtime.ToolRunResult, error) {
+func (r containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunSpec) (runtime.ToolRunResult, error) {
 	if spec.Image == "" {
 		return runtime.ToolRunResult{}, fmt.Errorf("skill launch: tool image runner requires a pinned image")
 	}
@@ -199,6 +212,32 @@ func (containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunSpe
 		Volumes: volumes,
 		Name:    toolContainerName(spec),
 	}
+
+	// Credential-injection enrichment (#1769): when a proxy bootstrapper is
+	// wired, route the tool container's HTTPS egress through the ADR-0019 daemon
+	// forward proxy via env-based CA trust so a matched host binding injects the
+	// operator's vault-bound credential at the boundary. Prepare fails closed: a
+	// dispatch that resolved daemon config but could not write its session CA
+	// must NOT silently egress un-proxied. The cleanup is deferred so the
+	// session CA is removed even if the boot below fails. RunOptions.Command is
+	// never set — the tool image's own entrypoint must run.
+	if r.proxy != nil {
+		bootstrap, cleanup, ok, err := r.proxy.Prepare(runtimeName, spec.StepID)
+		if err != nil {
+			// Prepare may have written a partial session CA before failing; run
+			// its cleanup so nothing leaks on the fail-closed path.
+			if cleanup != nil {
+				cleanup()
+			}
+			return runtime.ToolRunResult{}, err
+		}
+		if ok {
+			defer cleanup()
+			opts.Volumes = append(opts.Volumes, bootstrap.Mount)
+			opts.Env = bootstrap.Env
+		}
+	}
+
 	if _, err := containerRunToolImage(ctx, runtimeName, os.Stdout, os.Stderr, opts); err != nil {
 		return runtime.ToolRunResult{}, fmt.Errorf("skill launch: run pinned tool image %q: %w", spec.Image, err)
 	}

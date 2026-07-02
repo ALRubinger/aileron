@@ -273,6 +273,156 @@ func TestContainerToolImageRunner_SymlinkedCollectRefused(t *testing.T) {
 	}
 }
 
+// fakeToolProxyBootstrapper is a test double for toolProxyBootstrapper. It
+// records that Prepare/cleanup ran and returns a canned enrichment so the
+// enriched RunOptions shape is asserted with no live daemon and no Docker.
+type fakeToolProxyBootstrapper struct {
+	env        map[string]string
+	mount      sandboxcontainer.Volume
+	ok         bool
+	err        error
+	prepared   bool
+	cleaned    bool
+	gotRuntime string
+	gotStepID  string
+}
+
+func (f *fakeToolProxyBootstrapper) Prepare(runtimeName, stepID string) (toolProxyBootstrap, func(), bool, error) {
+	f.prepared = true
+	f.gotRuntime = runtimeName
+	f.gotStepID = stepID
+	if f.err != nil {
+		return toolProxyBootstrap{}, nil, false, f.err
+	}
+	return toolProxyBootstrap{Env: f.env, Mount: f.mount}, func() { f.cleaned = true }, f.ok, nil
+}
+
+// TestContainerToolImageRunner_ProxyEnrichesRunOptions proves that when a proxy
+// bootstrapper is wired, the dispatch appends the read-only CA mount, sets the
+// proxy/CA-bundle env, seeds placeholder creds, never sets a Command, and runs
+// cleanup after the boot. This is the #1769 credential-injection wiring proof:
+// the enriched RunOptions shape is asserted without touching Docker.
+func TestContainerToolImageRunner_ProxyEnrichesRunOptions(t *testing.T) {
+	var got sandboxcontainer.RunOptions
+	stubContainerToolBoot(t, &got, "out", "COLLECTED", nil)
+
+	fake := &fakeToolProxyBootstrapper{
+		ok: true,
+		env: map[string]string{
+			"HTTPS_PROXY":           "http://sess:tok@host.docker.internal:48123",
+			"https_proxy":           "http://sess:tok@host.docker.internal:48123",
+			"AWS_CA_BUNDLE":         "/etc/aileron/proxy/ca.pem",
+			"AWS_ACCESS_KEY_ID":     placeholderAWSAccessKeyID,
+			"AWS_SECRET_ACCESS_KEY": placeholderAWSSecretKey,
+		},
+		mount: sandboxcontainer.Volume{Source: "/host/ca.pem", Target: "/etc/aileron/proxy/ca.pem", ReadOnly: true},
+	}
+	runner := containerToolImageRunner{proxy: fake}
+
+	spec := runtime.ToolRunSpec{
+		Image:       "amazon/aws-cli@sha256:abc",
+		StepID:      "query-athena",
+		MountPath:   "/work/in",
+		Input:       map[string]any{"sql": "SELECT 1"},
+		CollectPath: "/work/out/out",
+	}
+	if _, err := runner.Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !fake.prepared {
+		t.Error("Prepare must be called when a proxy bootstrapper is wired")
+	}
+	if fake.gotStepID != "query-athena" {
+		t.Errorf("Prepare stepID = %q, want the spec step id", fake.gotStepID)
+	}
+	if !fake.cleaned {
+		t.Error("cleanup must run after the boot")
+	}
+
+	// The CA mount is appended read-only at the well-known in-container CA path,
+	// alongside the mount/collect volumes.
+	var caMountRO bool
+	for _, v := range got.Volumes {
+		if v.Target == "/etc/aileron/proxy/ca.pem" && v.ReadOnly {
+			caMountRO = true
+		}
+	}
+	if !caMountRO {
+		t.Errorf("CA must be mounted read-only at /etc/aileron/proxy/ca.pem, got %+v", got.Volumes)
+	}
+
+	// The proxy + CA-bundle + placeholder-cred env is set on the run.
+	if !strings.Contains(got.Env["HTTPS_PROXY"], "host.docker.internal") {
+		t.Errorf("HTTPS_PROXY = %q, want host.docker.internal", got.Env["HTTPS_PROXY"])
+	}
+	if got.Env["AWS_CA_BUNDLE"] != "/etc/aileron/proxy/ca.pem" {
+		t.Errorf("AWS_CA_BUNDLE = %q, want the container CA path", got.Env["AWS_CA_BUNDLE"])
+	}
+	if got.Env["AWS_ACCESS_KEY_ID"] != placeholderAWSAccessKeyID {
+		t.Errorf("AWS_ACCESS_KEY_ID = %q, want placeholder", got.Env["AWS_ACCESS_KEY_ID"])
+	}
+
+	// The tool image's own entrypoint must run: Command is NEVER set.
+	if len(got.Command) != 0 {
+		t.Errorf("Command must never be set for a tool dispatch, got %v", got.Command)
+	}
+}
+
+// TestContainerToolImageRunner_ProxyPassthroughWhenNotOK proves that a
+// bootstrapper returning ok=false leaves the dispatch un-enriched (no CA mount,
+// no env) and still cleans up nothing.
+func TestContainerToolImageRunner_ProxyPassthroughWhenNotOK(t *testing.T) {
+	var got sandboxcontainer.RunOptions
+	stubContainerToolBoot(t, &got, "out", "COLLECTED", nil)
+
+	fake := &fakeToolProxyBootstrapper{ok: false}
+	runner := containerToolImageRunner{proxy: fake}
+
+	if _, err := runner.Run(context.Background(), runtime.ToolRunSpec{
+		Image:       "img@sha256:abc",
+		StepID:      "s1",
+		CollectPath: "/work/out/out",
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !fake.prepared {
+		t.Error("Prepare must still be consulted")
+	}
+	for _, v := range got.Volumes {
+		if v.Target == "/etc/aileron/proxy/ca.pem" {
+			t.Errorf("passthrough dispatch must not mount a CA, got %+v", got.Volumes)
+		}
+	}
+	if len(got.Env) != 0 {
+		t.Errorf("passthrough dispatch must set no env, got %+v", got.Env)
+	}
+}
+
+// TestContainerToolImageRunner_ProxyPrepareErrorFailsClosed proves that a
+// Prepare error (daemon config resolved but the CA could not be written) fails
+// the dispatch rather than silently egressing un-proxied.
+func TestContainerToolImageRunner_ProxyPrepareErrorFailsClosed(t *testing.T) {
+	var got sandboxcontainer.RunOptions
+	booted := false
+	orig := containerRunToolImage
+	containerRunToolImage = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+		booted = true
+		got = opts
+		return sandboxcontainer.RunResult{}, nil
+	}
+	t.Cleanup(func() { containerRunToolImage = orig })
+
+	runner := containerToolImageRunner{proxy: &fakeToolProxyBootstrapper{err: errors.New("ca write failed")}}
+	_, err := runner.Run(context.Background(), runtime.ToolRunSpec{Image: "img@sha256:abc", StepID: "s1"})
+	if err == nil || !strings.Contains(err.Error(), "ca write failed") {
+		t.Fatalf("Prepare error must fail the dispatch closed, got %v", err)
+	}
+	if booted {
+		t.Errorf("the tool image must NOT boot after a fail-closed Prepare error, got %+v", got)
+	}
+}
+
 func TestContainerImageRunner_EmptyImageErrors(t *testing.T) {
 	_, err := containerImageRunner{}.Run(context.Background(), runtime.ImageRunSpec{})
 	if err == nil {
