@@ -2978,9 +2978,16 @@ type actionAddOptions struct {
 // fragment the OAuth dances across each install, which is the very
 // disruption ADR-0006 / #726 was avoiding when it chose against a
 // mid-install reauthorize prompt.
+//
+// unboundCapabilities does the same for the fresh bind offer (#1803):
+// every action in a suite that shares one credential capability
+// reports it unbound, so a per-action offer would repeat the same
+// question N times. The suite loop dedupes across entries and asks
+// once at the tail, next to the stale-binding batch.
 type actionInstallOutcome struct {
-	status        actionInstallStatus
-	staleBindings []staleBindingWire
+	status              actionInstallStatus
+	staleBindings       []staleBindingWire
+	unboundCapabilities []unboundCapabilityWire
 }
 
 type actionInstallStatus string
@@ -3252,18 +3259,14 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		return 1
 	}
 	var resp struct {
-		Name                string `json:"name"`
-		Fqn                 string `json:"fqn"`
-		Version             string `json:"version"`
-		Source              string `json:"source"`
-		Path                string `json:"path"`
-		AlreadyInstalled    bool   `json:"already_installed"`
-		UnboundCapabilities []struct {
-			ConnectorFQN string  `json:"connector_fqn"`
-			Kind         string  `json:"kind"`
-			Scope        *string `json:"scope,omitempty"`
-		} `json:"unbound_capabilities,omitempty"`
-		NewlyStaleBindings []staleBindingWire `json:"newly_stale_bindings,omitempty"`
+		Name                string                  `json:"name"`
+		Fqn                 string                  `json:"fqn"`
+		Version             string                  `json:"version"`
+		Source              string                  `json:"source"`
+		Path                string                  `json:"path"`
+		AlreadyInstalled    bool                    `json:"already_installed"`
+		UnboundCapabilities []unboundCapabilityWire `json:"unbound_capabilities,omitempty"`
+		NewlyStaleBindings  []staleBindingWire      `json:"newly_stale_bindings,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
@@ -3284,63 +3287,78 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
 		verb, resp.Name, resp.Source, resp.Path)
 
-	// Hand stale-binding transitions back to the suite path through
-	// the per-entry outcome so the loop can offer one batch prompt at
-	// the end — installOneAction itself only prompts in the
-	// non-suite-consented path so a single-action install still gets
-	// the inline prompt.
+	// Hand stale-binding transitions and unbound capabilities back to
+	// the suite path through the per-entry outcome so the loop can
+	// offer one deduplicated batch prompt for each at the end —
+	// installOneAction itself only prompts in the non-suite-consented
+	// path so a single-action install still gets the inline prompt.
 	if opts.outcome != nil {
 		opts.outcome.staleBindings = resp.NewlyStaleBindings
+		opts.outcome.unboundCapabilities = resp.UnboundCapabilities
 	}
 
-	if opts.noBind || len(resp.UnboundCapabilities) == 0 {
-		if len(resp.UnboundCapabilities) > 0 {
-			fmt.Fprintln(stdout, "")
-			fmt.Fprintln(stdout, "Action has unbound credential capabilities:")
-			for _, u := range resp.UnboundCapabilities {
-				fmt.Fprintf(stdout, "  - %s (%s)\n", u.ConnectorFQN, u.Kind)
-			}
-			fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` for each before invoking the action.")
-		}
-		// Even when --no-bind suppresses the prompt, surface the
-		// stale-binding list so a scripted install path doesn't
-		// silently drop the signal. Skipped under suite-consented
-		// installs because the suite loop owns the batch prompt.
-		if !opts.suiteConsented {
-			promptReauthorizeStaleBindings(resp.NewlyStaleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
-		}
+	// Suite-consented installs defer both credential conversations to
+	// the suite loop, which dedupes across all entries and presents
+	// one batch prompt for each at the tail (#741 for stale-binding
+	// reauthorization, #1803 for fresh bind offers); a per-action
+	// prompt here would repeat the same question once per entry and
+	// undo that batching.
+	if opts.suiteConsented {
 		return 0
 	}
 
-	// Prompt the user to bind each unbound capability now.
-	for _, u := range resp.UnboundCapabilities {
+	promptBindUnboundCapabilities(resp.UnboundCapabilities, opts.noBind, stdin, stdout, stderr)
+	promptReauthorizeStaleBindings(resp.NewlyStaleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
+	return 0
+}
+
+// promptBindUnboundCapabilities walks an unbound-capability list
+// emitted by the install endpoint and, for each entry, offers to
+// drop into `aileron binding setup <connector-FQN>` inline. Shared
+// by the single-action tail of installOneAction (inline, per
+// install) and the suite tail of installSuiteEntries (once per run,
+// over the set deduplicated across every entry — #1803). Because the
+// suite path asks over the deduplicated set exactly once at the
+// tail, a declined capability is never re-asked by the same run.
+//
+// Behavior (unchanged from the pre-#1803 inline loop):
+//
+//   - noBind suppresses the prompt entirely but still prints the
+//     list so a scripted install retains the signal in stdout.
+//   - Otherwise, each capability gets its own Y/n defaulting to yes.
+//     "n" prints a hint pointing at the standalone `aileron binding
+//     setup` verb and the loop continues; a failed setup is reported
+//     and the loop continues — partial bind is better than aborting,
+//     the user can retry the failing one later.
+func promptBindUnboundCapabilities(unbound []unboundCapabilityWire, noBind bool, stdin io.Reader, stdout, stderr io.Writer) {
+	if len(unbound) == 0 {
+		return
+	}
+	if noBind {
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "Action has unbound credential capabilities:")
+		for _, u := range unbound {
+			fmt.Fprintf(stdout, "  - %s (%s)\n", u.ConnectorFqn, u.Kind)
+		}
+		fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` for each before invoking the action.")
+		return
+	}
+	for _, u := range unbound {
 		fmt.Fprintln(stdout, "")
 		desc := u.Kind
 		if u.Scope != nil && *u.Scope != "" {
 			desc = u.Kind + " — " + *u.Scope
 		}
 		answer := promptLine(stdin, stdout,
-			fmt.Sprintf("This action needs %s access for %s. Set up now? [Y/n]: ", desc, u.ConnectorFQN))
+			fmt.Sprintf("This action needs %s access for %s. Set up now? [Y/n]: ", desc, u.ConnectorFqn))
 		if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
-			fmt.Fprintf(stdout, "  Skipped. Run `aileron binding setup %s` later.\n", u.ConnectorFQN)
+			fmt.Fprintf(stdout, "  Skipped. Run `aileron binding setup %s` later.\n", u.ConnectorFqn)
 			continue
 		}
-		if rc := runBindingSetup([]string{u.ConnectorFQN}, stdin, stdout, stderr); rc != 0 {
-			fmt.Fprintf(stderr, "  binding setup for %s exited %d\n", u.ConnectorFQN, rc)
-			// Continue to the next capability — partial bind is
-			// better than aborting; the user can retry the failing
-			// one later.
+		if rc := runBindingSetup([]string{u.ConnectorFqn}, stdin, stdout, stderr); rc != 0 {
+			fmt.Fprintf(stderr, "  binding setup for %s exited %d\n", u.ConnectorFqn, rc)
 		}
 	}
-
-	// Suite-consented installs defer the stale-binding prompt to the
-	// suite loop, which dedupes across all entries and presents one
-	// batch prompt at the tail; a per-action prompt here would
-	// fragment the OAuth dances and undo that batching.
-	if !opts.suiteConsented {
-		promptReauthorizeStaleBindings(resp.NewlyStaleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
-	}
-	return 0
 }
 
 // promptReauthorizeStaleBindings walks a stale-binding list emitted
@@ -3672,13 +3690,17 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, hubSuiteFQ
 	// pending ref into actionInstallStatusCancelled; preview-failed
 	// refs stay failed regardless. The trustState carries the
 	// authorities resolved in phase 1.
-	results, staleBindings := runSuiteInstallLoop(refs, previews, opts, trust, cancelled, stdin, stdout, stderr)
-	// Phase 4 (#741): one batch reauthorize prompt for the
-	// deduplicated set of bindings the install loop transitioned to
-	// `stale`. Cancellation skips this — no install ran, so no
-	// transitions to surface. opts.yes / opts.noBind are respected
-	// the same way as in the single-action path.
+	results, staleBindings, unboundCaps := runSuiteInstallLoop(refs, previews, opts, trust, cancelled, stdin, stdout, stderr)
+	// Phase 4 (#741, #1803): one batch bind offer for the
+	// deduplicated set of capabilities the installs reported unbound,
+	// then one batch reauthorize prompt for the deduplicated set of
+	// bindings the install loop transitioned to `stale`. Ordering
+	// mirrors the single-action tail (fresh binds before
+	// reauthorization). Cancellation skips both — no install ran, so
+	// nothing to surface. opts.yes / opts.noBind are respected the
+	// same way as in the single-action path.
 	if !cancelled {
+		promptBindUnboundCapabilities(unboundCaps, opts.noBind, stdin, stdout, stderr)
 		promptReauthorizeStaleBindings(staleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
 	}
 	return renderSuiteSummary(stdout, results)
@@ -3951,15 +3973,19 @@ type suiteInstallResult struct {
 // just fail again.
 //
 // Returns the per-ref result list plus the deduplicated set of
-// bindings the loop flipped to `stale` across every install (#741).
-// Suite-consented entries defer their per-install reauthorize prompt
-// to the caller, which presents a single batch prompt at the tail
-// instead of N fragmented browser hand-offs — the disruption #726
-// flagged when it chose against a mid-install reauthorize prompt.
-func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts actionAddOptions, trust *trustState, cancelled bool, stdin *bufio.Reader, stdout, stderr io.Writer) ([]suiteInstallResult, []staleBindingWire) {
+// bindings the loop flipped to `stale` across every install (#741)
+// and the deduplicated set of capabilities the installs reported
+// unbound (#1803). Suite-consented entries defer their per-install
+// reauthorize and fresh-bind prompts to the caller, which presents a
+// single batch prompt for each at the tail instead of N fragmented
+// hand-offs — the disruption #726 flagged when it chose against a
+// mid-install reauthorize prompt.
+func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts actionAddOptions, trust *trustState, cancelled bool, stdin *bufio.Reader, stdout, stderr io.Writer) ([]suiteInstallResult, []staleBindingWire, []unboundCapabilityWire) {
 	results := make([]suiteInstallResult, 0, len(refs))
 	var aggregate []staleBindingWire
 	seen := make(map[string]struct{})
+	var unbound []unboundCapabilityWire
+	seenUnbound := make(map[string]struct{})
 	for i, ref := range refs {
 		fmt.Fprintln(stdout)
 		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(refs), ref.String())
@@ -3989,8 +4015,24 @@ func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts act
 			seen[sb.Name] = struct{}{}
 			aggregate = append(aggregate, sb)
 		}
+		for _, u := range outcome.unboundCapabilities {
+			// Dedupe by (connector_fqn, kind, scope): every action
+			// that shares one credential capability reports the same
+			// tuple, and we want to offer the bind exactly once at
+			// the tail (#1803).
+			scope := ""
+			if u.Scope != nil {
+				scope = *u.Scope
+			}
+			key := u.ConnectorFqn + "\x00" + u.Kind + "\x00" + scope
+			if _, ok := seenUnbound[key]; ok {
+				continue
+			}
+			seenUnbound[key] = struct{}{}
+			unbound = append(unbound, u)
+		}
 	}
-	return results, aggregate
+	return results, aggregate, unbound
 }
 
 // renderSuiteSummary prints the per-ref outcome list + the rolled-up
