@@ -80,3 +80,6 @@ deploy/.env
 # Source of record is GitHub issues + ADRs; these go stale and stay out of Git.
 docs/plans/
 docs/brainstorms/
+
+# Compiled system-test scenario binary (build artifact of test/system/scenario)
+/test/system/scenario/scenario
