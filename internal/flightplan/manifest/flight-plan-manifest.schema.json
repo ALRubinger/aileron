@@ -117,13 +117,12 @@
       "properties": {
         "rung1Image": {
           "type": "object",
-          "description": "Rung one. The skill names a whole prebuilt image and freeze resolves it to a digest. The operator owns the image.",
+          "description": "Rung one. The skill runs in a whole prebuilt image and freeze resolves it to a digest pin. Omit ref to select the Aileron-provided runner image for the freezing CLI's version; a workload names its own image only for workload-specific tooling. Write rung1Image: {} for the default (a bare rung1Image: key with no value parses as null and is rejected).",
           "additionalProperties": false,
-          "required": ["ref"],
           "properties": {
             "ref": {
               "type": "string",
-              "description": "An OCI image reference. Pre-freeze this may be a tag (for example registry.example.com/runner:1.4). Freeze resolves it to an image@sha256: digest pin recorded in the lock section.",
+              "description": "An optional OCI image reference. Omit it to select the Aileron-provided runner image for the freezing CLI's version. When present, pre-freeze this may be a tag (for example registry.example.com/runner:1.4). Freeze resolves the selected image to an image@sha256: digest pin recorded in the lock section.",
               "minLength": 1
             }
           }

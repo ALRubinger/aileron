@@ -60,7 +60,7 @@ The no-LLM-at-runtime rule seals the agent and the LLM out of the function, not 
 
 A Flight Plan runs on a composed execution image, and that image is assembled from rungs.
 
-Rung one pins a whole prebuilt image. The skill names an image, and freeze resolves it to a digest. The operator owns that image.
+Rung one pins a whole prebuilt image. The skill names an image, and freeze resolves it to a digest. The runner image is an implementation detail of the launch runtime. When a rung-one declaration names no image, freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete reference plus its digest pin in the lock. A workload names its own image only for workload-specific tooling.
 
 Rung two declares capability units, and Aileron composes them. The skill declares the units it requires on top of a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features onto that base and pins the result. The capability-unit shape is the one defined in [ADR-0026](/adr/0026-cli-capability-units).
 

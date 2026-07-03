@@ -25,7 +25,7 @@ func TestResolveImages_Rung1ResolvesToDigest(t *testing.T) {
 		gotRef = ref
 		return fakeDigest, nil
 	})
-	pins, capSet, err := resolveImages(context.Background(), m, dr, nil)
+	pins, capSet, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -40,6 +40,97 @@ func TestResolveImages_Rung1ResolvesToDigest(t *testing.T) {
 	}
 }
 
+// TestResolveImages_Rung1DefaultResolvesBaseImage is the #1808 acceptance
+// proof: a rung-1 manifest that declares no ref resolves the Aileron-provided
+// runner image for the CLI version. A dev CLI version selects the :edge tag;
+// the resolver receives that concrete ref and the pin records it plus the
+// resolved digest, exactly as a named ref would.
+func TestResolveImages_Rung1DefaultResolvesBaseImage(t *testing.T) {
+	m := parseM(t, []byte(rung1DefaultMD))
+	var gotRef string
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		gotRef = ref
+		return fakeDigest, nil
+	})
+	pins, capSet, err := resolveImages(context.Background(), m, dr, nil, "dev")
+	if err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	wantRef := "ghcr.io/alrubinger/aileron-sandbox-base:edge"
+	if gotRef != wantRef {
+		t.Errorf("resolver got ref %q, want the default runner image %q", gotRef, wantRef)
+	}
+	if len(pins) != 1 || pins[0].Ref != wantRef || pins[0].Digest != fakeDigest {
+		t.Errorf("default rung-1 must pin the concrete default ref + digest, got %+v", pins)
+	}
+	if capSet != nil {
+		t.Errorf("rung-1 must have no capability set, got %v", capSet)
+	}
+}
+
+// TestResolveImages_Rung1DefaultReleaseUsesLatest proves the CLI-version tag
+// split at the freeze contract: a real release version resolves the default
+// runner image at :latest (not :edge), matching composition.imageTag.
+func TestResolveImages_Rung1DefaultReleaseUsesLatest(t *testing.T) {
+	m := parseM(t, []byte(rung1DefaultMD))
+	var gotRef string
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		gotRef = ref
+		return fakeDigest, nil
+	})
+	if _, _, err := resolveImages(context.Background(), m, dr, nil, "0.0.3"); err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if want := "ghcr.io/alrubinger/aileron-sandbox-base:latest"; gotRef != want {
+		t.Errorf("a release CLI version must resolve the default at %q, got %q", want, gotRef)
+	}
+}
+
+// TestResolveImages_Rung1DefaultEmptyCLIVersionIsEdge proves an empty
+// CLIVersion behaves as a dev build (resolves :edge), matching the CLI's
+// version default.
+func TestResolveImages_Rung1DefaultEmptyCLIVersionIsEdge(t *testing.T) {
+	m := parseM(t, []byte(rung1DefaultMD))
+	var gotRef string
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		gotRef = ref
+		return fakeDigest, nil
+	})
+	if _, _, err := resolveImages(context.Background(), m, dr, nil, ""); err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if want := "ghcr.io/alrubinger/aileron-sandbox-base:edge"; gotRef != want {
+		t.Errorf("an empty CLI version must resolve the default at %q, got %q", want, gotRef)
+	}
+}
+
+// TestResolveImages_Rung1DefaultNeedsResolver proves the defaulted rung-1 path
+// shares the nil-resolver guard: a default-runner manifest with no resolver
+// errors rather than silently pinning nothing.
+func TestResolveImages_Rung1DefaultNeedsResolver(t *testing.T) {
+	m := parseM(t, []byte(rung1DefaultMD))
+	if _, _, err := resolveImages(context.Background(), m, nil, nil, "dev"); err == nil {
+		t.Error("a defaulted rung-1 manifest with no resolver must error")
+	}
+}
+
+// TestResolveImages_Rung1DefaultRejectsTagNotDigest proves the defaulted
+// rung-1 path shares the pin-by-digest guard: a resolver that yields a tag
+// rather than a digest is rejected.
+func TestResolveImages_Rung1DefaultRejectsTagNotDigest(t *testing.T) {
+	m := parseM(t, []byte(rung1DefaultMD))
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		return ref, nil // echo the tag, not a digest
+	})
+	_, _, err := resolveImages(context.Background(), m, dr, nil, "dev")
+	if err == nil {
+		t.Fatal("a defaulted rung-1 resolver returning a tag must be rejected")
+	}
+	if !strings.Contains(err.Error(), "digest") {
+		t.Errorf("error should explain the pin-by-digest rule, got: %v", err)
+	}
+}
+
 func TestResolveImages_Rung2ComposesAndPins(t *testing.T) {
 	m := parseM(t, exampleSkillMD(t))
 	var gotFeatures []string
@@ -47,7 +138,7 @@ func TestResolveImages_Rung2ComposesAndPins(t *testing.T) {
 		gotFeatures = features
 		return fakeDigest, nil
 	})
-	pins, capSet, err := resolveImages(context.Background(), m, nil, fc)
+	pins, capSet, err := resolveImages(context.Background(), m, nil, fc, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -68,7 +159,7 @@ func TestResolveImages_Rung2ComposesAndPins(t *testing.T) {
 
 func TestResolveImages_InstructionOnlyEmpty(t *testing.T) {
 	m := parseM(t, []byte(instructionOnlyMD))
-	pins, capSet, err := resolveImages(context.Background(), m, nil, nil)
+	pins, capSet, err := resolveImages(context.Background(), m, nil, nil, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -79,7 +170,7 @@ func TestResolveImages_InstructionOnlyEmpty(t *testing.T) {
 
 func TestResolveImages_NoExecEnvEmpty(t *testing.T) {
 	m := parseM(t, []byte(noExecEnvMD))
-	pins, _, err := resolveImages(context.Background(), m, nil, nil)
+	pins, _, err := resolveImages(context.Background(), m, nil, nil, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -93,7 +184,7 @@ func TestResolveImages_RejectsTagNotDigest(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return "registry.example.com/runner:1.4", nil // a tag, not a digest
 	})
-	_, _, err := resolveImages(context.Background(), m, dr, nil)
+	_, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err == nil {
 		t.Fatal("a resolver returning a tag must be rejected")
 	}
@@ -107,21 +198,21 @@ func TestResolveImages_ResolverError(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return "", errors.New("image not found")
 	})
-	if _, _, err := resolveImages(context.Background(), m, dr, nil); err == nil {
+	if _, _, err := resolveImages(context.Background(), m, dr, nil, ""); err == nil {
 		t.Error("an unresolvable image must error")
 	}
 }
 
 func TestResolveImages_Rung1NeedsResolver(t *testing.T) {
 	m := parseM(t, []byte(rung1MD))
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, err := resolveImages(context.Background(), m, nil, nil, ""); err == nil {
 		t.Error("a rung-1 manifest with no resolver must error")
 	}
 }
 
 func TestResolveImages_Rung2NeedsComposer(t *testing.T) {
 	m := parseM(t, exampleSkillMD(t))
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, err := resolveImages(context.Background(), m, nil, nil, ""); err == nil {
 		t.Error("a rung-2 manifest with no composer must error")
 	}
 }
@@ -153,7 +244,7 @@ func TestResolveImages_Rung3ResolvesPerStepDigests(t *testing.T) {
 		gotRefs = append(gotRefs, ref)
 		return digestFor[ref], nil
 	})
-	pins, capSet, err := resolveImages(context.Background(), m, dr, nil)
+	pins, capSet, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("rung-3 resolution must succeed: %v", err)
 	}
@@ -184,7 +275,7 @@ func TestResolveImages_Rung3SharedTagPinsDistinctlyByID(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return fakeDigest, nil
 	})
-	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	pins, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("shared-tag rung-3 resolution must succeed: %v", err)
 	}
@@ -216,7 +307,7 @@ func TestResolveImages_Rung3PositionalIDFallback(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
 		return digestFor[ref], nil
 	})
-	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	pins, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("no-id rung-3 resolution must succeed: %v", err)
 	}
@@ -241,7 +332,7 @@ func TestResolveImages_Rung3SealsTrustContractHosts(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
 		return digestFor[ref], nil
 	})
-	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	pins, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -276,7 +367,7 @@ func TestResolveImages_Rung1PinCarriesNoStepID(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return fakeDigest, nil
 	})
-	pins, _, err := resolveImages(context.Background(), m, dr, nil)
+	pins, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("resolveImages: %v", err)
 	}
@@ -293,7 +384,7 @@ func TestResolveImages_Rung3RejectsTagNotDigest(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return "registry.example.com/per-step-tool:1", nil // a tag, not a digest
 	})
-	_, _, err := resolveImages(context.Background(), m, dr, nil)
+	_, _, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err == nil {
 		t.Fatal("a rung-3 resolver returning a tag must be rejected")
 	}
@@ -309,7 +400,7 @@ func TestResolveImages_Rung3ResolverError(t *testing.T) {
 	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 		return "", errors.New("image not found")
 	})
-	if _, _, err := resolveImages(context.Background(), m, dr, nil); err == nil {
+	if _, _, err := resolveImages(context.Background(), m, dr, nil, ""); err == nil {
 		t.Error("an unresolvable rung-3 image must error")
 	}
 }
@@ -319,7 +410,7 @@ func TestResolveImages_Rung3ResolverError(t *testing.T) {
 // pinning nothing (mirrors the rung-1 nil-resolver contract).
 func TestResolveImages_Rung3NeedsResolver(t *testing.T) {
 	m := parseM(t, []byte(rung3MD))
-	if _, _, err := resolveImages(context.Background(), m, nil, nil); err == nil {
+	if _, _, err := resolveImages(context.Background(), m, nil, nil, ""); err == nil {
 		t.Error("a rung-3 manifest with no resolver must error")
 	}
 }
@@ -357,11 +448,11 @@ func TestResolveImages_DistinctFeatureSetsDistinctPins(t *testing.T) {
 		}
 	}
 
-	pinsA, _, err := resolveImages(context.Background(), mWithFeatures("a"), nil, fc)
+	pinsA, _, err := resolveImages(context.Background(), mWithFeatures("a"), nil, fc, "")
 	if err != nil {
 		t.Fatalf("compose feature set A: %v", err)
 	}
-	pinsB, _, err := resolveImages(context.Background(), mWithFeatures("b"), nil, fc)
+	pinsB, _, err := resolveImages(context.Background(), mWithFeatures("b"), nil, fc, "")
 	if err != nil {
 		t.Fatalf("compose feature set B: %v", err)
 	}
@@ -372,7 +463,7 @@ func TestResolveImages_DistinctFeatureSetsDistinctPins(t *testing.T) {
 		t.Errorf("distinct Feature sets must produce distinct pinned digests, both pinned %q", pinsA[0].Digest)
 	}
 	// Same feature set must reproduce the same pin (determinism).
-	pinsA2, _, err := resolveImages(context.Background(), mWithFeatures("a"), nil, fc)
+	pinsA2, _, err := resolveImages(context.Background(), mWithFeatures("a"), nil, fc, "")
 	if err != nil {
 		t.Fatalf("recompose feature set A: %v", err)
 	}
@@ -393,7 +484,7 @@ func TestFreeze_Rung1WorkedExample(t *testing.T) {
 		gotRef = ref
 		return fakeDigest, nil
 	})
-	pins, capSet, err := resolveImages(context.Background(), m, dr, nil)
+	pins, capSet, err := resolveImages(context.Background(), m, dr, nil, "")
 	if err != nil {
 		t.Fatalf("freeze rung-1 worked example: %v", err)
 	}

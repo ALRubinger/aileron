@@ -15,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
+	cliversion "github.com/ALRubinger/aileron/internal/version"
 )
 
 // newDigestResolver and newFeatureComposer are package-level seams so CLI
@@ -47,6 +48,7 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 
 	res, err := freeze.Run(context.Background(), raw, freeze.Options{
 		Version:        *version,
+		CLIVersion:     cliversion.Version,
 		SigningKeyPath: *signingKey,
 		Resolver:       newDigestResolver(),
 		Composer:       newFeatureComposer(),
