@@ -176,6 +176,44 @@ func TestAuthenticateSandboxForwardProxy_ExpiredStepScope407(t *testing.T) {
 	}
 }
 
+// TestAuthenticateSandboxForwardProxy_TokenLessDaemonKeepsStepScope proves
+// that in a token-less daemon (localDaemonToken == "", the historical
+// accept-any dev posture) a step-scoped credential still authenticates
+// SCOPED, never silently unscoped: the step-scope lookup runs before the
+// accept-all branch, so the returned auth carries the bound StepScope. A
+// random non-scope token continues to accept-all-authenticate unscoped.
+func TestAuthenticateSandboxForwardProxy_TokenLessDaemonKeepsStepScope(t *testing.T) {
+	srv := &apiServer{localDaemonToken: ""}
+	minted := mintStepScope(t, srv, "session-123", "extract", []string{"api.example.com"})
+
+	req := httptest.NewRequest(http.MethodConnect, "https://api.example.com:443", nil)
+	req.Header.Set("Proxy-Authorization", basicProxyAuth("session-123", minted.Token))
+	rec := httptest.NewRecorder()
+	auth, ok := srv.authenticateSandboxForwardProxy(rec, req)
+	if !ok {
+		t.Fatal("a step-scope credential must authenticate in a token-less daemon")
+	}
+	if auth.StepScope == nil {
+		t.Fatal("a step-scope credential must authenticate SCOPED, not as an unscoped accept-all session")
+	}
+	if auth.StepScope.SessionID != "session-123" || auth.StepScope.StepID != "extract" {
+		t.Errorf("bound scope = %+v, want session-123/extract", auth.StepScope)
+	}
+
+	// A random non-scope token keeps the historical accept-any posture:
+	// authenticated, but unscoped.
+	req2 := httptest.NewRequest(http.MethodConnect, "https://api.example.com:443", nil)
+	req2.Header.Set("Proxy-Authorization", basicProxyAuth("session-123", "not-a-scope-token"))
+	rec2 := httptest.NewRecorder()
+	auth2, ok := srv.authenticateSandboxForwardProxy(rec2, req2)
+	if !ok {
+		t.Fatal("a non-scope token must accept-all-authenticate in a token-less daemon")
+	}
+	if auth2.StepScope != nil {
+		t.Errorf("a non-scope token must authenticate unscoped, got StepScope = %+v", auth2.StepScope)
+	}
+}
+
 // TestRecordSandboxProxyStepScopeTrustDenied_NilRecorderSafe proves the
 // audit emitter mirrors its siblings' nil-recorder discipline: with no
 // recorder it still mints an id (the injected newID when set, the default

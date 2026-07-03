@@ -3440,6 +3440,13 @@ paths:
         registry is in-memory (a per-step ephemeral credential needs
         no persistence). No credential material beyond the minted
         token itself is carried by this contract.
+
+        The caller-supplied `hosts` is trusted without daemon-side
+        re-verification against the sealed lock because the caller (the
+        in-container runtime) already holds the full daemon token;
+        declaring a scope narrower than that authority is no privilege
+        escalation, since the mint can only shrink reach, never widen
+        it.
       operationId: createSandboxProxyStepScope
       requestBody:
         required: true
