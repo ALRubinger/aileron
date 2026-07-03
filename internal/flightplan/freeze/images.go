@@ -20,18 +20,23 @@ var digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 // core free of a container runtime: production wires a resolver over
 // container.Runner / container.Builder, tests inject a fake.
 type DigestResolver interface {
-	// ResolveDigest resolves an OCI image reference (a tag, for rung-1) to
-	// its `sha256:` digest. The returned digest MUST match digestPattern.
+	// ResolveDigest resolves an OCI image reference (a tag, for an
+	// environment custom base image) to its `sha256:` digest. The returned
+	// digest MUST match digestPattern.
 	ResolveDigest(ctx context.Context, ref string) (string, error)
 }
 
-// FeatureComposer composes a rung-2 capability-unit Feature set onto the
-// Aileron base image and returns the built image's `sha256:` digest. It is
-// the seam over container.Builder + composition so freeze's rung-2 path is
+// FeatureComposer composes a declared reference set onto the Aileron base
+// image and returns the built image's `sha256:` digest. It is the seam over
+// container.Builder + composition so freeze's composed-environment path is
 // testable without Docker.
+//
+// INTERIM (#1827): the environment bridge passes raw `<name>@<version>` tool
+// refs through this seam; the successor resolves them against the curated
+// catalog to real devcontainer Feature recipes before composing.
 type FeatureComposer interface {
-	// ComposeDigest builds the image composed from the given devcontainer
-	// Feature references and returns its `sha256:` digest.
+	// ComposeDigest builds the image composed from the given references and
+	// returns its `sha256:` digest.
 	ComposeDigest(ctx context.Context, features []string) (string, error)
 }
 
@@ -61,37 +66,86 @@ func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, features []strin
 // sibling-image dispatch).
 const rung3Name = "rung3PerStepImages"
 
-// resolveImages resolves a manifest's execution environment to the pinned
+// resolveImages resolves a manifest's declared environment to the pinned
 // image set and resolved capability set the lockfile records. The cases:
 //
-//   - instruction-only / no executionEnvironment: empty pins, no error
+//   - instruction-only / no environment block: empty pins, no error
 //     (the skill still gets a contentHash and signature);
-//   - rung-1 (rung1Image): resolve the named image to a digest pin, or when
-//     rung1Image.ref is omitted, resolve the Aileron-provided runner image for
-//     cliVersion (composition.BaseImage) to a digest pin (#1808);
-//   - rung-2 (rung2CapabilityUnits.features): compose the Features and pin
-//     the built image's digest plus the resolved capability set;
-//   - rung-3 (rung3PerStepImages.steps[].image): resolve each per-step
-//     sibling image to a digest pin, one ImagePin per step (ADR-0027);
-//   - more than one image rung present, or an executionEnvironment naming
-//     no rung: a malformed manifest the schema already rejects; guarded here
-//     defensively.
+//   - environment.image alone: resolve the custom base image to a digest pin;
+//   - environment.tools alone: compose the declared tools and pin the built
+//     image's digest plus the resolved capability set;
+//   - both declared: refused until #1827 lands tools-onto-custom-base
+//     composition (never silently drop declared tools from a signed pin).
 //
 // Every resolved digest is checked against digestPattern: a resolver that
 // yields a tag rather than a digest is rejected (pin by digest, never tag).
-// cliVersion is the Aileron CLI build version used to resolve the default
-// rung-1 runner image when a rung1Image declares no ref. It selects the
-// floating sandbox-base tag (dev/empty maps to :edge, a release maps to
-// :latest) through composition.BaseImage. It is distinct from the skill's
-// semver label recorded in the lock (Options.Version).
+// cliVersion is the Aileron CLI build version; the retained legacy rung
+// branches below use it to resolve the default runner image
+// (composition.BaseImage). It is distinct from the skill's semver label
+// recorded in the lock (Options.Version).
+//
+// The rung1Image/rung2CapabilityUnits/rung3PerStepImages branches below are
+// DORMANT: the schema no longer admits requires.executionEnvironment, so
+// manifest.Parse can never populate the field they read. They are retained,
+// with their direct-construct tests, for #1827 (freeze) and #1829 (runtime)
+// to rewire or delete.
 func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer, cliVersion string) (pins []ImagePin, capSet []string, err error) {
 	if m == nil || m.InstructionOnly {
 		return nil, nil, nil
 	}
+
+	// INTERIM (#1827): the environment block is bridged onto the existing
+	// resolver/composer seams so the tree stays green while the real
+	// catalog-resolved single-composition path lands. Tool refs pass through
+	// RAW (no catalog resolution to Feature recipes, no runner-base
+	// inclusion) and a custom base with declared tools is refused.
+	if env := m.Aileron.Environment; env != nil {
+		if env.Image != "" {
+			// INTERIM (#1827): composing declared tools onto a custom base is
+			// the successor's job. Until it lands, a block declaring both is
+			// refused outright: silently freezing a signed artifact that
+			// omits declared tools would be capability drift.
+			if len(env.Tools) > 0 {
+				return nil, nil, fmt.Errorf("freeze: environment declares both image and tools; composing tools onto a custom base is not yet supported (#1827)")
+			}
+			if dr == nil {
+				return nil, nil, fmt.Errorf("freeze: environment image %q requires a digest resolver", env.Image)
+			}
+			digest, err := dr.ResolveDigest(ctx, env.Image)
+			if err != nil {
+				return nil, nil, fmt.Errorf("freeze: resolve environment image %q: %w", env.Image, err)
+			}
+			if err := requireDigest(env.Image, digest); err != nil {
+				return nil, nil, err
+			}
+			return []ImagePin{{Ref: env.Image, Digest: digest}}, nil, nil
+		}
+		tools := append([]string(nil), env.Tools...)
+		if len(tools) == 0 {
+			// The schema requires tools or image on a present block; this is
+			// the freeze-time defensive backstop for a direct construct.
+			return nil, nil, fmt.Errorf("freeze: environment declares neither tools nor image")
+		}
+		// INTERIM (#1827): the raw <name>@<version> refs go straight through
+		// the composer seam and the resolved capability set records the
+		// declared tools verbatim.
+		if fc == nil {
+			return nil, nil, fmt.Errorf("freeze: environment tools require a feature composer")
+		}
+		digest, err := fc.ComposeDigest(ctx, tools)
+		if err != nil {
+			return nil, nil, fmt.Errorf("freeze: compose environment tools: %w", err)
+		}
+		if err := requireDigest("environment:"+joinFeatures(tools), digest); err != nil {
+			return nil, nil, err
+		}
+		return []ImagePin{{Ref: composedToolsRef(tools), Digest: digest}}, tools, nil
+	}
+
 	env := m.Aileron.Requires.ExecutionEnvironment
 	if len(env) == 0 {
-		// No execution environment declared: an instruction/composition-only
-		// skill freezes with an empty resolvedImages set.
+		// No environment declared: an instruction/composition-only skill
+		// freezes with an empty resolvedImages set.
 		return nil, nil, nil
 	}
 
@@ -350,6 +404,13 @@ func rung3StepID(step map[string]any, index int) string {
 // image so the lock entry records what was composed.
 func composedRef(features []string) string {
 	return "aileron-base+features(" + joinFeatures(features) + ")"
+}
+
+// composedToolsRef renders a stable pre-freeze reference for an image
+// composed from declared environment tools so the lock entry records what
+// was composed.
+func composedToolsRef(tools []string) string {
+	return "aileron-base+tools(" + joinFeatures(tools) + ")"
 }
 
 func joinFeatures(features []string) string {

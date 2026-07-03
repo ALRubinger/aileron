@@ -81,7 +81,7 @@ func (f *fakeLaunchImageRunner) Run(_ context.Context, spec runtime.ImageRunSpec
 }
 
 // stubLaunchImageRunner swaps the production image-runner seam for a fake so a
-// rung-pinned launch never boots a real container. It returns the fake for
+// environment-pinned launch never boots a real container. It returns the fake for
 // assertions. When runner is nil the seam yields nil so the runtime's
 // pinned-but-no-runner guard fires.
 func stubLaunchImageRunner(t *testing.T, runner *fakeLaunchImageRunner) *fakeLaunchImageRunner {
@@ -110,17 +110,17 @@ func freezeExampleForLaunch(t *testing.T, storeDir string) {
 	}
 }
 
-// freezeNoImageForLaunch installs a no-execution-environment variant of the
-// worked example (the same stepped plan with the executionEnvironment block
-// removed) and freezes it, so the frozen unit pins no image and the launch
-// stays on the in-process path.
+// freezeNoImageForLaunch installs a no-environment variant of the worked
+// example (the same stepped plan with the environment block removed) and
+// freezes it, so the frozen unit pins no image and the launch stays on the
+// in-process path.
 func freezeNoImageForLaunch(t *testing.T, storeDir string) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "docs", "schema", "flight-plan-manifest.example.skill.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	stripped := stripExecEnvBlock(t, string(raw))
+	stripped := stripEnvironmentBlock(t, string(raw))
 	dir := filepath.Join(storeDir, "weekly-metrics-digest")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -136,17 +136,17 @@ func freezeNoImageForLaunch(t *testing.T, storeDir string) {
 	}
 }
 
-// stripExecEnvBlock removes the `executionEnvironment:` mapping (indented at 4
-// spaces) and its more-deeply-indented children from the worked-example
-// frontmatter, leaving a valid no-rung manifest.
-func stripExecEnvBlock(t *testing.T, md string) string {
+// stripEnvironmentBlock removes the `environment:` mapping (indented at 2
+// spaces under the aileron block) and its more-deeply-indented children from
+// the worked-example frontmatter, leaving a valid no-environment manifest.
+func stripEnvironmentBlock(t *testing.T, md string) string {
 	t.Helper()
 	lines := strings.Split(md, "\n")
 	out := make([]string, 0, len(lines))
 	skipping := false
 	for _, ln := range lines {
 		if !skipping {
-			if strings.HasPrefix(ln, "    executionEnvironment:") && strings.TrimSpace(ln) == "executionEnvironment:" {
+			if strings.HasPrefix(ln, "  environment:") && strings.TrimSpace(ln) == "environment:" {
 				skipping = true
 				continue
 			}
@@ -155,25 +155,26 @@ func stripExecEnvBlock(t *testing.T, md string) string {
 		}
 		trimmed := strings.TrimLeft(ln, " ")
 		indent := len(ln) - len(trimmed)
-		if trimmed == "" || indent > 4 {
+		if trimmed == "" || indent > 2 {
 			continue
 		}
 		skipping = false
 		out = append(out, ln)
 	}
 	res := strings.Join(out, "\n")
-	if strings.Contains(res, "executionEnvironment:") {
-		t.Fatal("stripExecEnvBlock left the block in place")
+	if strings.Contains(res, "environment:") {
+		t.Fatal("stripEnvironmentBlock left the block in place")
 	}
 	return res
 }
 
-// TestRunSkillLaunch_BootsPinnedRung2Image proves the acceptance property: the
-// worked example is rung-2, so its verified lock pins a composed image digest.
+// TestRunSkillLaunch_BootsPinnedEnvironmentImage proves the acceptance
+// property: the worked example declares environment tools, so its verified
+// lock pins a composed image digest.
 // Launch boots that exact ref@sha256:<digest-from-lock> through the image runner
 // and exits 0. The recorded image is the load-bearing assertion that the lock's
 // signed-image claim corresponds to the image actually entered.
-func TestRunSkillLaunch_BootsPinnedRung2Image(t *testing.T) {
+func TestRunSkillLaunch_BootsPinnedEnvironmentImage(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
 
@@ -192,7 +193,7 @@ func TestRunSkillLaunch_BootsPinnedRung2Image(t *testing.T) {
 		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
 	}
 	if !runner.called {
-		t.Fatal("launch did not boot the pinned image for a rung-2 unit")
+		t.Fatal("launch did not boot the pinned image for an environment unit")
 	}
 	if !strings.HasSuffix(runner.spec.Image, "@"+fakeFreezeDigest) {
 		t.Errorf("booted image = %q, want it to end with @%s (the verified lock digest)", runner.spec.Image, fakeFreezeDigest)
@@ -211,10 +212,10 @@ func TestRunSkillLaunch_BootsPinnedRung2Image(t *testing.T) {
 	}
 }
 
-// TestRunSkillLaunch_InProcessWhenNoRung proves parity: a frozen unit that pins
+// TestRunSkillLaunch_InProcessWhenNoEnvironment proves parity: a frozen unit that pins
 // no image stays on the in-process path. The image runner is never touched and
 // the dispatcher walks the step graph, materializing artifacts as before.
-func TestRunSkillLaunch_InProcessWhenNoRung(t *testing.T) {
+func TestRunSkillLaunch_InProcessWhenNoEnvironment(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeNoImageForLaunch(t, storeDir)
 
@@ -264,7 +265,7 @@ func TestRunSkillLaunch_InProcessWhenNoRung(t *testing.T) {
 }
 
 // TestRunSkillLaunch_PinnedButNoRunnerErrors proves the guard fires through the
-// CLI: a rung-pinned unit with a misconfigured (nil) image runner refuses with
+// CLI: an environment-pinned unit with a misconfigured (nil) image runner refuses with
 // a non-zero exit and a clear error, never silently running in-process.
 func TestRunSkillLaunch_PinnedButNoRunnerErrors(t *testing.T) {
 	storeDir := withTempStore(t)
@@ -276,7 +277,7 @@ func TestRunSkillLaunch_PinnedButNoRunnerErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
 	if code == 0 {
-		t.Fatal("a rung-pinned unit with no image runner must exit non-zero")
+		t.Fatal("an environment-pinned unit with no image runner must exit non-zero")
 	}
 	if !strings.Contains(stderr.String(), "no image runner is configured") {
 		t.Errorf("stderr = %q, want a no-runner-configured message", stderr.String())
@@ -333,7 +334,7 @@ func TestRunSkillLaunch_MissingVersionRefuses(t *testing.T) {
 }
 
 // TestRunSkillLaunch_InputOverrideReachesImageRunner proves a --input override
-// threads into the boot path: the worked example is rung-2, so the override must
+// threads into the boot path: the worked example pins an environment image, so the override must
 // reach the image runner's spec (which carries it into the in-container run)
 // rather than being dropped at the boot boundary.
 func TestRunSkillLaunch_InputOverrideReachesImageRunner(t *testing.T) {

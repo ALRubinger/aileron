@@ -50,17 +50,34 @@ type Manifest struct {
 type AileronBlock struct {
 	SchemaVersion string         `yaml:"schemaVersion"`
 	Requires      Requires       `yaml:"requires"`
+	Environment   *Environment   `yaml:"environment"`
 	Inputs        []any          `yaml:"inputs"`
 	Outputs       []any          `yaml:"outputs"`
 	Steps         []any          `yaml:"steps"`
 	Lock          map[string]any `yaml:"lock"`
 }
 
-// Requires lists the actions the skill calls and its execution-environment
-// dependencies.
+// Environment is the declared execution environment: one container per run.
+// Tools names curated-catalog tools (each `<name>@<version>`) freeze composes
+// onto the Aileron runner base; Image names a custom base image as the escape
+// hatch. The schema requires at least one of the two when the block is
+// present; a manifest with no environment block carries a nil *Environment.
+type Environment struct {
+	Tools []string `yaml:"tools"`
+	Image string   `yaml:"image"`
+}
+
+// Requires lists the actions the skill calls.
 type Requires struct {
-	Actions              []ActionRequirement `yaml:"actions"`
-	ExecutionEnvironment map[string]any      `yaml:"executionEnvironment"`
+	Actions []ActionRequirement `yaml:"actions"`
+
+	// ExecutionEnvironment is DORMANT: the schema no longer admits a
+	// `requires.executionEnvironment` key, so Parse can never populate this
+	// field. It is retained only so the not-yet-rewritten freeze rung
+	// branches (#1827) and runtime tool-dispatch decode (#1829) keep
+	// compiling with their direct-construct tests until their owners delete
+	// them. It is slated for deletion with its last consumer.
+	ExecutionEnvironment map[string]any `yaml:"executionEnvironment"`
 }
 
 // ActionRequirement is one required action plus its per-action trust

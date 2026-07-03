@@ -21,9 +21,9 @@ type VerifiedFrozen struct {
 	// frozen lock block.
 	ContentHash string
 	// ResolvedImages are the resolved image digest pins carried by the
-	// verified manifest lock block (rung-1 `rung1Image.ref` → digest, or
-	// rung-2 composed Features → digest). It is empty for an
-	// instruction-only or no-execution-environment unit. The runtime boots
+	// verified manifest lock block (an `environment.image` custom base →
+	// digest, or composed `environment.tools` → digest). It is empty for an
+	// instruction-only or no-environment unit. The runtime boots
 	// the pinned image at launch, so this field is the load-bearing bridge
 	// from the signed lock to the container actually entered. It is only ever
 	// populated on the verified path: a tampered digest changes the recomputed

@@ -14,7 +14,7 @@ func fakeComposer(digest string) FeatureComposer {
 	})
 }
 
-func TestRun_Rung2HappyPath(t *testing.T) {
+func TestRun_EnvironmentToolsHappyPath(t *testing.T) {
 	_, keyPath := genSigningKey(t)
 	res, err := Run(context.Background(), exampleSkillMD(t), Options{
 		Version:        "1.0.0",
@@ -36,7 +36,7 @@ func TestRun_Rung2HappyPath(t *testing.T) {
 	if len(res.Lock.ResolvedImages) != 1 || res.Lock.ResolvedImages[0].Digest != fakeDigest {
 		t.Errorf("resolvedImages = %+v", res.Lock.ResolvedImages)
 	}
-	if len(res.Lock.ResolvedCapabilitySet) != 2 {
+	if len(res.Lock.ResolvedCapabilitySet) != 1 || res.Lock.ResolvedCapabilitySet[0] != "aws-cli@2.x" {
 		t.Errorf("resolvedCapabilitySet = %v", res.Lock.ResolvedCapabilitySet)
 	}
 
@@ -66,107 +66,43 @@ func TestRun_Rung2HappyPath(t *testing.T) {
 	}
 }
 
-func TestRun_Rung3PinsAndSigns(t *testing.T) {
-	_, keyPath := genSigningKey(t)
-	digestFor := map[string]string{
-		"registry.example.com/tool-a:1": fakeDigest,
-		"registry.example.com/tool-b:2": fakeDigest2,
-	}
-	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
-		return digestFor[ref], nil
-	})
-	res, err := Run(context.Background(), []byte(rung3MultiStepMD), Options{
-		Version:        "1.0.0",
-		SigningKeyPath: keyPath,
-		Resolver:       dr,
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// The lockfile records one digest pin per rung-3 step, in declared order.
-	if len(res.Lock.ResolvedImages) != 2 {
-		t.Fatalf("rung-3 must pin one image per step, got %+v", res.Lock.ResolvedImages)
-	}
-	if res.Lock.ResolvedImages[0].Ref != "registry.example.com/tool-a:1" || res.Lock.ResolvedImages[0].Digest != fakeDigest {
-		t.Errorf("first pin = %+v", res.Lock.ResolvedImages[0])
-	}
-	if res.Lock.ResolvedImages[1].Ref != "registry.example.com/tool-b:2" || res.Lock.ResolvedImages[1].Digest != fakeDigest2 {
-		t.Errorf("second pin = %+v", res.Lock.ResolvedImages[1])
-	}
-	// Each rung-3 pin carries its declaring step's id, so the runtime associates
-	// a step to its pin by id (never by the mutable tag). The id is part of the
-	// signed lock, so it is attested alongside the digest.
-	if res.Lock.ResolvedImages[0].StepID != "extract" || res.Lock.ResolvedImages[1].StepID != "convert" {
-		t.Errorf("pins must carry the declared step ids, got [%q, %q]", res.Lock.ResolvedImages[0].StepID, res.Lock.ResolvedImages[1].StepID)
-	}
-	if len(res.Lock.ResolvedCapabilitySet) != 0 {
-		t.Errorf("rung-3 pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
-	}
-
-	// The signature verifies over the canonical content bytes, so the rung-3
-	// pins are covered by the plan content hash and signature.
-	lockNoHash := res.Lock.withoutContentHash()
-	mNoHash, err := injectLock([]byte(rung3MultiStepMD), lockNoHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lfNoHash, err := MarshalLockfile(lockNoHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
-		t.Errorf("signature must verify over the rung-3 pins: %v", err)
-	}
-
-	// The frozen manifest re-parses with the lock present, carrying the pins.
-	fm, err := manifest.Parse(res.FrozenManifest)
-	if err != nil {
-		t.Fatalf("frozen rung-3 manifest must re-parse: %v", err)
-	}
-	if fm.Aileron.Lock["contentHash"] != res.ContentHash {
-		t.Errorf("frozen manifest lock.contentHash = %v, want %v", fm.Aileron.Lock["contentHash"], res.ContentHash)
-	}
-}
-
-// TestRun_Rung1DefaultImagePinsAndSigns is the #1808 end-to-end acceptance: a
-// full freeze over a rung-1 manifest that declares no ref pins the concrete
-// Aileron-provided default runner image for the CLI version plus its resolved
-// digest, and the produced signature verifies over the bytes that include that
-// pin. A dev CLIVersion selects the :edge tag.
-func TestRun_Rung1DefaultImagePinsAndSigns(t *testing.T) {
+// TestRun_EnvironmentImagePinsAndSigns is the end-to-end proof for the
+// environment.image escape hatch: a full freeze over a manifest naming a
+// custom base pins the resolved digest, and the produced signature verifies
+// over the bytes that include that pin.
+func TestRun_EnvironmentImagePinsAndSigns(t *testing.T) {
 	_, keyPath := genSigningKey(t)
 	var gotRef string
 	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
 		gotRef = ref
 		return fakeDigest, nil
 	})
-	res, err := Run(context.Background(), []byte(rung1DefaultMD), Options{
+	res, err := Run(context.Background(), []byte(envImageMD), Options{
 		Version:        "1.0.0",
-		CLIVersion:     "dev",
 		SigningKeyPath: keyPath,
 		Resolver:       dr,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	wantRef := "ghcr.io/alrubinger/aileron-sandbox-base:edge"
+	wantRef := "registry.example.com/runner:1.4"
 	if gotRef != wantRef {
-		t.Errorf("resolver got ref %q, want the default runner image %q", gotRef, wantRef)
+		t.Errorf("resolver got ref %q, want the environment image %q", gotRef, wantRef)
 	}
 	if len(res.Lock.ResolvedImages) != 1 {
-		t.Fatalf("a default rung-1 freeze must pin one image, got %+v", res.Lock.ResolvedImages)
+		t.Fatalf("an environment-image freeze must pin one image, got %+v", res.Lock.ResolvedImages)
 	}
 	if res.Lock.ResolvedImages[0].Ref != wantRef || res.Lock.ResolvedImages[0].Digest != fakeDigest {
-		t.Errorf("lock must record the concrete default ref + digest, got %+v", res.Lock.ResolvedImages[0])
+		t.Errorf("lock must record the declared ref + digest, got %+v", res.Lock.ResolvedImages[0])
 	}
 	if len(res.Lock.ResolvedCapabilitySet) != 0 {
-		t.Errorf("rung-1 pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
+		t.Errorf("an image-only environment pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
 	}
 
-	// The signature verifies over the canonical content bytes, so the default
-	// pin is covered by the plan content hash and signature.
+	// The signature verifies over the canonical content bytes, so the pin is
+	// covered by the plan content hash and signature.
 	lockNoHash := res.Lock.withoutContentHash()
-	mNoHash, err := injectLock([]byte(rung1DefaultMD), lockNoHash)
+	mNoHash, err := injectLock([]byte(envImageMD), lockNoHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,76 +111,16 @@ func TestRun_Rung1DefaultImagePinsAndSigns(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
-		t.Errorf("signature must verify over the default pin: %v", err)
+		t.Errorf("signature must verify over the environment pin: %v", err)
 	}
 
 	// The frozen manifest re-parses with the lock present, carrying the pin.
 	fm, err := manifest.Parse(res.FrozenManifest)
 	if err != nil {
-		t.Fatalf("frozen default rung-1 manifest must re-parse: %v", err)
+		t.Fatalf("frozen environment-image manifest must re-parse: %v", err)
 	}
 	if fm.Aileron.Lock["contentHash"] != res.ContentHash {
 		t.Errorf("frozen manifest lock.contentHash = %v, want %v", fm.Aileron.Lock["contentHash"], res.ContentHash)
-	}
-}
-
-// TestRun_Rung3SealsTrustContractReach is the #1775 end-to-end acceptance: a
-// full freeze over a rung-3 manifest with a per-step trust contract records the
-// declared hosts on the step's lock pin, and the produced signature verifies
-// over the bytes that include those hosts. The reach is sealed, not
-// re-suppliable: a verifier accepts only the signed, host-bearing lock.
-func TestRun_Rung3SealsTrustContractReach(t *testing.T) {
-	_, keyPath := genSigningKey(t)
-	digestFor := map[string]string{
-		"registry.example.com/tool-a:1": fakeDigest,
-		"registry.example.com/tool-b:2": fakeDigest2,
-	}
-	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
-		return digestFor[ref], nil
-	})
-	res, err := Run(context.Background(), []byte(rung3TrustContractMD), Options{
-		Version:        "1.0.0",
-		SigningKeyPath: keyPath,
-		Resolver:       dr,
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(res.Lock.ResolvedImages) != 2 {
-		t.Fatalf("rung-3 must pin one image per step, got %+v", res.Lock.ResolvedImages)
-	}
-	// The reach step's pin carries the sealed hosts; the no-reach step's does not.
-	reach := res.Lock.ResolvedImages[0]
-	if reach.StepID != "reach" || strings.Join(reach.Hosts, ",") != "api.upstream.example.com,api.upstream.example.com:443" {
-		t.Errorf("reach pin must seal the declared hosts, got %+v", reach)
-	}
-	if len(res.Lock.ResolvedImages[1].Hosts) != 0 {
-		t.Errorf("the no-reach pin must carry no hosts, got %+v", res.Lock.ResolvedImages[1])
-	}
-
-	// The signature covers the sealed reach: it verifies over the canonical
-	// content bytes that include the hosts.
-	lockNoHash := res.Lock.withoutContentHash()
-	mNoHash, err := injectLock([]byte(rung3TrustContractMD), lockNoHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lfNoHash, err := MarshalLockfile(lockNoHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(lfNoHash), "api.upstream.example.com") {
-		t.Fatal("fixture invariant: the marshaled lock must carry the sealed hosts")
-	}
-	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
-		t.Errorf("signature must verify over the sealed reach: %v", err)
-	}
-
-	// Tampering the sealed reach out of the lock breaks the signature: the reach
-	// is not re-suppliable at launch.
-	tampered := strings.ReplaceAll(string(lfNoHash), "api.upstream.example.com", "evil.example.com")
-	if err := Verify(canonicalContent(mNoHash, []byte(tampered)), res.Signature, res.PublicKey); err == nil {
-		t.Error("a tampered reach must fail signature verification")
 	}
 }
 
@@ -282,12 +158,12 @@ func TestRun_ContentHashChangesWithVersion(t *testing.T) {
 	}
 }
 
-func TestRun_NoExecEnvStillSigns(t *testing.T) {
+func TestRun_NoEnvironmentStillSigns(t *testing.T) {
 	_, keyPath := genSigningKey(t)
-	// A skill with an aileron block but no executionEnvironment has no
-	// images to resolve. Run must still produce a contentHash, inject an
+	// A skill with an aileron block but no environment block has no images
+	// to resolve. Run must still produce a contentHash, inject an
 	// empty-images lock, and sign the result.
-	res, err := Run(context.Background(), []byte(noExecEnvMD), Options{
+	res, err := Run(context.Background(), []byte(noEnvironmentMD), Options{
 		Version:        "1.0.0",
 		SigningKeyPath: keyPath,
 	})
@@ -295,13 +171,13 @@ func TestRun_NoExecEnvStillSigns(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(res.Lock.ResolvedImages) != 0 {
-		t.Errorf("no-exec-env skill must have empty resolvedImages, got %v", res.Lock.ResolvedImages)
+		t.Errorf("no-environment skill must have empty resolvedImages, got %v", res.Lock.ResolvedImages)
 	}
 	if !sha256Pattern.MatchString(res.ContentHash) {
 		t.Errorf("contentHash = %q", res.ContentHash)
 	}
 	if len(res.Signature) == 0 || len(res.PublicKey) == 0 {
-		t.Error("no-exec-env skill must still be signed")
+		t.Error("no-environment skill must still be signed")
 	}
 }
 
@@ -367,10 +243,9 @@ aileron:
           audit:
             fields:
               - result
-    executionEnvironment:
-      rung2CapabilityUnits:
-        features:
-          - ghcr.io/example/feat:1
+  environment:
+    tools:
+      - gh@2
   inputs: []
   outputs: []
   steps:
@@ -410,13 +285,13 @@ func TestRun_MissingSigningKey(t *testing.T) {
 }
 
 func TestRun_ResolutionErrorSurfaces(t *testing.T) {
-	// A rung-1 manifest whose resolver errors must fail Run after lint and
-	// key-load, exercising the resolveImages error branch in Run.
+	// An environment-image manifest whose resolver errors must fail Run after
+	// lint and key-load, exercising the resolveImages error branch in Run.
 	_, keyPath := genSigningKey(t)
 	dr := DigestResolverFunc(func(context.Context, string) (string, error) {
 		return "", context.Canceled
 	})
-	_, err := Run(context.Background(), []byte(rung1MD), Options{
+	_, err := Run(context.Background(), []byte(envImageMD), Options{
 		SigningKeyPath: keyPath,
 		Resolver:       dr,
 	})
@@ -432,7 +307,7 @@ func TestRun_TagNotDigestFails(t *testing.T) {
 	dr := DigestResolverFunc(func(context.Context, string) (string, error) {
 		return "registry.example.com/runner:1.4", nil
 	})
-	_, err := Run(context.Background(), []byte(rung1MD), Options{
+	_, err := Run(context.Background(), []byte(envImageMD), Options{
 		SigningKeyPath: keyPath,
 		Resolver:       dr,
 	})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -46,10 +47,6 @@ func schemaPath(t *testing.T) string {
 
 func examplePath(t *testing.T) string {
 	return filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.skill.md")
-}
-
-func rung1ExamplePath(t *testing.T) string {
-	return filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.rung1.skill.md")
 }
 
 // compileSchema compiles the committed Flight Plan manifest schema.
@@ -151,22 +148,65 @@ func TestWorkedExampleValidates(t *testing.T) {
 	}
 }
 
-// TestRung1WorkedExampleValidates is the rung-1 worked-example drift guard:
-// the committed rung-1 example (a skill naming a whole prebuilt image)
-// validates against the committed schema, paralleling the rung-2 example.
-func TestRung1WorkedExampleValidates(t *testing.T) {
-	sch := compileSchema(t)
-	inst := frontmatter(t, rung1ExamplePath(t))
-	if err := sch.Validate(inst); err != nil {
-		t.Fatalf("rung-1 worked example must validate against the schema:\n%v", err)
+// TestWorkedExampleDeclaresEnvironmentTools sharpens the drift guard on the
+// environment block: the worked example must declare `aileron.environment`
+// with at least one curated tool ref, and must not carry the retired
+// `requires.executionEnvironment` key.
+func TestWorkedExampleDeclaresEnvironmentTools(t *testing.T) {
+	inst := frontmatter(t, examplePath(t))
+	blk := inst["aileron"].(map[string]any)
+	env, ok := blk["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("the worked example must declare aileron.environment, got %T", blk["environment"])
 	}
-	// It declares a rung-1 image and no rung-2 capability units.
-	env := inst["aileron"].(map[string]any)["requires"].(map[string]any)["executionEnvironment"].(map[string]any)
-	if _, ok := env["rung1Image"]; !ok {
-		t.Error("rung-1 example must declare rung1Image")
+	tools, ok := env["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		t.Fatalf("the worked example must declare environment.tools, got %v", env["tools"])
 	}
-	if _, ok := env["rung2CapabilityUnits"]; ok {
-		t.Error("rung-1 example must not declare rung2CapabilityUnits")
+	requires := blk["requires"].(map[string]any)
+	if _, lingering := requires["executionEnvironment"]; lingering {
+		t.Error("the worked example must not carry the retired requires.executionEnvironment key")
+	}
+}
+
+// toolNamePattern captures the closed tool-name alternation embedded in the
+// schema's environment.tools item pattern (`^(name1|name2|...)@...`).
+var toolNamePattern = regexp.MustCompile(`^\^\(([a-z0-9|-]+)\)@`)
+
+// TestEnvironmentToolVocabularyMatchesCatalog is the tool-vocabulary drift
+// guard: every tool name the schema's `environment.tools` pattern admits must
+// exist in the curated catalog at images/sandbox-features/<name>/. This is a
+// subset check by design; catalog entries the schema does not (yet) list,
+// such as agent features, are fine.
+func TestEnvironmentToolVocabularyMatchesCatalog(t *testing.T) {
+	raw, err := os.ReadFile(schemaPath(t))
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse schema JSON: %v", err)
+	}
+	defs := doc["$defs"].(map[string]any)
+	env := defs["environment"].(map[string]any)
+	tools := env["properties"].(map[string]any)["tools"].(map[string]any)
+	pattern, ok := tools["items"].(map[string]any)["pattern"].(string)
+	if !ok {
+		t.Fatal("environment.tools.items.pattern missing from the schema")
+	}
+	m := toolNamePattern.FindStringSubmatch(pattern)
+	if m == nil {
+		t.Fatalf("tools item pattern %q does not open with a closed name alternation", pattern)
+	}
+	names := strings.Split(m[1], "|")
+	if len(names) == 0 {
+		t.Fatal("the tools pattern admits no names")
+	}
+	for _, name := range names {
+		feature := filepath.Join(repoRoot(t), "images", "sandbox-features", name, "devcontainer-feature.json")
+		if _, err := os.Stat(feature); err != nil {
+			t.Errorf("schema admits tool %q but the catalog has no %s: %v", name, feature, err)
+		}
 	}
 }
 
@@ -311,75 +351,46 @@ func TestNoSecretValueField(t *testing.T) {
 	}
 }
 
-// TestExecutionEnvironmentRung1AndRung2MutuallyExclusive: declaring both
-// rung1Image and rung2CapabilityUnits fails. The two image rungs are mutually
-// exclusive (ADR-0027 execution rungs). This is the load-bearing guarantee the
-// rung-3 relaxation must not weaken.
-func TestExecutionEnvironmentRung1AndRung2MutuallyExclusive(t *testing.T) {
+// TestEnvironmentUnknownToolRejected: an environment.tools entry outside the
+// curated catalog vocabulary fails. Unknown-tool rejection is encoded in the
+// schema itself, so it fires at validation, before freeze.
+func TestEnvironmentUnknownToolRejected(t *testing.T) {
 	sch := compileSchema(t)
 	inst := validExampleInstance(t)
 	blk := aileronBlock(t, inst)
-	requires := blk["requires"].(map[string]any)
-	env := requires["executionEnvironment"].(map[string]any)
-	env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
-	env["rung2CapabilityUnits"] = map[string]any{"features": []any{"ghcr.io/example/feature:1"}}
+	env := blk["environment"].(map[string]any)
+	env["tools"] = []any{"nmap@7.1"}
 	if err := sch.Validate(inst); err == nil {
-		t.Fatal("declaring both rung1Image and rung2CapabilityUnits must be rejected")
+		t.Fatal("an unknown tool name must be rejected by the closed tools vocabulary")
 	}
 }
 
-// TestExecutionEnvironmentRung3OnlyAccepted: an execution environment that
-// declares only the rung3PerStepImages rung (neither rung1Image nor
-// rung2CapabilityUnits) is valid. Rung three is a built image rung: freeze
-// resolves each per-step sibling image to a digest pin (#1732, ADR-0027).
-func TestExecutionEnvironmentRung3OnlyAccepted(t *testing.T) {
+// TestEnvironmentEmptyRejected: a present-but-empty environment block fails.
+// Omitting the key, not an empty block, is how a skill says it has no
+// environment needs.
+func TestEnvironmentEmptyRejected(t *testing.T) {
 	sch := compileSchema(t)
 	inst := validExampleInstance(t)
 	blk := aileronBlock(t, inst)
-	requires := blk["requires"].(map[string]any)
-	env := requires["executionEnvironment"].(map[string]any)
-	delete(env, "rung1Image")
-	delete(env, "rung2CapabilityUnits")
-	env["rung3PerStepImages"] = map[string]any{
-		"steps": []any{map[string]any{"image": "registry.example.com/per-step-tool:1"}},
-	}
-	if err := sch.Validate(inst); err != nil {
-		t.Fatalf("a rung-3-only execution environment must validate:\n%v", err)
+	blk["environment"] = map[string]any{}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("an empty environment block must be rejected")
 	}
 }
 
-// TestExecutionEnvironmentRung3ExcludesRung1: rung three is now a built image
-// rung, so it is mutually exclusive with rung one and rung two just as they
-// exclude each other. Declaring rung-3 alongside rung-1 is rejected.
-func TestExecutionEnvironmentRung3ExcludesRung1(t *testing.T) {
+// TestRetiredExecutionEnvironmentRejected: the retired three-rung
+// requires.executionEnvironment key fails validation. The environment block
+// replaced it with no compatibility window.
+func TestRetiredExecutionEnvironmentRejected(t *testing.T) {
 	sch := compileSchema(t)
 	inst := validExampleInstance(t)
 	blk := aileronBlock(t, inst)
 	requires := blk["requires"].(map[string]any)
-	env := requires["executionEnvironment"].(map[string]any)
-	delete(env, "rung2CapabilityUnits")
-	env["rung1Image"] = map[string]any{"ref": "registry.example.com/runner:1.4"}
-	env["rung3PerStepImages"] = map[string]any{
-		"steps": []any{map[string]any{"image": "registry.example.com/per-step-tool:1"}},
+	requires["executionEnvironment"] = map[string]any{
+		"rung2CapabilityUnits": map[string]any{"features": []any{"ghcr.io/example/feature:1"}},
 	}
 	if err := sch.Validate(inst); err == nil {
-		t.Fatal("declaring rung3PerStepImages alongside rung1Image must be rejected")
-	}
-}
-
-// TestExecutionEnvironmentRung3EmptyStepsRejected: rung three requires a
-// non-empty steps array. An empty steps array is malformed and rejected.
-func TestExecutionEnvironmentRung3EmptyStepsRejected(t *testing.T) {
-	sch := compileSchema(t)
-	inst := validExampleInstance(t)
-	blk := aileronBlock(t, inst)
-	requires := blk["requires"].(map[string]any)
-	env := requires["executionEnvironment"].(map[string]any)
-	delete(env, "rung1Image")
-	delete(env, "rung2CapabilityUnits")
-	env["rung3PerStepImages"] = map[string]any{"steps": []any{}}
-	if err := sch.Validate(inst); err == nil {
-		t.Fatal("a rung-3 declaration with an empty steps array must be rejected")
+		t.Fatal("the retired requires.executionEnvironment key must be rejected")
 	}
 }
 
@@ -554,7 +565,7 @@ func TestLLMSeamIsOnlySeam(t *testing.T) {
 		switch s["kind"] {
 		case "llm-seam":
 			seams++
-		case "action-call", "transform":
+		case "action-call", "transform", "tool":
 			// deterministic kinds
 		default:
 			t.Fatalf("unexpected step kind %v", s["kind"])
