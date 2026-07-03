@@ -6,10 +6,12 @@ on:
     paths:
       - ".github/workflows/sandbox-base.yml"
       - "images/sandbox-base/**"
-      # The published image now bakes aileron-mcp (issue #957), so a change to
-      # the binary's source must rebuild the image on PR. internal/** is broad
-      # but correct: aileron-mcp links the internal module.
+      # The published image now bakes aileron-mcp (issue #957) and the aileron
+      # CLI (issue #1807, ADR-0027 image-boot), so a change to either binary's
+      # source must rebuild the image on PR. internal/** is broad but correct:
+      # both binaries link the internal module.
       - "cmd/aileron-mcp/**"
+      - "cmd/aileron/**"
       - "internal/**"
       - "sdk/go/**"
       - "go.work"
@@ -27,6 +29,7 @@ on:
       - ".github/workflows/sandbox-base.yml"
       - "images/sandbox-base/**"
       - "cmd/aileron-mcp/**"
+      - "cmd/aileron/**"
       - "internal/**"
       - "sdk/go/**"
       - "go.work"
@@ -308,6 +311,23 @@ jobs:
             exit 1
           fi
           echo "ai.aileron.mcp.version label: $label"
+
+          # Baked aileron CLI runs and reports a non-empty version (#1807,
+          # ADR-0027 image-boot re-entry contract: aileron on PATH).
+          cli_version=$(docker run --rm "$IMG" aileron --version)
+          if [ -z "$cli_version" ]; then
+            echo "baked aileron --version returned empty"
+            exit 1
+          fi
+          echo "baked aileron --version: $cli_version"
+
+          # The ai.aileron.cli.version label is present.
+          cli_label=$(docker inspect --format '{{ index .Config.Labels "ai.aileron.cli.version" }}' "$IMG")
+          if [ -z "$cli_label" ]; then
+            echo "ai.aileron.cli.version label missing on smoke image"
+            exit 1
+          fi
+          echo "ai.aileron.cli.version label: $cli_label"
 
           # #959: the tools.txt manifest and its profile banner are gone.
           docker run --rm "$IMG" sh -c '[ ! -e /etc/aileron/tools.txt ]'
