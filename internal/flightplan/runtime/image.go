@@ -44,6 +44,41 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 		Inputs:  opts.Inputs,
 		OutDir:  opts.OutDir,
 	}
+	// Boot-time Id-vs-Digest guard (#1863). A composed-tools pin is booted by
+	// its mutable LocalTag (its Digest is a locally-built image Id, not a
+	// registry digest, so `ref@digest` would not resolve; see imageRef). The
+	// boot therefore trusts the LocalTag string; nothing else re-checks that the
+	// daemon image behind that tag STILL resolves to the attested Digest. When a
+	// resolver is wired, re-inspect the tag in the local daemon and fail closed
+	// unless it resolves to pin.Digest: a mismatch means the local tag was
+	// rebuilt or repointed since freeze, and a resolve error means the attested
+	// image is gone. Either way the boot must refuse rather than enter an
+	// unverified environment. The guard is scoped to composed pins: for an
+	// image-only / custom-base pin the boot target is content-addressed
+	// (`ref@digest`) and the daemon resolves the digest itself, so no local-Id
+	// comparison applies. A nil resolver skips the guard (backward-compatible).
+	//
+	// The boot target stays the LocalTag (imageRef's LocalTag-wins semantics,
+	// #1856): a locally-built image is addressed by its tag through the CLI's
+	// tag-based re-entry and container naming. This guard narrows, but does not
+	// eliminate, the trust window: it re-inspects the tag immediately before the
+	// boot rather than trusting it unconditionally. A residual TOCTOU (the tag
+	// repointed between this Resolve and the runner's boot) is inherent to
+	// Docker's mutable-tag model; closing it would require booting by image Id,
+	// which is a change to imageRef's boot-target semantics outside this issue.
+	if pin.LocalTag != "" && opts.ImageDigestResolver != nil {
+		observed, err := opts.ImageDigestResolver.Resolve(ctx, pin.LocalTag)
+		if err != nil {
+			return RunResult{}, fmt.Errorf(
+				"flightplan: refusing to boot composed local tag %q: cannot resolve its digest in the local daemon (attested %s): %w",
+				pin.LocalTag, pin.Digest, err)
+		}
+		if observed != pin.Digest {
+			return RunResult{}, fmt.Errorf(
+				"flightplan: refusing to boot composed local tag %q: it resolves to %s but the signed lock attested %s; the local image was rebuilt or repointed since freeze",
+				pin.LocalTag, observed, pin.Digest)
+		}
+	}
 	res, err := opts.ImageRunner.Run(ctx, spec)
 	if err != nil {
 		return RunResult{}, err

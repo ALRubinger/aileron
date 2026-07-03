@@ -779,3 +779,50 @@ func TestContainerImageRunner_BootFailureSurfaces(t *testing.T) {
 		t.Fatalf("boot failure must surface, got %v", err)
 	}
 }
+
+// TestNewLaunchImageDigestResolver_WiresProductionResolver proves the
+// production wiring seam yields the container-backed resolver (#1863).
+func TestNewLaunchImageDigestResolver_WiresProductionResolver(t *testing.T) {
+	if _, ok := newLaunchImageDigestResolver().(containerImageDigestResolver); !ok {
+		t.Fatalf("newLaunchImageDigestResolver returned %T, want containerImageDigestResolver", newLaunchImageDigestResolver())
+	}
+}
+
+// TestContainerImageDigestResolver_DelegatesToInspector proves the production
+// resolver delegates to imageInspector.localImageDigest (the SAME RepoDigests-
+// then-.Id logic that produced the pin's digest at freeze time), returning the
+// local image Id for a locally-built tag with no RepoDigests. The compare the
+// runtime guard performs is therefore apples-to-apples by construction (#1863).
+func TestContainerImageDigestResolver_DelegatesToInspector(t *testing.T) {
+	imageID := "sha256:" + strings.Repeat("b", 64)
+	tag := "aileron/sandbox-tools:0123456789abcdef"
+	fr := &fakeRunner{outputs: map[string]string{
+		// No RepoDigests for a locally-built image, so localImageDigest falls
+		// back to the .Id — the same fallback that produced the pin's Digest.
+		`image inspect --format {{json .RepoDigests}} ` + tag: `[]`,
+		`image inspect --format {{.Id}} ` + tag:               imageID + "\n",
+	}}
+	withFakeInspector(t, fr)
+
+	got, err := containerImageDigestResolver{}.Resolve(context.Background(), tag)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != imageID {
+		t.Errorf("resolved digest = %q, want the local image Id %q", got, imageID)
+	}
+}
+
+// TestContainerImageDigestResolver_InspectorError proves an inspector-
+// construction failure surfaces from Resolve (the runtime guard then fails the
+// boot closed, #1863).
+func TestContainerImageDigestResolver_InspectorError(t *testing.T) {
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{}, errTestInspect
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+	if _, err := (containerImageDigestResolver{}).Resolve(context.Background(), "aileron/sandbox-tools:x"); err == nil {
+		t.Error("an inspector-construction error must surface from Resolve")
+	}
+}

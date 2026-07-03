@@ -41,6 +41,19 @@ var newLaunchImageRunner = func() runtime.ImageRunner {
 	return containerImageRunner{daemonEnv: daemonImageEnv{}, proxy: daemonPlanProxyBootstrapper{}}
 }
 
+// newLaunchImageDigestResolver returns the production
+// runtime.LocalImageDigestResolver that re-checks, at boot time, that a
+// composed-tools pin's local tag still resolves in the local daemon to the
+// pin's attested digest (#1863). It is a package-level seam so CLI tests swap in
+// a fake that records the tag and never touches Docker, mirroring the other
+// launch seams. The production resolver reuses the SAME localImageDigest logic
+// (RepoDigests-then-.Id) that produced the pin's digest at freeze time, so the
+// compare is apples-to-apples. The runtime consults it ONLY on the composed boot
+// path and fails closed on a digest mismatch or a resolve error.
+var newLaunchImageDigestResolver = func() runtime.LocalImageDigestResolver {
+	return containerImageDigestResolver{}
+}
+
 // newLaunchToolStepRunner returns the production tool-step runner that
 // executes a `kind: tool` step as a deterministic subprocess INSIDE the
 // booted plan container (#1829). It is a package-level seam so CLI tests
@@ -131,6 +144,12 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// plan inside it. When the frozen unit pins no image, the runtime never
 		// touches this seam and stays on the in-process path.
 		ImageRunner: newLaunchImageRunner(),
+		// ImageDigestResolver re-checks, at boot time, that a composed-tools pin's
+		// local tag still resolves in the local daemon to the pin's attested
+		// digest (#1863). The runtime consults it only on the composed boot path
+		// and fails closed on a mismatch or resolve error; a non-composed
+		// (ref@digest) pin never touches it.
+		ImageDigestResolver: newLaunchImageDigestResolver(),
 		// InPinnedImage: the image-boot re-entry runs with the sentinel its
 		// booting runner injected; it is already inside the certified
 		// environment and must run the plan in-process, not boot the pin

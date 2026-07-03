@@ -256,6 +256,25 @@ type ToolStepResult struct {
 	Output any
 }
 
+// LocalImageDigestResolver resolves a locally-resolvable image reference (a
+// tag the local daemon carries) to its content digest, so the runtime can
+// re-check that the composed local tag it is about to boot still resolves to
+// the digest the signed lock attested (#1863). The runtime core depends only
+// on this seam; the CLI (cmd/aileron) wires the production implementation over
+// the same `image inspect` (RepoDigests-then-.Id) logic that PRODUCED the
+// pin's Digest at freeze time, so the runtime never imports the container
+// package (mirroring the ImageRunner discipline).
+//
+// Its contract, consumed ONLY on the composed-tools boot path (pin.LocalTag !=
+// ""): return the local `sha256:` digest the daemon resolves image to. The
+// boot compares that digest against the pin's attested Digest and fails closed
+// on any mismatch. A resolve ERROR (the image is gone from the daemon, the
+// inspect fails) is likewise fail-closed at the call site: the attested image
+// is not present, so the boot must refuse rather than boot an unverified tag.
+type LocalImageDigestResolver interface {
+	Resolve(ctx context.Context, image string) (string, error)
+}
+
 // ToolStepRunner executes a single `kind: tool` step as a subprocess in the
 // current (pinned) environment (#1829). Unlike ImageRunner (which boots one
 // image and runs the WHOLE plan inside it), ToolStepRunner is a per-step
