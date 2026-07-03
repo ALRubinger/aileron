@@ -65,6 +65,14 @@ var sandboxProxyStepScopeHostPattern = regexp.MustCompile(`^[a-zA-Z0-9.-]+(:[0-9
 // fresh ephemeral credential; the TTL cleans up an unreleased scope. The
 // registry is in-memory only — a per-step ephemeral credential needs no
 // persistence across a daemon restart (the step fails closed and re-mints).
+//
+// The caller-supplied hosts[] is trusted without daemon-side re-verification
+// against the sealed lock because the in-container runtime that mints already
+// holds the full daemon token, so declaring a scope NARROWER than that
+// authority is no privilege escalation — the mint can only shrink reach, never
+// widen it. (Were minting ever reachable without full-token auth, scoping
+// would become caller-defined; the forward-proxy auth path keeps the mint
+// behind that token, so that gap does not exist today.)
 func (s *apiServer) CreateSandboxProxyStepScope(w http.ResponseWriter, r *http.Request) {
 	var req api.SandboxProxyStepScopeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

@@ -68,7 +68,11 @@ func buildActionRecord(d actionDispatch) AuditRecord {
 // step's subprocess ran under a step-scoped proxy credential restricted to
 // exactly them; enforced:false means the step declared a contract with no
 // sealed entry (only reachable outside the verified load path, which refuses
-// that shape).
+// that shape). enforced:true is a proxy-credential guarantee, not a
+// network-layer egress guarantee: it attests the step ran under a step-scoped
+// proxy credential restricted to its sealed reach, not that a non-cooperative
+// subprocess ignoring HTTPS_PROXY (dialing a raw socket) was blocked — that is
+// out of scope for this marker.
 func buildReachRecord(r reachRecord) AuditRecord {
 	return AuditRecord{
 		Kind: RecordKindReach,
