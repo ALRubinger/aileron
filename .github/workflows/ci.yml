@@ -857,9 +857,12 @@ jobs:
       # @devcontainers/cli and asserts `command -v claude` / `command -v codex`,
       # and (#1083) composes the Codex Feature plus a second Feature through
       # Aileron's composition.Discover -> Builder.Build path and asserts both
-      # tools resolve on PATH. The ubuntu runner has Docker; this is the
-      # fail-fast acceptance environment.
-      - name: Build sandbox Features and verify CLIs on PATH (#1082, #1083)
+      # tools resolve on PATH; and (#1857) composes the aws-cli + gh Features
+      # and asserts the composed image's devcontainer.metadata label parses into
+      # both credential conventions (sigv4-resign + bearer) via the production
+      # read path. The ubuntu runner has Docker; this is the fail-fast
+      # acceptance environment.
+      - name: Build sandbox Features and verify CLIs on PATH (#1082, #1083, #1857)
         run: task test:integration:sandbox-features
 
   integration-sandbox-managed:
