@@ -57,6 +57,42 @@ func TestRunInImage_BootsExactPinnedImage(t *testing.T) {
 	}
 }
 
+func TestRunInImage_BootsComposedLocalTag(t *testing.T) {
+	// A composed-tools pin carries a descriptive, unbootable Ref and an image-Id
+	// Digest, plus the bootable local-daemon tag in LocalTag. The runtime must
+	// boot the LocalTag verbatim (the daemon-resolvable identity), never the
+	// `ref@digest` join, which names no image the daemon can resolve. This is the
+	// #1856 regression: before the fix imageRef produced the unbootable join and
+	// the boot failed closed.
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	descriptiveRef := "ghcr.io/alrubinger/aileron-sandbox-base:edge@sha256:" +
+		strings.Repeat("a", 64) + "+tools(gh@2.x)"
+	imageID := "sha256:" + strings.Repeat("b", 64)
+	lp := LoadedPlan{
+		ContentHash: "sha256:content",
+		ResolvedImages: []freeze.ImagePin{
+			{Ref: descriptiveRef, Digest: imageID, LocalTag: localTag},
+		},
+	}
+	fake := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	if _, err := runInImage(context.Background(), lp, Options{
+		Name:        "tools-plan",
+		Version:     "1.0.0",
+		ImageRunner: fake,
+	}); err != nil {
+		t.Fatalf("runInImage: %v", err)
+	}
+	if !fake.called {
+		t.Fatal("the image runner was never called")
+	}
+	if fake.spec.Image != localTag {
+		t.Errorf("booted image = %q, want the bootable local tag %q", fake.spec.Image, localTag)
+	}
+	if strings.Contains(fake.spec.Image, "@"+imageID) || strings.Contains(fake.spec.Image, "+tools(") {
+		t.Errorf("booted the unbootable ref@digest join %q, want the local tag", fake.spec.Image)
+	}
+}
+
 func TestRunInImage_PinnedButNoRunnerErrors(t *testing.T) {
 	// A plan that declares and pins an environment image but supplies no ImageRunner is
 	// an explicit error, never a silent in-process fallback: ignoring the pin
@@ -141,12 +177,17 @@ func TestHasWholePlanImage(t *testing.T) {
 }
 
 func TestImageRef_JoinsRefAndDigest(t *testing.T) {
-	got := imageRef("registry.example.com/runner:1.4", "sha256:abc")
+	got := imageRef("registry.example.com/runner:1.4", "sha256:abc", "")
 	if got != "registry.example.com/runner:1.4@sha256:abc" {
 		t.Errorf("imageRef = %q", got)
 	}
 	// An empty digest degrades to the bare ref rather than a dangling `@`.
-	if got := imageRef("r", ""); got != "r" {
+	if got := imageRef("r", "", ""); got != "r" {
 		t.Errorf("imageRef with empty digest = %q, want the bare ref", got)
+	}
+	// A non-empty local tag wins over the ref@digest join: it is the
+	// daemon-resolvable identity of a locally-built composed image.
+	if got := imageRef("registry.example.com/runner:1.4", "sha256:abc", "aileron/sandbox-tools:x"); got != "aileron/sandbox-tools:x" {
+		t.Errorf("imageRef with local tag = %q, want the local tag", got)
 	}
 }

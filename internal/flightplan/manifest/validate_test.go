@@ -177,6 +177,16 @@ func TestLockResolvedImagesSinglePinShape(t *testing.T) {
 			t.Fatal("an unknown key on a resolvedImages item must be rejected")
 		}
 	})
+	t.Run("valid/composed pin carries localTag", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(item("\n        localTag: aileron/sandbox-tools:0123456789abcdef"))); err != nil {
+			t.Fatalf("a pin carrying a bootable localTag must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/empty localTag rejected", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(item("\n        localTag: \"\""))); err == nil {
+			t.Fatal("an empty-string localTag must be rejected by minLength: 1")
+		}
+	})
 }
 
 // TestLockStepTrust locks the step-keyed sealed trust section at the schema

@@ -170,10 +170,11 @@ func stripEnvironmentBlock(t *testing.T, md string) string {
 
 // TestRunSkillLaunch_BootsPinnedEnvironmentImage proves the acceptance
 // property: the worked example declares environment tools, so its verified
-// lock pins a composed image digest.
-// Launch boots that exact ref@sha256:<digest-from-lock> through the image runner
-// and exits 0. The recorded image is the load-bearing assertion that the lock's
-// signed-image claim corresponds to the image actually entered.
+// lock pins a composed image carrying a bootable local-daemon tag (#1856).
+// Launch boots that local tag through the image runner and exits 0. The
+// recorded image is the load-bearing assertion that the lock's signed
+// composed-tools claim corresponds to the daemon-resolvable image actually
+// entered, not the unbootable descriptive ref@digest join.
 func TestRunSkillLaunch_BootsPinnedEnvironmentImage(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
@@ -195,8 +196,11 @@ func TestRunSkillLaunch_BootsPinnedEnvironmentImage(t *testing.T) {
 	if !runner.called {
 		t.Fatal("launch did not boot the pinned image for an environment unit")
 	}
-	if !strings.HasSuffix(runner.spec.Image, "@"+fakeFreezeDigest) {
-		t.Errorf("booted image = %q, want it to end with @%s (the verified lock digest)", runner.spec.Image, fakeFreezeDigest)
+	if !strings.HasPrefix(runner.spec.Image, "aileron/sandbox-tools:") {
+		t.Errorf("booted image = %q, want the composed pin's bootable local-daemon tag", runner.spec.Image)
+	}
+	if strings.Contains(runner.spec.Image, "@"+fakeFreezeDigest) || strings.Contains(runner.spec.Image, "+tools(") {
+		t.Errorf("booted the unbootable descriptive ref@digest join %q, want the local tag", runner.spec.Image)
 	}
 	if runner.spec.Name != "weekly-metrics-digest" {
 		t.Errorf("spec.Name = %q, want the launched skill name", runner.spec.Name)

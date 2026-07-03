@@ -627,6 +627,11 @@
                 "type": "string",
                 "description": "The resolved content-addressed digest.",
                 "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "localTag": {
+                "type": "string",
+                "description": "The bootable local-daemon tag the runtime boots for a composed-tools pin (aileron/sandbox-tools:<hex>). Present only on a composed-tools pin; absent for a directly-pinned base, which boots ref@digest.",
+                "minLength": 1
               }
             }
           }

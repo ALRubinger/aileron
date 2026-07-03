@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
 
 func parseM(t *testing.T, raw []byte) *manifest.Manifest {
@@ -61,6 +62,10 @@ func TestResolveImages_EnvironmentImageResolvesToDigest(t *testing.T) {
 	if len(pins) != 1 || pins[0].Digest != fakeDigest || pins[0].Ref != "registry.example.com/runner:1.4" {
 		t.Errorf("pins = %+v", pins)
 	}
+	// An image-only pin has no composed local tag: it boots ref@digest.
+	if pins[0].LocalTag != "" {
+		t.Errorf("an image-only pin must carry no LocalTag, got %q", pins[0].LocalTag)
+	}
 	if capSet != nil {
 		t.Errorf("an image-only environment must have no capability set, got %v", capSet)
 	}
@@ -105,6 +110,16 @@ func TestResolveImages_ToolsComposeOntoDefaultBase(t *testing.T) {
 	}
 	if !strings.Contains(pins[0].Ref, wantBase+"@"+fakeDigest) || !strings.Contains(pins[0].Ref, "aws-cli@2.x") {
 		t.Errorf("the pin ref must record the pinned base and the composed tools, got %q", pins[0].Ref)
+	}
+	// The composed pin carries the bootable local-daemon tag the composed image
+	// carries in the daemon: byte-identical to LocalToolsImageTag over the same
+	// pinnedBase and catalog-resolved feature refs the composer received.
+	wantTag := composition.LocalToolsImageTag(wantBase+"@"+fakeDigest, gotFeatures)
+	if !strings.HasPrefix(wantTag, "aileron/sandbox-tools:") {
+		t.Fatalf("expected an aileron/sandbox-tools: tag, got %q", wantTag)
+	}
+	if pins[0].LocalTag != wantTag {
+		t.Errorf("composed pin LocalTag = %q, want %q", pins[0].LocalTag, wantTag)
 	}
 	if strings.Join(capSet, ",") != "aws-cli@2.x" {
 		t.Errorf("resolved capability set must record the declared tools verbatim, got %v", capSet)
@@ -157,6 +172,13 @@ func TestResolveImages_ToolsComposeOntoCustomImage(t *testing.T) {
 	}
 	if len(pins) != 1 || pins[0].Digest != fakeDigest2 {
 		t.Fatalf("tools onto a custom base must pin exactly one image, got %+v", pins)
+	}
+	wantTag := composition.LocalToolsImageTag("registry.example.com/base:1@"+fakeDigest, gotFeatures)
+	if !strings.HasPrefix(wantTag, "aileron/sandbox-tools:") {
+		t.Fatalf("expected an aileron/sandbox-tools: tag, got %q", wantTag)
+	}
+	if pins[0].LocalTag != wantTag {
+		t.Errorf("composed pin LocalTag = %q, want %q", pins[0].LocalTag, wantTag)
 	}
 	if strings.Join(capSet, ",") != "gh@2,aws-cli@2.x" {
 		t.Errorf("resolved capability set = %v, want the declared tools verbatim", capSet)
@@ -374,6 +396,14 @@ func TestResolveImages_DistinctToolSetsDistinctPins(t *testing.T) {
 	if pinsA[0].Digest == pinsB[0].Digest {
 		t.Errorf("distinct tool sets must produce distinct pinned digests, both pinned %q", pinsA[0].Digest)
 	}
+	// Tag collision-freedom carries through freeze: distinct tool sets get
+	// distinct bootable local tags.
+	if pinsA[0].LocalTag == "" || pinsB[0].LocalTag == "" {
+		t.Fatalf("each composed pin must carry a LocalTag, got A=%q B=%q", pinsA[0].LocalTag, pinsB[0].LocalTag)
+	}
+	if pinsA[0].LocalTag == pinsB[0].LocalTag {
+		t.Errorf("distinct tool sets must produce distinct LocalTags, both %q", pinsA[0].LocalTag)
+	}
 	if strings.Join(capA, ",") != "aws-cli@2.x" {
 		t.Errorf("resolved capability set must record the declared tools, got %v", capA)
 	}
@@ -384,5 +414,8 @@ func TestResolveImages_DistinctToolSetsDistinctPins(t *testing.T) {
 	}
 	if pinsA2[0].Digest != pinsA[0].Digest {
 		t.Errorf("the same tool set must reproduce the same pin: %q vs %q", pinsA2[0].Digest, pinsA[0].Digest)
+	}
+	if pinsA2[0].LocalTag != pinsA[0].LocalTag {
+		t.Errorf("the same tool set must reproduce the same LocalTag: %q vs %q", pinsA2[0].LocalTag, pinsA[0].LocalTag)
 	}
 }
