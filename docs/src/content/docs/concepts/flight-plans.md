@@ -58,13 +58,13 @@ The operation effect feeds the approval surface. A `read` runs unattended. A `wr
 
 ## The execution environment
 
-A Flight Plan runs on a composed execution image, and that image is assembled from rungs.
+A Flight Plan runs inside one container. The `environment` block declares it, and freeze composes and pins exactly one image for the whole plan.
 
-Rung one pins a whole prebuilt image. The skill names an image, and freeze resolves it to a digest. The operator owns that image.
+The block declares `tools`, an `image`, or both. `tools` names curated-catalog tools, each as `<name>@<version>`, that freeze resolves to devcontainer Features and composes onto the Aileron-provided runner base. `image` names a custom base image, the escape hatch for tooling the catalog does not carry, and declared tools compose onto it when both are present. Freeze resolves the declared environment to a single content-addressed digest, and launch boots that one image and runs the whole plan inside it. A tool step runs a declared tool as a deterministic subprocess in that container, and its declared network reach is sealed at freeze and enforced at launch. The execution container is agent-free. The image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 
-Rung two declares capability units, and Aileron composes them. The skill declares the units it requires on top of a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features onto that base and pins the result.
+## Multi-identity
 
-Rung three is a per-step sealed sibling-image dispatch. Freeze resolves each step's sibling image to a content-addressed digest pinned in the lock. The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+The credential binding lives on the operator's machine, not in the plan. The identical sealed artifact launches under different identities with different authorizations, and the audit trail records who. The image and the booted container never contain a secret in any form. The daemon forward proxy injects or re-signs with the vault credential at the egress boundary, so one frozen version serves many operators without ever carrying one operator's identity.
 
 ## The lifecycle
 
@@ -76,8 +76,8 @@ A Flight Plan moves through three phases.
 
 ## Where to go next
 
-- [Authoring a Flight Plan](/guides/authoring-a-flight-plan/) — write the `SKILL.md` by hand, then hand it off to freeze.
-- [Freezing a Flight Plan](/guides/freezing-a-flight-plan/) — seal an installed skill into a signed Flight Plan version.
-- [Launching a Flight Plan](/guides/launching-a-flight-plan/) — run a frozen Flight Plan deterministically.
-- [ADR-0027: Flight Plan = Sealed Installable Skill](/adr/0027-flight-plan-sealed-installable-skill/) — the design decision behind everything on this page.
-- [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) — the normative `SKILL.md` frontmatter format, field by field.
+- [Authoring a Flight Plan](/guides/authoring-a-flight-plan/). Write the `SKILL.md` by hand, then hand it off to freeze.
+- [Freezing a Flight Plan](/guides/freezing-a-flight-plan/). Seal an installed skill into a signed Flight Plan version.
+- [Launching a Flight Plan](/guides/launching-a-flight-plan/). Run a frozen Flight Plan deterministically.
+- [ADR-0027: Flight Plan = Sealed Installable Skill](/adr/0027-flight-plan-sealed-installable-skill/). The design decision behind everything on this page.
+- [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/). The normative `SKILL.md` frontmatter format, field by field.

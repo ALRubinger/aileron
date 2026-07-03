@@ -188,7 +188,7 @@ type ImageRunResult struct {
 	AuditIDs []string
 }
 
-// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the frozen
+// ImageRunner boots the verified pinned environment image and runs the frozen
 // plan to completion inside it (issue #1731). The runtime core depends only on
 // this seam; the CLI (cmd/aileron) wires the production implementation over
 // internal/sandbox/container, so the runtime never imports the container
@@ -229,7 +229,7 @@ type ToolStepSpec struct {
 	// declared no collect and the step produces no collected output.
 	CollectPath string
 	// Hosts is the step's SEALED network reach from the verified lock's
-	// stepTrust section — never the re-read frontmatter. Non-empty means the
+	// stepTrust section, never the re-read frontmatter. Non-empty means the
 	// runner MUST run the subprocess under a step-scoped proxy credential
 	// registered for exactly these hosts, and MUST fail closed (never run
 	// unscoped) when it cannot obtain one. Empty means the step declared no

@@ -36,7 +36,8 @@ aileron:
   schemaVersion: aileron.flightplan.v1
   requires:
     actions: []          # the actions the plan calls, each with a trust contract
-    executionEnvironment: {}  # the rung-1 or rung-2 execution image
+  environment:           # the single container the plan runs in, optional
+    tools: []            # curated-catalog tools, or an image, or both
   inputs: []             # declared inputs with resolution rules
   outputs: []            # declared output artifacts
   steps: []              # the deterministic step graph, optional
@@ -53,7 +54,8 @@ The tables below give every field's type, required-ness, and semantics. Field na
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `schemaVersion` | string | No | When present, must be `aileron.flightplan.v1`. Identifies the block contract this manifest was authored against. |
-| `requires` | object | Yes | The action and execution-environment dependencies. |
+| `requires` | object | Yes | The action dependencies. |
+| `environment` | object | No | The single container the plan runs in. Declares `tools`, an `image`, or both. Absent when the plan needs no environment. |
 | `inputs` | array | Yes | The declared inputs, each with a resolution rule. |
 | `outputs` | array | Yes | The declared output artifacts. |
 | `steps` | array | No | The deterministic step graph. The composition that wires actions and transforms into a directed acyclic graph. Absent when the skill is instruction-only. |
@@ -64,7 +66,6 @@ The tables below give every field's type, required-ness, and semantics. Field na
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `actions` | array | Yes | The actions the plan calls. At least one entry. Each entry carries a per-action trust contract. |
-| `executionEnvironment` | object | No | The execution image the plan runs in, declared as one rung. |
 
 Each `actions[]` entry:
 
@@ -75,23 +76,14 @@ Each `actions[]` entry:
 
 An unsatisfied `requires:` entry is a missing-requirement signal the runtime surfaces. It is never a parse failure. A manifest that names an action the host has not installed still parses as a valid skill.
 
-### `requires.executionEnvironment`
+### `environment`
 
-The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Exactly one of `rung1Image`, `rung2CapabilityUnits`, or `rung3PerStepImages` is declared when `executionEnvironment` is present. The three rungs are mutually exclusive. Freeze resolves the declared rung to content-addressed digest pins recorded in the lock section.
+The execution environment is one container per run ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) the execution environment). The block is optional; a plan that needs no environment omits it. When present, it declares `tools`, an `image`, or both. A present block must declare at least one of the two, so an empty `environment: {}` is rejected. Freeze resolves the declared environment to a single content-addressed image digest recorded in the lock section.
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `rung1Image` | object | No | Rung one. The skill runs in a whole prebuilt image. Freeze resolves it to a digest. Write `rung1Image: {}` to select the Aileron-provided runner image. |
-| `rung1Image.ref` | string | No | An optional OCI image reference. Omit it to resolve the Aileron-provided runner image for the freezing CLI's version. Freeze records the concrete ref plus an `image@sha256:` digest pin in the lock. A bare `rung1Image:` key with no value is null and is rejected, so authors write `rung1Image: {}` for the default. |
-| `rung2CapabilityUnits` | object | No | Rung two. Declares capability units composed onto the Aileron agent-free base image. |
-| `rung2CapabilityUnits.features` | array | Yes within `rung2CapabilityUnits` | The capability-unit devcontainer Feature references ([ADR-0026](/adr/0026-cli-capability-units)). |
-| `rung3PerStepImages` | object | No | Rung three. Per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Freeze resolves each step's sibling image to a digest pin recorded in the lock. |
-| `rung3PerStepImages.steps` | array | Yes within `rung3PerStepImages` | The per-step sibling images. Non-empty; freeze pins one digest per step. |
-| `rung3PerStepImages.steps[].image` | string | Yes within a step | An OCI image reference for the per-step sibling tool. Freeze resolves a tag to an `image@sha256:` digest pin. |
-| `rung3PerStepImages.steps[].id` | string | No | An optional step identifier, unique within the rung-three step set. |
-| `rung3PerStepImages.steps[].mount` | object | No | An optional mount declaration for the step's input I/O. `mount.path` is the mount path inside the image. |
-| `rung3PerStepImages.steps[].collect` | object | No | An optional run-and-collect declaration for the step's output I/O. `collect.path` is the path whose contents are collected as the step output. |
-| `rung3PerStepImages.steps[].trustContract` | object | No | An optional per-step trust contract reusing the per-action shape. Its `hosts` declare the step's network reach. Freeze seals the declared reach onto the step's lock pin so the signature covers it. A declared contract must be non-empty. |
+| `tools` | array | At least one of `tools` or `image` | The curated-catalog tools the plan's steps invoke, each as `<name>@<version>` (for example `aws-cli@2.x`). The name set is closed to the curated catalog; an unknown name is rejected at validation, before freeze. The version grammar is deliberately loose (`2`, `2.x`, and `2.19.1` all validate) and freeze resolves it against the catalog. Freeze composes the resolved tool Features onto the Aileron runner base into one image. |
+| `image` | string | At least one of `tools` or `image` | An OCI image reference for a custom base image, the escape hatch when the curated catalog does not carry the needed tooling. Pre-freeze this may be a tag. Freeze resolves it to an `image@sha256:` digest pin. Declaring both `tools` and `image` composes the declared tools onto the custom base. |
 
 ### `requires.actions[].trustContract`
 
@@ -162,28 +154,33 @@ Every step carries an `id` unique within the graph and a `kind`. The remaining f
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `id` | string | Yes | The step id, unique within the step graph. Later steps reference this step's outputs as `steps.<id>.<outputName>`. |
-| `kind` | string | Yes | One of `action-call`, `transform`, `llm-seam`. A closed enum. |
+| `kind` | string | Yes | One of `action-call`, `transform`, `tool`, `llm-seam`. A closed enum. |
 | `actionRef` | string | Yes for `action-call` | The action this step invokes, in the form `aileron:<connector>.<action>`. Must match a declared `requires.actions[].ref`. |
+| `command` | array | Yes for `tool` | The argv array a `tool` step executes. The first element is the program, the rest its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion. |
 | `args` | object | No (`action-call` only) | The action arguments. Each value is a binding reference, never a value. |
-| `bindings` | object | No (`transform`, `llm-seam`) | The named inputs to the step. Each value is a binding reference. |
-| `outputs` | array | Yes for `transform` and `llm-seam`, No for `action-call` | The named results the step produces. |
+| `bindings` | object | No (`transform`, `tool`, `llm-seam`) | The named inputs to the step. Each value is a binding reference. |
+| `mount` | object | No (`tool` only) | The step's input-I/O boundary. `mount.path` is the path inside the environment where the step's input files are placed. |
+| `collect` | object | No (`tool` only) | The step's output-I/O boundary. `collect.path` is the path inside the environment whose contents are collected as the step output. |
+| `trustContract` | object | No (`tool` only) | The step's per-step trust contract, reusing the per-action shape. Its `hosts` declare the step's network reach. Freeze seals the declared reach into the lock `stepTrust` section so the signature covers it and it cannot be re-supplied at launch. A declared contract must be non-empty. |
+| `outputs` | array | Yes for `transform`, `tool`, and `llm-seam`, No for `action-call` | The named results the step produces. |
 | `materializesOutput` | string | No | Names a declared `outputs[].name` artifact this step's result materializes into. |
 
 ## Composition and the step graph
 
 The `steps` block is the deterministic composition ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)). It wires declared actions and deterministic transforms into a directed acyclic graph. The block is optional. A skill with no `steps` block is instruction-only and still a valid manifest.
 
-There are three step kinds.
+There are four step kinds.
 
 | `kind` | Reaches an LLM | Semantics |
 |---|---|---|
 | `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
 | `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
+| `tool` | No | Runs a declared environment tool as a deterministic subprocess inside the single booted plan container. Its `command` is an argv array run with no shell interpretation. Its optional `mount` and `collect` are the file-I/O boundary, and its optional `trustContract` declares the step's network reach. |
 | `llm-seam` | Yes | The single marked non-deterministic seam. The only kind that reaches an LLM. |
 
-The `kind` enum is closed. By construction no kind other than `llm-seam` can reach an LLM, so the no-LLM guarantee is structurally checkable. The `kind: llm-seam` value is the first-class mark the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces that only that one seam reaches an LLM. A `transform` is the structural guarantee that intermediate logic stays deterministic.
+The `kind` enum is closed. By construction no kind other than `llm-seam` can reach an LLM, so the no-LLM guarantee is structurally checkable. The `kind: llm-seam` value is the first-class mark the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces that only that one seam reaches an LLM. A `transform` and a `tool` step are the structural guarantee that intermediate logic stays deterministic.
 
-A step reads its data through bindings. A binding is a reference, never a value. An `action-call` step binds its `args`; a `transform` and an `llm-seam` step bind their `bindings`. A binding takes one of two forms. `inputs.<name>` references a declared input resolved once at the launch boundary ([#1523](https://github.com/ALRubinger/aileron/issues/1523)). `steps.<stepId>.<outputName>` references a named output of a prior step. The references make the wiring a graph.
+A step reads its data through bindings. A binding is a reference, never a value. An `action-call` step binds its `args`; a `transform`, a `tool`, and an `llm-seam` step bind their `bindings`. A binding takes one of two forms. `inputs.<name>` references a declared input resolved once at the launch boundary ([#1523](https://github.com/ALRubinger/aileron/issues/1523)). `steps.<stepId>.<outputName>` references a named output of a prior step. The references make the wiring a graph.
 
 The step graph is a directed acyclic graph. The runtime executes it in deterministic topological order. A JSON Schema cannot express acyclicity, so the schema does not enforce it. The acyclicity rule and the topological-order rule are stated here as invariants, the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks them, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces them. The drift-guard test asserts the worked example's references resolve and are acyclic.
 
@@ -258,15 +255,14 @@ The `lock` section is absent before freeze. Freeze populates it and writes an im
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `resolvedImages` | array | No | The resolved image digest pins. Each entry pairs a pre-freeze `ref` with its resolved `digest`. A rung-three per-step pin also carries the dispatching step's `id` and, when the step declared a trust contract, the sealed `hosts` reach. |
+| `resolvedImages` | array | No | The resolved image digest pins. The plan runs in one container, so a plan with a declared environment pins exactly one image: the digest-resolved custom base, or the image composed from the runtime base plus the declared tools. Each entry pairs a pre-freeze `ref` with its resolved `digest` and carries no per-step linkage. |
 | `resolvedCapabilitySet` | array | No | The resolved capability set the freeze pinned. |
+| `stepTrust` | object | No | The step-keyed sealed trust section. Keyed by tool-step id; each entry carries the network reach freeze sealed from that step's declared trust contract, as `hosts` only. Freeze stamps it here so the reach is covered by the content hash and signature and cannot be re-supplied at launch. A tool step that declares no trust contract has no entry. Launch consumes it to enforce the step's reach. |
 | `contentHash` | string | No | The content hash identifying the exact frozen manifest bytes. |
 | `version` | string | No | The human-facing semver label for this frozen version. |
 
 The version is the content hash plus a semver label. The content hash identifies the exact frozen bytes. The semver label is the human-facing version name.
 
-## Execution rungs
+## The execution environment
 
-A Flight Plan runs on a composed execution image assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Rung one pins a whole prebuilt image, declared as `rung1Image`. The runner image is an implementation detail of the launch runtime. A workload names its own image under `rung1Image.ref` only for workload-specific tooling. When `rung1Image` declares no ref, freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock. Rung two declares capability units that Aileron composes onto a generic agent-free minimal base image, declared as `rung2CapabilityUnits` whose Features follow [ADR-0026](/adr/0026-cli-capability-units).
-
-Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O carried in the `rung3PerStepImages` rung. Freeze resolves each step's sibling image to a content-addressed digest pinned in the lock. The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+A Flight Plan runs inside one container declared by the `environment` block ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) the execution environment). `environment.tools` names curated-catalog tools that freeze composes as devcontainer Features ([ADR-0026](/adr/0026-cli-capability-units)) onto the Aileron-provided runner base. `environment.image` names a custom base image, the escape hatch for tooling the catalog does not carry, and declared tools compose onto it when both are present. Freeze resolves the declared environment to a single content-addressed digest pinned in the lock, and launch boots that one image and runs the whole plan inside it. A `tool` step runs a declared tool as a deterministic subprocess in that container; its optional per-step trust contract seals into the lock `stepTrust` section, and launch enforces the sealed reach at the daemon proxy. The execution container is agent-free. The image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.

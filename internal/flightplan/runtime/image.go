@@ -15,18 +15,18 @@ func hasWholePlanImage(pins []freeze.ImagePin) bool {
 	return len(pins) > 0
 }
 
-// runInImage boots the verified pinned rung-1/rung-2 image and runs the frozen
+// runInImage boots the verified pinned environment image and runs the frozen
 // plan inside it (#1731). It is reached only when the loaded plan carries a
 // non-empty ResolvedImages set, so the pin is always present here.
 //
 // The image booted is taken straight from the verified lock (pins[0]), never a
 // re-parse of untrusted bytes: that is the load-bearing security property. A
 // plan that pins an image but supplies no ImageRunner is an explicit error, not
-// a silent in-process fallback. A rung was declared and pinned; running the
+// a silent in-process fallback. An environment was declared and pinned; running the
 // plan in-process would enter an environment the attestation never certified.
 func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, error) {
-	// Rung-1/rung-2 resolve exactly one image pin, and the attestation certifies
-	// that single environment. Guard the invariant so a future multi-pin rung
+	// The environment resolves exactly one image pin, and the attestation certifies
+	// that single environment. Guard the invariant so a future multi-pin environment
 	// can never silently boot only pins[0] while ignoring the rest.
 	if len(lp.ResolvedImages) != 1 {
 		return RunResult{}, fmt.Errorf(

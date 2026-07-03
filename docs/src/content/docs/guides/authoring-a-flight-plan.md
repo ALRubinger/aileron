@@ -1,6 +1,6 @@
 ---
 title: "Authoring a Flight Plan"
-description: "Hand-write a Flight Plan SKILL.md: the requires block for actions and execution environments, per-action trust contracts, declared inputs and outputs, the deterministic no-LLM step graph, and the handoff to freeze and sign."
+description: "Hand-write a Flight Plan SKILL.md: the requires block for actions, the environment block for the container, per-action trust contracts, declared inputs and outputs, the deterministic no-LLM step graph, and the handoff to freeze and sign."
 ---
 
 This guide walks you from an empty file to a skill ready to freeze. By the end you will have a single `SKILL.md` document that declares the actions it calls, the environment it runs in, the inputs it resolves, the outputs it produces, and a deterministic step graph that wires them together with no language model in the loop.
@@ -42,10 +42,9 @@ aileron:
             safeToRetry: true
           audit:
             fields: ["network-target", "operation-effect", "response-summary"]
-    executionEnvironment:
-      rung2CapabilityUnits:
-        features:
-          - "ghcr.io/aileron/features/jq:1"
+  environment:
+    tools:
+      - gh@2.x
   inputs:
     - name: window_days
       type: number
@@ -84,7 +83,7 @@ Open the frontmatter block at the top; close it; write the body underneath. The 
 
 ## The `requires:` block
 
-The `requires:` block lists the actions the plan calls and the execution environment it runs in. It is the dependency declaration freeze reads when it pins and binds.
+The `requires:` block lists the actions the plan calls. The sibling `environment:` block declares the container it runs in. Together they are the dependency declaration freeze reads when it pins and binds.
 
 ### Actions and the per-action trust contract
 
@@ -105,13 +104,14 @@ Declare the minimum each action needs. The contract is verbose by design. A plan
 
 ### The execution environment
 
-`requires.executionEnvironment` declares the image the Flight Plan runs in, as one rung. The three rungs are mutually exclusive, so exactly one is declared.
+The `environment:` block declares the single container the plan runs in. It is a sibling of `requires:` under the `aileron` block, not nested inside it. The block is optional; omit it for a plan that needs no tooling. When present, it declares `tools`, an `image`, or both, and must declare at least one, so an empty `environment: {}` is rejected.
 
-- `rung1Image.ref` names a whole prebuilt operator-owned image. Freeze resolves a tag to an `image@sha256:` digest pin. `rung1Image.ref` is optional. When `rung1Image` declares no ref (write `rung1Image: {}`), freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock.
-- `rung2CapabilityUnits.features` declares the capability-unit devcontainer Features composed onto the Aileron agent-free base image. Freeze composes them and pins the built image by digest.
-- `rung3PerStepImages.steps` declares one sibling image per step, each with an optional `id`, `mount`, and `collect`. Freeze resolves each step's image to an `image@sha256:` digest pin recorded in the lock.
+- `environment.tools` names curated-catalog tools the plan's steps invoke, each as `<name>@<version>` (for example `aws-cli@2.x` or `gh@2.x`). The name set is closed to the curated catalog; an unknown name is rejected at validation, before freeze. The version grammar is loose (`2`, `2.x`, and `2.19.1` all validate). Freeze resolves each entry to its catalog devcontainer Feature and composes one image on the Aileron-provided runner base.
+- `environment.image` names a custom base image, the escape hatch when the curated catalog does not carry the tooling you need. Freeze resolves a tag to an `image@sha256:` digest pin. Declaring both `tools` and `image` composes the declared tools onto your custom base.
 
-The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+Freeze resolves the declared environment to a single content-addressed digest, and launch boots that one image and runs the whole plan inside it. The execution container is agent-free. The image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+
+The `environment` block never names an identity. The credential binding lives on your machine at launch, not in the plan, so the identical sealed artifact runs under different vault-bound identities and the audit trail records who ran it.
 
 ## Inputs
 
@@ -151,9 +151,12 @@ Every step carries an `id` unique within the graph and a `kind` from a closed en
 |---|---|---|
 | `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
 | `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
+| `tool` | No | Runs a declared environment tool as a deterministic subprocess inside the booted plan container. Its `command` is an argv array run with no shell interpretation. Its optional `mount` and `collect` are the file-I/O boundary, and its optional `trustContract` declares the step's network reach. |
 | `llm-seam` | Yes | The single marked non-deterministic seam. The only kind that reaches an LLM. |
 
-Wire steps with bindings, never values. A binding is a reference. An `action-call` step binds its `args`; a `transform` and an `llm-seam` step bind their `bindings`. A binding takes one of two forms.
+A `tool` step runs one of the tools your `environment` declared. Give it a `command` argv array (the program then its arguments, never a shell string), and optionally a `mount` to place input files into the container and a `collect` to read a produced path back as the step output. If the tool reaches the network, declare its reach with a per-step `trustContract` whose `hosts` list the upstream it may call. Freeze seals that reach into the lock, and launch enforces it: a scoped call to an undeclared host is refused at the daemon proxy before any TLS handshake, and no credential bytes ever enter the container.
+
+Wire steps with bindings, never values. A binding is a reference. An `action-call` step binds its `args`; a `transform`, a `tool`, and an `llm-seam` step bind their `bindings`. A binding takes one of two forms.
 
 - `inputs.<name>` references a declared input resolved once at the launch boundary.
 - `steps.<stepId>.<outputName>` references a named output of a prior step.
@@ -201,12 +204,12 @@ After freeze, [launch](/guides/launching-a-flight-plan/) runs the frozen Flight 
 - **More than one seam.** v1 allows exactly one marked seam. Route all reasoning through it.
 - **An `actionRef` with no matching `requires.actions[].ref`.** A step can only call an action the `requires:` block declares. The freeze lint catches the mismatch.
 - **Hand-writing the lock.** The `lock` section is produced by freeze. It is absent before freeze, and you never author it.
-- **A `base64` output in v1.** The `encoding` field reserves `base64`, but the v1 runtime materializes `utf-8` text only. A binary artifact waits on the deferred rung-three run-and-collect launch boundary.
+- **A `base64` output in v1.** The `encoding` field reserves `base64`, but the v1 runtime materializes `utf-8` text only. A binary artifact waits on the deferred escape hatch: a `tool` step's mount and collect file-I/O boundary.
 
 ## Where to go next
 
-- [Flight Plans](/concepts/flight-plans/) — the model behind everything in this guide.
-- [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) — the normative field reference, with the full schema and a worked example.
-- [Freezing a Flight Plan](/guides/freezing-a-flight-plan/) — seal the skill into a signed Flight Plan version.
-- [Launching a Flight Plan](/guides/launching-a-flight-plan/) — run the frozen Flight Plan deterministically.
-- [ADR-0027: Flight Plan = Sealed Installable Skill](/adr/0027-flight-plan-sealed-installable-skill/) — the design constraints behind this layer.
+- [Flight Plans](/concepts/flight-plans/). The model behind everything in this guide.
+- [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/). The normative field reference, with the full schema and a worked example.
+- [Freezing a Flight Plan](/guides/freezing-a-flight-plan/). Seal the skill into a signed Flight Plan version.
+- [Launching a Flight Plan](/guides/launching-a-flight-plan/). Run the frozen Flight Plan deterministically.
+- [ADR-0027: Flight Plan = Sealed Installable Skill](/adr/0027-flight-plan-sealed-installable-skill/). The design constraints behind this layer.

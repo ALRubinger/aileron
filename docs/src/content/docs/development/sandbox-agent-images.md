@@ -26,7 +26,7 @@ The check uses the same composition plan and minimal launch validation as `ailer
 | Pi | `pi` | Command contract only | ✓ via `--mcp-config` | Shares Claude's MCP wiring. |
 | Other agents | varies | Unsupported | n/a | Add an Aileron launch agent and an image recipe before relying on sandbox launch. |
 
-Under `--sandbox=docker` the launcher resolves the host-built `aileron-mcp` binary, bind-mounts it read-only at `/usr/local/bin/aileron-mcp`, builds an `mcpEnv` rewritten for the runtime (`host.docker.internal` on Docker), and calls each agent's `ConfigureMCP` hook. Four of the five agents (Claude, Pi, Goose, OpenCode) work without any agent-side code change because their config is either inline-with-exec (`--mcp-config`, `--with-extension`) or workspace-local (`opencode.json` in the bind-mounted workspace). Codex is the one exception — its host `~/.codex/config.toml` is irrelevant inside the container, so the launcher writes a generated `config.toml` to a host tempdir and bind-mounts it. See [ADR-0024](/adr/0024-sandbox-mcp-parity/) and the [manual walkthrough](/development/sandbox-mcp-walkthrough/) for the load-bearing flow.
+Under `--sandbox=docker` the launcher resolves the host-built `aileron-mcp` binary, bind-mounts it read-only at `/usr/local/bin/aileron-mcp`, builds an `mcpEnv` rewritten for the runtime (`host.docker.internal` on Docker), and calls each agent's `ConfigureMCP` hook. Four of the five agents (Claude, Pi, Goose, OpenCode) work without any agent-side code change because their config is either inline-with-exec (`--mcp-config`, `--with-extension`) or workspace-local (`opencode.json` in the bind-mounted workspace). Codex is the one exception. Its host `~/.codex/config.toml` is irrelevant inside the container, so the launcher writes a generated `config.toml` to a host tempdir and bind-mounts it. See [ADR-0024](/adr/0024-sandbox-mcp-parity/) and the [manual walkthrough](/development/sandbox-mcp-walkthrough/) for the load-bearing flow.
 
 Docker is the only supported sandbox runtime in v4. Podman is planned but not yet supported; its `host.containers.internal` host alias is the deferred re-add path, and passing `--runtime=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014` (see [ADR-0014](/adr/0014-spawn-sandbox-technology/)).
 
@@ -80,7 +80,7 @@ docker pull ghcr.io/alrubinger/aileron-sandbox-codex:0.0.1-0.2.0
 
 CI smoke-tests every published image for launchability before it ships. The smoke asserts the agent CLI resolves on `PATH` and that the launcher's image validation succeeds.
 
-The baked CLI is smoke-tested with `aileron --version`, which is vault-bypassing (see `commandsBypassingVault` in `cmd/aileron/vault_state.go`) and so prints without an unlocked vault. A real rung-1 image-boot with `AILERON_API_URL` injected is the other supported way to exercise the baked CLI end to end. Do not verify a published image with a bare `docker run <edge> aileron skill launch --help`. The `skill` command is not on the vault-bypass allowlist, so it enters the vault state machine and errors on vault state before printing help. That error is expected behavior for a bare invocation, not a defect in the image bake.
+The baked CLI is smoke-tested with `aileron --version`, which is vault-bypassing (see `commandsBypassingVault` in `cmd/aileron/vault_state.go`) and so prints without an unlocked vault. A real environment image boot with `AILERON_API_URL` injected is the other supported way to exercise the baked CLI end to end. Do not verify a published image with a bare `docker run <edge> aileron skill launch --help`. The `skill` command is not on the vault-bypass allowlist, so it enters the vault state machine and errors on vault state before printing help. That error is expected behavior for a bare invocation, not a defect in the image bake.
 
 A daily watcher workflow (`sandbox-agents-watch.yml`) keeps the `edge` images fresh against upstream agent-CLI releases. It watches the publishable agents (computed from `composition.PublishedAgents`, so a non-publishable agent like Claude Code is never watched) by polling npm for each agent's latest CLI version, for example `@openai/codex`. It compares each against the CLI version baked into the `edge` image, recovered from the `dev-<cli-version>` tag co-located on the `edge` manifest digest. On drift it re-triggers `sandbox-agents.yml`, which rebuilds from the unpinned Feature install scripts and so bakes the latest CLI. The refreshed build publishes `edge` and `dev-<cli-version>`. Dev and main consumers pull `edge`, so they pick up new agent CLIs automatically without a release.
 
@@ -262,7 +262,7 @@ A BYO image meets the proxy contract by providing two helpers on `PATH`:
 | `aileron-run-with-proxy-ca` | Entrypoint wrapper that installs the CA as root, then drops privileges to the `agent` user and executes the requested agent command. The launcher always starts the container through this wrapper when the proxy is in force. |
 | `aileron-remap-agent-uid` | Entrypoint wrapper that, started as root, remaps the in-container `agent` user/group to the numeric uid/gid owning the mounted workspace, then execs the rest of its argv still as root. The launcher prepends it on Linux + Docker so the workspace bind mount is writable by the agent. See [Workspace ownership on Linux](#workspace-ownership-on-linux). |
 
-The canonical implementations ship with the `ghcr.io/alrubinger/aileron-sandbox-base` image. BYO authors who derive from another base distro can write drop-in equivalents — the launcher only cares about the CLI shape, not the trust-store mechanism. Pick the mechanism that matches the base:
+The canonical implementations ship with the `ghcr.io/alrubinger/aileron-sandbox-base` image. BYO authors who derive from another base distro can write drop-in equivalents. The launcher only cares about the CLI shape, not the trust-store mechanism. Pick the mechanism that matches the base:
 
 | Base distro | Install file at | Apply with | Notes |
 |---|---|---|---|
@@ -273,7 +273,7 @@ The canonical implementations ship with the `ghcr.io/alrubinger/aileron-sandbox-
 Two operational requirements apply to every equivalent helper:
 
 1. The CA must be installed as `root` once at container start, before the agent process runs. This is what `aileron-run-with-proxy-ca` guarantees by switching back to the `agent` user with `exec` after the install.
-2. The install step must be idempotent — the same helper is invoked on every container start, and the same CA is installed every time. Existing `update-ca-certificates` / `update-ca-trust` implementations are naturally idempotent.
+2. The install step must be idempotent. The same helper is invoked on every container start, and the same CA is installed every time. Existing `update-ca-certificates` / `update-ca-trust` implementations are naturally idempotent.
 
 Validate a BYO image meets both the agent and proxy contracts with:
 
@@ -281,7 +281,7 @@ Validate a BYO image meets both the agent and proxy contracts with:
 aileron sandbox check --runtime=docker --build=never --agent=claude
 ```
 
-The check reports `support: ok` only when the agent command and both proxy helpers are present and the `--check` probe succeeds. To launch without the proxy — useful for images that cannot meet the contract during initial bring-up — pass `--sandbox-proxy=off` on `aileron launch`. `sandbox check` does not honor that opt-out; it always exercises the full contract so BYO authors see the same failures the launcher would see.
+The check reports `support: ok` only when the agent command and both proxy helpers are present and the `--check` probe succeeds. To launch without the proxy (useful for images that cannot meet the contract during initial bring-up), pass `--sandbox-proxy=off` on `aileron launch`. `sandbox check` does not honor that opt-out; it always exercises the full contract so BYO authors see the same failures the launcher would see.
 
 ## Workspace ownership on Linux
 

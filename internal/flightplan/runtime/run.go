@@ -37,12 +37,12 @@ type Options struct {
 	// Seam is the single marked LLM seam. Nil (the v1 default) makes any
 	// llm-seam step error, so a default launch reaches no LLM.
 	Seam LLMSeam
-	// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the
+	// ImageRunner boots the verified pinned environment image and runs the
 	// plan inside it. When the loaded plan carries a resolved image pin and this
 	// seam is wired, Run delegates to it; when the plan pins no image, Run stays
 	// on the in-process path and never touches this seam. A plan that pins an
 	// image with no ImageRunner configured is an explicit error, never a silent
-	// in-process fallback (a declared rung must be entered to honor the
+	// in-process fallback (a declared environment must be entered to honor the
 	// attestation).
 	ImageRunner ImageRunner
 	// ToolRunner executes a `kind: tool` step as a deterministic subprocess in
@@ -53,7 +53,7 @@ type Options struct {
 	// (mirrors the ImageRunner nil-guard discipline).
 	ToolRunner ToolStepRunner
 	// InPinnedImage marks this run as already executing INSIDE the verified
-	// pinned rung-1/rung-2 image — the image-boot re-entry (#1731). It routes
+	// pinned environment image, the image-boot re-entry (#1731). It routes
 	// a whole-plan-pinned unit onto the in-process path instead of booting the
 	// pin again: inside the container, in-process IS the certified
 	// environment, and re-booting would recurse (the image carries no nested
@@ -114,7 +114,7 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	// and run the plan inside it (#1731). The image-boot re-entry
 	// (InPinnedImage) stays in-process: it is already running inside the
 	// booted pin, so in-process IS the certified environment and booting
-	// again would recurse. Tool steps (#1829) also stay in-process — the
+	// again would recurse. Tool steps (#1829) also stay in-process; the
 	// re-entered executor runs each one as a subprocess in the same
 	// container, never a sibling boot.
 	if hasWholePlanImage(lp.ResolvedImages) && !opts.InPinnedImage {

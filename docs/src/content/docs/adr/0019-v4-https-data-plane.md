@@ -125,19 +125,19 @@ The passthrough request body is forwarded byte-for-byte with no daemon-side size
 
 The first #898 audit-schema slice distinguishes the HTTPS data-plane entry source in audit payloads. Connector-resolved proxy events now include `aileron.proxy.source` as `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. (Historical: that slice also recorded `sandbox.proxy.rejected` for transparent proxy attempts whose decrypted target did not uniquely match an installed connector spec. The Model A amendment above replaced that behavior with `sandbox.proxy.passthrough`; `sandbox.proxy.rejected` now records only protocol-level failures.) These events continue to omit credential bytes, raw headers, request bodies, query strings, and full upstream URLs.
 
-The finishing #896 work flips the v4 HTTPS proxy from opt-in to **default on** for `aileron launch --sandbox=docker`. The v4 product claim — credentialed third-party CLIs run in the container without raw credentials — only holds while the proxy is on, so the claim must hold out of the box. A new `--sandbox-proxy=auto|on|off` flag and `AILERON_SANDBOX_PROXY` env var control the policy explicitly. The flag takes precedence over the env var, which takes precedence over the default. `auto` (the default) behaves identically to `on` for Docker. `off` disables the bootstrap and records a `sandbox.proxy.disabled` audit event with reason `user_opt_out`. The previous `AILERON_SANDBOX_PROXY_BOOTSTRAP` env var is removed (pre-MVP policy: no backwards-compat shims).
+The finishing #896 work flips the v4 HTTPS proxy from opt-in to **default on** for `aileron launch --sandbox=docker`. The v4 product claim, that credentialed third-party CLIs run in the container without raw credentials, only holds while the proxy is on, so the claim must hold out of the box. A new `--sandbox-proxy=auto|on|off` flag and `AILERON_SANDBOX_PROXY` env var control the policy explicitly. The flag takes precedence over the env var, which takes precedence over the default. `auto` (the default) behaves identically to `on` for Docker. `off` disables the bootstrap and records a `sandbox.proxy.disabled` audit event with reason `user_opt_out`. The previous `AILERON_SANDBOX_PROXY_BOOTSTRAP` env var is removed (pre-MVP policy: no backwards-compat shims).
 
 v4 is Docker-only. Podman is deferred to a later track, not rejected. The runtime abstraction seam is preserved, so re-adding Podman is re-enabling it in `resolveRuntime` and the support matrix. See [ADR-0014](/adr/0014-spawn-sandbox-technology) and umbrella issue [#1050](https://github.com/ALRubinger/aileron/issues/1050) for the descope rationale.
 
-The same finishing work adds a **fail-fast preflight**: when the proxy is requested but the BYO image does not meet the proxy contract (`aileron-install-proxy-ca` + `aileron-run-with-proxy-ca` on `PATH` + a writable trust store), launch refuses to start the container, prints an actionable error citing the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) docs and `--sandbox-proxy=off`, and emits `sandbox.proxy.disabled` with reason `preflight_failed`. Silent fallback from "proxy requested" to "proxy disabled" was rejected explicitly — silent fallback would break the credential-sealing claim with no operator-visible signal. Non-Docker sandbox modes emit `sandbox.proxy.disabled` with reason `unsupported_sandbox_mode`; `--sandbox-proxy=on` against an unsupported mode fails preflight.
+The same finishing work adds a **fail-fast preflight**: when the proxy is requested but the BYO image does not meet the proxy contract (`aileron-install-proxy-ca` + `aileron-run-with-proxy-ca` on `PATH` + a writable trust store), launch refuses to start the container, prints an actionable error citing the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) docs and `--sandbox-proxy=off`, and emits `sandbox.proxy.disabled` with reason `preflight_failed`. Silent fallback from "proxy requested" to "proxy disabled" was rejected explicitly. Silent fallback would break the credential-sealing claim with no operator-visible signal. Non-Docker sandbox modes emit `sandbox.proxy.disabled` with reason `unsupported_sandbox_mode`; `--sandbox-proxy=on` against an unsupported mode fails preflight.
 
-### Rung-3 tool-container egress reuses the data plane
+### Tool-step egress
 
-Flight Plan rung-3 steps ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)) dispatch a single step to a pinned sibling tool image with a bare mount-run-collect lifecycle. That tool container's HTTPS egress reaches the same daemon forward proxy this ADR defines, so a matched host binding injects the operator's vault-bound credential at the boundary. The wiring differs from the `aileron launch` agent path in one respect: the tool container is trusted through **env-based CA trust** alone. The dispatch mounts the session CA read-only at `/etc/aileron/proxy/ca.pem`, points the standard CA-bundle environment variables (`AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `CURL_CA_BUNDLE`) at that path, and sets `HTTPS_PROXY` to the session-authenticated proxy URL. It runs no in-container preflight and never overrides the tool image's own entrypoint, so `aileron-install-proxy-ca` / `aileron-run-with-proxy-ca` are not required on the tool image. No credential bytes enter the tool image, its environment, its mounts, or its arguments. The credential is attached only at the proxy boundary, per host binding.
+A Flight Plan `tool` step ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)) runs a declared environment tool as a deterministic subprocess inside the single booted plan container. There is no sibling tool container. The step's HTTPS egress rides the same boot-session proxy the whole plan already trusts, so a matched host binding injects the operator's vault-bound credential at the boundary. No credential bytes enter the container, its environment, its mounts, or its arguments. The credential is attached only at the proxy boundary, per host binding.
 
-The rung-3 dispatch attaches the credential on the way out. It does not enforce per-step egress: the declared network reach of a rung-3 step is audit metadata, not a live `AllowedHosts` firewall at the tool-container boundary. Per-step egress enforcement is descoped ([#1783](https://github.com/ALRubinger/aileron/issues/1783)). The declared reach is now surfaced in the audit trail as a `flightplan.launch.reach` event marked `enforced: false` ([#1784](https://github.com/ALRubinger/aileron/issues/1784)). That event records the step's declared effect and hosts for observability. It adds no enforcement. Egress stays passthrough and the credential is injected per host binding at the proxy boundary ([ADR-0019](/adr/0019-v4-https-data-plane)). Tools that honor no CA-bundle environment variable and consult only the system trust store are out of scope for this wiring; the supported set is the closed injection-scheme set this ADR defines. Because enrichment is unconditional once daemon config resolves, the proxy presents a session-CA-signed MITM leaf for every HTTPS host the step reaches; a rung-3 tool that honors none of the CA-bundle env vars and consults only the system trust store will reject that leaf, so enabling a daemon can break an unsupported tool step that works today under direct egress. The wiring stays unconditional: the CA-bundle env-var set covers common runtimes, so the surface is narrow.
+A tool step's declared network reach is enforced, not merely audited. Freeze seals the step's declared `hosts` into the verified lock. At launch, before a sealed step runs, the daemon mints a step-scoped, TTL-bounded proxy credential registered for exactly those sealed hosts. The subprocess's `HTTPS_PROXY` carries that scope token as the CONNECT password, and the boot session id stays the username so CA continuity with the trusted CA bundle is preserved. A scoped CONNECT to a host outside the sealed reach is refused with a `403` and audited as `sandbox.proxy.trust_denied` (reason `step_scope_host_denied`) before the TLS interception handshake, so an undeclared host never reaches an upstream and no credential is resolved for it. Obtaining the scope fails closed: a sealed step that cannot mint a scope errors and never runs unscoped. The scoped subprocess environment also drops `AILERON_TOKEN`, so the step cannot reconstruct the unscoped boot credential. The corresponding `flightplan.launch.reach` audit event records the step's effect and hosts with `enforced: true` when the reach came from the verified lock and the step ran under such a scope.
 
-Rung-3 tool egress activation gates on daemon-config **presence** (token + base URL from `AILERON_TOKEN`/`AILERON_API_URL` or `~/.aileron` discovery), not on daemon **liveness**. A stale `~/.aileron` discovery entry (token present) with no daemon actually listening still enriches `HTTPS_PROXY`/CA and routes every rung-3 tool step through a non-existent proxy, failing with `CONNECT` connection-refused — a regression versus the direct-egress passthrough that runs when no config resolves at all. Config-presence gating is accepted for this wiring; liveness-probing / fail-open is deferred to a follow-up.
+The tool subprocess is refused outside the pinned image. The image runner injects a sentinel the runner checks before it execs, so a signed argv can never run on the operator's host. The reach enforcement is the daemon proxy's, keyed by the step scope, so it does not depend on the container honoring any particular CA-bundle environment variable for the deny decision: the refusal happens at the proxy on the CONNECT, before any TLS leaf is presented.
 
 ## Consequences
 
@@ -159,43 +159,41 @@ The proxy/data-plane implementation stands on its own; it never depended on shel
 
 ## References
 
-- [Issue #896](https://github.com/ALRubinger/aileron/issues/896) — HTTPS proxy/data-plane implementation
-- [Issue #898](https://github.com/ALRubinger/aileron/issues/898) — runtime audit-schema cross-cut
-- [ADR-0009](/adr/0009-user-channel) — typed audit and per-operation governance that connector specs carry and bare host bindings do not
-- [ADR-0010](/adr/0010-failure-handling) — per-operation approval gating connector operations receive
-- [ADR-0017](/adr/0017-sandbox-composition) — current sandbox runtime cut
-- [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
-- [ADR-0024](/adr/0024-sandbox-mcp-parity) — `aileron-mcp` as the sole in-container tool surface; raw CLIs are not MCP tools, so the substrate seals them at the host boundary
-- [ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) — Flight Plan rung-3 tool steps whose HTTPS egress is proxy-wired here
-- [Issue #1769](https://github.com/ALRubinger/aileron/issues/1769) — rung-3 tool-container egress wired into the data plane via env-based CA trust
-- [Issue #1783](https://github.com/ALRubinger/aileron/issues/1783) — per-step egress enforcement descoped (audit-only)
-- [Issue #1784](https://github.com/ALRubinger/aileron/issues/1784) — declared rung-3 network reach surfaced in the audit trail as `flightplan.launch.reach` (`enforced: false`)
-- [Issue #959](https://github.com/ALRubinger/aileron/issues/959) — retirement of the rendered CLI-shim surface
-- [Umbrella #1191](https://github.com/ALRubinger/aileron/issues/1191) — credential-sealing substrate generalization; this amendment is wave 1
-- [Feedback #1181](https://github.com/ALRubinger/aileron/issues/1181) — the dogfooding feedback that motivated generalizing Model A into a substrate
-- [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) — the two helpers the proxy bootstrap requires from the in-container trust store
-- [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — manual recipes for `curl`, `gh`, `aws`, plus the automated `curl` integration test contract
+- [Issue #896](https://github.com/ALRubinger/aileron/issues/896). HTTPS proxy/data-plane implementation
+- [Issue #898](https://github.com/ALRubinger/aileron/issues/898). runtime audit-schema cross-cut
+- [ADR-0009](/adr/0009-user-channel). typed audit and per-operation governance that connector specs carry and bare host bindings do not
+- [ADR-0010](/adr/0010-failure-handling). per-operation approval gating connector operations receive
+- [ADR-0017](/adr/0017-sandbox-composition). current sandbox runtime cut
+- [ADR-0018](/adr/0018-v4-single-binary-runtime). single-binary runtime model
+- [ADR-0024](/adr/0024-sandbox-mcp-parity). `aileron-mcp` as the sole in-container tool surface; raw CLIs are not MCP tools, so the substrate seals them at the host boundary
+- [ADR-0027](/adr/0027-flight-plan-sealed-installable-skill). Flight Plan tool steps whose in-container HTTPS egress is proxy-wired here, with per-step reach enforced at this proxy
+- [Issue #1784](https://github.com/ALRubinger/aileron/issues/1784). Declared tool-step network reach surfaced in the audit trail as `flightplan.launch.reach`
+- [Issue #959](https://github.com/ALRubinger/aileron/issues/959). retirement of the rendered CLI-shim surface
+- [Umbrella #1191](https://github.com/ALRubinger/aileron/issues/1191). credential-sealing substrate generalization; this amendment is wave 1
+- [Feedback #1181](https://github.com/ALRubinger/aileron/issues/1181). the dogfooding feedback that motivated generalizing Model A into a substrate
+- [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract). the two helpers the proxy bootstrap requires from the in-container trust store
+- [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/). manual recipes for `curl`, `gh`, `aws`, plus the automated `curl` integration test contract
 
 ### Shipped PRs
 
 The slices that brought this ADR to Accepted, in chronological order:
 
-- [#906](https://github.com/ALRubinger/aileron/pull/906) — first #896 slice: daemon-side connector-operation endpoint at `POST /v1/connector-operations/run`, 501-fail-closed.
-- [#913](https://github.com/ALRubinger/aileron/pull/913) — second slice: opt-in proxy bootstrap mode, session-local CA generation, `HTTPS_PROXY` injection.
-- [#914](https://github.com/ALRubinger/aileron/pull/914) — third slice: daemon-side proxy request boundary `POST /v1/sandbox-proxy/requests`.
-- [#916](https://github.com/ALRubinger/aileron/pull/916) — fourth slice: image-side `aileron-install-proxy-ca` helper contract.
-- [#918](https://github.com/ALRubinger/aileron/pull/918) — fifth slice: `aileron-run-with-proxy-ca` wired into sandbox launch.
-- [#920](https://github.com/ALRubinger/aileron/pull/920) — sixth slice: first daemon-side upstream transport for bodyless HTTPS proxy requests with credential injection.
-- [#921](https://github.com/ALRubinger/aileron/pull/921) — seventh slice: generated spec shim bridge for `GET`/`DELETE`/`HEAD`.
-- [#923](https://github.com/ALRubinger/aileron/pull/923) — eighth slice: generated-shim JSON request bodies for `POST`/`PATCH`/`PUT`.
-- [#930](https://github.com/ALRubinger/aileron/pull/930) — ninth slice: transparent proxy entrypoint with proxy URL userinfo + Proxy-Authorization.
-- [#931](https://github.com/ALRubinger/aileron/pull/931) — tenth slice: transparent proxy transport boundary with CONNECT + TLS interception.
-- [#935](https://github.com/ALRubinger/aileron/pull/935) — eleventh slice: transparent proxy → credential injection boundary via connector spec match.
-- [#939](https://github.com/ALRubinger/aileron/pull/939) — twelfth slice: standard-client smoke coverage for the proxy URL shape.
-- [#940](https://github.com/ALRubinger/aileron/pull/940) — first #898 audit-schema slice: `aileron.proxy.source` discriminator + `sandbox.proxy.rejected` for unresolved transparent attempts.
-- [#967](https://github.com/ALRubinger/aileron/pull/967) — finishing Section A: end-to-end transparent-proxy body coverage.
-- [#968](https://github.com/ALRubinger/aileron/pull/968) — finishing Section D: BYO Image Proxy Contract docs + `aileron sandbox check --agent` validation extension.
-- [#970](https://github.com/ALRubinger/aileron/pull/970) — finishing Section B: default-on flip + `--sandbox-proxy` flag + `sandbox.proxy.disabled` audit event.
-- [#971](https://github.com/ALRubinger/aileron/pull/971) — finishing Section C: replacement of the three honest-stub 501 sites with structured rejections.
-- [#972](https://github.com/ALRubinger/aileron/pull/972) — finishing Section E: CLI matrix docs page + `curl` integration test.
-- [#974](https://github.com/ALRubinger/aileron/pull/974) — finishing Section G: audit-schema reconciliation in the observability guide + shape conformance test.
+- [#906](https://github.com/ALRubinger/aileron/pull/906). first #896 slice: daemon-side connector-operation endpoint at `POST /v1/connector-operations/run`, 501-fail-closed.
+- [#913](https://github.com/ALRubinger/aileron/pull/913). second slice: opt-in proxy bootstrap mode, session-local CA generation, `HTTPS_PROXY` injection.
+- [#914](https://github.com/ALRubinger/aileron/pull/914). third slice: daemon-side proxy request boundary `POST /v1/sandbox-proxy/requests`.
+- [#916](https://github.com/ALRubinger/aileron/pull/916). fourth slice: image-side `aileron-install-proxy-ca` helper contract.
+- [#918](https://github.com/ALRubinger/aileron/pull/918). fifth slice: `aileron-run-with-proxy-ca` wired into sandbox launch.
+- [#920](https://github.com/ALRubinger/aileron/pull/920). sixth slice: first daemon-side upstream transport for bodyless HTTPS proxy requests with credential injection.
+- [#921](https://github.com/ALRubinger/aileron/pull/921). seventh slice: generated spec shim bridge for `GET`/`DELETE`/`HEAD`.
+- [#923](https://github.com/ALRubinger/aileron/pull/923). eighth slice: generated-shim JSON request bodies for `POST`/`PATCH`/`PUT`.
+- [#930](https://github.com/ALRubinger/aileron/pull/930). ninth slice: transparent proxy entrypoint with proxy URL userinfo + Proxy-Authorization.
+- [#931](https://github.com/ALRubinger/aileron/pull/931). tenth slice: transparent proxy transport boundary with CONNECT + TLS interception.
+- [#935](https://github.com/ALRubinger/aileron/pull/935). eleventh slice: transparent proxy → credential injection boundary via connector spec match.
+- [#939](https://github.com/ALRubinger/aileron/pull/939). twelfth slice: standard-client smoke coverage for the proxy URL shape.
+- [#940](https://github.com/ALRubinger/aileron/pull/940). first #898 audit-schema slice: `aileron.proxy.source` discriminator + `sandbox.proxy.rejected` for unresolved transparent attempts.
+- [#967](https://github.com/ALRubinger/aileron/pull/967). finishing Section A: end-to-end transparent-proxy body coverage.
+- [#968](https://github.com/ALRubinger/aileron/pull/968). finishing Section D: BYO Image Proxy Contract docs + `aileron sandbox check --agent` validation extension.
+- [#970](https://github.com/ALRubinger/aileron/pull/970). finishing Section B: default-on flip + `--sandbox-proxy` flag + `sandbox.proxy.disabled` audit event.
+- [#971](https://github.com/ALRubinger/aileron/pull/971). finishing Section C: replacement of the three honest-stub 501 sites with structured rejections.
+- [#972](https://github.com/ALRubinger/aileron/pull/972). finishing Section E: CLI matrix docs page + `curl` integration test.
+- [#974](https://github.com/ALRubinger/aileron/pull/974). finishing Section G: audit-schema reconciliation in the observability guide + shape conformance test.
