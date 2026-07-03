@@ -210,6 +210,78 @@ func TestEnvironmentToolVocabularyMatchesCatalog(t *testing.T) {
 	}
 }
 
+// agentFeatures are the sandbox-feature directories that provision an agent
+// runtime rather than an invocable tool. They are intentionally absent from the
+// schema's environment.tools vocabulary because a Flight Plan declares the tools
+// its steps invoke, not the agent that runs it. The reverse drift guard below
+// excludes them.
+var agentFeatures = map[string]struct{}{
+	"claude": {},
+	"codex":  {},
+}
+
+// TestCatalogToolVocabularyMatchesSchema is the reverse-direction tool-vocabulary
+// drift guard, the complement of TestEnvironmentToolVocabularyMatchesCatalog:
+// every non-agent catalog entry at images/sandbox-features/<name>/ must appear in
+// the schema's environment.tools name alternation. Without this direction, adding
+// a feature directory to the catalog leaves it silently unusable in a Flight Plan
+// until someone also edits the schema pattern (and its doc copy); this test makes
+// that omission fail loudly at the moment the catalog grows.
+func TestCatalogToolVocabularyMatchesSchema(t *testing.T) {
+	// Collect the tool names the schema admits.
+	raw, err := os.ReadFile(schemaPath(t))
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse schema JSON: %v", err)
+	}
+	defs := doc["$defs"].(map[string]any)
+	env := defs["environment"].(map[string]any)
+	tools := env["properties"].(map[string]any)["tools"].(map[string]any)
+	pattern, ok := tools["items"].(map[string]any)["pattern"].(string)
+	if !ok {
+		t.Fatal("environment.tools.items.pattern missing from the schema")
+	}
+	m := toolNamePattern.FindStringSubmatch(pattern)
+	if m == nil {
+		t.Fatalf("tools item pattern %q does not open with a closed name alternation", pattern)
+	}
+	admitted := make(map[string]struct{})
+	for _, name := range strings.Split(m[1], "|") {
+		admitted[name] = struct{}{}
+	}
+
+	// Walk the curated catalog and require every non-agent feature to be admitted.
+	catalogDir := filepath.Join(repoRoot(t), "images", "sandbox-features")
+	entries, err := os.ReadDir(catalogDir)
+	if err != nil {
+		t.Fatalf("read catalog dir %s: %v", catalogDir, err)
+	}
+	var checked int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Only count directories that are actually curated features.
+		if _, err := os.Stat(filepath.Join(catalogDir, name, "devcontainer-feature.json")); err != nil {
+			continue
+		}
+		if _, isAgent := agentFeatures[name]; isAgent {
+			continue
+		}
+		checked++
+		if _, ok := admitted[name]; !ok {
+			t.Errorf("catalog feature %q is not admitted by the schema environment.tools pattern %q; add it to the schema (and its doc copy) or mark it an agent feature", name, pattern)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no non-agent catalog features were checked; the reverse drift guard is inert")
+	}
+}
+
 // TestStrippedManifestStillValid asserts the lossless-if-stripped guarantee at
 // the schema level: removing the entire `aileron` block leaves a document that
 // the schema does not reject. A host without Aileron reads a valid skill.
