@@ -55,21 +55,25 @@ type Options struct {
 	// Version is the semver label recorded in the lock. Optional; empty
 	// records no version label.
 	Version string
-	// CLIVersion is the Aileron CLI build version that drives the default
-	// runner image reference in the retained legacy default-image branch
-	// (#1808, dormant until #1827 rewires it). It is distinct from Version
-	// (the skill's semver label): CLIVersion picks the floating sandbox-base
-	// tag the default resolves from. An empty value behaves as a dev build
-	// (resolves the :edge tag), matching the CLI's version default.
+	// CLIVersion is the Aileron CLI build version. It drives the default
+	// composition base: a tools-declaring skill with no custom image composes
+	// onto the Aileron runner base for this version (composition.BaseImage).
+	// It is distinct from Version (the skill's semver label): CLIVersion
+	// picks the floating sandbox-base tag the default resolves from. An empty
+	// value behaves as a dev build (resolves the :edge tag), matching the
+	// CLI's version default.
 	CLIVersion string
 	// SigningKeyPath is the path to the PEM ed25519 private key. Empty falls
 	// back to $AILERON_SIGNING_KEY (see LoadSigningKey).
 	SigningKeyPath string
-	// Resolver resolves an environment custom-base image reference to a
-	// digest. May be nil for instruction-only / no-environment skills.
+	// Resolver resolves a base image reference (the runner base or an
+	// environment custom image) to a digest. Required for any
+	// environment-declaring skill; may be nil for instruction-only /
+	// no-environment skills.
 	Resolver DigestResolver
-	// Composer composes a declared environment tool set and pins the built
-	// image's digest. May be nil when no tools-declaring skill is frozen.
+	// Composer composes catalog-resolved Feature references onto the
+	// digest-pinned base and pins the built image's digest. May be nil when
+	// no tools-declaring skill is frozen.
 	Composer FeatureComposer
 }
 
@@ -105,9 +109,20 @@ func Run(ctx context.Context, raw []byte, opts Options) (Result, error) {
 		return Result{}, err
 	}
 
+	// Seal each contracted tool step's declared reach into the step-keyed
+	// lock section, so the content hash and signature cover it.
+	var stepTrust map[string]StepReach
+	if !m.InstructionOnly {
+		stepTrust, err = sealStepTrust(m.Aileron.Steps)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
 	lock := Lockfile{
 		ResolvedImages:        pins,
 		ResolvedCapabilitySet: capSet,
+		StepTrust:             stepTrust,
 		Version:               opts.Version,
 	}
 

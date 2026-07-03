@@ -29,6 +29,14 @@ type VerifiedFrozen struct {
 	// populated on the verified path: a tampered digest changes the recomputed
 	// content hash and refuses before this field is read.
 	ResolvedImages []ImagePin
+	// StepTrust is the step-keyed sealed trust section carried by the
+	// verified manifest lock block: for each tool step that declared a trust
+	// contract, the network reach freeze sealed from it, keyed by step id.
+	// Launch/runtime read the sealed reach only from here (the verified
+	// path): a tampered section changes the recomputed content hash and
+	// refuses before this field is read. Nil when the frozen unit seals no
+	// tool-step reach.
+	StepTrust map[string]StepReach
 	// SignerFingerprint is the `sha256:<hex>` fingerprint of the verified
 	// author public-key PEM (the same `pubPEM` the ed25519 signature verified
 	// against). It is the honest signer identity the audit trail carries:
@@ -143,10 +151,22 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 	if len(manifestLock.ResolvedImages) > 0 {
 		pins = append([]ImagePin(nil), manifestLock.ResolvedImages...)
 	}
+	// The step-keyed sealed reach is copied from the manifest's own verified
+	// lock block exactly like the pins, with the hosts slices defensively
+	// copied so a later mutation of manifestLock can never change what a
+	// caller reads off the verified path.
+	var stepTrust map[string]StepReach
+	if len(manifestLock.StepTrust) > 0 {
+		stepTrust = make(map[string]StepReach, len(manifestLock.StepTrust))
+		for id, reach := range manifestLock.StepTrust {
+			stepTrust[id] = StepReach{Hosts: append([]string(nil), reach.Hosts...)}
+		}
+	}
 	return VerifiedFrozen{
 		SkillMD:           verified,
 		ContentHash:       recorded,
 		ResolvedImages:    pins,
+		StepTrust:         stepTrust,
 		SignerFingerprint: signerFingerprint(pubPEM),
 	}, nil
 }

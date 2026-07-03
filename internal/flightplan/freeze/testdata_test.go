@@ -112,6 +112,86 @@ aileron:
 # No Environment
 `
 
+// toolStepsMD is a valid manifest declaring environment tools and three tool
+// steps: two with a trust contract (declared reach freeze seals into
+// lock.stepTrust) and one without (omitted from the sealed section).
+const toolStepsMD = `---
+name: tool-steps-skill
+description: A skill running declared environment tools with sealed reach.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+  environment:
+    tools:
+      - aws-cli@2.x
+      - gh@2
+  inputs: []
+  outputs: []
+  steps:
+    - id: fetch
+      kind: tool
+      command:
+        - aws
+        - s3
+        - ls
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - s3.amazonaws.com
+          - s3.amazonaws.com:443
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result
+    - id: version
+      kind: tool
+      command:
+        - aws
+        - --version
+      outputs:
+        - version
+    - id: file
+      kind: tool
+      command:
+        - gh
+        - issue
+        - create
+      outputs:
+        - issue
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - api.github.com
+        effect: write
+        idempotency:
+          safeToRetry: false
+        audit:
+          fields:
+            - result
+---
+
+# Tool Steps Skill
+`
+
 // genSigningKey returns a fresh ed25519 private key and writes its PKCS#8
 // PEM form to a temp file, returning the path. Mirrors the keyring PEM
 // conventions; used to exercise LoadSigningKey + Sign.

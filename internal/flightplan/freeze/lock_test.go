@@ -14,9 +14,13 @@ func sampleLock() Lockfile {
 		ResolvedImages: []ImagePin{
 			{Ref: "registry.example.com/runner:1.4", Digest: fakeDigest},
 		},
-		ResolvedCapabilitySet: []string{"ghcr.io/example/feature:1"},
-		ContentHash:           fakeDigest2,
-		Version:               "1.2.3",
+		ResolvedCapabilitySet: []string{"aws-cli@2.x"},
+		StepTrust: map[string]StepReach{
+			"fetch": {Hosts: []string{"s3.amazonaws.com"}},
+			"file":  {Hosts: []string{"tracker.example.com", "tracker.example.com:443"}},
+		},
+		ContentHash: fakeDigest2,
+		Version:     "1.2.3",
 	}
 }
 
@@ -43,10 +47,40 @@ func TestMarshalLockfile_UsesSchemaFieldNames(t *testing.T) {
 		t.Fatalf("MarshalLockfile: %v", err)
 	}
 	s := string(b)
-	for _, key := range []string{"resolvedImages:", "resolvedCapabilitySet:", "contentHash:", "version:", "ref:", "digest:"} {
+	for _, key := range []string{"resolvedImages:", "resolvedCapabilitySet:", "stepTrust:", "contentHash:", "version:", "ref:", "digest:", "hosts:"} {
 		if !strings.Contains(s, key) {
 			t.Errorf("lockfile missing schema field %q:\n%s", key, s)
 		}
+	}
+}
+
+// TestMarshalLockfile_StepTrustDeterministic proves the step-keyed map
+// marshals byte-identically regardless of insertion order: yaml.v3 sorts map
+// keys, and the freeze determinism contract (two freezes of the same input
+// produce byte-identical lockfiles) rides on it.
+func TestMarshalLockfile_StepTrustDeterministic(t *testing.T) {
+	ab := Lockfile{StepTrust: map[string]StepReach{}}
+	ab.StepTrust["alpha"] = StepReach{Hosts: []string{"a.example.com"}}
+	ab.StepTrust["beta"] = StepReach{Hosts: []string{"b.example.com"}}
+	ba := Lockfile{StepTrust: map[string]StepReach{}}
+	ba.StepTrust["beta"] = StepReach{Hosts: []string{"b.example.com"}}
+	ba.StepTrust["alpha"] = StepReach{Hosts: []string{"a.example.com"}}
+
+	first, err := MarshalLockfile(ab)
+	if err != nil {
+		t.Fatalf("marshal ab: %v", err)
+	}
+	second, err := MarshalLockfile(ba)
+	if err != nil {
+		t.Fatalf("marshal ba: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("stepTrust marshal is insertion-order dependent:\n%s\nvs\n%s", first, second)
+	}
+	idxAlpha := strings.Index(string(first), "alpha:")
+	idxBeta := strings.Index(string(first), "beta:")
+	if idxAlpha < 0 || idxBeta < 0 || idxAlpha > idxBeta {
+		t.Errorf("stepTrust keys must emit sorted:\n%s", first)
 	}
 }
 

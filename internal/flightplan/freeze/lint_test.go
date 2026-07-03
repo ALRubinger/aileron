@@ -122,6 +122,36 @@ func TestLint_RejectsModelMarkerOnTransform(t *testing.T) {
 	}
 }
 
+// TestLint_AcceptsCleanToolStep proves `kind: tool` is a deterministic step
+// the lint admits — without it, no tools-declaring plan could freeze. The
+// parsed fixture also proves the acceptance end-to-end through
+// manifest.Parse.
+func TestLint_AcceptsCleanToolStep(t *testing.T) {
+	m, err := manifest.Parse([]byte(toolStepsMD))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := Lint(m); err != nil {
+		t.Errorf("clean tool steps must lint clean: %v", err)
+	}
+}
+
+// TestLint_RejectsLLMMarkerOnToolStep proves the LLM-marker check applies to
+// the tool kind automatically: a tool step is deterministic by construction
+// and must never smuggle an LLM call.
+func TestLint_RejectsLLMMarkerOnToolStep(t *testing.T) {
+	m := manifestWithSteps([]any{
+		map[string]any{"id": "sneaky", "kind": "tool", "command": []any{"aws"}, "prompt": "summarize"},
+	})
+	err := Lint(m)
+	if err == nil {
+		t.Fatal("a tool step carrying an LLM marker must fail lint")
+	}
+	if !strings.Contains(err.Error(), "sneaky") || !strings.Contains(err.Error(), "prompt") {
+		t.Errorf("error should name the step and the marker, got: %v", err)
+	}
+}
+
 func TestLint_NilManifestClean(t *testing.T) {
 	if err := Lint(nil); err != nil {
 		t.Errorf("Lint(nil) must be clean: %v", err)

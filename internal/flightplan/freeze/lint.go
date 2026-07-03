@@ -9,12 +9,14 @@ import (
 
 // validStepKinds is the closed set of step kinds the schema permits. The
 // no-LLM guarantee is structural: only `llm-seam` reaches an LLM, and every
-// other kind is deterministic by construction. A step whose kind is absent
-// or outside this set could smuggle a non-deterministic call past the seam,
-// so the lint rejects it.
+// other kind (action-call, transform, and the deterministic-subprocess tool
+// step) is deterministic by construction. A step whose kind is absent or
+// outside this set could smuggle a non-deterministic call past the seam, so
+// the lint rejects it.
 var validStepKinds = map[string]bool{
 	"action-call": true,
 	"transform":   true,
+	"tool":        true,
 	"llm-seam":    true,
 }
 
@@ -44,7 +46,7 @@ func (e *LintError) Error() string {
 //
 //   - every step must declare a `kind`;
 //   - that kind must be one of the schema's closed set (action-call,
-//     transform, llm-seam); an unknown kind is a smuggling vector;
+//     transform, tool, llm-seam); an unknown kind is a smuggling vector;
 //   - a non-seam step must not carry an LLM marker (a key whose name marks
 //     a model/prompt/llm call). Only `llm-seam` may.
 //
@@ -71,7 +73,7 @@ func Lint(m *manifest.Manifest) error {
 		if !validStepKinds[kind] {
 			return &LintError{
 				StepID: id,
-				Reason: fmt.Sprintf("unknown step kind %q (only action-call, transform, and the marked llm-seam may appear)", kind),
+				Reason: fmt.Sprintf("unknown step kind %q (only action-call, transform, tool, and the marked llm-seam may appear)", kind),
 			}
 		}
 		if kind == llmSeamKind {

@@ -42,7 +42,10 @@ func frozenExample(t *testing.T) store.FrozenVersion {
 	res, err := freeze.Run(context.Background(), raw, freeze.Options{
 		Version:        "1.0.0",
 		SigningKeyPath: keyPath,
-		Composer: freeze.FeatureComposerFunc(func(_ context.Context, _ []string) (string, error) {
+		Resolver: freeze.DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
+			return "sha256:" + strings.Repeat("b", 64), nil
+		}),
+		Composer: freeze.FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
 			return "sha256:" + strings.Repeat("a", 64), nil
 		}),
 	})
