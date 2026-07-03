@@ -4,7 +4,7 @@
 // reachability contract (#1759).
 //
 // This test proves the load-bearing #1759 contract: a record emitted by the
-// re-entered `aileron skill launch` INSIDE the booted rung-1/rung-2 image
+// re-entered `aileron skill launch` INSIDE the booted environment image
 // surfaces on the HOST daemon's audit trail. The image-boot path injects the
 // host daemon coordinates (AILERON_API_URL + AILERON_TOKEN, host-rewritten to
 // host.docker.internal, /v1-suffixed) into the container so the inner launch
@@ -24,7 +24,7 @@
 //
 // The wiring is env-driven so one body serves the CI job and a local run:
 //
-//	AILERON_SANDBOX_FLIGHTPLAN_IMAGE  pinned rung-1/rung-2 image ref to boot
+//	AILERON_SANDBOX_FLIGHTPLAN_IMAGE  pinned environment image ref to boot
 //	AILERON_API_URL                   live host daemon API base (with /v1)
 //	AILERON_TOKEN                     host daemon auth token
 //	AILERON_SANDBOX_FLIGHTPLAN_UNIT   frozen unit name to launch inside the image
@@ -66,7 +66,7 @@ func TestFlightPlanImageAuditReachesHost(t *testing.T) {
 
 	image := strings.TrimSpace(os.Getenv("AILERON_SANDBOX_FLIGHTPLAN_IMAGE"))
 	if image == "" {
-		t.Fatalf("AILERON_SANDBOX_FLIGHTPLAN_IMAGE must name the pinned rung-1/rung-2 image to boot (required, not skipped)")
+		t.Fatalf("AILERON_SANDBOX_FLIGHTPLAN_IMAGE must name the pinned environment image to boot (required, not skipped)")
 	}
 	apiURL := strings.TrimSpace(os.Getenv("AILERON_API_URL"))
 	token := strings.TrimSpace(os.Getenv("AILERON_TOKEN"))

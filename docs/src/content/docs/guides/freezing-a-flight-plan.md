@@ -10,8 +10,8 @@ Freeze is the author-time step that seals an installed Aileron skill into a Flig
 Freeze runs a fixed sequence over one `SKILL.md` document.
 
 1. It parses and lints the manifest. The lint rejects any step that could reach an LLM outside the marked `llm-seam` (see [the manifest spec](/development/flight-plan-manifest-spec)).
-2. It resolves the execution environment to image digests. A rung-1 `rung1Image.ref` is resolved to its `sha256:` digest. When a rung-1 `rung1Image` declares no ref, freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock. A rung-2 `rung2CapabilityUnits.features` set is composed and the built image is pinned by digest.
-3. It builds the lockfile. The lockfile records the resolved image pins, the resolved capability set, the content hash, and the semver label.
+2. It resolves the declared environment to exactly one image digest. Declared `environment.tools` are resolved to their catalog devcontainer Features and composed onto the Aileron-provided runner base, and the built image is pinned by its `sha256:` digest. A custom `environment.image` is resolved to its `sha256:` digest; when `tools` are declared alongside it, they compose onto that custom base. The plan runs in one container, so this resolves to a single pin. A plan that declares no environment pins nothing.
+3. It builds the lockfile. The lockfile records the single resolved image pin, the resolved capability set, the step-keyed sealed trust reach for each tool step that declared a trust contract, the content hash, and the semver label.
 4. It content-addresses the unit. The content hash is a `sha256` over the canonical frozen manifest bytes plus the lockfile bytes.
 5. It signs the content with a detached ed25519 signature.
 6. It writes the frozen version into the store as an immutable directory.
@@ -56,3 +56,5 @@ Frozen versions are immutable. Re-freezing changed content writes a new version 
 The signature is verifiable at launch. A verifier needs only the signature and the public key, both stored beside the version. The launch-time runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) verifies the signature before it runs a Flight Plan.
 
 The signing private key never enters the store. Only the public key and the detached signature are persisted.
+
+A frozen version is multi-identity. The seal carries no credential binding and no identity. The identical frozen version launches under different vault-bound identities with different authorizations, and the audit trail records who ran it. The credential binding lives on the launching operator's machine, so the same signed bytes serve many operators without carrying any one operator's identity.

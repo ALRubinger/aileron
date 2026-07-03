@@ -48,8 +48,8 @@ func TestErrorMessages(t *testing.T) {
 
 // TestRun_InProcessPipelineFromLoadedPlan exercises the in-process pipeline
 // from a frozen version on disk: load+verify then resolve+execute+materialize
-// end-to-end. The worked example is rung-2, so the public Run now boots the
-// pinned image (covered by TestRun_BootsPinnedImageWhenLockPinsRung); this test
+// end-to-end. The worked example declares an environment, so the public Run now boots the
+// pinned image (covered by TestRun_BootsPinnedImageWhenLockPinsEnvironment); this test
 // drives the parity pipeline directly from the loaded plan so the resolve →
 // execute → materialize path stays covered independent of the boot branch.
 func TestRun_InProcessPipelineFromLoadedPlan(t *testing.T) {

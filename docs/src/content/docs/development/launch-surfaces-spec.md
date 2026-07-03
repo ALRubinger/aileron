@@ -14,7 +14,7 @@ This spec defines surfaces. It does not redefine the freeze boundary, the Launch
 
 A surface introduces no new approval mechanism. Approval routing is the effect-driven out-of-band approval already specified by the [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) trust contract and [ADR-0009](/adr/0009-user-channel). A surface binds to that routing and never replaces it.
 
-File-artifact outputs are in scope for result delivery. Binary materialization stays deferred. v1 materializes `utf-8` artifacts only, and `base64` or binary output is blocked on the host-ABI binary-body field and the rung-three mount or run-and-collect boundary ([#1510](https://github.com/ALRubinger/aileron/issues/1510)).
+File-artifact outputs are in scope for result delivery. Binary materialization stays deferred. v1 materializes `utf-8` artifacts only, and `base64` or binary output is blocked on the host-ABI binary-body field and the tool step's mount or collect boundary ([#1510](https://github.com/ALRubinger/aileron/issues/1510)).
 
 This spec ships no code. It is a normative format and contract spec in the same register as the [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) and the [AI-Assisted Authoring UX Spec](/development/ai-assisted-authoring-spec/). The runtime it surfaces is tracked in [#1511](https://github.com/ALRubinger/aileron/issues/1511). The surface set is absorbed and quoted from [#928](https://github.com/ALRubinger/aileron/issues/928), not depended on.
 
@@ -24,7 +24,7 @@ Every surface shares one Launch contract. The per-surface dimensions specialize 
 
 Every Launch binds a frozen Flight Plan version. The version is the content hash plus the semver label from the manifest `lock` section ([Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) freeze and lock section). A surface invokes the deterministic Launch runtime against a digest-pinned, signed version. A surface never invokes an unfrozen skill.
 
-Booting a pinned rung-1 or rung-2 image runs the aileron binary baked into that image against the host CLI that started the Launch ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)). The launcher reads the image's `ai.aileron.cli.version` label and compares it to the host CLI version. A mismatch prints a stderr warning naming both versions. The Launch never fails on version skew. An image that carries no such label boots silently, because a custom image's contract is the operator's responsibility under ADR-0027.
+Booting the pinned environment image runs the aileron binary baked into that image against the host CLI that started the Launch ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)). The launcher reads the image's `ai.aileron.cli.version` label and compares it to the host CLI version. A mismatch prints a stderr warning naming both versions. The Launch never fails on version skew. An image that carries no such label boots silently, because a custom image's contract is the operator's responsibility under ADR-0027.
 
 Every Launch resolves its declared inputs once, at the launch boundary ([#1523](https://github.com/ALRubinger/aileron/issues/1523)). A surface passes literal-input overrides into that single resolution step. A surface never resolves inputs itself and never resolves them more than once.
 
@@ -142,7 +142,7 @@ A named file artifact is published to its declared publish target. The `outputs:
 
 A surface that cannot execute JavaScript receives a hosted URL or an iframe target rather than inline content. An email reply and a static surface cannot render an interactive result inline. The surface receives a hosted URL or an iframe target that points at the published artifact instead.
 
-A large or binary artifact is published by reference, never inlined. A small text artifact may render inline. A large artifact or a binary artifact is published to its target and delivered as a reference to that target. This is consistent with v1 `utf-8`-only materialization. Binary and `base64` materialization is the deferred follow-up blocked on the host-ABI binary-body field and the rung-three mount or run-and-collect escape hatch ([#1510](https://github.com/ALRubinger/aileron/issues/1510)).
+A large or binary artifact is published by reference, never inlined. A small text artifact may render inline. A large artifact or a binary artifact is published to its target and delivered as a reference to that target. This is consistent with v1 `utf-8`-only materialization. Binary and `base64` materialization is the deferred follow-up blocked on the host-ABI binary-body field and the tool step's mount or collect escape hatch ([#1510](https://github.com/ALRubinger/aileron/issues/1510)).
 
 ## Embeddable widget designs
 

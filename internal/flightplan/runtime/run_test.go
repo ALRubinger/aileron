@@ -121,11 +121,11 @@ func TestRun_DeniedApprovalAbortsAndAudits(t *testing.T) {
 	}
 }
 
-// TestRun_BootsPinnedImageWhenLockPinsRung proves the boot branch end to end:
-// the worked example is rung-2, so a store-backed Run delegates to the wired
+// TestRun_BootsPinnedImageWhenLockPinsEnvironment proves the boot branch end to end:
+// the worked example declares an environment, so a store-backed Run delegates to the wired
 // ImageRunner with the exact ref@digest from the verified lock and never walks
 // the in-process pipeline.
-func TestRun_BootsPinnedImageWhenLockPinsRung(t *testing.T) {
+func TestRun_BootsPinnedImageWhenLockPinsEnvironment(t *testing.T) {
 	fv := frozenExample(t)
 	s := store.New(t.TempDir())
 	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
@@ -145,7 +145,7 @@ func TestRun_BootsPinnedImageWhenLockPinsRung(t *testing.T) {
 		t.Fatalf("Run boot path: %v", err)
 	}
 	if !fake.called {
-		t.Fatal("Run did not delegate to the ImageRunner for a rung-pinned unit")
+		t.Fatal("Run did not delegate to the ImageRunner for an environment-pinned unit")
 	}
 	if !strings.HasSuffix(fake.spec.Image, "@"+wantDigest) {
 		t.Errorf("booted image = %q, want it to end with @%s", fake.spec.Image, wantDigest)
@@ -156,7 +156,7 @@ func TestRun_BootsPinnedImageWhenLockPinsRung(t *testing.T) {
 }
 
 // TestRun_PinnedButNoRunnerErrorsFromStore proves the guard fires end to end: a
-// store-backed unit that pins a rung with no ImageRunner configured refuses,
+// store-backed unit that pins an environment with no ImageRunner configured refuses,
 // never silently falling back to the in-process path.
 func TestRun_PinnedButNoRunnerErrorsFromStore(t *testing.T) {
 	fv := frozenExample(t)
@@ -171,16 +171,16 @@ func TestRun_PinnedButNoRunnerErrorsFromStore(t *testing.T) {
 		// ImageRunner intentionally nil.
 	})
 	if err == nil {
-		t.Fatal("a rung-pinned unit with no ImageRunner must refuse")
+		t.Fatal("an environment-pinned unit with no ImageRunner must refuse")
 	}
 	if !strings.Contains(err.Error(), "no image runner is configured") {
 		t.Errorf("error = %q, want a no-runner-configured message", err.Error())
 	}
 }
 
-// TestRun_NoRungStaysInProcess proves parity: a unit that pins no image never
+// TestRun_NoEnvironmentStaysInProcess proves parity: a unit that pins no image never
 // touches the ImageRunner and drives the in-process runPlan pipeline.
-func TestRun_NoRungStaysInProcess(t *testing.T) {
+func TestRun_NoEnvironmentStaysInProcess(t *testing.T) {
 	fv := frozenNoImage(t)
 	s := store.New(t.TempDir())
 	if err := s.WriteFrozen("no-exec-env", fv); err != nil {
@@ -219,10 +219,10 @@ func TestRun_NoRungStaysInProcess(t *testing.T) {
 }
 
 // TestRun_InPinnedImageReentryStaysInProcess proves the image-boot re-entry
-// guard: a rung-pinned unit launched with InPinnedImage (the in-container
+// guard: an environment-pinned unit launched with InPinnedImage (the in-container
 // re-entry, #1731) drives the in-process pipeline and never touches the
 // ImageRunner. Without the guard the re-entry would boot the pin again and
-// recurse — the failure mode is "no container runtime found on PATH" inside
+// recurse; the failure mode is "no container runtime found on PATH" inside
 // the booted image.
 func TestRun_InPinnedImageReentryStaysInProcess(t *testing.T) {
 	fv := frozenExample(t)

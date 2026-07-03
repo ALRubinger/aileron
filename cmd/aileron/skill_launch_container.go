@@ -17,7 +17,7 @@ import (
 )
 
 // containerImageRunner is the production runtime.ImageRunner: it boots the
-// verified pinned rung-1/rung-2 image and runs the frozen Flight Plan inside it
+// verified pinned environment image and runs the frozen Flight Plan inside it
 // (#1731). It mirrors the sandboxRunContainer seam in internal/launch: the boot
 // is a package-level indirection (containerRunFlightPlan) so CLI tests swap in a
 // fake image runner and never touch Docker, while production shells out to the
@@ -35,7 +35,7 @@ import (
 // Daemon-audit reachability (#1759): when daemonEnv is non-nil it injects the
 // host daemon coordinates (AILERON_API_URL + AILERON_TOKEN) into the booted
 // container's env so the re-entered `aileron skill launch` reaches the SAME host
-// daemon action + audit boundary — a record emitted inside the image then
+// daemon action + audit boundary, a record emitted inside the image then
 // surfaces in the host `aileron audit list`. Without it the inner binary sees no
 // daemon env and resolves/spawns an ephemeral in-container daemon nothing on the
 // host can query. A zero-value runner has daemonEnv == nil and injects no env,
@@ -76,7 +76,7 @@ func (r containerImageRunner) diagWriter() io.Writer {
 // injects it into every whole-plan boot, and runSkillLaunch reads it into
 // runtime.Options.InPinnedImage so the in-container re-entry runs the plan
 // in-process instead of booting the verified pin a second time (which would
-// recurse — the image carries no nested container runtime).
+// recurse; the image carries no nested container runtime).
 const envSkillImageBooted = "AILERON_SKILL_IMAGE_BOOTED"
 
 // containerRunFlightPlan boots the pinned image and runs the plan inside it. It
@@ -100,7 +100,7 @@ var containerBakedCLIVersion = func(ctx context.Context, runtimeName, image stri
 	return sandboxcontainer.BakedCLIVersion(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
 }
 
-// reportBakedCLIVersion surfaces version skew between the pinned rung-1/rung-2
+// reportBakedCLIVersion surfaces version skew between the pinned environment
 // image's baked aileron CLI and the host CLI that is booting it (#1809). The
 // image-boot re-entry runs the baked binary against this host's launch
 // (ADR-0027 / #1731), so a mismatch is worth a heads-up but is never fatal: the
@@ -171,7 +171,7 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// Re-emit the launch input overrides as --input name=value on the in-container
 	// re-entry (#1802). Without this the inner binary sees no overrides and every
 	// input silently resolves to its default, while the runner still echoes
-	// spec.Inputs as ResolvedInputs — falsely telling the operator the overrides
+	// spec.Inputs as ResolvedInputs, falsely telling the operator the overrides
 	// applied. CLI-path values arrive as strings via inputFlag.Set, and the inner
 	// re-entry parses them with the same inputFlag, so the string round-trip is
 	// exact. Keys are appended in sorted order so the emitted command is
@@ -201,7 +201,7 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		Name:    flightPlanContainerName(spec),
 		// The sentinel tells the in-container re-entry it is ALREADY inside
 		// the booted pin: it must run the plan in-process rather than boot
-		// the pin again (which would recurse — the image carries no nested
+		// the pin again (which would recurse; the image carries no nested
 		// container runtime, and with one it would never terminate).
 		Env: map[string]string{envSkillImageBooted: "1"},
 	}
@@ -233,7 +233,7 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// injects the operator's vault-bound credential at the boundary. Prepare
 	// fails closed: a boot that resolved daemon config but could not write its
 	// session CA (or whose declared conventions were malformed) must NOT silently
-	// egress un-proxied — it runs cleanup and fails the boot. The proxy env and
+	// egress un-proxied; it runs cleanup and fails the boot. The proxy env and
 	// the sentinel + daemon env are disjoint key sets
 	// (HTTPS_PROXY/CA/placeholders vs
 	// AILERON_SKILL_IMAGE_BOOTED/AILERON_API_URL/AILERON_TOKEN), so the merge

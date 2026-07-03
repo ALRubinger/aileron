@@ -170,7 +170,7 @@ func TestLoadVerified_UntamperedLoads(t *testing.T) {
 }
 
 func TestLoadVerified_PropagatesResolvedImages(t *testing.T) {
-	// The worked example is rung-2: its verified lock pins a composed image
+	// The worked example declares an environment: its verified lock pins a composed image
 	// digest. verifyAndDecode must carry that pin onto the LoadedPlan so Run can
 	// boot the exact image the signature attested.
 	fv := frozenExample(t)

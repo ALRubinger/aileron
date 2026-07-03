@@ -10,7 +10,7 @@ import (
 )
 
 func TestRunInImage_BootsExactPinnedImage(t *testing.T) {
-	// A plan that pins a rung image boots that exact ref@digest through the
+	// A plan that pins an environment image boots that exact ref@digest through the
 	// ImageRunner. The recorded image is the load-bearing assertion: it must
 	// equal ref@sha256:<digest-from-lock>, never a re-resolved tag.
 	digest := "sha256:" + strings.Repeat("a", 64)
@@ -58,7 +58,7 @@ func TestRunInImage_BootsExactPinnedImage(t *testing.T) {
 }
 
 func TestRunInImage_PinnedButNoRunnerErrors(t *testing.T) {
-	// A plan that declares and pins a rung image but supplies no ImageRunner is
+	// A plan that declares and pins an environment image but supplies no ImageRunner is
 	// an explicit error, never a silent in-process fallback: ignoring the pin
 	// would enter an environment the attestation never certified.
 	lp := LoadedPlan{
@@ -95,7 +95,7 @@ func TestRunInImage_RejectsMultiplePins(t *testing.T) {
 	// The attestation certifies exactly one image environment, so a plan that
 	// somehow carries more than one resolved pin must error rather than silently
 	// boot pins[0] and ignore the rest. Guards the single-pin invariant against a
-	// future multi-pin rung.
+	// future multi-pin environment.
 	lp := LoadedPlan{
 		ResolvedImages: []freeze.ImagePin{
 			{Ref: "registry.example.com/runner:1.4", Digest: "sha256:" + strings.Repeat("a", 64)},

@@ -30,7 +30,9 @@ Launch refuses to run a frozen unit it cannot verify. Before any step runs, the 
 
 ## The no-LLM guarantee
 
-A Flight Plan is a pinned function over its declared inputs. It is deterministic given those resolved inputs. The runtime guarantees this structurally. Every step declares a `kind` from a closed set: `action-call`, `transform`, or `llm-seam`. The executor has exactly three branches, one per kind. The `action-call` and `transform` branches hold no reference to any language-model type. No deterministic step can reach a model by construction.
+A Flight Plan is a pinned function over its declared inputs. It is deterministic given those resolved inputs. The runtime guarantees this structurally. Every step declares a `kind` from a closed set: `action-call`, `transform`, `tool`, or `llm-seam`. The executor has exactly four branches, one per kind. The `action-call`, `transform`, and `tool` branches hold no reference to any language-model type. No deterministic step can reach a model by construction.
+
+A `tool` step runs a declared environment tool as a deterministic subprocess inside the one container the plan booted. It executes an argv `command` with no shell interpretation. Its sealed network reach is enforced at launch: before the step runs, the daemon mints a step-scoped, TTL-bounded proxy credential restricted to exactly the sealed hosts. A scoped call to an undeclared host is refused with a 403 at the daemon proxy before the TLS handshake, and no credential bytes ever enter the container. A contracted tool step with no verified sealed reach, and a tool-step plan launched with no pinned environment, both fail closed.
 
 The single marked seam is the `llm-seam` step. It is the only kind that may reach a model. In v1 the seam is unwired by default. An `llm-seam` step with no configured provider is a hard error. A default launch therefore reaches no model at all, so the no-LLM property holds by default and not only by construction.
 
@@ -51,6 +53,10 @@ A step that declares `materializesOutput` produces a typed file-map. The runtime
 ## The audit boundary
 
 Launch emits a customer-owned audit record per action and one per launch. Each record carries exactly the audit fields the action declares. Scalars are recorded by value. Data reads are recorded by their resolved binding, a result or snapshot summary, never the full dataset inline. The audit sink is the customer-owned store the runtime is wired to.
+
+## Multi-identity
+
+The credential binding lives on the launching operator's machine, not in the frozen plan. Two operators launch the identical sealed version, each under a different vault-bound identity with different authorizations, and each launch's audit trail records who ran it. The image and the booted container never receive the vault credential bytes, because the daemon forward proxy injects or re-signs with the vault credential at the egress boundary. One artifact, two operators, two identities, and the audit records who.
 
 ## Determinism
 

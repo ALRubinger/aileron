@@ -26,7 +26,7 @@ var newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
 var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink { return daemonAuditSink{stderr: stderr} }
 
 // newLaunchImageRunner returns the production image runner that boots the
-// verified pinned rung-1/rung-2 image and runs the plan inside it (#1731). It
+// verified pinned environment image and runs the plan inside it (#1731). It
 // is a package-level seam so CLI tests swap in a fake that records the exact
 // image string and never touches Docker, mirroring the other launch seams.
 // The production runner injects the daemon-backed env resolver so the
@@ -48,7 +48,7 @@ var newLaunchImageRunner = func() runtime.ImageRunner {
 // mirroring newLaunchImageRunner. The production runner refuses to exec
 // outside the pinned image (the AILERON_SKILL_IMAGE_BOOTED sentinel) and,
 // for a step with a sealed reach, mints a daemon step-scoped proxy
-// credential before the exec and releases it after — failing closed when the
+// credential before the exec and releases it after, failing closed when the
 // scope cannot be obtained, so a sealed step never runs unscoped.
 var newLaunchToolStepRunner = func() runtime.ToolStepRunner {
 	return inContainerToolStepRunner{}
@@ -127,7 +127,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// an llm-seam step errors unless a provider is supplied. Tests inject a
 		// deterministic seam through launchSeamForTest.
 		Seam: launchSeamForTest,
-		// ImageRunner boots the verified pinned rung-1/rung-2 image and runs the
+		// ImageRunner boots the verified pinned environment image and runs the
 		// plan inside it. When the frozen unit pins no image, the runtime never
 		// touches this seam and stays on the in-process path.
 		ImageRunner: newLaunchImageRunner(),
@@ -264,8 +264,8 @@ func daemonActionName(ref string) string {
 // nests the real result one level deep, which duplicates the payload in the
 // materialized artifact, misdirects redaction/multi-output reads at the outer
 // keys, and breaks the audit query-execution-id lift (issue #1801). So when the
-// parsed result is that envelope — a JSON object carrying an "action" string AND
-// an "output" object — unwrap it and return the inner output map. StubExecutor
+// parsed result is that envelope, a JSON object carrying an "action" string AND
+// an "output" object, unwrap it and return the inner output map. StubExecutor
 // results carry "action" but no "output", so requiring both keys leaves them
 // (and every other shape) passing through unchanged. The daemon's public
 // /v1/actions run envelope is untouched; only the launch-side binding is fixed.
