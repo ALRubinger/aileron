@@ -301,6 +301,24 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	}, nil
 }
 
+// containerImageDigestResolver is the production runtime.LocalImageDigestResolver
+// (#1863): it resolves a composed local tag to its content digest through the
+// SAME imageInspector.localImageDigest logic (RepoDigests-then-.Id fallback) that
+// PRODUCED the pin's Digest at freeze time, so the boot-time Id-vs-Digest compare
+// is apples-to-apples by construction. It is a thin adapter over the
+// newImageInspector package-level seam, so CLI tests inject a fake-runner
+// inspector and the resolver runs without Docker, mirroring the
+// builderFeatureComposer / runtimeDigestResolver seam pattern.
+type containerImageDigestResolver struct{}
+
+func (containerImageDigestResolver) Resolve(ctx context.Context, image string) (string, error) {
+	in, err := newImageInspector()
+	if err != nil {
+		return "", err
+	}
+	return in.localImageDigest(ctx, image)
+}
+
 // flightPlanContainerName builds an addressable container name for the boot. The
 // name keeps a stable, human-readable base (the skill name and version) and
 // appends a short random suffix so two concurrent launches of the same frozen

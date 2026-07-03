@@ -60,9 +60,42 @@ func stubLaunchSeams(t *testing.T, disp runtime.ActionDispatcher, useRealAudit .
 	if !(len(useRealAudit) > 0 && useRealAudit[0]) {
 		newLaunchAuditSink = func(io.Writer) runtime.AuditSink { return &fakeAuditSink{} }
 	}
+	// The composed-tools boot-time Id-vs-Digest guard (#1863) consults the
+	// production container-backed digest resolver, which would shell out to
+	// `docker image inspect`. Default it to nil in launch tests (the guard's
+	// backward-compatible no-op path) so a launch that boots a fake image runner
+	// never touches Docker. Tests exercising the guard end-to-end opt in via
+	// stubLaunchImageDigestResolver.
+	origR := newLaunchImageDigestResolver
+	newLaunchImageDigestResolver = func() runtime.LocalImageDigestResolver { return nil }
 	t.Cleanup(func() {
 		newLaunchDispatcher, newLaunchApprover, newLaunchAuditSink = origD, origA, origS
+		newLaunchImageDigestResolver = origR
 	})
+}
+
+// stubLaunchImageDigestResolver swaps the production digest-resolver seam for a
+// fake so a composed-pin launch exercises the boot-time guard (#1863) end to
+// end with no live Docker. Call it AFTER stubLaunchSeams (which defaults the
+// resolver to nil), so the fake wins.
+func stubLaunchImageDigestResolver(t *testing.T, resolver runtime.LocalImageDigestResolver) {
+	t.Helper()
+	orig := newLaunchImageDigestResolver
+	newLaunchImageDigestResolver = func() runtime.LocalImageDigestResolver { return resolver }
+	t.Cleanup(func() { newLaunchImageDigestResolver = orig })
+}
+
+// stubLaunchDigestResolverFake is a launch-test digest resolver double: it
+// returns a canned digest or error and records the tag it was asked about.
+type stubLaunchDigestResolverFake struct {
+	digest   string
+	err      error
+	gotImage string
+}
+
+func (f *stubLaunchDigestResolverFake) Resolve(_ context.Context, image string) (string, error) {
+	f.gotImage = image
+	return f.digest, f.err
 }
 
 // fakeLaunchImageRunner records the exact image string and spec it was handed
@@ -213,6 +246,66 @@ func TestRunSkillLaunch_BootsPinnedEnvironmentImage(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Launched \"weekly-metrics-digest\"") {
 		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// TestRunSkillLaunch_GuardBootsOnDigestMatch proves the boot-time Id-vs-Digest
+// guard (#1863) end to end through the CLI: a composed-tools unit whose local
+// tag resolves in the daemon to the exact attested digest boots normally. The
+// resolver is consulted with the composed local tag and the launch exits 0.
+func TestRunSkillLaunch_GuardBootsOnDigestMatch(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	// The composed pin's Digest is fakeFreezeDigest (the composer's returned
+	// digest); a resolver returning it makes the guard pass.
+	resolver := &stubLaunchDigestResolverFake{digest: fakeFreezeDigest}
+	stubLaunchImageDigestResolver(t, resolver)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.HasPrefix(resolver.gotImage, "aileron/sandbox-tools:") {
+		t.Errorf("guard resolved %q, want the composed local tag", resolver.gotImage)
+	}
+	if !runner.called {
+		t.Fatal("a matching guard must boot the image runner")
+	}
+}
+
+// TestRunSkillLaunch_GuardFailsClosedOnDigestMismatch proves the guard fails the
+// whole launch closed (#1863) when the composed local tag resolves to a
+// different digest than the signed lock attested: the image runner is NEVER
+// booted, the CLI exits non-zero, and stderr names the mismatch.
+func TestRunSkillLaunch_GuardFailsClosedOnDigestMismatch(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	// A resolver returning a DIFFERENT digest than the attested fakeFreezeDigest
+	// makes the guard fire.
+	otherDigest := "sha256:" + strings.Repeat("e", 64)
+	stubLaunchImageDigestResolver(t, &stubLaunchDigestResolverFake{digest: otherDigest})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("a digest mismatch must fail the launch closed, exit=%d stdout=%s", code, stdout.String())
+	}
+	if runner.called {
+		t.Fatal("a mismatched guard must NOT boot the image runner")
+	}
+	if !strings.Contains(stderr.String(), otherDigest) || !strings.Contains(stderr.String(), "refusing to boot") {
+		t.Errorf("stderr must name the mismatch and the refusal, got %q", stderr.String())
 	}
 }
 
