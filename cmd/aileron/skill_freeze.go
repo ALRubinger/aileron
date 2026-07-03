@@ -20,8 +20,8 @@ import (
 
 // newDigestResolver and newFeatureComposer are package-level seams so CLI
 // tests exercise the freeze orchestration without a container runtime. The
-// production implementations wire container.DefaultRunner() (rung-1 image
-// inspect) and container.Builder (rung-2 Feature composition).
+// production implementations wire container.DefaultRunner() (base-image
+// inspect) and container.Builder (environment-tools Feature composition).
 var newDigestResolver = func() freeze.DigestResolver { return runtimeDigestResolver{} }
 var newFeatureComposer = func() freeze.FeatureComposer { return builderFeatureComposer{} }
 
@@ -162,7 +162,7 @@ func (in imageInspector) inspectFormat(ctx context.Context, image, format string
 	return out.Bytes(), nil
 }
 
-// runtimeDigestResolver resolves a rung-1 image reference to its digest by
+// runtimeDigestResolver resolves a base-image reference to its digest by
 // pulling (best-effort) then inspecting RepoDigests through the shared
 // container Runner seam. It pins by digest, never by tag.
 type runtimeDigestResolver struct{}
@@ -242,20 +242,22 @@ func repoOfRef(ref string) string {
 	return ref
 }
 
-// builderFeatureComposer composes a rung-2 capability-unit Feature set
-// through the container Builder (the #1454 build pipeline) and returns the
-// built image's digest. It routes rung-2 through the same Builder /
-// composition path the sandbox uses, not a bespoke build.
+// builderFeatureComposer composes catalog-resolved Feature references onto
+// the digest-pinned base image through the container Builder (the #1454
+// build pipeline) and returns the built image's digest. It routes the
+// environment-tools composition through the same Builder / composition path
+// the sandbox uses (composition.ToolsPlan's synthesized devcontainer), not a
+// bespoke build.
 type builderFeatureComposer struct{}
 
-func (builderFeatureComposer) ComposeDigest(ctx context.Context, features []string) (string, error) {
+func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) (string, error) {
 	in, err := newImageInspector()
 	if err != nil {
 		return "", err
 	}
-	// Compose the Features onto the Aileron base image via the standard
-	// composition Plan, build through the Builder, then resolve the built
-	// image's digest with the same inspector used for rung-1.
+	// Compose the Features onto the given base via the standard composition
+	// Plan, build through the Builder, then resolve the built image's digest
+	// with the same inspector the base-image resolver uses.
 	b := container.Builder{
 		Runtime: in.runtime,
 		Runner:  in.runner,
@@ -263,30 +265,15 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, features []stri
 		Stderr:  io.Discard,
 	}
 	result, err := b.Build(ctx, container.BuildOptions{
-		Plan:   rung2Plan(features),
+		Plan:   composition.ToolsPlan(base, features),
 		Policy: container.BuildPolicyAlways,
 	})
 	if err != nil {
-		return "", fmt.Errorf("compose rung-2 features: %w", err)
+		return "", fmt.Errorf("compose environment tools: %w", err)
 	}
 	// The built image is a local tag; resolve it to a digest. A locally-built
 	// image typically has no RepoDigests, so fall back to its image Id.
 	return in.localImageDigest(ctx, result.Image)
-}
-
-// rung2Plan builds the composition Plan that composes the given
-// capability-unit Features onto the Aileron base image. Routing rung-2
-// through composition.Plan + the Builder keeps freeze on the same build
-// path the sandbox uses rather than a bespoke build.
-func rung2Plan(features []string) composition.Plan {
-	plan := composition.Plan{
-		Tier:     composition.TierDevcontainer,
-		Features: make(map[string]json.RawMessage, len(features)),
-	}
-	for _, f := range features {
-		plan.Features[f] = json.RawMessage("{}")
-	}
-	return plan
 }
 
 // localImageDigest resolves a locally-built image tag to a content digest.

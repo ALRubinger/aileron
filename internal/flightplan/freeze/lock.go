@@ -8,29 +8,29 @@ import (
 )
 
 // ImagePin pairs a pre-freeze image reference with the content-addressed
-// digest freeze resolved it to. It mirrors the schema
-// `$defs.lock.resolvedImages[]` item exactly.
-//
-// StepID links a rung-3 per-step pin to the step that dispatches to it, so the
-// runtime associates a step to its pin by id rather than by the mutable image
-// tag (which two steps may share). It is empty for rung-1/rung-2 pins, which
-// boot a single whole-plan image and carry no step linkage; `omitempty` keeps
-// those pins' lock bytes byte-identical to the pre-StepID format.
+// digest freeze resolved it to. The schema `$defs.lock.resolvedImages[]` item
+// admits exactly {ref, digest}: the plan runs in one container, so freeze
+// emits at most one pin and no per-pin step linkage.
 type ImagePin struct {
 	Ref    string `yaml:"ref" json:"ref"`
 	Digest string `yaml:"digest" json:"digest"`
-	// StepID is the rung-3 declaring step's id (its declared `id`, or a
-	// positional index like "#0" when the step declares none). Empty for
-	// rung-1/rung-2 pins.
+	// StepID is DORMANT: the schema no longer admits a per-pin `id`, so
+	// freeze never emits it. It is retained only so the not-yet-rewritten
+	// runtime tool-dispatch decode (#1829) keeps compiling with its
+	// direct-construct tests; it is slated for deletion with that rewire.
 	StepID string `yaml:"id,omitempty" json:"id,omitempty"`
-	// Hosts is the network reach freeze sealed from the rung-3 step's declared
-	// trust contract (its `hosts`). Freeze stamps it here so the content hash
-	// and signature cover it: a resolved, signed assertion of the step's reach
-	// that cannot be re-supplied at launch. It is the single canonical signed
-	// source #1769 stamps onto the launch host allow-list. `omitempty` keeps
-	// rung-1/rung-2 pins and rung-3 pins with no declared contract byte-identical
-	// to the pre-reach lock format.
+	// Hosts is DORMANT: the per-pin sealed reach moved to the step-keyed
+	// `lock.stepTrust` section (see Lockfile.StepTrust), so freeze never
+	// emits it. Retained only for the #1829 runtime rewire, same as StepID.
 	Hosts []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
+}
+
+// StepReach is the sealed network reach for one tool step: the `hosts` from
+// its declared trust contract, resolved at freeze time. It mirrors a schema
+// `$defs.lock.stepTrust` entry exactly. Hosts only: the full contract stays
+// in the signed frontmatter bytes.
+type StepReach struct {
+	Hosts []string `yaml:"hosts" json:"hosts"`
 }
 
 // Lockfile is the resolved lock-and-digest record freeze produces. Its
@@ -41,8 +41,17 @@ type Lockfile struct {
 	// ResolvedImages are the resolved image digest pins. Empty for an
 	// instruction-only or no-execution-environment skill.
 	ResolvedImages []ImagePin `yaml:"resolvedImages,omitempty" json:"resolvedImages,omitempty"`
-	// ResolvedCapabilitySet is the capability set freeze pinned (rung-2).
+	// ResolvedCapabilitySet is the capability set freeze pinned: the declared
+	// environment tools, verbatim. Empty when no tools are declared.
 	ResolvedCapabilitySet []string `yaml:"resolvedCapabilitySet,omitempty" json:"resolvedCapabilitySet,omitempty"`
+	// StepTrust is the step-keyed sealed trust section: for each tool step
+	// that declares a trust contract, the resolved network reach freeze
+	// sealed from it, keyed by step id. Covered by the content hash and
+	// signature, so the reach cannot be re-supplied at launch. Nil when no
+	// tool step declares a contract (omitempty keeps those locks
+	// byte-identical to the pre-stepTrust format). yaml.v3 marshals map keys
+	// sorted, so the emitted section is byte-deterministic across freezes.
+	StepTrust map[string]StepReach `yaml:"stepTrust,omitempty" json:"stepTrust,omitempty"`
 	// ContentHash identifies the exact frozen manifest bytes
 	// (`sha256:<hex>`). It is computed last and excluded from the bytes it
 	// hashes, so a Lockfile passed to the content hasher must have it empty.

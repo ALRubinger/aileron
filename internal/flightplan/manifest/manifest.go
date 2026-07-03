@@ -73,10 +73,10 @@ type Requires struct {
 
 	// ExecutionEnvironment is DORMANT: the schema no longer admits a
 	// `requires.executionEnvironment` key, so Parse can never populate this
-	// field. It is retained only so the not-yet-rewritten freeze rung
-	// branches (#1827) and runtime tool-dispatch decode (#1829) keep
-	// compiling with their direct-construct tests until their owners delete
-	// them. It is slated for deletion with its last consumer.
+	// field. It is retained only so the not-yet-rewritten runtime
+	// tool-dispatch decode (#1829, its sole remaining consumer) keeps
+	// compiling until that owner deletes it. It is slated for deletion with
+	// that consumer.
 	ExecutionEnvironment map[string]any `yaml:"executionEnvironment"`
 }
 

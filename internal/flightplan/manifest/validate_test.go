@@ -115,14 +115,12 @@ func TestStrippedTopLevelStillValid(t *testing.T) {
 	}
 }
 
-// TestLockResolvedImagesID locks the per-step pin association substrate at the
-// schema boundary: a lock whose resolvedImages[] item carries the optional
-// `id` is valid (the step→pin link), a lock item with only ref+digest stays
-// valid (whole-plan environment pins carry no id), and an unknown key on the
-// item is still rejected (additionalProperties:false is preserved).
-func TestLockResolvedImagesID(t *testing.T) {
-	lockFrontmatter := func(item string) []byte {
-		return []byte(`name: s
+// lockFrontmatter wraps a lock block body into a complete, otherwise-valid
+// aileron frontmatter so a test exercises only the lock validity rules.
+// lockBlock is the YAML for the lock value's keys, indented to sit under
+// `lock:` (4 spaces for its keys).
+func lockFrontmatter(lockBlock string) []byte {
+	return []byte(`name: s
 description: d
 aileron:
   schemaVersion: aileron.flightplan.v1
@@ -143,86 +141,111 @@ aileron:
   inputs: []
   outputs: []
   lock:
-    resolvedImages:
-` + item + `
+` + lockBlock + `
 `)
-	}
-	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
 
-	t.Run("valid/with id", func(t *testing.T) {
-		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        id: extract"
-		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
-			t.Fatalf("a resolvedImages item with id must validate, got: %v", err)
+const lockTestDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// TestLockResolvedImagesSinglePinShape locks the one-pin model at the schema
+// boundary (#1827): a resolvedImages item is exactly {ref, digest}. The
+// retired per-pin `id` and `hosts` keys (the rung-3 stepId-on-pin linkage) are
+// rejected outright; the step-keyed sealed reach lives in the sibling
+// stepTrust section instead.
+func TestLockResolvedImagesSinglePinShape(t *testing.T) {
+	item := func(extra string) string {
+		return "    resolvedImages:\n      - ref: registry.example.com/runner:1.4\n        digest: " + lockTestDigest + extra
+	}
+
+	t.Run("valid/ref and digest only", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(item(""))); err != nil {
+			t.Fatalf("a ref+digest pin must validate, got: %v", err)
 		}
 	})
-	t.Run("valid/without id", func(t *testing.T) {
-		item := "      - ref: registry.example.com/runner:1.4\n        digest: " + digest
-		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
-			t.Fatalf("a resolvedImages item without id must validate, got: %v", err)
+	t.Run("invalid/per-pin id rejected", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(item("\n        id: extract"))); err == nil {
+			t.Fatal("the retired per-pin id key must be rejected")
+		}
+	})
+	t.Run("invalid/per-pin hosts rejected", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(item("\n        hosts:\n          - api.example.com"))); err == nil {
+			t.Fatal("the retired per-pin hosts key must be rejected")
 		}
 	})
 	t.Run("invalid/unknown key", func(t *testing.T) {
-		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        stepId: extract"
-		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
+		if err := validateFrontmatter(lockFrontmatter(item("\n        stepId: extract"))); err == nil {
 			t.Fatal("an unknown key on a resolvedImages item must be rejected")
-		}
-	})
-	t.Run("invalid/empty id", func(t *testing.T) {
-		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest + "\n        id: \"\""
-		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
-			t.Fatal("an empty id (minLength:1) must be rejected")
 		}
 	})
 }
 
-// TestLockResolvedImagesHosts locks the per-pin sealed reach at the schema
-// boundary: a lock resolvedImages[] item may carry the optional `hosts` array
-// (freeze's sealed reach), a malformed host (a scheme-prefixed entry) is
-// rejected by the host pattern, and the item stays
-// additionalProperties:false.
-func TestLockResolvedImagesHosts(t *testing.T) {
-	lockFrontmatter := func(item string) []byte {
-		return []byte(`name: s
-description: d
-aileron:
-  schemaVersion: aileron.flightplan.v1
-  requires:
-    actions:
-      - ref: aileron:metrics.query_series
-        trustContract:
-          credential:
-            kind: none
-          hosts:
-            - api.example.com
-          effect: read
-          idempotency:
-            safeToRetry: true
-          audit:
-            fields:
-              - result
-  inputs: []
-  outputs: []
-  lock:
-    resolvedImages:
-` + item + `
-`)
+// TestLockStepTrust locks the step-keyed sealed trust section at the schema
+// boundary (#1827): stepTrust is keyed by tool-step id, each entry requires a
+// non-empty hosts array using the trust-contract host pattern, and the entry
+// object is closed.
+func TestLockStepTrust(t *testing.T) {
+	valid := map[string]string{
+		"single step": `    stepTrust:
+      fetch:
+        hosts:
+          - s3.amazonaws.com`,
+		"multiple steps with ports": `    stepTrust:
+      fetch:
+        hosts:
+          - s3.amazonaws.com
+          - s3.amazonaws.com:443
+      file:
+        hosts:
+          - tracker.example.com`,
+		"alongside a pin": `    resolvedImages:
+      - ref: registry.example.com/runner:1.4
+        digest: ` + lockTestDigest + `
+    stepTrust:
+      fetch:
+        hosts:
+          - api.example.com`,
 	}
-	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for name, lock := range valid {
+		t.Run("valid/"+name, func(t *testing.T) {
+			if err := validateFrontmatter(lockFrontmatter(lock)); err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+		})
+	}
 
-	t.Run("valid/with hosts", func(t *testing.T) {
-		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest +
-			"\n        id: reach\n        hosts:\n          - api.example.com\n          - api.example.com:443"
-		if err := validateFrontmatter(lockFrontmatter(item)); err != nil {
-			t.Fatalf("a resolvedImages item with hosts must validate, got: %v", err)
-		}
-	})
-	t.Run("invalid/scheme-prefixed host", func(t *testing.T) {
-		item := "      - ref: registry.example.com/tool-a:1\n        digest: " + digest +
-			"\n        hosts:\n          - https://api.example.com"
-		if err := validateFrontmatter(lockFrontmatter(item)); err == nil {
-			t.Fatal("a scheme-prefixed host must be rejected by the host pattern")
-		}
-	})
+	invalid := map[string]string{
+		"empty hosts": `    stepTrust:
+      fetch:
+        hosts: []`,
+		"missing hosts": `    stepTrust:
+      fetch: {}`,
+		"scheme-prefixed host": `    stepTrust:
+      fetch:
+        hosts:
+          - https://api.example.com`,
+		"unknown key on entry": `    stepTrust:
+      fetch:
+        hosts:
+          - api.example.com
+        effect: read`,
+		"non-object entry": `    stepTrust:
+      fetch: s3.amazonaws.com`,
+		"key not a step id": `    stepTrust:
+      "not a step id":
+        hosts:
+          - api.example.com`,
+	}
+	for name, lock := range invalid {
+		t.Run("invalid/"+name, func(t *testing.T) {
+			err := validateFrontmatter(lockFrontmatter(lock))
+			if err == nil {
+				t.Fatalf("expected validation error for %q, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "schema validation") {
+				t.Errorf("error should cite schema validation, got: %v", err)
+			}
+		})
+	}
 }
 
 // environmentFrontmatter wraps an `environment` block body into a complete,

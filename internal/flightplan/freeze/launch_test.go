@@ -17,10 +17,29 @@ func freezeExample(t *testing.T) Result {
 	res, err := Run(context.Background(), exampleSkillMD(t), Options{
 		Version:        "1.0.0",
 		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
 		Composer:       fakeComposer(fakeDigest),
 	})
 	if err != nil {
 		t.Fatalf("freeze.Run: %v", err)
+	}
+	return res
+}
+
+// freezeToolSteps freezes the tool-steps fixture (two contracted tool steps)
+// with a fresh signing key, the shared fixture for the verified stepTrust
+// exposure tests.
+func freezeToolSteps(t *testing.T) Result {
+	t.Helper()
+	_, keyPath := genSigningKey(t)
+	res, err := Run(context.Background(), []byte(toolStepsMD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
+		Composer:       fakeComposer(fakeDigest2),
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run tool steps: %v", err)
 	}
 	return res
 }
@@ -132,6 +151,63 @@ func TestVerifyFrozen_ExposesResolvedImagesForEnvironmentImage(t *testing.T) {
 	}
 	if v.ResolvedImages[0].Ref != "registry.example.com/runner:1.4" {
 		t.Errorf("ResolvedImages[0].Ref = %q, want the environment.image ref", v.ResolvedImages[0].Ref)
+	}
+}
+
+// TestVerifyFrozen_ExposesStepTrust proves launch/runtime read the sealed
+// reach off the verified path: a successful verification surfaces the
+// step-keyed trust section exactly as the manifest's verified lock block
+// recorded it, defensively copied.
+func TestVerifyFrozen_ExposesStepTrust(t *testing.T) {
+	res := freezeToolSteps(t)
+	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen: %v", err)
+	}
+	if len(v.StepTrust) != 2 {
+		t.Fatalf("StepTrust = %+v, want the two contracted steps", v.StepTrust)
+	}
+	if strings.Join(v.StepTrust["fetch"].Hosts, ",") != "s3.amazonaws.com,s3.amazonaws.com:443" {
+		t.Errorf("fetch reach = %v", v.StepTrust["fetch"].Hosts)
+	}
+	if strings.Join(v.StepTrust["file"].Hosts, ",") != "api.github.com" {
+		t.Errorf("file reach = %v", v.StepTrust["file"].Hosts)
+	}
+	// A skill sealing no reach exposes a nil section.
+	plain := freezeExample(t)
+	vp, err := VerifyFrozen(plain.FrozenManifest, plain.Lockfile, plain.Signature, plain.PublicKey)
+	if err != nil {
+		t.Fatalf("VerifyFrozen (no tool steps): %v", err)
+	}
+	if vp.StepTrust != nil {
+		t.Errorf("a unit sealing no reach must expose nil StepTrust, got %+v", vp.StepTrust)
+	}
+}
+
+// TestVerifyFrozen_TamperedStepTrustRefuses is the sign-coverage regression
+// for the step-keyed section: widening a sealed host inside the frozen
+// manifest's lock block after signing changes the recomputed content hash,
+// so verification refuses before any reach is exposed.
+func TestVerifyFrozen_TamperedStepTrustRefuses(t *testing.T) {
+	res := freezeToolSteps(t)
+	// The lock block is injected at the end of the aileron mapping, so the
+	// LAST occurrence of the sealed host is the lock's stepTrust entry (the
+	// earlier occurrences are the step's declared contract in the signed
+	// frontmatter). Tamper only that sealed entry.
+	target := []byte("api.github.com")
+	idx := bytes.LastIndex(res.FrozenManifest, target)
+	if idx < 0 {
+		t.Fatal("test setup: sealed host not found in the frozen manifest")
+	}
+	tampered := append([]byte(nil), res.FrozenManifest[:idx]...)
+	tampered = append(tampered, []byte("api.evil-example.com")...)
+	tampered = append(tampered, res.FrozenManifest[idx+len(target):]...)
+	v, err := VerifyFrozen(tampered, res.Lockfile, res.Signature, res.PublicKey)
+	if err == nil {
+		t.Fatal("a tampered stepTrust section must refuse to verify")
+	}
+	if len(v.StepTrust) != 0 {
+		t.Errorf("a refused verification must expose no sealed reach, got %+v", v.StepTrust)
 	}
 }
 

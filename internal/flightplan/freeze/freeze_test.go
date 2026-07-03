@@ -9,7 +9,7 @@ import (
 )
 
 func fakeComposer(digest string) FeatureComposer {
-	return FeatureComposerFunc(func(_ context.Context, _ []string) (string, error) {
+	return FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
 		return digest, nil
 	})
 }
@@ -19,6 +19,7 @@ func TestRun_EnvironmentToolsHappyPath(t *testing.T) {
 	res, err := Run(context.Background(), exampleSkillMD(t), Options{
 		Version:        "1.0.0",
 		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
 		Composer:       fakeComposer(fakeDigest),
 	})
 	if err != nil {
@@ -126,35 +127,112 @@ func TestRun_EnvironmentImagePinsAndSigns(t *testing.T) {
 
 func TestRun_Reproducible(t *testing.T) {
 	_, keyPath := genSigningKey(t)
-	opts := Options{Version: "1.0.0", SigningKeyPath: keyPath, Composer: fakeComposer(fakeDigest)}
-	a, err := Run(context.Background(), exampleSkillMD(t), opts)
-	if err != nil {
-		t.Fatalf("Run a: %v", err)
-	}
-	b, err := Run(context.Background(), exampleSkillMD(t), opts)
-	if err != nil {
-		t.Fatalf("Run b: %v", err)
-	}
-	if a.ContentHash != b.ContentHash {
-		t.Errorf("contentHash not reproducible: %q != %q", a.ContentHash, b.ContentHash)
-	}
-	if string(a.FrozenManifest) != string(b.FrozenManifest) {
-		t.Error("frozen manifest bytes not reproducible")
+	opts := Options{Version: "1.0.0", SigningKeyPath: keyPath, Resolver: dummyResolver(), Composer: fakeComposer(fakeDigest)}
+	// The tool-steps fixture carries a MULTI-ENTRY stepTrust section, so this
+	// also proves the step-keyed map marshals byte-deterministically (two
+	// freezes of the same input produce byte-identical artifacts).
+	for name, fixture := range map[string][]byte{
+		"environment tools": exampleSkillMD(t),
+		"tool steps":        []byte(toolStepsMD),
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := Run(context.Background(), fixture, opts)
+			if err != nil {
+				t.Fatalf("Run a: %v", err)
+			}
+			b, err := Run(context.Background(), fixture, opts)
+			if err != nil {
+				t.Fatalf("Run b: %v", err)
+			}
+			if a.ContentHash != b.ContentHash {
+				t.Errorf("contentHash not reproducible: %q != %q", a.ContentHash, b.ContentHash)
+			}
+			if string(a.FrozenManifest) != string(b.FrozenManifest) {
+				t.Error("frozen manifest bytes not reproducible")
+			}
+			if string(a.Lockfile) != string(b.Lockfile) {
+				t.Error("lockfile bytes not reproducible")
+			}
+		})
 	}
 }
 
 func TestRun_ContentHashChangesWithVersion(t *testing.T) {
 	_, keyPath := genSigningKey(t)
-	a, err := Run(context.Background(), exampleSkillMD(t), Options{Version: "1.0.0", SigningKeyPath: keyPath, Composer: fakeComposer(fakeDigest)})
+	a, err := Run(context.Background(), exampleSkillMD(t), Options{Version: "1.0.0", SigningKeyPath: keyPath, Resolver: dummyResolver(), Composer: fakeComposer(fakeDigest)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := Run(context.Background(), exampleSkillMD(t), Options{Version: "2.0.0", SigningKeyPath: keyPath, Composer: fakeComposer(fakeDigest)})
+	b, err := Run(context.Background(), exampleSkillMD(t), Options{Version: "2.0.0", SigningKeyPath: keyPath, Resolver: dummyResolver(), Composer: fakeComposer(fakeDigest)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.ContentHash == b.ContentHash {
 		t.Error("a different version label must change the content hash")
+	}
+}
+
+// TestRun_ToolStepsSealStepTrust is the end-to-end proof of the step-keyed
+// trust seal: a freeze over a manifest with tool steps produces a lockfile
+// whose stepTrust carries exactly the contracted steps' declared hosts under
+// the schema field names, and the emitted YAML round-trips.
+func TestRun_ToolStepsSealStepTrust(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	res, err := Run(context.Background(), []byte(toolStepsMD), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
+		Composer:       fakeComposer(fakeDigest2),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Lock.StepTrust) != 2 {
+		t.Fatalf("StepTrust = %+v, want the two contracted steps", res.Lock.StepTrust)
+	}
+	if strings.Join(res.Lock.StepTrust["fetch"].Hosts, ",") != "s3.amazonaws.com,s3.amazonaws.com:443" {
+		t.Errorf("fetch reach = %v", res.Lock.StepTrust["fetch"].Hosts)
+	}
+	if strings.Join(res.Lock.StepTrust["file"].Hosts, ",") != "api.github.com" {
+		t.Errorf("file reach = %v", res.Lock.StepTrust["file"].Hosts)
+	}
+	// The emitted lockfile uses the schema field names.
+	lf := string(res.Lockfile)
+	for _, key := range []string{"stepTrust:", "fetch:", "file:", "hosts:"} {
+		if !strings.Contains(lf, key) {
+			t.Errorf("lockfile missing %q:\n%s", key, lf)
+		}
+	}
+	if strings.Contains(lf, "version:\n") {
+		t.Errorf("the uncontracted step must not appear in stepTrust:\n%s", lf)
+	}
+	// The frozen manifest re-parses and its lock block carries the section.
+	fm, err := manifest.Parse(res.FrozenManifest)
+	if err != nil {
+		t.Fatalf("frozen manifest must re-parse: %v", err)
+	}
+	if _, ok := fm.Aileron.Lock["stepTrust"]; !ok {
+		t.Error("frozen manifest lock block must carry stepTrust")
+	}
+}
+
+// TestRun_MalformedToolStepTrustRefuses proves a tool step declaring an
+// empty reach refuses to freeze. Run parses raw bytes, so the schema rejects
+// the shape at the validation gate (sealStepTrust's own backstop for direct
+// constructs is covered in steptrust_test.go); either way the refusal lands
+// before signing, which is the fail-closed contract.
+func TestRun_MalformedToolStepTrustRefuses(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	bad := strings.Replace(toolStepsMD, "        hosts:\n          - s3.amazonaws.com\n          - s3.amazonaws.com:443\n", "        hosts: []\n", 1)
+	if bad == toolStepsMD {
+		t.Fatal("test setup: fixture hosts not found to malform")
+	}
+	if _, err := Run(context.Background(), []byte(bad), Options{
+		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
+		Composer:       fakeComposer(fakeDigest2),
+	}); err == nil {
+		t.Error("a tool step with an empty declared reach must refuse to freeze")
 	}
 }
 
@@ -263,7 +341,8 @@ aileron:
 	composerHit := false
 	_, err := Run(context.Background(), []byte(strings.Replace(badMD, "kind: action-call", "kind: not-a-kind", 1)), Options{
 		SigningKeyPath: keyPath,
-		Composer: FeatureComposerFunc(func(_ context.Context, _ []string) (string, error) {
+		Resolver:       dummyResolver(),
+		Composer: FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
 			composerHit = true
 			return fakeDigest, nil
 		}),

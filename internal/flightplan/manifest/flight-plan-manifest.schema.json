@@ -611,12 +611,12 @@
     },
     "lock": {
       "type": "object",
-      "description": "The lock and digest section. Produced by freeze (#1509): pins the resolved image digests and the resolved capability set, and records the manifest content hash plus semver label. ABSENT before freeze; this schema specifies its shape as freeze's target only. When present, every image reference is a content-addressed digest.",
+      "description": "The lock and digest section. Produced by freeze (#1509): pins the resolved environment image digest, records the resolved capability set and the step-keyed sealed trust reach, and records the manifest content hash plus semver label. ABSENT before freeze; this schema specifies its shape as freeze's target only. When present, every image reference is a content-addressed digest.",
       "additionalProperties": false,
       "properties": {
         "resolvedImages": {
           "type": "array",
-          "description": "The resolved image digest pins. Each entry pairs the pre-freeze reference with its resolved image@sha256: digest.",
+          "description": "The resolved image digest pins. The plan runs in one container, so a plan with a declared environment pins exactly one image: the digest-resolved custom base, or the image composed from the runtime base plus the declared tools. Each entry pairs the pre-freeze reference with its resolved image@sha256: digest and carries no per-step linkage; the step-keyed sealed reach lives in the sibling stepTrust section.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -627,20 +627,6 @@
                 "type": "string",
                 "description": "The resolved content-addressed digest.",
                 "pattern": "^sha256:[a-f0-9]{64}$"
-              },
-              "id": {
-                "type": "string",
-                "description": "For a per-step pin, the id of the step that dispatches to this image (its declared `id`, or a positional fallback). Links the pin to its step so association does not key on the mutable image reference. Absent for whole-plan environment pins, which boot a single image with no per-step linkage.",
-                "minLength": 1
-              },
-              "hosts": {
-                "type": "array",
-                "description": "For a per-step pin, the network reach freeze sealed from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary. Freeze stamps the declared reach here so it is covered by the content hash and signature: a resolved, signed assertion of the step's reach that cannot be re-supplied at launch. Absent for whole-plan environment pins and for a step that declares no trust contract.",
-                "items": {
-                  "type": "string",
-                  "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
-                  "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
-                }
               }
             }
           }
@@ -649,6 +635,30 @@
           "type": "array",
           "description": "The resolved capability set the freeze pinned.",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "stepTrust": {
+          "type": "object",
+          "description": "The step-keyed sealed trust section. Keyed by tool-step id; each entry carries the network reach freeze sealed from that step's declared trust contract. Hosts only: the full contract stays in the signed frontmatter, and this section is the resolved reach launch and runtime consume. Freeze stamps it here so the reach is covered by the content hash and signature and cannot be re-supplied at launch. A tool step that declares no trust contract has no entry.",
+          "propertyNames": {
+            "pattern": "^[a-zA-Z0-9_-]+$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts"],
+            "properties": {
+              "hosts": {
+                "type": "array",
+                "description": "The sealed network reach from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary.",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
+                  "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+                }
+              }
+            }
+          }
         },
         "contentHash": {
           "type": "string",

@@ -35,7 +35,7 @@ func stubFreezeResolvers(t *testing.T, digest string) {
 		return freeze.DigestResolverFunc(func(context.Context, string) (string, error) { return digest, nil })
 	}
 	newFeatureComposer = func() freeze.FeatureComposer {
-		return freeze.FeatureComposerFunc(func(context.Context, []string) (string, error) { return digest, nil })
+		return freeze.FeatureComposerFunc(func(context.Context, string, []string) (string, error) { return digest, nil })
 	}
 	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
 }
@@ -340,6 +340,105 @@ aileron:
 	}
 }
 
+// TestRunSkillFreeze_ToolsComposeOntoCustomBase proves the CLI freeze path
+// for the composed environment: a skill declaring a custom base image AND
+// curated tools freezes by digest-resolving the base, then handing the
+// composer the DIGEST-PINNED base plus the CATALOG-RESOLVED Feature
+// references. The lockfile pins the composed digest and records the declared
+// tools as the capability set.
+func TestRunSkillFreeze_ToolsComposeOntoCustomBase(t *testing.T) {
+	storeDir := withTempStore(t)
+	key := writeSigningKey(t)
+
+	baseDigest := "sha256:" + strings.Repeat("a", 64)
+	composedDigest := "sha256:" + strings.Repeat("b", 64)
+	origDR, origFC := newDigestResolver, newFeatureComposer
+	var resolvedRef, composeBase string
+	var composeFeatures []string
+	newDigestResolver = func() freeze.DigestResolver {
+		return freeze.DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+			resolvedRef = ref
+			return baseDigest, nil
+		})
+	}
+	newFeatureComposer = func() freeze.FeatureComposer {
+		return freeze.FeatureComposerFunc(func(_ context.Context, base string, features []string) (string, error) {
+			composeBase = base
+			composeFeatures = features
+			return composedDigest, nil
+		})
+	}
+	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
+
+	const toolsMD = `---
+name: tools-on-base
+description: Curated tools onto a custom base.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:x.y
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+  environment:
+    image: registry.example.com/base:1.4
+    tools:
+      - aws-cli@2.x
+  inputs: []
+  outputs: []
+---
+
+# Tools On Base
+`
+	dir := filepath.Join(storeDir, "tools-on-base")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(toolsMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "tools-on-base"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a tools+custom-base freeze must succeed, exit=%d stderr=%s", code, stderr.String())
+	}
+	if resolvedRef != "registry.example.com/base:1.4" {
+		t.Errorf("resolver got %q, want the declared custom base", resolvedRef)
+	}
+	if want := "registry.example.com/base:1.4@" + baseDigest; composeBase != want {
+		t.Errorf("composer got base %q, want the digest-pinned base %q", composeBase, want)
+	}
+	if want := composition.FeatureReference("aws-cli"); strings.Join(composeFeatures, ",") != want {
+		t.Errorf("composer got features %v, want the catalog-resolved %q", composeFeatures, want)
+	}
+
+	s := store.New(storeDir)
+	ids, err := s.FrozenVersions("tools-on-base")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("FrozenVersions = %v, %v", ids, err)
+	}
+	v, err := s.ReadFrozen("tools-on-base", ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(v.Lockfile), composedDigest) {
+		t.Errorf("the lockfile must pin the composed digest:\n%s", v.Lockfile)
+	}
+	if !strings.Contains(string(v.Lockfile), "aws-cli@2.x") {
+		t.Errorf("the lockfile must record the declared tools:\n%s", v.Lockfile)
+	}
+}
+
 func TestRunSkillFreeze_FromPath(t *testing.T) {
 	withTempStore(t)
 	stubFreezeResolvers(t, fakeFreezeDigest)
@@ -502,7 +601,7 @@ func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
 		return imageInspector{}, errTestInspect
 	}
 	t.Cleanup(func() { newImageInspector = orig })
-	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), []string{"f"}); err == nil {
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"f"}); err == nil {
 		t.Error("an inspector-construction error must surface from ComposeDigest")
 	}
 }
@@ -626,22 +725,6 @@ func TestReadSkillForFreeze_DirectoryWithoutSkill(t *testing.T) {
 	withTempStore(t)
 	if _, err := readSkillForFreeze(t.TempDir()); err == nil {
 		t.Error("a directory with no SKILL.md must error")
-	}
-}
-
-func TestRung2Plan(t *testing.T) {
-	features := []string{"ghcr.io/x/a:1", "ghcr.io/x/b:1"}
-	plan := rung2Plan(features)
-	if plan.Tier != composition.TierDevcontainer {
-		t.Errorf("tier = %s", plan.Tier)
-	}
-	if len(plan.Features) != 2 {
-		t.Errorf("features = %v", plan.Features)
-	}
-	for _, f := range features {
-		if _, ok := plan.Features[f]; !ok {
-			t.Errorf("feature %q missing from plan", f)
-		}
 	}
 }
 
