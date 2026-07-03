@@ -437,6 +437,13 @@ aileron:
 	if !strings.Contains(string(v.Lockfile), "aws-cli@2.x") {
 		t.Errorf("the lockfile must record the declared tools:\n%s", v.Lockfile)
 	}
+	// The composed pin records the bootable local-daemon tag (#1856), computed
+	// from the same digest-pinned base and catalog-resolved feature refs the
+	// composer received, so the runtime boots the composed image.
+	wantTag := composition.LocalToolsImageTag(composeBase, composeFeatures)
+	if !strings.Contains(string(v.Lockfile), "localTag: "+wantTag) {
+		t.Errorf("the lockfile must record the composed pin's bootable localTag %q:\n%s", wantTag, v.Lockfile)
+	}
 }
 
 func TestRunSkillFreeze_FromPath(t *testing.T) {

@@ -37,6 +37,13 @@ func TestRun_EnvironmentToolsHappyPath(t *testing.T) {
 	if len(res.Lock.ResolvedImages) != 1 || res.Lock.ResolvedImages[0].Digest != fakeDigest {
 		t.Errorf("resolvedImages = %+v", res.Lock.ResolvedImages)
 	}
+	// The composed-tools pin carries the bootable local-daemon tag (#1856), so
+	// the runtime can boot the composed image rather than the unbootable
+	// ref@digest join. The tag is sealed inside the signed lock (content hash +
+	// signature cover it), verified by the round-trip below.
+	if tag := res.Lock.ResolvedImages[0].LocalTag; !strings.HasPrefix(tag, "aileron/sandbox-tools:") {
+		t.Errorf("composed pin must carry an aileron/sandbox-tools: LocalTag, got %q", tag)
+	}
 	if len(res.Lock.ResolvedCapabilitySet) != 1 || res.Lock.ResolvedCapabilitySet[0] != "aws-cli@2.x" {
 		t.Errorf("resolvedCapabilitySet = %v", res.Lock.ResolvedCapabilitySet)
 	}
@@ -64,6 +71,58 @@ func TestRun_EnvironmentToolsHappyPath(t *testing.T) {
 	}
 	if fm.Aileron.Lock["contentHash"] != res.ContentHash {
 		t.Errorf("frozen manifest lock.contentHash = %v, want %v", fm.Aileron.Lock["contentHash"], res.ContentHash)
+	}
+}
+
+// TestRun_ComposedLocalTagIsSigned proves the composed pin's bootable LocalTag
+// is security-relevant boot input covered by the signature: a lock whose
+// localTag is mutated after freeze no longer verifies against the stored
+// signature. The tag is now the runtime's boot target (#1856), so it must be
+// sealed like the digest, not re-suppliable at launch.
+func TestRun_ComposedLocalTagIsSigned(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	res, err := Run(context.Background(), exampleSkillMD(t), Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+		Resolver:       dummyResolver(),
+		Composer:       fakeComposer(fakeDigest),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Lock.ResolvedImages[0].LocalTag == "" {
+		t.Fatal("precondition: the composed pin must carry a LocalTag to tamper with")
+	}
+
+	// The honest lock verifies over its canonical content bytes.
+	honest := res.Lock.withoutContentHash()
+	mHonest, err := injectLock(exampleSkillMD(t), honest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lfHonest, err := MarshalLockfile(honest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(canonicalContent(mHonest, lfHonest), res.Signature, res.PublicKey); err != nil {
+		t.Fatalf("the honest lock must verify: %v", err)
+	}
+
+	// Mutating the localTag changes the canonical content bytes, so the stored
+	// signature no longer verifies: the tag is sealed inside the lock.
+	tampered := res.Lock.withoutContentHash()
+	tampered.ResolvedImages = append([]ImagePin(nil), tampered.ResolvedImages...)
+	tampered.ResolvedImages[0].LocalTag = "aileron/sandbox-tools:deadbeefdeadbeef"
+	mTampered, err := injectLock(exampleSkillMD(t), tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lfTampered, err := MarshalLockfile(tampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(canonicalContent(mTampered, lfTampered), res.Signature, res.PublicKey); err == nil {
+		t.Error("a mutated localTag must fail signature verification; the tag is sealed boot input")
 	}
 }
 

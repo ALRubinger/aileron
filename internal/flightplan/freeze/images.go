@@ -152,7 +152,19 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 	if err := requireDigest("environment:"+strings.Join(tools, ","), digest); err != nil {
 		return nil, nil, err
 	}
-	return []ImagePin{{Ref: composedToolsRef(pinnedBase, tools), Digest: digest}}, tools, nil
+	// The composed pin carries three identities: the descriptive Ref (what was
+	// composed onto which pinned base, for errors/audit), the attesting Digest
+	// (the composed image's content address), and the bootable LocalTag (the
+	// local-daemon tag the composed image actually carries, so the runtime can
+	// boot it). LocalTag is computed from the SAME pinnedBase and
+	// catalog-resolved featureRefs the composer received, so it is byte-identical
+	// to composition.ToolsPlan(pinnedBase, featureRefs).Image; LocalToolsImageTag
+	// sorts internally, so declaration order does not matter.
+	return []ImagePin{{
+		Ref:      composedToolsRef(pinnedBase, tools),
+		Digest:   digest,
+		LocalTag: composition.LocalToolsImageTag(pinnedBase, featureRefs),
+	}}, tools, nil
 }
 
 // requireDigest enforces the pin-by-digest invariant: a resolved value that
@@ -166,7 +178,9 @@ func requireDigest(ref, digest string) error {
 
 // composedToolsRef renders a stable, descriptive pre-freeze reference for an
 // image composed from declared environment tools, so the lock entry records
-// what was composed and onto which digest-pinned base.
+// what was composed and onto which digest-pinned base. This Ref is descriptive
+// and not itself bootable: the composed pin carries a separate LocalTag with
+// the daemon-resolvable local-daemon tag the runtime boots.
 func composedToolsRef(pinnedBase string, tools []string) string {
 	return pinnedBase + "+tools(" + strings.Join(tools, ",") + ")"
 }

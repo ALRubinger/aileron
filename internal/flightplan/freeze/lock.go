@@ -9,11 +9,19 @@ import (
 
 // ImagePin pairs a pre-freeze image reference with the content-addressed
 // digest freeze resolved it to. The schema `$defs.lock.resolvedImages[]` item
-// admits exactly {ref, digest}: the plan runs in one container, so freeze
+// admits {ref, digest, localTag?}: the plan runs in one container, so freeze
 // emits at most one pin and no per-pin step linkage.
 type ImagePin struct {
 	Ref    string `yaml:"ref" json:"ref"`
 	Digest string `yaml:"digest" json:"digest"`
+	// LocalTag is the bootable local-daemon tag for a composed-tools pin
+	// (`aileron/sandbox-tools:<hex>`), the identity the composed image carries
+	// in the local daemon. It is set only on the composed-tools pin: an
+	// image-only or custom-base pin leaves it empty and boots `ref@digest`.
+	// omitempty keeps those non-composed locks byte-identical to the
+	// pre-localTag format. Sealed inside the signed lock (covered by the
+	// content hash and signature), so it cannot be re-supplied at launch.
+	LocalTag string `yaml:"localTag,omitempty" json:"localTag,omitempty"`
 }
 
 // StepReach is the sealed network reach for one tool step: the `hosts` from

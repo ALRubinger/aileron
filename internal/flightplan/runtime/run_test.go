@@ -122,8 +122,9 @@ func TestRun_DeniedApprovalAbortsAndAudits(t *testing.T) {
 }
 
 // TestRun_BootsPinnedImageWhenLockPinsEnvironment proves the boot branch end to end:
-// the worked example declares an environment, so a store-backed Run delegates to the wired
-// ImageRunner with the exact ref@digest from the verified lock and never walks
+// the worked example declares tools, so freeze records a composed pin carrying a
+// bootable local-daemon tag. A store-backed Run delegates to the wired
+// ImageRunner with that local tag from the verified lock (#1856) and never walks
 // the in-process pipeline.
 func TestRun_BootsPinnedImageWhenLockPinsEnvironment(t *testing.T) {
 	fv := frozenExample(t)
@@ -131,7 +132,16 @@ func TestRun_BootsPinnedImageWhenLockPinsEnvironment(t *testing.T) {
 	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
 		t.Fatalf("WriteFrozen: %v", err)
 	}
-	wantDigest := "sha256:" + strings.Repeat("a", 64)
+	// The verified lock's composed pin carries the bootable local tag; the boot
+	// must hand that verbatim to the runner, not the unbootable ref@digest join.
+	lp, err := verifyAndDecode(fv)
+	if err != nil {
+		t.Fatalf("verifyAndDecode: %v", err)
+	}
+	wantTag := lp.ResolvedImages[0].LocalTag
+	if wantTag == "" || !strings.HasPrefix(wantTag, "aileron/sandbox-tools:") {
+		t.Fatalf("expected a composed pin with an aileron/sandbox-tools: local tag, got %q", wantTag)
+	}
 	fake := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:booted"}}
 	res, err := Run(context.Background(), Options{
 		Store:       s,
@@ -147,8 +157,8 @@ func TestRun_BootsPinnedImageWhenLockPinsEnvironment(t *testing.T) {
 	if !fake.called {
 		t.Fatal("Run did not delegate to the ImageRunner for an environment-pinned unit")
 	}
-	if !strings.HasSuffix(fake.spec.Image, "@"+wantDigest) {
-		t.Errorf("booted image = %q, want it to end with @%s", fake.spec.Image, wantDigest)
+	if fake.spec.Image != wantTag {
+		t.Errorf("booted image = %q, want the composed pin's local tag %q", fake.spec.Image, wantTag)
 	}
 	if res.ContentHash != "sha256:booted" {
 		t.Errorf("RunResult.ContentHash = %q, want the runner's result", res.ContentHash)
