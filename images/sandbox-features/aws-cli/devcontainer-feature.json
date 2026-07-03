@@ -1,0 +1,18 @@
+{
+  "id": "aws-cli",
+  "version": "0.0.1",
+  "name": "AWS CLI",
+  "description": "Installs the AWS CLI (aws-cli) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user, and carries aws-cli's credential convention (sigv4-resign scheme + AWS placeholder pair) under customizations.aileron.credential.",
+  "documentationURL": "https://docs.withaileron.ai/development/sandbox-agent-images/",
+  "customizations": {
+    "aileron": {
+      "credential": {
+        "scheme": "sigv4-resign",
+        "placeholders": [
+          {"env": "AWS_ACCESS_KEY_ID", "value": "AKIAIOSFODNN7PLACEHLDR"},
+          {"env": "AWS_SECRET_ACCESS_KEY", "value": "placeholderAileronInjectsRealSecretXXXXXX"}
+        ]
+      }
+    }
+  }
+}

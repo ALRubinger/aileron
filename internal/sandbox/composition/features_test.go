@@ -47,13 +47,13 @@ type featureManifest struct {
 }
 
 // featureIDs is every Feature published from images/sandbox-features: the npm
-// agent Features (claude, codex) plus the apk-only CLI-capability Feature (gh).
-// The shared manifest-validity and install-presence contracts apply to all of
-// them; the npm-recipe parity and scaffold-reference contracts apply only to
-// the agent Features (see TestFeatureInstallScriptsMatchCanonicalRecipe and
-// TestScaffoldFeatureReferenceMatchesManifestVersion, which keep their own
+// agent Features (claude, codex) plus the apk-only CLI-capability Features (gh,
+// aws-cli). The shared manifest-validity and install-presence contracts apply
+// to all of them; the npm-recipe parity and scaffold-reference contracts apply
+// only to the agent Features (see TestFeatureInstallScriptsMatchCanonicalRecipe
+// and TestScaffoldFeatureReferenceMatchesManifestVersion, which keep their own
 // agent-only lists).
-var featureIDs = []string{"claude", "codex", "gh"}
+var featureIDs = []string{"claude", "codex", "gh", "aws-cli"}
 
 func TestFeatureManifestsAreValid(t *testing.T) {
 	root := featuresContext(t)
@@ -352,6 +352,54 @@ func TestGHFeatureInstallScriptMatchesBaseContainerfile(t *testing.T) {
 	for _, secret := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
 		if strings.Contains(body, secret) {
 			t.Fatalf("%s references credential env var %q; the gh Feature must not read or bake credentials:\n%s", path, secret, body)
+		}
+	}
+}
+
+// TestAWSCLIFeatureInstallScript is the aws-cli-specific install parity check.
+// Like gh, aws-cli is an apk-only CLI-capability Feature (no @vendor/pkg, not in
+// agentRecipes), so it is excluded from
+// TestFeatureInstallScriptsMatchCanonicalRecipe. Its parity target is Alpine's
+// community aws-cli package with the same v3.24 community-repo scoping gh uses,
+// apk-only, and with no baked credential: the credential convention lives in the
+// manifest's customizations.aileron.credential block, never in the install
+// script.
+func TestAWSCLIFeatureInstallScript(t *testing.T) {
+	root := featuresContext(t)
+	path := filepath.Join(root, "aws-cli", "install.sh")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	body := string(raw)
+
+	// apk-only: the Alpine base has no apt-get, and aws-cli has no npm package.
+	if !strings.Contains(body, "apk add") {
+		t.Fatalf("%s must install via apk (the Alpine base has no apt-get):\n%s", path, body)
+	}
+	if strings.Contains(body, "apt-get") {
+		t.Fatalf("%s uses apt-get; the Alpine base requires apk:\n%s", path, body)
+	}
+	if strings.Contains(body, "npm install") {
+		t.Fatalf("%s installs via npm; aws-cli is an apk-only CLI Feature, not an npm agent recipe:\n%s", path, body)
+	}
+
+	// Installs the aws-cli apk package, scoped to the v3.24 community repo,
+	// mirroring the gh Feature's community-repo scoping.
+	if !strings.Contains(body, "aws-cli") {
+		t.Fatalf("%s must install the aws-cli apk package:\n%s", path, body)
+	}
+	const communityRepo = "--repository=https://dl-cdn.alpinelinux.org/alpine/v3.24/community"
+	if !strings.Contains(body, communityRepo) {
+		t.Fatalf("%s must scope the v3.24 community repo with %q (parity with the gh Feature):\n%s", path, communityRepo, body)
+	}
+
+	// No credential reads baked into the Feature: the placeholder data lives in
+	// the manifest's customizations.aileron.credential block, never in the
+	// install script.
+	for _, secret := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("%s references credential env var %q; the aws-cli Feature must not read or bake credentials:\n%s", path, secret, body)
 		}
 	}
 }

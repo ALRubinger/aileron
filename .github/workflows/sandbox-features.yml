@@ -55,7 +55,7 @@ jobs:
       # PR runs validate the Features package without pushing; ci.yml's
       # integration-sandbox-features job is the build/compose acceptance gate, so
       # this keeps the PR path lightweight. `devcontainer features package` walks
-      # the directory, processes each sub-Feature (claude, codex, gh), and fails on a
+      # the directory, processes each sub-Feature (claude, codex, gh, aws-cli), and fails on a
       # malformed manifest. It is the same directory-walk the publish step uses,
       # minus the push.
       - name: Validate Features package
@@ -76,7 +76,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # `devcontainer features publish` walks images/sandbox-features and pushes
-      # each sub-Feature (claude, codex, gh) to ghcr.io/<namespace>/<id>. A "0.0.1"
+      # each sub-Feature (claude, codex, gh, aws-cli) to ghcr.io/<namespace>/<id>. A "0.0.1"
       # manifest publishes the tag set 0.0.1, 0.0, 0, and latest, so the
       # scaffold's ":0" reference resolves.
       #

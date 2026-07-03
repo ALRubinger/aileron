@@ -1,11 +1,17 @@
 {
   "id": "gh",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "name": "GitHub CLI",
-  "description": "Installs the GitHub CLI (github-cli) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user, and carries gh's full CLI-capability unit (acquisition + credential sealing) under customizations.aileron.cli.",
+  "description": "Installs the GitHub CLI (github-cli) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user, and carries gh's full CLI-capability unit (acquisition + credential sealing) under customizations.aileron.cli and its credential convention under customizations.aileron.credential.",
   "documentationURL": "https://docs.withaileron.ai/development/sandbox-agent-images/",
   "customizations": {
     "aileron": {
+      "credential": {
+        "scheme": "bearer",
+        "placeholders": [
+          {"env": "GH_TOKEN", "value": "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"}
+        ]
+      },
       "cli": {
         "name": "gh",
         "key": "user/github",
