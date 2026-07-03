@@ -240,6 +240,9 @@ func TestNewLaunchImageRunner_WiresDaemonEnvResolver(t *testing.T) {
 	if _, ok := runner.daemonEnv.(daemonImageEnv); !ok {
 		t.Errorf("daemonEnv = %T, want daemonImageEnv (the production resolver)", runner.daemonEnv)
 	}
+	if runner.diag != nil {
+		t.Errorf("newLaunchImageRunner diag = %v, want nil (os.Stderr in production)", runner.diag)
+	}
 }
 
 // --- CLI-version skew preflight (#1809) ---
