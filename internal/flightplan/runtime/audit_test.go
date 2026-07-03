@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -174,27 +175,28 @@ func TestBuildOutputRecord_ActionCallOmitsTransform(t *testing.T) {
 	}
 }
 
-func TestBuildOutputRecord_ToolStepCarriesImageAndKind(t *testing.T) {
-	// A tool-materialized output (rung-3 dispatch, #1762) carries the literal
-	// step.kind="tool" (overriding the closed StepKind enum), the pinned image,
-	// the collected-output content_hash, the input walk-back, and the plan /
+func TestBuildOutputRecord_ToolStepCarriesCommandAndKind(t *testing.T) {
+	// A tool-materialized output (#1829) carries step.kind="tool" (KindTool is
+	// a first-class kind), the executed argv as aileron.step.command, the
+	// collected-output content_hash, the input walk-back, and the plan /
 	// invocation identity — every other field identical to the connector path.
 	// It carries NO aileron.step.transform, NO aileron.step.calls, and NO
-	// aileron.step.command.
+	// aileron.step.image (the environment identity is the plan's single pin,
+	// on the launch record).
 	prov := launchProvenance{
-		Skill: "rung3-plan", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		Skill: "tool-plan", ContentHash: "sha256:plan", SignedBy: "sha256:key",
 		SignatureStatus: "verified", InvocationID: "inv-9",
 	}
 	inputValue := map[string]any{"payload": "hello"}
 	o := materializedOutput{
 		StepID:   "extract",
-		StepKind: KindTransform, // rung-3 dispatch is checked before the kind branch; Kind is incidental.
+		StepKind: KindTool,
 		Artifact: Artifact{Name: "extract.txt", MimeType: "text/plain", Content: []byte("collected"), Digest: "sha256:abc"},
 		Binds: map[string]Binding{
 			"payload": {Kind: BindInput, Raw: "inputs.payload", Name: "payload"},
 		},
-		Resolved:  map[string]any{"payload": inputValue},
-		ToolImage: "registry.example.com/tool-a:1@" + digestA,
+		Resolved: map[string]any{"payload": inputValue},
+		Command:  []string{"extract-tool", "--mode", "csv"},
 	}
 	rec := buildOutputRecord(o, prov, nil, nil)
 	f := rec.Fields
@@ -202,8 +204,9 @@ func TestBuildOutputRecord_ToolStepCarriesImageAndKind(t *testing.T) {
 	if f["aileron.step.kind"] != "tool" {
 		t.Errorf("step.kind = %v, want the literal tool", f["aileron.step.kind"])
 	}
-	if f["aileron.step.image"] != "registry.example.com/tool-a:1@"+digestA {
-		t.Errorf("step.image = %v, want the pinned ref@digest", f["aileron.step.image"])
+	cmd, ok := f["aileron.step.command"].([]string)
+	if !ok || strings.Join(cmd, " ") != "extract-tool --mode csv" {
+		t.Errorf("step.command = %v, want the executed argv", f["aileron.step.command"])
 	}
 	if f["aileron.output.content_hash"] != "sha256:abc" {
 		t.Errorf("content_hash = %v, want the Artifact.Digest verbatim", f["aileron.output.content_hash"])
@@ -232,14 +235,14 @@ func TestBuildOutputRecord_ToolStepCarriesImageAndKind(t *testing.T) {
 	if _, present := f["aileron.step.calls"]; present {
 		t.Error("aileron.step.calls[] (Half B) must be absent")
 	}
-	if _, present := f["aileron.step.command"]; present {
-		t.Error("aileron.step.command must not be synthesized")
+	if _, present := f["aileron.step.image"]; present {
+		t.Error("aileron.step.image must not be synthesized; the environment identity is the plan's single pin")
 	}
 }
 
-func TestBuildOutputRecord_NonToolOutputOmitsImage(t *testing.T) {
-	// A connector/transform output (ToolImage == "") still emits its own StepKind
-	// and NO aileron.step.image — the regression guard that the image key is
+func TestBuildOutputRecord_NonToolOutputOmitsCommand(t *testing.T) {
+	// A connector/transform output still emits its own StepKind and NO
+	// aileron.step.command — the regression guard that the command key is
 	// tool-only.
 	for _, tc := range []struct {
 		name string
@@ -258,8 +261,8 @@ func TestBuildOutputRecord_NonToolOutputOmitsImage(t *testing.T) {
 			if rec.Fields["aileron.step.kind"] != string(tc.kind) {
 				t.Errorf("step.kind = %v, want %v", rec.Fields["aileron.step.kind"], tc.kind)
 			}
-			if _, present := rec.Fields["aileron.step.image"]; present {
-				t.Error("a non-tool output record must not carry aileron.step.image")
+			if _, present := rec.Fields["aileron.step.command"]; present {
+				t.Error("a non-tool output record must not carry aileron.step.command")
 			}
 		})
 	}
@@ -580,17 +583,18 @@ func containsValue(v any, want string) bool {
 	return false
 }
 
-// --- Unit 3 (#1784): declared-reach record build + emit ---
+// --- #1784 reach record build + emit (#1829 enforced dimension) ---
 
-// TestBuildReachRecord_CarriesDeclaredReachAndNotEnforcedMarker proves
-// buildReachRecord produces a RecordKindReach record whose flat aileron.* fields
-// carry the step id, effect, hosts, and the fixed `aileron.reach.enforced: false`
-// marker that states the declaration is audit-only.
-func TestBuildReachRecord_CarriesDeclaredReachAndNotEnforcedMarker(t *testing.T) {
+// TestBuildReachRecord_CarriesReachAndEnforcedMarker proves buildReachRecord
+// produces a RecordKindReach record whose flat aileron.* fields carry the
+// step id, effect, hosts, and the truthful `aileron.reach.enforced` marker:
+// true when the hosts are the sealed step-scoped reach, false otherwise.
+func TestBuildReachRecord_CarriesReachAndEnforcedMarker(t *testing.T) {
 	rec := buildReachRecord(reachRecord{
-		StepID: "extract",
-		Effect: EffectExternalSend,
-		Hosts:  []string{"api.example.com", "cdn.example.com"},
+		StepID:   "extract",
+		Effect:   EffectExternalSend,
+		Hosts:    []string{"api.example.com", "cdn.example.com"},
+		Enforced: true,
 	})
 	if rec.Kind != RecordKindReach {
 		t.Fatalf("kind = %v, want RecordKindReach", rec.Kind)
@@ -606,15 +610,16 @@ func TestBuildReachRecord_CarriesDeclaredReachAndNotEnforcedMarker(t *testing.T)
 		t.Errorf("hosts = %v, want the two declared hosts", rec.Fields["aileron.reach.hosts"])
 	}
 	enforced, ok := rec.Fields["aileron.reach.enforced"].(bool)
-	if !ok || enforced {
-		t.Errorf("enforced = %v, want literal false (the not-enforced marker)", rec.Fields["aileron.reach.enforced"])
+	if !ok || !enforced {
+		t.Errorf("enforced = %v, want true for a sealed, step-scoped reach", rec.Fields["aileron.reach.enforced"])
 	}
 }
 
-// TestBuildReachRecord_EmptyHostsStillEnforcedFalse proves the enforced marker is
-// always present and false even for a contract with no declared hosts.
-func TestBuildReachRecord_EmptyHostsStillEnforcedFalse(t *testing.T) {
-	rec := buildReachRecord(reachRecord{StepID: "s", Effect: EffectRead, Hosts: nil})
+// TestBuildReachRecord_UnsealedReachEnforcedFalse proves the enforced marker
+// is truthful: a contracted step with no sealed reach records enforced:false,
+// never an overclaim.
+func TestBuildReachRecord_UnsealedReachEnforcedFalse(t *testing.T) {
+	rec := buildReachRecord(reachRecord{StepID: "s", Effect: EffectRead, Hosts: nil, Enforced: false})
 	if v, ok := rec.Fields["aileron.reach.enforced"].(bool); !ok || v {
 		t.Errorf("enforced = %v, want false", rec.Fields["aileron.reach.enforced"])
 	}

@@ -54,10 +54,10 @@ var validRedactKinds = map[string]RedactionKind{
 
 // toContract validates the trust-contract fields and builds the typed
 // TrustContract. It is the single validation body shared by the action path
-// (toAction) and the rung-3 per-step path (decodeToolDispatch): the effect
+// (toAction) and the per-step tool path (populateToolStep): the effect
 // must be a known enum, the hosts must be non-empty (the access scope is the
 // boundary), and each redaction rule must be a known kind. ref names the
-// offending element in any error so a rung-3 step and an action report the
+// offending element in any error so a tool step and an action report the
 // same failures identically.
 func (d trustContractDTO) toContract(ref string) (TrustContract, error) {
 	eff, ok := validEffects[d.Effect]
@@ -205,6 +205,27 @@ type stepDTO struct {
 	Bindings           map[string]string `yaml:"bindings"`
 	Outputs            []string          `yaml:"outputs"`
 	MaterializesOutput string            `yaml:"materializesOutput"`
+
+	// The following mirror the schema's toolStep shape (#1829) and are
+	// meaningful only for kind: tool; toStep refuses them on any other kind.
+	// Mount and Collect are pointers so their absence is distinguishable from
+	// an empty mapping (an empty path inside a present block is a refusal).
+
+	// Command is the tool step's argv array (schema-required, minItems 1).
+	Command []string `yaml:"command"`
+	// Mount is the optional mount declaration (input file I/O boundary).
+	Mount *struct {
+		Path string `yaml:"path"`
+	} `yaml:"mount"`
+	// Collect is the optional run-and-collect declaration (output file I/O
+	// boundary).
+	Collect *struct {
+		Path string `yaml:"path"`
+	} `yaml:"collect"`
+	// TrustContract is the tool step's optional per-step trust contract,
+	// declaring its network reach (hosts) and effect. Validated at decode via
+	// the same shared toContract body an action's contract uses.
+	TrustContract *trustContractDTO `yaml:"trustContract"`
 }
 
 func (d stepDTO) toStep() (Step, error) {
@@ -217,13 +238,31 @@ func (d stepDTO) toStep() (Step, error) {
 		kind = KindActionCall
 	case "transform":
 		kind = KindTransform
+	case "tool":
+		kind = KindTool
 	case "llm-seam":
 		kind = KindLLMSeam
 	default:
-		return Step{}, decodeErrf("step %q: unknown kind %q (only action-call, transform, and the marked llm-seam may appear)", d.ID, d.Kind)
+		return Step{}, decodeErrf("step %q: unknown kind %q (only action-call, transform, tool, and the marked llm-seam may appear)", d.ID, d.Kind)
 	}
 
 	step := Step{ID: d.ID, Kind: kind, Outputs: d.Outputs, MaterializesOutput: d.MaterializesOutput}
+
+	// The tool-step surface (command/mount/collect/trustContract, #1829) is
+	// closed to kind: tool. Any other kind carrying one of these fields is a
+	// malformed step (the closed schema forbids it), refused rather than
+	// silently ignored.
+	if kind != KindTool {
+		if len(d.Command) != 0 {
+			return Step{}, decodeErrf("step %q: kind %q must not declare a command (only a tool step executes one)", d.ID, d.Kind)
+		}
+		if d.Mount != nil || d.Collect != nil {
+			return Step{}, decodeErrf("step %q: kind %q must not declare mount/collect (the tool-step file I/O boundary)", d.ID, d.Kind)
+		}
+		if d.TrustContract != nil {
+			return Step{}, decodeErrf("step %q: kind %q must not declare a trustContract (only a tool step declares per-step reach)", d.ID, d.Kind)
+		}
+	}
 
 	if kind == KindActionCall {
 		if d.ActionRef == "" {
@@ -245,8 +284,8 @@ func (d stepDTO) toStep() (Step, error) {
 		if d.ActionRef != "" {
 			return Step{}, decodeErrf("step %q: kind %q must not declare an actionRef", d.ID, d.Kind)
 		}
-		// A transform / llm-seam carries bindings, not args: a stray args block
-		// is a malformed step, refused rather than silently ignored.
+		// A transform / tool / llm-seam carries bindings, not args: a stray
+		// args block is a malformed step, refused rather than silently ignored.
 		if len(d.Args) != 0 {
 			return Step{}, decodeErrf("step %q: kind %q must not declare args (use bindings)", d.ID, d.Kind)
 		}
@@ -266,6 +305,12 @@ func (d stepDTO) toStep() (Step, error) {
 		return Step{}, decodeErrf("step %q: kind %q must not declare a transform (only a transform step names one)", d.ID, d.Kind)
 	}
 
+	if kind == KindTool {
+		if err := d.populateToolStep(&step); err != nil {
+			return Step{}, err
+		}
+	}
+
 	// Every kind requires at least one declared output (schema stepOutputs
 	// minItems:1; action-call's outputs is optional in the schema but the
 	// worked example always declares them, and a step that produces nothing
@@ -280,52 +325,43 @@ func (d stepDTO) toStep() (Step, error) {
 	return step, nil
 }
 
-// ---- rung-3 per-step tool dispatch ----
-
-// rung3EnvDTO mirrors the schema `executionEnvironment.rung3PerStepImages`
-// block. Strict decode (KnownFields) means an unexpected key under the block or
-// a step entry is a decode error, so a typo never silently drops a mount/collect
-// declaration. `id`/`mount`/`collect` are optional in the schema and modeled as
-// such here; only `image` is required.
-type rung3EnvDTO struct {
-	Steps []rung3StepDTO `yaml:"steps"`
-}
-
-// rung3StepDTO is one rung-3 step's declared tool-dispatch I/O. Mount and
-// Collect are pointers so their absence (a step that declares no mount/collect)
-// is distinguishable from an empty mapping.
-type rung3StepDTO struct {
-	ID    string `yaml:"id"`
-	Image string `yaml:"image"`
-	Mount *struct {
-		Path string `yaml:"path"`
-	} `yaml:"mount"`
-	Collect *struct {
-		Path string `yaml:"path"`
-	} `yaml:"collect"`
-	// TrustContract is the step's optional per-step trust contract, declaring
-	// its network reach (hosts) and effect. Nil when the step declares none; a
-	// declared contract is validated at decode via toContract exactly like an
-	// action's trust contract.
-	TrustContract *trustContractDTO `yaml:"trustContract"`
-}
-
-// mountPath returns the declared mount path, or empty when the step declared no
-// mount. A mount block with an empty path is a decode error at the caller.
-func (d rung3StepDTO) mountPath() string {
-	if d.Mount == nil {
-		return ""
+// populateToolStep validates and copies the tool-step surface (#1829) onto a
+// KindTool step: the required non-empty argv (each element non-empty — the
+// schema's minLength:1, re-checked here so a manifest tampered past the
+// schema gate never execs an empty program), the optional mount/collect
+// paths (a present block with an empty path is a refusal, mirroring the
+// schema's minLength gate), and the optional per-step trust contract,
+// validated via the same shared toContract body an action's contract uses.
+func (d stepDTO) populateToolStep(step *Step) error {
+	if len(d.Command) == 0 {
+		return decodeErrf("step %q: tool step declares no command (the argv is the executed identity)", d.ID)
 	}
-	return d.Mount.Path
-}
-
-// collectPath returns the declared collect path, or empty when the step
-// declared no collect.
-func (d rung3StepDTO) collectPath() string {
-	if d.Collect == nil {
-		return ""
+	for i, arg := range d.Command {
+		if arg == "" {
+			return decodeErrf("step %q: tool command element %d is empty", d.ID, i)
+		}
 	}
-	return d.Collect.Path
+	step.Command = d.Command
+	if d.Mount != nil {
+		if d.Mount.Path == "" {
+			return decodeErrf("step %q: tool step declares a mount with an empty path", d.ID)
+		}
+		step.MountPath = d.Mount.Path
+	}
+	if d.Collect != nil {
+		if d.Collect.Path == "" {
+			return decodeErrf("step %q: tool step declares a collect with an empty path", d.ID)
+		}
+		step.CollectPath = d.Collect.Path
+	}
+	if d.TrustContract != nil {
+		tc, err := d.TrustContract.toContract("tool step " + d.ID)
+		if err != nil {
+			return err
+		}
+		step.TrustContract = &tc
+	}
+	return nil
 }
 
 func parseBindings(stepID string, raw map[string]string) (map[string]Binding, error) {

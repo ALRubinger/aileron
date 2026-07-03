@@ -70,14 +70,6 @@ type Environment struct {
 // Requires lists the actions the skill calls.
 type Requires struct {
 	Actions []ActionRequirement `yaml:"actions"`
-
-	// ExecutionEnvironment is DORMANT: the schema no longer admits a
-	// `requires.executionEnvironment` key, so Parse can never populate this
-	// field. It is retained only so the not-yet-rewritten runtime
-	// tool-dispatch decode (#1829, its sole remaining consumer) keeps
-	// compiling until that owner deletes it. It is slated for deletion with
-	// that consumer.
-	ExecutionEnvironment map[string]any `yaml:"executionEnvironment"`
 }
 
 // ActionRequirement is one required action plus its per-action trust

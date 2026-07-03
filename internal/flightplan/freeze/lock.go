@@ -14,15 +14,6 @@ import (
 type ImagePin struct {
 	Ref    string `yaml:"ref" json:"ref"`
 	Digest string `yaml:"digest" json:"digest"`
-	// StepID is DORMANT: the schema no longer admits a per-pin `id`, so
-	// freeze never emits it. It is retained only so the not-yet-rewritten
-	// runtime tool-dispatch decode (#1829) keeps compiling with its
-	// direct-construct tests; it is slated for deletion with that rewire.
-	StepID string `yaml:"id,omitempty" json:"id,omitempty"`
-	// Hosts is DORMANT: the per-pin sealed reach moved to the step-keyed
-	// `lock.stepTrust` section (see Lockfile.StepTrust), so freeze never
-	// emits it. Retained only for the #1829 runtime rewire, same as StepID.
-	Hosts []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
 }
 
 // StepReach is the sealed network reach for one tool step: the `hosts` from

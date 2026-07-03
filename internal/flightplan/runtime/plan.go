@@ -6,12 +6,12 @@
 // (#1519) and emitting a customer-owned audit record.
 //
 // The no-LLM guarantee is structural, not a runtime check. The executor has
-// exactly three step-kind branches (action-call, transform, llm-seam) and
-// only the explicitly marked llm-seam branch can reach a language model. The
-// action-call and transform branches hold no reference to any seam type, so
-// no deterministic step can reach an LLM by construction. In v1 the seam is
-// unwired by default: an llm-seam step with no configured provider is a hard
-// error, so a default launch reaches no LLM at all.
+// exactly four step-kind branches (action-call, transform, tool, llm-seam)
+// and only the explicitly marked llm-seam branch can reach a language model.
+// The action-call, transform, and tool branches hold no reference to any
+// seam type, so no deterministic step can reach an LLM by construction. In
+// v1 the seam is unwired by default: an llm-seam step with no configured
+// provider is a hard error, so a default launch reaches no LLM at all.
 //
 // The runtime depends on the manifest, freeze, and store packages but takes
 // the action boundary, the approval channel, and the audit sink as thin SPI
@@ -176,20 +176,23 @@ type Output struct {
 }
 
 // StepKind is the closed step-kind enum. The no-LLM guarantee is structural:
-// only KindLLMSeam can reach a language model.
+// only KindLLMSeam can reach a language model. KindTool runs a declared
+// environment tool as a deterministic subprocess inside the plan's single
+// composed container (#1829); it never reaches an LLM.
 type StepKind string
 
 const (
 	KindActionCall StepKind = "action-call"
 	KindTransform  StepKind = "transform"
+	KindTool       StepKind = "tool"
 	KindLLMSeam    StepKind = "llm-seam"
 )
 
 // Step is one step in the deterministic step graph. A single struct carries
 // every kind's fields; Kind selects which are meaningful. ActionRef is set
 // only for action-call; Args is the action-call binding map; Bindings is the
-// transform/llm-seam binding map. Keeping one struct keeps the executor's
-// three-branch switch the single dispatch point.
+// transform/tool/llm-seam binding map. Keeping one struct keeps the
+// executor's kind switch the single dispatch point.
 type Step struct {
 	ID        string
 	Kind      StepKind
@@ -201,7 +204,8 @@ type Step struct {
 	Transform string
 	// Args binds action-call argument names to binding references.
 	Args map[string]Binding
-	// Bindings binds transform / llm-seam input names to binding references.
+	// Bindings binds transform / tool / llm-seam input names to binding
+	// references.
 	Bindings map[string]Binding
 	// Outputs are the named results this step produces, referenced by a
 	// later step as steps.<id>.<output>.
@@ -209,38 +213,29 @@ type Step struct {
 	// MaterializesOutput names a declared output this step's result
 	// materializes into. Empty when the step materializes nothing.
 	MaterializesOutput string
-	// ToolDispatch, when non-nil, routes this step to a pinned rung-3 sibling
-	// tool image with mount → run → collect I/O (ADR-0027 rung three, #1733)
-	// instead of the in-process kind branch. It is orthogonal to Kind: the
-	// executor checks for a tool dispatch first and shells the step out to the
-	// tool runner when present. Nil for every non-rung-3 step.
-	ToolDispatch *ToolDispatch
-}
 
-// ToolDispatch is a step's rung-3 per-step tool-image dispatch: the verified
-// pinned image plus the mount (input) and collect (output) paths. It is
-// attached during decode by matching a graph step's id to a verified rung-3
-// pin; a rung-3 step whose pin is absent is a decode refusal (no tag-shaped or
-// unpinned ref ever reaches a dispatch). Image is always the content-addressed
-// `ref@sha256:<hex>` from the verified lock, never a mutable tag.
-type ToolDispatch struct {
-	// Image is the verified `ref@sha256:<hex>` pin the step dispatches to. The
-	// executor hands this to the ToolImageRunner verbatim.
-	Image string
-	// MountPath is the in-image path the resolved step input is mounted at, or
-	// empty when the step declared no mount.
+	// The following fields are meaningful only for KindTool (#1829): a tool
+	// step runs its argv as a deterministic subprocess inside the plan's
+	// pinned environment with mount → run → collect file I/O.
+
+	// Command is the argv the tool step executes: the first element is the
+	// program, the rest its arguments. Always exec'd directly (no shell), so
+	// the signed invocation carries no injection surface.
+	Command []string
+	// MountPath is the in-environment path the resolved step input is
+	// written to (as input.json), or empty when the step declares no mount.
 	MountPath string
-	// CollectPath is the in-image path whose contents are collected as the
-	// step's output, or empty when the step declared no collect.
+	// CollectPath is the in-environment path whose contents are collected
+	// as the step's single declared output, or empty when the step declares
+	// no collect.
 	CollectPath string
-	// TrustContract, when non-nil, is the step's declared per-step trust
-	// contract: its Hosts declare the step's network reach (the access-scope
-	// boundary) and Effect the operation effect, validated at decode exactly
-	// like an action's trust contract. It is CARRIED here, not consumed: this
-	// runtime never stamps the reach onto a host allow-list or emit path.
-	// Consuming it (writing binding.HostBinding.AllowedHosts, fail-closed emit)
-	// is #1769; the egress firewall is #1736. Nil when the rung-3 step declared
-	// no trust contract (declares no reach).
+	// TrustContract, when non-nil, is the tool step's declared per-step
+	// trust contract: its Hosts declare the step's network reach and Effect
+	// the operation effect, validated at decode exactly like an action's
+	// contract. The reach the runtime ENFORCES comes from the verified
+	// lock's sealed stepTrust section (LoadedPlan.StepTrust), never from
+	// this frontmatter copy; a contracted tool step with no sealed entry is
+	// a load refusal. Nil when the step declares no reach.
 	TrustContract *TrustContract
 }
 

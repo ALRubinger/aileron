@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 )
 
 // stepResult is the named-output set one step produced, keyed by output name.
@@ -17,11 +19,10 @@ type execState struct {
 	dispatches []actionDispatch
 	// artifacts records materialized output artifacts, in execution order.
 	artifacts []Artifact
-	// reaches records the declared per-step network reach captured at each
-	// rung-3 dispatch, in execution order. It is audit-only: the runtime never
-	// enforces the declared reach (egress stays passthrough), it only surfaces
-	// the declaration as a `flightplan.launch.reach` record marked
-	// `enforced:false` (#1784).
+	// reaches records the per-step network reach captured at each tool-step
+	// execution, in execution order (#1784, enforced by #1829). Each record
+	// carries the hosts the step ran under and whether they were the sealed,
+	// step-scope-enforced reach from the verified lock.
 	reaches []reachRecord
 	// outputs records each materialized artifact together with the step that
 	// produced it, in execution order. Unlike artifacts (kept for writing and
@@ -58,26 +59,28 @@ type materializedOutput struct {
 	// the exact inputs that produced it — by hash, never by inlining the
 	// dataset.
 	Resolved map[string]any
-	// ToolImage is the pinned `ref@sha256:<hex>` tool image, set ONLY when the
-	// producing step dispatched a rung-3 tool image (step.ToolDispatch != nil).
-	// It is empty for every non-tool (in-process action-call or transform)
-	// step. Its presence is the discriminator the audit layer uses to flip
-	// `aileron.step.kind` to the literal "tool" and to record
-	// `aileron.step.image` with this pin. The content-addressed pin fully and
-	// verifiably identifies what ran (the image's baked-in entrypoint), so it
-	// carries the executed-command identity a rung-3 dispatch has (there is no
-	// separate command in the rung-3 model, issue #1762).
-	ToolImage string
+	// Command is the executed argv, set ONLY when the producing step is a
+	// `kind: tool` step (#1829). It is nil for every non-tool step. The argv
+	// is the executed-command identity the per-output audit record emits as
+	// `aileron.step.command`; the environment identity is the plan's single
+	// composed pin, already on the launch record, so no per-step image is
+	// recorded here.
+	Command []string
 }
 
-// reachRecord captures one rung-3 dispatch's declared network reach for the
-// audit: the step id and the trust contract's Effect and Hosts. It is
-// audit-only, recorded regardless of dispatch outcome, and NEVER an enforcement
-// seam — no host is bound, blocked, or correlated from it (#1784, descope #1783).
+// reachRecord captures one tool step's network reach for the audit: the step
+// id, the declared operation Effect, the Hosts the step ran under, and
+// whether that reach was enforced. Enforced means the hosts are the verified
+// lock's sealed stepTrust reach and the step's subprocess ran under a
+// step-scoped proxy credential restricted to exactly them (#1829); a
+// contracted step with no sealed entry (only reachable on directly
+// constructed plans — the verified load path refuses that shape) records its
+// frontmatter hosts with enforced:false, so the record never overclaims.
 type reachRecord struct {
-	StepID string
-	Effect Effect
-	Hosts  []string
+	StepID   string
+	Effect   Effect
+	Hosts    []string
+	Enforced bool
 }
 
 // actionDispatch records one action-call's enforced outcome for the audit.
@@ -106,21 +109,27 @@ type actionDispatch struct {
 	ConsentDecision   string
 }
 
-// executor walks the topologically-ordered step graph. It has EXACTLY three
-// kind branches (action-call, transform, llm-seam). The action-call and
-// transform branches hold no reference to the seam type, so no deterministic
-// step can reach an LLM. Only the llm-seam branch calls runSeam, and that
-// errors by default in v1.
+// executor walks the topologically-ordered step graph. It has EXACTLY four
+// kind branches (action-call, transform, tool, llm-seam). The action-call,
+// transform, and tool branches hold no reference to the seam type, so no
+// deterministic step can reach an LLM. Only the llm-seam branch calls
+// runSeam, and that errors by default in v1.
 type executor struct {
 	plan      *Plan
 	enforcer  *enforcer
 	transform *TransformRegistry
 	seam      LLMSeam
-	// toolRunner dispatches a rung-3 per-step tool image (mount → run →
-	// collect). Nil when no tool runner is configured; a step that carries a
-	// ToolDispatch with a nil toolRunner is an explicit error, never a silent
-	// in-process fallback (mirrors the seam/image-runner nil-guard discipline).
-	toolRunner ToolImageRunner
+	// toolRunner executes a `kind: tool` step as a subprocess in the current
+	// pinned environment (#1829). Nil when no tool runner is configured; a
+	// tool step with a nil toolRunner is an explicit error, never a silent
+	// skip (mirrors the seam/image-runner nil-guard discipline).
+	toolRunner ToolStepRunner
+	// stepTrust is the verified lock's sealed per-step reach
+	// (freeze.VerifiedFrozen.StepTrust), keyed by tool step id. It is the
+	// ONLY source of the reach the runtime enforces: the frontmatter
+	// trust-contract copy on the Step is audit context, never the
+	// enforcement input. Nil/absent entries mean the step declares no reach.
+	stepTrust map[string]freeze.StepReach
 }
 
 // execute runs Phase B: it walks p.Order, executes each step against the
@@ -141,11 +150,11 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 
 		var outputs map[string]any
 		switch {
-		case step.ToolDispatch != nil:
-			// A rung-3 step shells out to its pinned sibling tool image with
-			// mount → run → collect I/O, orthogonal to Kind. It is checked first
-			// so the in-process kind branches never run for a tool-dispatch step.
-			outputs, err = x.runToolDispatch(ctx, step, resolved, &st)
+		case step.Kind == KindTool:
+			// A tool step runs its argv as a deterministic subprocess inside
+			// the plan's pinned environment with mount → run → collect I/O
+			// (#1829), scoped to its sealed reach.
+			outputs, err = x.runToolStep(ctx, step, resolved, &st)
 		case step.Kind == KindActionCall:
 			outputs, err = x.runActionCall(ctx, step, resolved, &st)
 		case step.Kind == KindTransform:
@@ -193,28 +202,27 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 				// inputs are precisely what produced this artifact.
 				Binds:    step.binds(),
 				Resolved: resolved,
-				// Carry the pinned tool image ONLY when this step dispatched a
-				// rung-3 tool (issue #1762). Empty for every non-tool step; its
-				// presence flips the audit record's step.kind to "tool" and adds
-				// aileron.step.image. The rung-3 model carries no separate
-				// command, so the content-addressed pin is the executed-command
-				// identity.
-				ToolImage: toolImage(step),
+				// Carry the executed argv ONLY when this step is a tool step
+				// (#1829): the command is the executed identity the per-output
+				// audit record emits as aileron.step.command. Nil for every
+				// non-tool step. The environment identity is the plan's single
+				// composed pin, already on the launch record.
+				Command: toolCommand(step),
 			})
 		}
 	}
 	return st, nil
 }
 
-// toolImage returns the step's pinned `ref@sha256:<hex>` tool image when the
-// step dispatched a rung-3 tool, or "" for any in-process (action-call or
-// transform) step. It is the tool-materialized discriminator the audit layer
-// reads to distinguish a tool-produced output from a connector/transform one.
-func toolImage(step Step) string {
-	if step.ToolDispatch == nil {
-		return ""
+// toolCommand returns the step's executed argv when the step is a tool step,
+// or nil for any other kind. It is the tool-materialized discriminator the
+// audit layer reads to distinguish a tool-produced output from a
+// connector/transform one.
+func toolCommand(step Step) []string {
+	if step.Kind != KindTool {
+		return nil
 	}
-	return step.ToolDispatch.Image
+	return step.Command
 }
 
 // runActionCall dispatches an action-call through the enforced boundary and
@@ -269,57 +277,66 @@ func (x *executor) runActionCall(ctx context.Context, step Step, args map[string
 	return outputs, nil
 }
 
-// runToolDispatch dispatches a rung-3 step to its pinned sibling tool image
-// with mount → run → collect I/O (ADR-0027 rung three, #1733). It mounts the
-// step's resolved binding input at the declared mount path, runs the pinned
-// tool, and reads back the collected output. The collected value becomes the
-// step's single declared output so downstream steps binding steps.<id>.<output>
-// receive it through the existing resolveBindings path with no new dataflow
-// mechanism.
+// runToolStep executes a `kind: tool` step as a deterministic subprocess in
+// the plan's pinned environment with mount → run → collect I/O (#1829). It
+// threads the step's SEALED reach (the verified lock's stepTrust entry,
+// never the frontmatter copy) into the runner, which runs the subprocess
+// under a step-scoped proxy credential restricted to exactly those hosts —
+// failing closed when the scope cannot be obtained. The collected value
+// becomes the step's single declared output so downstream steps binding
+// steps.<id>.<output> receive it through the existing resolveBindings path
+// with no new dataflow mechanism.
 //
-// A tool-dispatch step with no configured tool runner is an explicit error,
-// never a silent skip: a declared, pinned dispatch must be entered to honor the
-// attestation (mirrors the ImageRunner/LLMSeam nil-guard discipline).
-func (x *executor) runToolDispatch(ctx context.Context, step Step, resolved map[string]any, st *execState) (map[string]any, error) {
-	td := step.ToolDispatch
-	// Record the step's declared network reach before the dispatch, so the
-	// declaration is captured regardless of the dispatch outcome (a nil runner,
-	// a runner error). This is audit-only: the reach is never enforced. A step
-	// that declared no trust contract records nothing (never a synthesized empty
-	// contract).
-	if td.TrustContract != nil {
+// A tool step with no configured tool runner is an explicit error, never a
+// silent skip (mirrors the ImageRunner/LLMSeam nil-guard discipline).
+func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[string]any, st *execState) (map[string]any, error) {
+	// The reach the step runs under: the sealed lock entry when present.
+	// enforced:true is recorded only for a sealed reach, because only a
+	// sealed reach drives the runner's step-scope credential (the production
+	// runner fails closed rather than run a sealed step unscoped).
+	sealed, hasSealed := x.stepTrust[step.ID]
+
+	// Record the step's network reach before the execution, so the record is
+	// captured regardless of the run outcome (a nil runner, a subprocess
+	// error). A step that declared no trust contract records nothing (never a
+	// synthesized empty contract).
+	if step.TrustContract != nil {
+		hosts := step.TrustContract.Hosts
+		if hasSealed {
+			hosts = sealed.Hosts
+		}
 		st.reaches = append(st.reaches, reachRecord{
-			StepID: step.ID,
-			Effect: td.TrustContract.Effect,
-			Hosts:  td.TrustContract.Hosts,
+			StepID:   step.ID,
+			Effect:   step.TrustContract.Effect,
+			Hosts:    hosts,
+			Enforced: hasSealed,
 		})
 	}
 	if x.toolRunner == nil {
-		return nil, fmt.Errorf("flightplan: step %q dispatches pinned tool image %q but no tool image runner is configured", step.ID, td.Image)
+		return nil, fmt.Errorf("flightplan: step %q is a tool step but no tool step runner is configured", step.ID)
 	}
-	// The mount input is the step's resolved bindings. It is a binding-resolved
-	// value only, never a credential.
-	spec := ToolRunSpec{
-		Image:       td.Image,
+	// The mounted input is the step's resolved bindings. It is a
+	// binding-resolved value only, never a credential.
+	spec := ToolStepSpec{
 		StepID:      step.ID,
-		MountPath:   td.MountPath,
+		Command:     step.Command,
+		MountPath:   step.MountPath,
 		Input:       resolved,
-		CollectPath: td.CollectPath,
+		CollectPath: step.CollectPath,
+		Hosts:       sealed.Hosts,
 	}
 	res, err := x.toolRunner.Run(ctx, spec)
 	if err != nil {
-		return nil, fmt.Errorf("flightplan: step %q tool dispatch to %q: %w", step.ID, td.Image, err)
+		return nil, fmt.Errorf("flightplan: step %q tool execution: %w", step.ID, err)
 	}
 
-	// The collected output maps to the step's single declared output. A rung-3
-	// dispatch produces one collected value; a step declaring multiple outputs
-	// has no unambiguous mapping for a single collected blob, so that is refused.
-	// A rung-3 dispatch collects exactly one blob, so the step must declare
-	// exactly one output to carry it. Zero outputs (a collect with nowhere to
-	// land) and multiple outputs (an ambiguous mapping for one blob) are both
-	// refused rather than silently dropping or duplicating the collected value.
+	// The collected output maps to the step's single declared output. A tool
+	// step collects exactly one blob, so the step must declare exactly one
+	// output to carry it. Zero outputs (a collect with nowhere to land) and
+	// multiple outputs (an ambiguous mapping for one blob) are both refused
+	// rather than silently dropping or duplicating the collected value.
 	if len(step.Outputs) != 1 {
-		return nil, fmt.Errorf("flightplan: step %q dispatches a tool image and declares %d outputs; a rung-3 tool dispatch produces exactly one collected output", step.ID, len(step.Outputs))
+		return nil, fmt.Errorf("flightplan: step %q is a tool step and declares %d outputs; a tool step produces exactly one collected output", step.ID, len(step.Outputs))
 	}
 	return map[string]any{step.Outputs[0]: res.Output}, nil
 }

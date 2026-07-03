@@ -60,13 +60,15 @@ func buildActionRecord(d actionDispatch) AuditRecord {
 	return AuditRecord{Kind: RecordKindAction, ActionRef: d.ActionRef, Fields: fields, Sink: d.Sink}
 }
 
-// buildReachRecord builds one per-rung-3-dispatch declared-reach record (#1784)
-// from a captured reachRecord. The flat `aileron.*` field map carries the
-// dispatching step's id, the declared operation effect, the declared reachable
-// hosts, and the literal `aileron.reach.enforced: false` marker. That marker is
-// the point of the record: it states the declaration is surfaced for audit and
-// is NOT enforced (egress stays passthrough; the credential is injected per host
-// binding). `enforced` is always present and always false.
+// buildReachRecord builds one per-tool-step reach record (#1784, enforcement
+// truth from #1829) from a captured reachRecord. The flat `aileron.*` field
+// map carries the step's id, the declared operation effect, the hosts the
+// step ran under, and the truthful `aileron.reach.enforced` marker:
+// enforced:true means the hosts are the verified lock's sealed reach and the
+// step's subprocess ran under a step-scoped proxy credential restricted to
+// exactly them; enforced:false means the step declared a contract with no
+// sealed entry (only reachable outside the verified load path, which refuses
+// that shape).
 func buildReachRecord(r reachRecord) AuditRecord {
 	return AuditRecord{
 		Kind: RecordKindReach,
@@ -74,7 +76,7 @@ func buildReachRecord(r reachRecord) AuditRecord {
 			"aileron.step.id":        r.StepID,
 			"aileron.reach.effect":   string(r.Effect),
 			"aileron.reach.hosts":    r.Hosts,
-			"aileron.reach.enforced": false,
+			"aileron.reach.enforced": r.Enforced,
 		},
 	}
 }
@@ -103,8 +105,8 @@ type launchProvenance struct {
 	InvocationID string
 }
 
-// emitAudit records every per-action audit record, then one declared-reach
-// record per rung-3 dispatch that carried a trust contract (#1784), then one
+// emitAudit records every per-action audit record, then one reach record per
+// tool step that carried a trust contract (#1784/#1829), then one
 // output.materialized record per materialized artifact, then one per-launch
 // summary record through the sink, returning the minted record ids in order.
 // The sink is the customer-owned audit store (wired by the CLI). A nil sink
@@ -117,9 +119,8 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchPro
 	for _, d := range st.dispatches {
 		ids = append(ids, sink.Record(ctx, buildActionRecord(d)))
 	}
-	// One declared-reach record per rung-3 dispatch that carried a trust
-	// contract (#1784). Audit-only: each record is marked `enforced:false`; no
-	// host is bound or blocked from it.
+	// One reach record per tool step that carried a trust contract
+	// (#1784/#1829), marked enforced truthfully per record.
 	for _, r := range st.reaches {
 		ids = append(ids, sink.Record(ctx, buildReachRecord(r)))
 	}
@@ -187,26 +188,19 @@ func buildOutputRecord(o materializedOutput, prov launchProvenance, dispatchBySt
 		"aileron.plan.signature_status": prov.SignatureStatus,
 		"aileron.invocation.id":         prov.InvocationID,
 	}
-	// A tool-materialized output (rung-3 dispatch, issue #1762) overrides the
-	// step-kind with the literal "tool" and records the pinned image. StepKind
-	// stays a closed 3-member enum (the no-LLM guarantee); tool dispatch is
-	// orthogonal to Kind, so the tool marker is the pinned image on the
-	// materialized output, not a new enum member. The image is the
-	// content-addressed `ref@sha256:<hex>` pin, which fully identifies what ran
-	// (the baked-in entrypoint). No aileron.step.command is synthesized — the
-	// rung-3 model carries no command; the pin IS the executed-command identity.
-	// aileron.step.calls[] (per-egress attribution, Half B) is out of scope and
-	// omitted entirely.
-	if o.ToolImage != "" {
-		fields["aileron.step.kind"] = "tool"
-		fields["aileron.step.image"] = o.ToolImage
+	// A tool-materialized output (#1829) records the executed argv: `kind:
+	// tool` is a first-class step kind, so aileron.step.kind is already the
+	// literal "tool" from StepKind above, and the discriminator here keys off
+	// the kind. The argv is the executed-command identity; the environment
+	// identity is the plan's single composed pin, already on the launch
+	// record, so no per-step aileron.step.image exists. aileron.step.calls[]
+	// (per-egress attribution, Half B) is out of scope and omitted entirely.
+	if o.StepKind == KindTool {
+		fields["aileron.step.command"] = o.Command
 	}
-	// The transform name is meaningful only for a transform step; omit it for an
-	// action-call so the record does not carry an empty value. A tool step's
-	// output is the collected blob, never a transform result, so a tool step
-	// never carries aileron.step.transform even if its Kind happens to be
-	// transform (the rung-3 dispatch is checked before the kind branches).
-	if o.ToolImage == "" && o.StepKind == KindTransform && o.Transform != "" {
+	// The transform name is meaningful only for a transform step; omit it for
+	// an action-call or tool step so the record does not carry an empty value.
+	if o.StepKind == KindTransform && o.Transform != "" {
 		fields["aileron.step.transform"] = o.Transform
 	}
 	// The input walk-back: the producing step's bindings, each hashed. Present

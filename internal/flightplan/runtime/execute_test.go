@@ -107,7 +107,7 @@ func runFixture(t *testing.T, opts Options) (RunResult, *dispatchRouter, *record
 	if opts.Seam != nil {
 		o.Seam = opts.Seam
 	}
-	res, err := runPlan(context.Background(), p, "sha256:test", "sha256:signer", o)
+	res, err := runPlan(context.Background(), p, "sha256:test", "sha256:signer", nil, o)
 	if err != nil {
 		t.Fatalf("runPlan: %v", err)
 	}

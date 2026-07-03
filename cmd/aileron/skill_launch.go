@@ -41,18 +41,17 @@ var newLaunchImageRunner = func() runtime.ImageRunner {
 	return containerImageRunner{daemonEnv: daemonImageEnv{}, proxy: daemonPlanProxyBootstrapper{}}
 }
 
-// newLaunchToolImageRunner returns the production tool-image runner that
-// dispatches a rung-3 step to its pinned sibling tool image with mount → run →
-// collect I/O (#1733). It is a package-level seam so CLI tests swap in a fake
-// that records the pinned image and mount/collect wiring and never touches
-// Docker, mirroring newLaunchImageRunner.
-// Per-dispatch egress is UN-PROXIED in the interim window (#1828/#1829): the
-// boot-time credential injection moved to the whole-plan boot
-// (newLaunchImageRunner wires daemonPlanProxyBootstrapper). A rung-3 tool step
-// therefore egresses passthrough until #1829 retargets per-step proxy scoping
-// onto this dispatch.
-var newLaunchToolImageRunner = func() runtime.ToolImageRunner {
-	return containerToolImageRunner{}
+// newLaunchToolStepRunner returns the production tool-step runner that
+// executes a `kind: tool` step as a deterministic subprocess INSIDE the
+// booted plan container (#1829). It is a package-level seam so CLI tests
+// swap in a fake that records the argv/scope wiring and never execs,
+// mirroring newLaunchImageRunner. The production runner refuses to exec
+// outside the pinned image (the AILERON_SKILL_IMAGE_BOOTED sentinel) and,
+// for a step with a sealed reach, mints a daemon step-scoped proxy
+// credential before the exec and releases it after — failing closed when the
+// scope cannot be obtained, so a sealed step never runs unscoped.
+var newLaunchToolStepRunner = func() runtime.ToolStepRunner {
+	return inContainerToolStepRunner{}
 }
 
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
@@ -137,11 +136,11 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// environment and must run the plan in-process, not boot the pin
 		// again.
 		InPinnedImage: os.Getenv(envSkillImageBooted) != "",
-		// ToolImageRunner dispatches each rung-3 step to its pinned sibling tool
-		// image with mount → run → collect I/O. The plan orchestration stays
-		// in-process; only the per-step tool dispatch shells out.
-		ToolImageRunner: newLaunchToolImageRunner(),
-		OutDir:          *outDir,
+		// ToolRunner executes each `kind: tool` step as a scoped subprocess in
+		// the current (pinned) environment (#1829). No sibling container is
+		// ever dispatched.
+		ToolRunner: newLaunchToolStepRunner(),
+		OutDir:     *outDir,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
