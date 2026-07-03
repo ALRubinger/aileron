@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -40,11 +42,29 @@ func withHomeAndEnv(t *testing.T) string {
 	return stateDir
 }
 
-func TestDaemonToolProxyBootstrapper_AssemblesEnvAndCAFromDiscovery(t *testing.T) {
+// setMetadataLabel swaps the containerImageMetadataLabel seam to return a fixed
+// label for the duration of the test, so the plan bootstrapper never shells out
+// to `docker image inspect`.
+func setMetadataLabel(t *testing.T, label string) {
+	t.Helper()
+	prev := containerImageMetadataLabel
+	containerImageMetadataLabel = func(_ context.Context, _, _ string) string { return label }
+	t.Cleanup(func() { containerImageMetadataLabel = prev })
+}
+
+// twoToolMetadata is a devcontainer.metadata label carrying the aws-cli and gh
+// credential conventions, the multi-tool union the boot must plant.
+const twoToolMetadata = `[
+  {"id":"aws-cli","customizations":{"aileron":{"credential":{"scheme":"sigv4-resign","placeholders":[{"env":"AWS_ACCESS_KEY_ID","value":"AKIAIOSFODNN7PLACEHLDR"},{"env":"AWS_SECRET_ACCESS_KEY","value":"placeholderAileronInjectsRealSecretXXXXXX"}]}}}},
+  {"id":"gh","customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[{"env":"GH_TOKEN","value":"ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"}]}}}}
+]`
+
+func TestDaemonPlanProxyBootstrapper_AssemblesExactEnvAndCAFromDiscovery(t *testing.T) {
 	stateDir := withHomeAndEnv(t)
 	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+	setMetadataLabel(t, twoToolMetadata)
 
-	bootstrap, cleanup, ok, err := daemonToolProxyBootstrapper{}.Prepare("docker", "extract")
+	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "example.com/plan@sha256:abc", "myplan")
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -57,62 +77,72 @@ func TestDaemonToolProxyBootstrapper_AssemblesEnvAndCAFromDiscovery(t *testing.T
 	if bootstrap.Mount.Target != "/etc/aileron/proxy/ca.pem" || !bootstrap.Mount.ReadOnly {
 		t.Fatalf("CA mount = %+v, want RO at /etc/aileron/proxy/ca.pem", bootstrap.Mount)
 	}
-	// The CA exists on disk under the session dir.
+	// ca.pem exists on disk under the boot session dir.
 	if _, err := os.Stat(bootstrap.Mount.Source); err != nil {
 		t.Fatalf("CA not written on disk: %v", err)
 	}
-
-	// HTTPS_PROXY (both cases) is loopback-rewritten to host.docker.internal and
-	// carries the session:token userinfo the CONNECT handshake authenticates.
-	for _, key := range []string{"HTTPS_PROXY", "https_proxy"} {
-		got := bootstrap.Env[key]
-		if !strings.Contains(got, "host.docker.internal:48123") {
-			t.Errorf("%s = %q, want host.docker.internal rewrite", key, got)
-		}
-		if !strings.Contains(got, ":daemon-token@") {
-			t.Errorf("%s = %q, want :daemon-token@ userinfo", key, got)
-		}
+	if !strings.Contains(bootstrap.Mount.Source, filepath.Join("sessions", "flightplan-boot-myplan-")) {
+		t.Errorf("CA source %q not under the flightplan-boot session dir", bootstrap.Mount.Source)
 	}
 
-	// Every CA-bundle var points at the mounted CA path.
-	for _, key := range caBundleEnvVars {
-		if got := bootstrap.Env[key]; got != "/etc/aileron/proxy/ca.pem" {
-			t.Errorf("%s = %q, want the container CA path", key, got)
-		}
+	// The env is EXACTLY the expected map — the authed loopback-rewritten proxy
+	// URL, the six CA vars, NO_PROXY/no_proxy, and the aws-cli + gh placeholder
+	// union — and NOTHING ELSE. Exact-map equality is the "never a real secret"
+	// assertion at this layer.
+	proxyURL := bootstrap.Env["HTTPS_PROXY"]
+	want := map[string]string{
+		"HTTPS_PROXY":           proxyURL,
+		"https_proxy":           proxyURL,
+		"NO_PROXY":              "localhost,127.0.0.1,::1,host.docker.internal",
+		"no_proxy":              "localhost,127.0.0.1,::1,host.docker.internal",
+		"AWS_CA_BUNDLE":         "/etc/aileron/proxy/ca.pem",
+		"REQUESTS_CA_BUNDLE":    "/etc/aileron/proxy/ca.pem",
+		"NODE_EXTRA_CA_CERTS":   "/etc/aileron/proxy/ca.pem",
+		"SSL_CERT_FILE":         "/etc/aileron/proxy/ca.pem",
+		"GIT_SSL_CAINFO":        "/etc/aileron/proxy/ca.pem",
+		"CURL_CA_BUNDLE":        "/etc/aileron/proxy/ca.pem",
+		"AWS_ACCESS_KEY_ID":     "AKIAIOSFODNN7PLACEHLDR",
+		"AWS_SECRET_ACCESS_KEY": "placeholderAileronInjectsRealSecretXXXXXX",
+		"GH_TOKEN":              "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA",
+	}
+	if !reflect.DeepEqual(bootstrap.Env, want) {
+		t.Fatalf("boot env = %#v\nwant %#v", bootstrap.Env, want)
 	}
 
-	// Placeholder (non-secret) AWS creds are seeded so botocore pre-signs.
-	if bootstrap.Env["AWS_ACCESS_KEY_ID"] != placeholderAWSAccessKeyID {
-		t.Errorf("AWS_ACCESS_KEY_ID = %q, want placeholder", bootstrap.Env["AWS_ACCESS_KEY_ID"])
+	// The proxy URL is loopback-rewritten to host.docker.internal and carries the
+	// session:token userinfo the CONNECT handshake authenticates.
+	if !strings.Contains(proxyURL, "host.docker.internal:48123") {
+		t.Errorf("HTTPS_PROXY = %q, want host.docker.internal rewrite", proxyURL)
 	}
-	if bootstrap.Env["AWS_SECRET_ACCESS_KEY"] != placeholderAWSSecretKey {
-		t.Errorf("AWS_SECRET_ACCESS_KEY = %q, want placeholder", bootstrap.Env["AWS_SECRET_ACCESS_KEY"])
+	if !strings.Contains(proxyURL, ":daemon-token@") {
+		t.Errorf("HTTPS_PROXY = %q, want :daemon-token@ userinfo", proxyURL)
 	}
 
 	// The real daemon token is a proxy-auth credential, not a network secret; it
 	// must appear ONLY in the proxy URL userinfo, never leaked into a CA-bundle
-	// or credential var.
-	for _, key := range append(append([]string{}, caBundleEnvVars...), "AWS_SECRET_ACCESS_KEY") {
+	// or placeholder var.
+	for _, key := range append(append([]string{}, caBundleEnvVars...), "AWS_SECRET_ACCESS_KEY", "GH_TOKEN") {
 		if strings.Contains(bootstrap.Env[key], "daemon-token") {
 			t.Errorf("%s leaked the daemon token: %q", key, bootstrap.Env[key])
 		}
 	}
 
-	// Cleanup removes the session CA directory.
+	// Cleanup removes the boot session CA directory.
 	cleanup()
 	if _, err := os.Stat(bootstrap.Mount.Source); !os.IsNotExist(err) {
 		t.Fatalf("cleanup must remove the session CA, stat err = %v", err)
 	}
 }
 
-func TestDaemonToolProxyBootstrapper_PrefersEnvOverDiscovery(t *testing.T) {
+func TestDaemonPlanProxyBootstrapper_PrefersEnvOverDiscovery(t *testing.T) {
 	stateDir := withHomeAndEnv(t)
 	// Discovery carries a different URL/token; the env must win.
 	writeDiscovery(t, stateDir, "http://127.0.0.1:1/", "discovery-token")
 	t.Setenv("AILERON_API_URL", "http://127.0.0.1:55555/v1")
 	t.Setenv("AILERON_TOKEN", "env-token")
+	setMetadataLabel(t, "")
 
-	bootstrap, cleanup, ok, err := daemonToolProxyBootstrapper{}.Prepare("docker", "s1")
+	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -133,10 +163,120 @@ func TestDaemonToolProxyBootstrapper_PrefersEnvOverDiscovery(t *testing.T) {
 	}
 }
 
-func TestDaemonToolProxyBootstrapper_PassthroughWhenConfigAbsent(t *testing.T) {
+func TestDaemonPlanProxyBootstrapper_EmptyMetadataLabelYieldsNoPlaceholders(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+	setMetadataLabel(t, "") // unlabeled / uninspectable image
+
+	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
+	if err != nil {
+		t.Fatalf("Prepare must fail-soft on an empty label: %v", err)
+	}
+	if !ok {
+		t.Fatal("Prepare must still enrich proxy env + CA on an empty label")
+	}
+	t.Cleanup(cleanup)
+
+	// Proxy + CA are present, but no placeholder creds.
+	if bootstrap.Env["HTTPS_PROXY"] == "" {
+		t.Error("HTTPS_PROXY must still be set with an empty metadata label")
+	}
+	for _, k := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GH_TOKEN"} {
+		if _, present := bootstrap.Env[k]; present {
+			t.Errorf("placeholder %s must be absent when the label carries no conventions", k)
+		}
+	}
+}
+
+func TestDaemonPlanProxyBootstrapper_MalformedMetadataFailsClosed(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+	// A present-but-invalid credential block (unknown scheme) must refuse the
+	// boot rather than silently ship no placeholders.
+	setMetadataLabel(t, `[{"customizations":{"aileron":{"credential":{"scheme":"nope","placeholders":[{"env":"X","value":"y"}]}}}}]`)
+
+	_, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
+	if err == nil {
+		t.Fatal("Prepare must error on a malformed metadata label")
+	}
+	if ok {
+		t.Fatal("Prepare must not report ok on the fail-closed path")
+	}
+	// The error path still returns a runnable cleanup so the partial CA is
+	// removed rather than leaked.
+	if cleanup == nil {
+		t.Fatal("Prepare must return a runnable cleanup on the error path")
+	}
+	cleanup()
+}
+
+func TestDaemonPlanProxyBootstrapper_ReservedKeysWinOverPlaceholders(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+	// A (mis)declared placeholder trying to claim a reserved proxy/CA env must
+	// NOT clobber the authoritative value — reserved keys always win, so the
+	// fail-closed egress mediation cannot be weakened by image metadata.
+	setMetadataLabel(t, `[
+  {"customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[
+    {"env":"HTTPS_PROXY","value":"http://evil.example"},
+    {"env":"NO_PROXY","value":"*"},
+    {"env":"AWS_CA_BUNDLE","value":"/tmp/evil.pem"},
+    {"env":"GH_TOKEN","value":"ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"}
+  ]}}}}
+]`)
+
+	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if !ok {
+		t.Fatal("Prepare must resolve")
+	}
+	t.Cleanup(cleanup)
+
+	if strings.Contains(bootstrap.Env["HTTPS_PROXY"], "evil.example") {
+		t.Errorf("HTTPS_PROXY = %q, a placeholder must never override the authoritative proxy URL", bootstrap.Env["HTTPS_PROXY"])
+	}
+	if bootstrap.Env["NO_PROXY"] != "localhost,127.0.0.1,::1,host.docker.internal" {
+		t.Errorf("NO_PROXY = %q, a placeholder must never override the reserved bypass list", bootstrap.Env["NO_PROXY"])
+	}
+	if bootstrap.Env["AWS_CA_BUNDLE"] != "/etc/aileron/proxy/ca.pem" {
+		t.Errorf("AWS_CA_BUNDLE = %q, a placeholder must never override the mounted CA path", bootstrap.Env["AWS_CA_BUNDLE"])
+	}
+	// A non-reserved placeholder (GH_TOKEN) still lands.
+	if bootstrap.Env["GH_TOKEN"] != "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("GH_TOKEN = %q, a non-reserved placeholder must still be planted", bootstrap.Env["GH_TOKEN"])
+	}
+}
+
+func TestDaemonPlanProxyBootstrapper_ConflictingPlaceholdersFailClosed(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+	// Two elements declare GH_TOKEN with different values: the union is a
+	// conflict and the boot must refuse rather than last-wins-ship a placeholder.
+	setMetadataLabel(t, `[
+  {"customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[{"env":"GH_TOKEN","value":"ghp_a"}]}}}},
+  {"customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[{"env":"GH_TOKEN","value":"ghp_b"}]}}}}
+]`)
+
+	_, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
+	if err == nil {
+		t.Fatal("Prepare must error on conflicting placeholder values")
+	}
+	if ok {
+		t.Fatal("Prepare must not report ok on the fail-closed path")
+	}
+	if cleanup == nil {
+		t.Fatal("Prepare must return a runnable cleanup on the error path")
+	}
+	cleanup()
+}
+
+func TestDaemonPlanProxyBootstrapper_PassthroughWhenConfigAbsent(t *testing.T) {
 	t.Run("no daemon config at all", func(t *testing.T) {
 		withHomeAndEnv(t) // empty state dir, no env
-		_, _, ok, err := daemonToolProxyBootstrapper{}.Prepare("docker", "s1")
+		setMetadataLabel(t, twoToolMetadata)
+		_, _, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 		if err != nil {
 			t.Fatalf("Prepare must not error on absent config: %v", err)
 		}
@@ -148,7 +288,8 @@ func TestDaemonToolProxyBootstrapper_PassthroughWhenConfigAbsent(t *testing.T) {
 	t.Run("url present but token absent", func(t *testing.T) {
 		stateDir := withHomeAndEnv(t)
 		writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "") // no token
-		_, _, ok, err := daemonToolProxyBootstrapper{}.Prepare("docker", "s1")
+		setMetadataLabel(t, twoToolMetadata)
+		_, _, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
@@ -160,7 +301,8 @@ func TestDaemonToolProxyBootstrapper_PassthroughWhenConfigAbsent(t *testing.T) {
 	t.Run("token present but url absent", func(t *testing.T) {
 		withHomeAndEnv(t)
 		t.Setenv("AILERON_TOKEN", "env-token") // token but no URL / discovery
-		_, _, ok, err := daemonToolProxyBootstrapper{}.Prepare("docker", "s1")
+		setMetadataLabel(t, twoToolMetadata)
+		_, _, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
@@ -190,7 +332,7 @@ func TestSanitizeSessionSegment(t *testing.T) {
 		"step_1-2":   "step_1-2",
 		"a/b":        "a-b",
 		"../escape":  "---escape",
-		"":           "step",
+		"":           "plan",
 		"with space": "with-space",
 	}
 	for in, want := range cases {

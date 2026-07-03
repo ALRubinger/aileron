@@ -43,11 +43,22 @@ import (
 // host can query. A zero-value runner has daemonEnv == nil and injects no env,
 // keeping the CLI unit tests deterministic irrespective of any live ~/.aileron
 // daemon; production wires the daemon-backed resolver via newLaunchImageRunner.
+//
+// Boot-time credential injection (#1828): when proxy is non-nil the runner
+// routes the whole booted plan container's HTTPS egress through the ADR-0019
+// daemon forward proxy via env-based CA trust, so a matched host binding injects
+// the operator's vault-bound credential at the boundary. No credential BYTES
+// cross this boundary in the image, env, mounts, or args: only a read-only CA
+// and the catalog-derived placeholder (non-secret) creds are set. A zero-value
+// runner has proxy == nil and stays passthrough.
 type containerImageRunner struct {
 	// daemonEnv, when non-nil, resolves the daemon env injected into the boot so
 	// the in-container launch reaches the host daemon. nil (the zero value) is
 	// passthrough (no injected env).
 	daemonEnv imageDaemonEnv
+	// proxy, when non-nil, enriches the boot with proxy egress + CA trust +
+	// catalog-derived placeholder creds. nil (the zero value) is passthrough.
+	proxy planProxyBootstrapper
 	// diag is where the pre-boot CLI-version-skew warning is written. nil (the
 	// zero value) means os.Stderr in production; tests set a buffer to assert the
 	// warning end-to-end through Run.
@@ -218,6 +229,41 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		}
 	}
 
+	// Boot-time credential injection (#1828): when a proxy bootstrapper is wired,
+	// route the whole booted plan container's HTTPS egress through the ADR-0019
+	// daemon forward proxy via env-based CA trust so a matched host binding
+	// injects the operator's vault-bound credential at the boundary. Prepare
+	// fails closed: a boot that resolved daemon config but could not write its
+	// session CA (or whose declared conventions were malformed) must NOT silently
+	// egress un-proxied — it runs cleanup and fails the boot. The proxy env and
+	// the sentinel + daemon env are disjoint key sets
+	// (HTTPS_PROXY/CA/placeholders vs
+	// AILERON_SKILL_IMAGE_BOOTED/AILERON_API_URL/AILERON_TOKEN), so the merge
+	// never clobbers the sentinel or daemon coordinates. Cleanup is deferred so
+	// the session CA is removed after the (synchronous) run completes.
+	if r.proxy != nil {
+		bootstrap, cleanup, ok, err := r.proxy.Prepare(ctx, runtimeName, spec.Image, spec.Name)
+		if err != nil {
+			if cleanup != nil {
+				cleanup()
+			}
+			return runtime.ImageRunResult{}, err
+		}
+		if ok {
+			if cleanup != nil {
+				defer cleanup()
+			}
+			opts.Volumes = append(opts.Volumes, bootstrap.Mount)
+			if opts.Env == nil {
+				opts.Env = bootstrap.Env
+			} else {
+				for k, v := range bootstrap.Env {
+					opts.Env[k] = v
+				}
+			}
+		}
+	}
+
 	if _, err := containerRunFlightPlan(ctx, runtimeName, os.Stdout, os.Stderr, opts); err != nil {
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: run pinned image %q: %w", spec.Image, err)
 	}
@@ -243,19 +289,15 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 // containerRunToolImage indirection so CLI tests swap a fake and never touch
 // Docker.
 //
-// Credential injection (#1769): when proxy is non-nil the runner routes the
-// tool container's HTTPS egress through the ADR-0019 daemon forward proxy via
-// env-based CA trust, so a matched host binding injects the operator's
-// vault-bound credential at the boundary. No credential BYTES cross this
-// boundary in the image, env, mounts, or args: only a read-only CA and
-// placeholder (non-secret) creds are set. A zero-value runner has proxy == nil
-// and stays passthrough (no CA mount, no env), which keeps the CLI unit tests
-// deterministic irrespective of any live ~/.aileron daemon.
-type containerToolImageRunner struct {
-	// proxy, when non-nil, enriches the dispatch with proxy egress + CA trust.
-	// nil (the zero value) is passthrough.
-	proxy toolProxyBootstrapper
-}
+// Per-dispatch egress is UN-PROXIED in the interim window (#1828/#1829): the
+// boot-time credential injection moved to the whole-plan boot
+// (containerImageRunner), so a rung-3 per-step tool dispatch currently egresses
+// passthrough (direct, no forward proxy, no CA, no placeholder creds). #1829
+// retargets per-step proxy scoping onto this dispatch; until it lands a step's
+// outbound HTTPS is un-mediated. The step input written to the read-only mount
+// is binding-resolved data only and never a credential, so no secret bytes
+// cross this boundary regardless.
+type containerToolImageRunner struct{}
 
 // containerToolInputFile is the filename the resolved step input is written to
 // inside the mount dir. The tool reads its input from MountPath/<this>.
@@ -336,31 +378,6 @@ func (r containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunS
 		// and no implicit operator-CWD workspace mount is emitted — the tool
 		// sees exactly the declared mounts above and nothing else.
 		ToolDispatch: true,
-	}
-
-	// Credential-injection enrichment (#1769): when a proxy bootstrapper is
-	// wired, route the tool container's HTTPS egress through the ADR-0019 daemon
-	// forward proxy via env-based CA trust so a matched host binding injects the
-	// operator's vault-bound credential at the boundary. Prepare fails closed: a
-	// dispatch that resolved daemon config but could not write its session CA
-	// must NOT silently egress un-proxied. The cleanup is deferred so the
-	// session CA is removed even if the boot below fails. RunOptions.Command is
-	// never set — the tool image's own entrypoint must run.
-	if r.proxy != nil {
-		bootstrap, cleanup, ok, err := r.proxy.Prepare(runtimeName, spec.StepID)
-		if err != nil {
-			// Prepare may have written a partial session CA before failing; run
-			// its cleanup so nothing leaks on the fail-closed path.
-			if cleanup != nil {
-				cleanup()
-			}
-			return runtime.ToolRunResult{}, err
-		}
-		if ok {
-			defer cleanup()
-			opts.Volumes = append(opts.Volumes, bootstrap.Mount)
-			opts.Env = bootstrap.Env
-		}
 	}
 
 	if _, err := containerRunToolImage(ctx, runtimeName, os.Stdout, os.Stderr, opts); err != nil {

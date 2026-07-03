@@ -361,10 +361,11 @@ func TestContainerImageRunner_ZeroValueInjectsNoEnv(t *testing.T) {
 	}
 }
 
-// TestNewLaunchImageRunner_WiresDaemonEnvResolver proves the production seam
-// wires the daemon-backed env resolver so production boots carry the host daemon
-// coordinates (#1759), mirroring newLaunchToolImageRunner's proxy wiring.
-func TestNewLaunchImageRunner_WiresDaemonEnvResolver(t *testing.T) {
+// TestNewLaunchImageRunner_WiresDaemonEnvAndProxy proves the production seam
+// wires both the daemon-backed env resolver (#1759) and the daemon-backed plan
+// proxy bootstrapper (#1828) so production boots carry the host daemon
+// coordinates AND the proxy/CA/placeholder enrichment.
+func TestNewLaunchImageRunner_WiresDaemonEnvAndProxy(t *testing.T) {
 	runner, ok := newLaunchImageRunner().(containerImageRunner)
 	if !ok {
 		t.Fatalf("newLaunchImageRunner returned %T, want containerImageRunner", newLaunchImageRunner())
@@ -372,8 +373,197 @@ func TestNewLaunchImageRunner_WiresDaemonEnvResolver(t *testing.T) {
 	if _, ok := runner.daemonEnv.(daemonImageEnv); !ok {
 		t.Errorf("daemonEnv = %T, want daemonImageEnv (the production resolver)", runner.daemonEnv)
 	}
+	if _, ok := runner.proxy.(daemonPlanProxyBootstrapper); !ok {
+		t.Errorf("proxy = %T, want daemonPlanProxyBootstrapper (the production bootstrapper)", runner.proxy)
+	}
 	if runner.diag != nil {
 		t.Errorf("newLaunchImageRunner diag = %v, want nil (os.Stderr in production)", runner.diag)
+	}
+}
+
+// TestNewLaunchToolImageRunner_ZeroValue proves the per-dispatch tool runner is
+// wired with no proxy in the interim window (#1828/#1829): per-step egress is
+// un-proxied until #1829 retargets per-step scoping onto it.
+func TestNewLaunchToolImageRunner_ZeroValue(t *testing.T) {
+	if _, ok := newLaunchToolImageRunner().(containerToolImageRunner); !ok {
+		t.Fatalf("newLaunchToolImageRunner returned %T, want containerToolImageRunner", newLaunchToolImageRunner())
+	}
+}
+
+// fakePlanProxyBootstrapper is a test double for planProxyBootstrapper. It
+// records that Prepare/cleanup ran and returns a canned enrichment so the
+// enriched boot RunOptions shape is asserted with no live daemon and no Docker.
+type fakePlanProxyBootstrapper struct {
+	env         map[string]string
+	mount       sandboxcontainer.Volume
+	ok          bool
+	err         error
+	prepared    bool
+	cleaned     bool
+	gotRuntime  string
+	gotImage    string
+	gotPlanName string
+}
+
+func (f *fakePlanProxyBootstrapper) Prepare(_ context.Context, runtimeName, image, planName string) (planProxyBootstrap, func(), bool, error) {
+	f.prepared = true
+	f.gotRuntime = runtimeName
+	f.gotImage = image
+	f.gotPlanName = planName
+	if f.err != nil {
+		return planProxyBootstrap{}, func() { f.cleaned = true }, false, f.err
+	}
+	return planProxyBootstrap{Env: f.env, Mount: f.mount}, func() { f.cleaned = true }, f.ok, nil
+}
+
+// TestContainerImageRunner_ProxyEnrichesBoot proves that when a proxy
+// bootstrapper is wired and resolves, the whole-plan boot appends the read-only
+// CA mount and merges the proxy/CA/placeholder env alongside the boot sentinel
+// and daemon env (#1828). The distinct key sets never clobber each other, and
+// cleanup runs after the synchronous run.
+func TestContainerImageRunner_ProxyEnrichesBoot(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	daemon := &fakeImageDaemonEnv{
+		env: map[string]string{
+			"AILERON_API_URL": "http://host.docker.internal:48123/v1",
+			"AILERON_TOKEN":   "daemon-token",
+		},
+		ok: true,
+	}
+	proxy := &fakePlanProxyBootstrapper{
+		ok: true,
+		env: map[string]string{
+			"HTTPS_PROXY":       "http://sess:tok@host.docker.internal:48123",
+			"https_proxy":       "http://sess:tok@host.docker.internal:48123",
+			"NO_PROXY":          "localhost,127.0.0.1,::1,host.docker.internal",
+			"no_proxy":          "localhost,127.0.0.1,::1,host.docker.internal",
+			"AWS_CA_BUNDLE":     "/etc/aileron/proxy/ca.pem",
+			"AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7PLACEHLDR",
+			"GH_TOKEN":          "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA",
+		},
+		mount: sandboxcontainer.Volume{Source: "/host/ca.pem", Target: "/etc/aileron/proxy/ca.pem", ReadOnly: true},
+	}
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner@sha256:abc",
+		Name:  "weekly-metrics-digest",
+	}
+	if _, err := (containerImageRunner{daemonEnv: daemon, proxy: proxy}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !proxy.prepared {
+		t.Error("Prepare must be called when a proxy bootstrapper is wired")
+	}
+	if proxy.gotImage != spec.Image {
+		t.Errorf("Prepare image = %q, want the spec image", proxy.gotImage)
+	}
+	if proxy.gotPlanName != spec.Name {
+		t.Errorf("Prepare planName = %q, want the spec name", proxy.gotPlanName)
+	}
+	if !proxy.cleaned {
+		t.Error("cleanup must run after the synchronous boot")
+	}
+
+	// The CA mount is appended read-only at the well-known in-container CA path.
+	var caMountRO bool
+	for _, v := range got.Volumes {
+		if v.Target == "/etc/aileron/proxy/ca.pem" && v.ReadOnly {
+			caMountRO = true
+		}
+	}
+	if !caMountRO {
+		t.Errorf("CA must be mounted read-only at /etc/aileron/proxy/ca.pem, got %+v", got.Volumes)
+	}
+
+	// The proxy env is merged in alongside the sentinel + daemon env; the three
+	// key sets are disjoint, so none clobbers another.
+	if got.Env[envSkillImageBooted] != "1" {
+		t.Errorf("%s = %q, want the boot sentinel preserved after the proxy merge", envSkillImageBooted, got.Env[envSkillImageBooted])
+	}
+	if got.Env["AILERON_API_URL"] != "http://host.docker.internal:48123/v1" || got.Env["AILERON_TOKEN"] != "daemon-token" {
+		t.Errorf("daemon env must survive the proxy merge, got API_URL=%q TOKEN=%q", got.Env["AILERON_API_URL"], got.Env["AILERON_TOKEN"])
+	}
+	if !strings.Contains(got.Env["HTTPS_PROXY"], "host.docker.internal") {
+		t.Errorf("HTTPS_PROXY = %q, want the proxy URL", got.Env["HTTPS_PROXY"])
+	}
+	if got.Env["NO_PROXY"] != "localhost,127.0.0.1,::1,host.docker.internal" {
+		t.Errorf("NO_PROXY = %q, want the loopback+daemon bypass list", got.Env["NO_PROXY"])
+	}
+	if got.Env["AWS_CA_BUNDLE"] != "/etc/aileron/proxy/ca.pem" {
+		t.Errorf("AWS_CA_BUNDLE = %q, want the container CA path", got.Env["AWS_CA_BUNDLE"])
+	}
+	if got.Env["AWS_ACCESS_KEY_ID"] != "AKIAIOSFODNN7PLACEHLDR" || got.Env["GH_TOKEN"] != "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA" {
+		t.Errorf("placeholder creds missing from the merged boot env: %+v", got.Env)
+	}
+}
+
+// TestContainerImageRunner_ProxyPassthroughWhenNotOK proves a bootstrapper
+// returning ok=false leaves the boot un-enriched: no CA mount, only the boot
+// sentinel on the env (#1828).
+func TestContainerImageRunner_ProxyPassthroughWhenNotOK(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	proxy := &fakePlanProxyBootstrapper{ok: false}
+	spec := runtime.ImageRunSpec{Image: "img@sha256:abc", Name: "p"}
+	if _, err := (containerImageRunner{proxy: proxy}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !proxy.prepared {
+		t.Error("Prepare must still be consulted")
+	}
+	for _, v := range got.Volumes {
+		if v.Target == "/etc/aileron/proxy/ca.pem" {
+			t.Errorf("passthrough boot must not mount a CA, got %+v", got.Volumes)
+		}
+	}
+	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the passthrough (ok=false) boot", got.Env)
+	}
+}
+
+// TestContainerImageRunner_ProxyPrepareErrorFailsClosed proves a Prepare error
+// (daemon config resolved but the CA could not be written, or a malformed
+// metadata convention) fails the boot rather than silently egressing
+// un-proxied, and runs the returned cleanup (#1828).
+func TestContainerImageRunner_ProxyPrepareErrorFailsClosed(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	booted := false
+	orig := containerRunFlightPlan
+	containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+		booted = true
+		got = opts
+		return sandboxcontainer.RunResult{}, nil
+	}
+	t.Cleanup(func() { containerRunFlightPlan = orig })
+
+	proxy := &fakePlanProxyBootstrapper{err: errors.New("ca write failed")}
+	_, err := (containerImageRunner{proxy: proxy}).Run(context.Background(), runtime.ImageRunSpec{Image: "img@sha256:abc", Name: "p"})
+	if err == nil || !strings.Contains(err.Error(), "ca write failed") {
+		t.Fatalf("Prepare error must fail the boot closed, got %v", err)
+	}
+	if booted {
+		t.Errorf("the image must NOT boot after a fail-closed Prepare error, got %+v", got)
+	}
+	if !proxy.cleaned {
+		t.Error("the returned cleanup must run on the error path so a partial CA never leaks")
 	}
 }
 
@@ -693,156 +883,6 @@ func TestContainerToolImageRunner_SymlinkedCollectRefused(t *testing.T) {
 	}
 	if res.Output != nil {
 		t.Errorf("no host bytes must be smuggled into the output, got %v", res.Output)
-	}
-}
-
-// fakeToolProxyBootstrapper is a test double for toolProxyBootstrapper. It
-// records that Prepare/cleanup ran and returns a canned enrichment so the
-// enriched RunOptions shape is asserted with no live daemon and no Docker.
-type fakeToolProxyBootstrapper struct {
-	env        map[string]string
-	mount      sandboxcontainer.Volume
-	ok         bool
-	err        error
-	prepared   bool
-	cleaned    bool
-	gotRuntime string
-	gotStepID  string
-}
-
-func (f *fakeToolProxyBootstrapper) Prepare(runtimeName, stepID string) (toolProxyBootstrap, func(), bool, error) {
-	f.prepared = true
-	f.gotRuntime = runtimeName
-	f.gotStepID = stepID
-	if f.err != nil {
-		return toolProxyBootstrap{}, nil, false, f.err
-	}
-	return toolProxyBootstrap{Env: f.env, Mount: f.mount}, func() { f.cleaned = true }, f.ok, nil
-}
-
-// TestContainerToolImageRunner_ProxyEnrichesRunOptions proves that when a proxy
-// bootstrapper is wired, the dispatch appends the read-only CA mount, sets the
-// proxy/CA-bundle env, seeds placeholder creds, never sets a Command, and runs
-// cleanup after the boot. This is the #1769 credential-injection wiring proof:
-// the enriched RunOptions shape is asserted without touching Docker.
-func TestContainerToolImageRunner_ProxyEnrichesRunOptions(t *testing.T) {
-	var got sandboxcontainer.RunOptions
-	stubContainerToolBoot(t, &got, "out", "COLLECTED", nil)
-
-	fake := &fakeToolProxyBootstrapper{
-		ok: true,
-		env: map[string]string{
-			"HTTPS_PROXY":           "http://sess:tok@host.docker.internal:48123",
-			"https_proxy":           "http://sess:tok@host.docker.internal:48123",
-			"AWS_CA_BUNDLE":         "/etc/aileron/proxy/ca.pem",
-			"AWS_ACCESS_KEY_ID":     placeholderAWSAccessKeyID,
-			"AWS_SECRET_ACCESS_KEY": placeholderAWSSecretKey,
-		},
-		mount: sandboxcontainer.Volume{Source: "/host/ca.pem", Target: "/etc/aileron/proxy/ca.pem", ReadOnly: true},
-	}
-	runner := containerToolImageRunner{proxy: fake}
-
-	spec := runtime.ToolRunSpec{
-		Image:       "amazon/aws-cli@sha256:abc",
-		StepID:      "query-athena",
-		MountPath:   "/work/in",
-		Input:       map[string]any{"sql": "SELECT 1"},
-		CollectPath: "/work/out/out",
-	}
-	if _, err := runner.Run(context.Background(), spec); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	if !fake.prepared {
-		t.Error("Prepare must be called when a proxy bootstrapper is wired")
-	}
-	if fake.gotStepID != "query-athena" {
-		t.Errorf("Prepare stepID = %q, want the spec step id", fake.gotStepID)
-	}
-	if !fake.cleaned {
-		t.Error("cleanup must run after the boot")
-	}
-
-	// The CA mount is appended read-only at the well-known in-container CA path,
-	// alongside the mount/collect volumes.
-	var caMountRO bool
-	for _, v := range got.Volumes {
-		if v.Target == "/etc/aileron/proxy/ca.pem" && v.ReadOnly {
-			caMountRO = true
-		}
-	}
-	if !caMountRO {
-		t.Errorf("CA must be mounted read-only at /etc/aileron/proxy/ca.pem, got %+v", got.Volumes)
-	}
-
-	// The proxy + CA-bundle + placeholder-cred env is set on the run.
-	if !strings.Contains(got.Env["HTTPS_PROXY"], "host.docker.internal") {
-		t.Errorf("HTTPS_PROXY = %q, want host.docker.internal", got.Env["HTTPS_PROXY"])
-	}
-	if got.Env["AWS_CA_BUNDLE"] != "/etc/aileron/proxy/ca.pem" {
-		t.Errorf("AWS_CA_BUNDLE = %q, want the container CA path", got.Env["AWS_CA_BUNDLE"])
-	}
-	if got.Env["AWS_ACCESS_KEY_ID"] != placeholderAWSAccessKeyID {
-		t.Errorf("AWS_ACCESS_KEY_ID = %q, want placeholder", got.Env["AWS_ACCESS_KEY_ID"])
-	}
-
-	// The tool image's own entrypoint must run: Command is NEVER set.
-	if len(got.Command) != 0 {
-		t.Errorf("Command must never be set for a tool dispatch, got %v", got.Command)
-	}
-}
-
-// TestContainerToolImageRunner_ProxyPassthroughWhenNotOK proves that a
-// bootstrapper returning ok=false leaves the dispatch un-enriched (no CA mount,
-// no env) and still cleans up nothing.
-func TestContainerToolImageRunner_ProxyPassthroughWhenNotOK(t *testing.T) {
-	var got sandboxcontainer.RunOptions
-	stubContainerToolBoot(t, &got, "out", "COLLECTED", nil)
-
-	fake := &fakeToolProxyBootstrapper{ok: false}
-	runner := containerToolImageRunner{proxy: fake}
-
-	if _, err := runner.Run(context.Background(), runtime.ToolRunSpec{
-		Image:       "img@sha256:abc",
-		StepID:      "s1",
-		CollectPath: "/work/out/out",
-	}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !fake.prepared {
-		t.Error("Prepare must still be consulted")
-	}
-	for _, v := range got.Volumes {
-		if v.Target == "/etc/aileron/proxy/ca.pem" {
-			t.Errorf("passthrough dispatch must not mount a CA, got %+v", got.Volumes)
-		}
-	}
-	if len(got.Env) != 0 {
-		t.Errorf("passthrough dispatch must set no env, got %+v", got.Env)
-	}
-}
-
-// TestContainerToolImageRunner_ProxyPrepareErrorFailsClosed proves that a
-// Prepare error (daemon config resolved but the CA could not be written) fails
-// the dispatch rather than silently egressing un-proxied.
-func TestContainerToolImageRunner_ProxyPrepareErrorFailsClosed(t *testing.T) {
-	var got sandboxcontainer.RunOptions
-	booted := false
-	orig := containerRunToolImage
-	containerRunToolImage = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
-		booted = true
-		got = opts
-		return sandboxcontainer.RunResult{}, nil
-	}
-	t.Cleanup(func() { containerRunToolImage = orig })
-
-	runner := containerToolImageRunner{proxy: &fakeToolProxyBootstrapper{err: errors.New("ca write failed")}}
-	_, err := runner.Run(context.Background(), runtime.ToolRunSpec{Image: "img@sha256:abc", StepID: "s1"})
-	if err == nil || !strings.Contains(err.Error(), "ca write failed") {
-		t.Fatalf("Prepare error must fail the dispatch closed, got %v", err)
-	}
-	if booted {
-		t.Errorf("the tool image must NOT boot after a fail-closed Prepare error, got %+v", got)
 	}
 }
 
