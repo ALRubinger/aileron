@@ -15,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
+	sandboxtoolchain "github.com/ALRubinger/aileron/internal/sandbox/toolchain"
 	cliversion "github.com/ALRubinger/aileron/internal/version"
 )
 
@@ -255,6 +256,12 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	if err != nil {
 		return "", err
 	}
+	// Resolve the devcontainer toolchain from flag/env/default, mirroring the
+	// `aileron sandbox` and launch callers (freeze has no --toolchain flag, so
+	// the flag args are empty and resolution is env → default(managed)). Without
+	// this the Builder sees an empty ToolchainMode (normalized to managed) with
+	// no provisioner and hard-errors, so freeze-with-tools never composes.
+	toolchainMode, nodeBinary, cliEntrypoint := container.ResolveToolchainSelection("", "", "", os.Getenv)
 	// Compose the Features onto the given base via the standard composition
 	// Plan, build through the Builder, then resolve the built image's digest
 	// with the same inspector the base-image resolver uses.
@@ -264,9 +271,18 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		Stdout:  io.Discard,
 		Stderr:  io.Discard,
 	}
+	// Wire the managed provisioner only on the managed branch; the host-npx
+	// opt-out must never carry a provisioner (its no-network/no-provision
+	// contract), matching the sandbox and launch callers.
+	if container.IsManagedToolchain(toolchainMode) {
+		b.Provisioner = sandboxtoolchain.Provisioner{}
+	}
 	result, err := b.Build(ctx, container.BuildOptions{
-		Plan:   composition.ToolsPlan(base, features),
-		Policy: container.BuildPolicyAlways,
+		Plan:                      composition.ToolsPlan(base, features),
+		Policy:                    container.BuildPolicyAlways,
+		ToolchainMode:             toolchainMode,
+		NodeBinary:                nodeBinary,
+		DevcontainerCLIEntrypoint: cliEntrypoint,
 	})
 	if err != nil {
 		return "", fmt.Errorf("compose environment tools: %w", err)
