@@ -7937,9 +7937,10 @@ func TestRunAuditShow_RendersFullMaterializedRecord(t *testing.T) {
 }
 
 // TestRunAuditShow_RendersToolStepProvenance locks the #1762 acceptance
-// guarantee that `audit show` renders a rung-3 tool-step output.materialized
-// event verbatim, including aileron.step.kind:"tool" and the pinned
-// aileron.step.image, through the SAME show surface the connector path uses.
+// guarantee (retargeted by #1829) that `audit show` renders a tool-step
+// output.materialized event verbatim, including aileron.step.kind:"tool" and
+// the executed aileron.step.command argv, through the SAME show surface the
+// connector path uses.
 func TestRunAuditShow_RendersToolStepProvenance(t *testing.T) {
 	prev := auditGetFetcher
 	auditGetFetcher = func(_ string) (*auditEventWire, int, error) {
@@ -7951,7 +7952,7 @@ func TestRunAuditShow_RendersToolStepProvenance(t *testing.T) {
 				"aileron.output.name":         "extract.txt",
 				"aileron.output.content_hash": "sha256:cafe",
 				"aileron.step.kind":           "tool",
-				"aileron.step.image":          "registry.example.com/tool-a:1@sha256:beef",
+				"aileron.step.command":        []any{"extract-tool", "--mode", "csv"},
 			},
 		}, http.StatusOK, nil
 	}
@@ -7965,8 +7966,8 @@ func TestRunAuditShow_RendersToolStepProvenance(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"aileron.step.kind",
-		"aileron.step.image",
-		"registry.example.com/tool-a:1@sha256:beef",
+		"aileron.step.command",
+		"extract-tool",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered output missing %q; got:\n%s", want, out)
