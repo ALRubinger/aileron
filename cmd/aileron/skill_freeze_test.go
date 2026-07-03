@@ -17,6 +17,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
+	"github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
 const fakeFreezeDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -610,6 +611,45 @@ func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
 	t.Cleanup(func() { newImageInspector = orig })
 	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"f"}); err == nil {
 		t.Error("an inspector-construction error must surface from ComposeDigest")
+	}
+}
+
+// TestBuilderFeatureComposer_ResolvesHostNPXToolchain is the regression guard
+// for #1866: the composer must resolve the toolchain from the environment and
+// wire it into the Builder. Before the fix ComposeDigest ignored the toolchain
+// selection, so the Builder saw an empty ToolchainMode (normalized to managed)
+// with no provisioner and hard-errored ("no provisioner is configured…"),
+// making freeze-with-tools fail for every real caller. With
+// AILERON_SANDBOX_TOOLCHAIN=host-npx set, the composer must resolve the
+// host-npx opt-out (no provisioner) and compose successfully.
+func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+
+	base := "base@" + fakeFreezeDigest
+	features := []string{"aws-cli"}
+	// The Builder builds the ToolsPlan image under this deterministic tag, then
+	// localImageDigest inspects it. A locally-built image has no RepoDigests, so
+	// the composer falls back to the image Id (also a sha256 content address).
+	tag := composition.LocalToolsImageTag(base, features)
+	wantID := "sha256:" + strings.Repeat("b", 64)
+	fr := &fakeRunner{
+		fails: map[string]error{
+			// Force the RepoDigests fallback: a locally-built image has no
+			// registry digest.
+			`image inspect --format {{json .RepoDigests}} ` + tag: errTestInspect,
+		},
+		outputs: map[string]string{
+			`image inspect --format {{.Id}} ` + tag: wantID + "\n",
+		},
+	}
+	withFakeInspector(t, fr)
+
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), base, features)
+	if err != nil {
+		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
+	}
+	if got != wantID {
+		t.Errorf("digest = %q, want %q", got, wantID)
 	}
 }
 
