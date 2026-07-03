@@ -583,6 +583,15 @@ func TestContainerToolImageRunner_MountsRunsCollects(t *testing.T) {
 	if !strings.HasPrefix(got.Name, "aileron-flightplan-tool-extract-") {
 		t.Errorf("container name = %q, want the stable tool prefix plus a suffix", got.Name)
 	}
+	// The dispatch selects the sealed-tool contract in the shared builder:
+	// entrypoint-only (no command) and no implicit workspace mount. Without it,
+	// Builder.Run refuses the boot with "sandbox command is required".
+	if !got.ToolDispatch {
+		t.Error("RunOptions.ToolDispatch must be set on a rung-3 tool dispatch")
+	}
+	if len(got.Command) != 0 {
+		t.Errorf("Command = %v, want empty (the tool image's baked entrypoint runs)", got.Command)
+	}
 }
 
 // TestContainerToolImageRunner_NoMountNoCollect proves a minimal rung-3 step
