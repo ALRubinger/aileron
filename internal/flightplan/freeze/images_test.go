@@ -109,9 +109,6 @@ func TestResolveImages_ToolsComposeOntoDefaultBase(t *testing.T) {
 	if strings.Join(capSet, ",") != "aws-cli@2.x" {
 		t.Errorf("resolved capability set must record the declared tools verbatim, got %v", capSet)
 	}
-	if pins[0].StepID != "" || pins[0].Hosts != nil {
-		t.Errorf("a composed pin must carry no per-pin step linkage, got %+v", pins[0])
-	}
 }
 
 // TestResolveImages_ToolsDefaultBaseReleaseUsesLatest proves the CLI-version

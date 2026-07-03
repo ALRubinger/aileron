@@ -68,7 +68,7 @@ func TestRun_StructuralNoLLMGuarantee(t *testing.T) {
 	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
 		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "x", "mimeType": "text/csv"}}, nil
 	})
-	_, err := runPlan(context.Background(), p, "h", "sha256:signer", Options{
+	_, err := runPlan(context.Background(), p, "h", "sha256:signer", nil, Options{
 		Dispatcher: &dispatchRouter{results: map[string]map[string]any{
 			"aileron:metrics.query_series": {"series": []any{}},
 		}},
@@ -91,7 +91,7 @@ func TestRun_DeniedApprovalAbortsAndAudits(t *testing.T) {
 	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
 		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "x", "mimeType": "text/csv"}}, nil
 	})
-	_, err := runPlan(context.Background(), p, "h", "sha256:signer", Options{
+	_, err := runPlan(context.Background(), p, "h", "sha256:signer", nil, Options{
 		Dispatcher: &dispatchRouter{results: map[string]map[string]any{
 			"aileron:metrics.query_series": {"series": []any{}},
 			"aileron:tracker.create_issue": {"path": "filed_issue.json", "encoding": "utf-8", "content": "{}", "mimeType": "application/json"},

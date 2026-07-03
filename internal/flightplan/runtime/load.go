@@ -22,11 +22,18 @@ type LoadedPlan struct {
 	Plan        *Plan
 	ContentHash string
 	// ResolvedImages carries the verified image digest pins from the frozen
-	// lock (rung-1 or rung-2). When non-empty, Run boots the pinned image and
+	// lock. When non-empty, Run boots the pinned image and
 	// runs the plan inside it; when empty, Run stays on the in-process path.
 	// The pins come from the verified manifest lock block, so the digest booted
 	// is exactly the one the author signature attested.
 	ResolvedImages []freeze.ImagePin
+	// StepTrust is the verified lock's sealed per-step reach
+	// (lock.stepTrust), keyed by tool step id (#1829). It is the ONLY source
+	// of the network reach the runtime enforces for a tool step: the
+	// frontmatter trust-contract copy is audit context, never the enforcement
+	// input, so a reach can never be re-supplied at launch. Populated only on
+	// the verified path. Nil when the frozen unit seals no tool-step reach.
+	StepTrust map[string]freeze.StepReach
 	// SignerFingerprint is the `sha256:<hex>` fingerprint of the verified
 	// author public key (from freeze.VerifyFrozen). It is threaded into the
 	// launch audit as the plan's signer identity (#1752). Populated only on the
@@ -65,17 +72,39 @@ func verifyAndDecode(fv store.FrozenVersion) (LoadedPlan, error) {
 	if err != nil {
 		return LoadedPlan{}, &LoadError{Reason: fmt.Sprintf("parse verified manifest: %v", err)}
 	}
-	// Thread the verified image pins into decode so a rung-3 plan attaches each
-	// step's pinned tool dispatch (a rung-3 step whose pin is absent is refused).
-	// Non-rung-3 plans ignore the pins.
-	plan, err := DecodeWithImages(m, verified.ResolvedImages)
+	plan, err := Decode(m)
 	if err != nil {
+		return LoadedPlan{}, err
+	}
+	if err := crossCheckStepTrust(plan, verified.StepTrust); err != nil {
 		return LoadedPlan{}, err
 	}
 	return LoadedPlan{
 		Plan:              plan,
 		ContentHash:       verified.ContentHash,
 		ResolvedImages:    verified.ResolvedImages,
+		StepTrust:         verified.StepTrust,
 		SignerFingerprint: verified.SignerFingerprint,
 	}, nil
+}
+
+// crossCheckStepTrust cross-checks the decoded tool steps against the sealed
+// per-step reach (#1829, fail-closed): a tool step that declares a
+// trustContract but has no sealed lock.stepTrust entry is an inconsistent
+// frozen unit — freeze always seals a contracted tool step's reach, so a
+// missing entry means the artifacts disagree, and running would leave the
+// step's declared reach unenforced. A sealed entry with no matching
+// contracted step is tolerated (it grants nothing: the executor keys
+// enforcement off the step's own graph entry).
+func crossCheckStepTrust(plan *Plan, sealed map[string]freeze.StepReach) error {
+	for _, s := range plan.Steps {
+		if s.Kind != KindTool || s.TrustContract == nil {
+			continue
+		}
+		if _, ok := sealed[s.ID]; !ok {
+			return &LoadError{Reason: fmt.Sprintf(
+				"tool step %q declares a trust contract but the verified lock seals no stepTrust reach for it; the frozen unit is inconsistent", s.ID)}
+		}
+	}
+	return nil
 }

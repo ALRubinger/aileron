@@ -72,7 +72,7 @@ func TestRun_InProcessPipelineFromLoadedPlan(t *testing.T) {
 		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
 	}}
 
-	res, err := runPlan(context.Background(), lp.Plan, lp.ContentHash, lp.SignerFingerprint, Options{
+	res, err := runPlan(context.Background(), lp.Plan, lp.ContentHash, lp.SignerFingerprint, lp.StepTrust, Options{
 		Dispatcher: disp,
 		Approver:   &fakeApprover{decision: Decision{Approved: true}},
 		Seam:       fakeSeam{out: map[string]any{"issue_body": "x"}},

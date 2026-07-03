@@ -95,10 +95,13 @@ const (
 	// RecordKindOutput is one per-materialized-output provenance record (#1752),
 	// emitted for both action-call and transform materializing steps.
 	RecordKindOutput
-	// RecordKindReach is one per rung-3 dispatch record declaring the step's
-	// per-step network reach (#1784): the trust contract's Effect and Hosts,
-	// marked `enforced:false`. It is audit-only, never an enforcement seam —
-	// egress stays passthrough and the credential is injected per host binding.
+	// RecordKindReach is one per tool-step record declaring the step's
+	// per-step network reach (#1784, enforced by #1829): the declared Effect
+	// plus the hosts the step ran under. `enforced:true` means the hosts are
+	// the verified lock's sealed reach and the step ran under a step-scoped
+	// proxy credential restricted to exactly them; `enforced:false` means the
+	// step declared a contract but no sealed reach existed (a
+	// directly-constructed plan outside the verified load path).
 	RecordKindReach
 )
 
@@ -197,55 +200,71 @@ type ImageRunner interface {
 	Run(ctx context.Context, spec ImageRunSpec) (ImageRunResult, error)
 }
 
-// ToolRunSpec is the input to the ToolImageRunner seam. It is the per-step
-// rung-3 sibling-tool dispatch (ADR-0027 rung three): unlike ImageRunSpec, it
-// does NOT run the whole plan. The runtime stays on the host and shells a single
-// step out to a pinned sibling tool image with mount → run → collect I/O. The
-// image is booted, the resolved step Input is mounted read-side at MountPath, the
-// tool runs, and the bytes at CollectPath are read back as the step's output.
-type ToolRunSpec struct {
-	// Image is the exact `ref@sha256:<hex>` the verified lock pinned for this
-	// step. It is the load-bearing security value: the runner MUST boot this
-	// image verbatim and MUST NOT re-resolve it, so the tool dispatched
-	// corresponds to the lock's signed assertion.
-	Image string
-	// StepID is the dispatching step's id, for addressable naming and error
-	// context. It carries no security weight (the pin is Image).
+// ToolStepSpec is the input to the ToolStepRunner seam (#1829): one
+// `kind: tool` step executed as a deterministic subprocess INSIDE the plan's
+// single pinned environment (the container the whole-plan boot entered).
+// There is no per-step image: the environment identity is the plan's one
+// composed pin, already asserted by the signed lock at boot. The runner
+// writes the resolved Input to MountPath (as input.json), execs the argv
+// directly (no shell), and reads CollectPath back as the step's output.
+type ToolStepSpec struct {
+	// StepID is the executing step's id, for scope addressing and error
+	// context.
 	StepID string
-	// MountPath is the path inside the tool image the resolved Input is mounted
-	// at (the read side of the mount boundary). Empty means the step declared no
-	// mount and the tool receives no mounted input.
+	// Command is the argv to exec: Command[0] is the program, the rest its
+	// arguments. It comes from the verified manifest, is exec'd with no
+	// shell interpretation, and is the executed-command identity the audit
+	// records.
+	Command []string
+	// MountPath is the in-environment directory the resolved Input is
+	// written to before the exec (the read side of the mount boundary).
+	// Empty means the step declared no mount and no input file is written.
 	MountPath string
-	// Input is the step's resolved binding input, mounted at MountPath. It is a
-	// binding-resolved value only, never a credential (credentials are injected
-	// host-side at the action boundary, not here).
+	// Input is the step's resolved binding input, written under MountPath.
+	// It is a binding-resolved value only, never a credential (credentials
+	// are injected host-side at the network boundary, not here).
 	Input any
-	// CollectPath is the path inside the tool image whose contents are read back
-	// as the step's output (the run-and-collect boundary). Empty means the step
-	// declared no collect and the tool produces no collected output.
+	// CollectPath is the in-environment path whose contents are read back as
+	// the step's output (the run-and-collect boundary). Empty means the step
+	// declared no collect and the step produces no collected output.
 	CollectPath string
+	// Hosts is the step's SEALED network reach from the verified lock's
+	// stepTrust section — never the re-read frontmatter. Non-empty means the
+	// runner MUST run the subprocess under a step-scoped proxy credential
+	// registered for exactly these hosts, and MUST fail closed (never run
+	// unscoped) when it cannot obtain one. Empty means the step declared no
+	// reach and runs under the plan-boot proxy environment unchanged.
+	Hosts []string
 }
 
-// ToolRunResult is the outcome of one rung-3 per-step tool dispatch: the value
-// collected from CollectPath, which becomes the dispatching step's declared
-// output and flows into downstream steps' dataflow unchanged.
-type ToolRunResult struct {
-	// Output is the value read back from the tool's CollectPath. It becomes the
-	// step's named output; a step that declared no collect returns a nil Output.
+// ToolStepResult is the outcome of one tool-step execution: the value
+// collected from CollectPath, which becomes the step's declared output and
+// flows into downstream steps' dataflow unchanged.
+type ToolStepResult struct {
+	// Output is the value read back from CollectPath. It becomes the step's
+	// named output; a step that declared no collect returns a nil Output.
+	//
+	// The production runner returns the collect file's RAW BYTES as a
+	// string, never a decoded structure. That is the same contract the
+	// materialize path already speaks: a string carrier is parsed as the
+	// JSON it emitted (decodeCarrier), so a tool that wants its collected
+	// output to materialize as a file artifact writes a file-map JSON
+	// document ({path, mimeType, encoding, content}) or a JSON data
+	// object/array to its collect path. A non-JSON collect file still flows
+	// to downstream bindings as a plain string; it only refuses at the
+	// materialize boundary if a step tries to materialize it directly.
 	Output any
 }
 
-// ToolImageRunner dispatches a single rung-3 step to its pinned sibling tool
-// image with mount → run → collect I/O (ADR-0027 rung three, issue #1733).
-// Unlike ImageRunner (which boots one image and runs the WHOLE plan inside it),
-// ToolImageRunner is a per-step seam: the plan orchestration stays in-process on
-// the host and only the individual step shells out to the tool image. The
-// contract: boot the exact ToolRunSpec.Image, mount the resolved input at
-// MountPath (read side), run the tool, and read back CollectPath as the step's
-// output. The runtime core depends only on this seam; the CLI wires the
-// container-backed implementation, so the runtime never imports the container
-// package. The runtime supplies ToolRunSpec.Image straight from the verified
-// lock, so the runner is handed a pin it must not re-resolve.
-type ToolImageRunner interface {
-	Run(ctx context.Context, spec ToolRunSpec) (ToolRunResult, error)
+// ToolStepRunner executes a single `kind: tool` step as a subprocess in the
+// current (pinned) environment (#1829). Unlike ImageRunner (which boots one
+// image and runs the WHOLE plan inside it), ToolStepRunner is a per-step
+// seam consumed by the executor already running inside that boot: no
+// sibling container is ever dispatched. The contract: write the resolved
+// input at MountPath, exec the argv with the step-scoped proxy env when
+// Hosts is non-empty (failing closed when the scope cannot be obtained),
+// and read back CollectPath as the step's output. The runtime core depends
+// only on this seam; the CLI wires the production subprocess implementation.
+type ToolStepRunner interface {
+	Run(ctx context.Context, spec ToolStepSpec) (ToolStepResult, error)
 }

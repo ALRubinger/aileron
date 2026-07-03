@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/google/uuid"
 )
@@ -44,13 +45,13 @@ type Options struct {
 	// in-process fallback (a declared rung must be entered to honor the
 	// attestation).
 	ImageRunner ImageRunner
-	// ToolImageRunner dispatches an individual rung-3 step to its pinned sibling
-	// tool image with mount → run → collect I/O (#1733). Unlike ImageRunner, the
-	// plan orchestration stays in-process (runPlan); only the per-step tool
-	// dispatch shells out. When a loaded plan carries a rung-3 step and this seam
-	// is unset, that step is an explicit error, never a silent skip (mirrors the
-	// ImageRunner nil-guard discipline: a declared tool dispatch must be entered).
-	ToolImageRunner ToolImageRunner
+	// ToolRunner executes a `kind: tool` step as a deterministic subprocess in
+	// the current pinned environment (#1829). Unlike ImageRunner, the plan
+	// orchestration stays in-process (runPlan); the tool step never dispatches
+	// a sibling container. When a loaded plan carries a tool step and this
+	// seam is unset, that step is an explicit error, never a silent skip
+	// (mirrors the ImageRunner nil-guard discipline).
+	ToolRunner ToolStepRunner
 	// InPinnedImage marks this run as already executing INSIDE the verified
 	// pinned rung-1/rung-2 image — the image-boot re-entry (#1731). It routes
 	// a whole-plan-pinned unit onto the in-process path instead of booting the
@@ -99,28 +100,48 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	// When the verified lock pins a rung-1/rung-2 WHOLE-PLAN image, boot that
-	// exact image and run the plan inside it (#1731). Rung-3 pins are per-step
-	// sibling-tool dispatches (they carry a StepID) and must NOT be mis-routed
-	// into runInImage: the plan orchestration stays in-process and only the
-	// individual step shells out to its tool image (#1733). So the boot branch
-	// fires only for whole-plan pins (no per-step StepID); rung-3 stays on
-	// runPlan, where the executor dispatches each tool step through the seam.
-	// The image-boot re-entry (InPinnedImage) also stays in-process: it is
-	// already running inside the booted pin, so in-process IS the certified
-	// environment and booting again would recurse.
+	// A tool step requires the plan's declared environment: its argv is
+	// signed against the composed image the lock pinned, so executing it
+	// anywhere else (the operator's host, an unpinned in-process run) would
+	// enter an environment the attestation never certified. Refuse a
+	// tool-step plan with no pinned environment unless this run is ALREADY
+	// inside the booted pin (#1829).
+	if planHasToolSteps(lp.Plan) && len(lp.ResolvedImages) == 0 && !opts.InPinnedImage {
+		return RunResult{}, fmt.Errorf(
+			"flightplan: plan declares tool steps but pins no environment image; tool steps run only inside the declared environment")
+	}
+	// When the verified lock pins a WHOLE-PLAN image, boot that exact image
+	// and run the plan inside it (#1731). The image-boot re-entry
+	// (InPinnedImage) stays in-process: it is already running inside the
+	// booted pin, so in-process IS the certified environment and booting
+	// again would recurse. Tool steps (#1829) also stay in-process — the
+	// re-entered executor runs each one as a subprocess in the same
+	// container, never a sibling boot.
 	if hasWholePlanImage(lp.ResolvedImages) && !opts.InPinnedImage {
 		return runInImage(ctx, lp, opts)
 	}
-	return runPlan(ctx, lp.Plan, lp.ContentHash, lp.SignerFingerprint, opts)
+	return runPlan(ctx, lp.Plan, lp.ContentHash, lp.SignerFingerprint, lp.StepTrust, opts)
+}
+
+// planHasToolSteps reports whether the plan carries any `kind: tool` step.
+func planHasToolSteps(plan *Plan) bool {
+	for _, s := range plan.Steps {
+		if s.Kind == KindTool {
+			return true
+		}
+	}
+	return false
 }
 
 // runPlan executes an already-loaded, verified plan. It is factored out so
 // tests drive the full Phase A/B/materialize/audit pipeline from an in-memory
 // plan without a store on disk, while Run handles the load+verify gate. The
 // signerFingerprint is the verified author-key fingerprint threaded onto the
-// per-output audit records as the plan's signer identity (#1752).
-func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint string, opts Options) (RunResult, error) {
+// per-output audit records as the plan's signer identity (#1752). stepTrust
+// is the verified lock's sealed per-step reach (#1829): the ONLY source of
+// the network reach a tool step is scoped to; nil for a plan with no sealed
+// tool-step reach.
+func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint string, stepTrust map[string]freeze.StepReach, opts Options) (RunResult, error) {
 	clk := opts.Clock
 	if clk == nil {
 		clk = SystemClock{}
@@ -137,10 +158,10 @@ func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint str
 		return RunResult{}, err
 	}
 
-	// Phase B: walk the DAG. The tool-image runner is threaded so rung-3 steps
-	// dispatch to their pinned sibling image; a rung-3 step with no runner
-	// configured is an explicit error inside the executor.
-	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam, toolRunner: opts.ToolImageRunner}
+	// Phase B: walk the DAG. The tool-step runner and the sealed per-step
+	// reach are threaded so tool steps run as scoped subprocesses; a tool
+	// step with no runner configured is an explicit error inside the executor.
+	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam, toolRunner: opts.ToolRunner, stepTrust: stepTrust}
 	st, runErr := x.execute(ctx, inputs)
 
 	// Mint a launch-scoped invocation id so every audit record from this launch

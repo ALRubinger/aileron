@@ -1116,62 +1116,6 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 	}
 }
 
-// TestRunToolDispatchRunsEntrypointOnly proves the rung-3 sealed-tool contract
-// (#1733) in the shared builder: no command (the image's baked entrypoint
-// runs), and no implicit operator-CWD workspace mount — the container sees
-// exactly the declared volumes. Without this, every real tool dispatch died
-// with "sandbox command is required" (the CLI's tool runner never sets a
-// command by design, and the integration e2e bypasses Builder.Run).
-func TestRunToolDispatchRunsEntrypointOnly(t *testing.T) {
-	pinHostOSDarwin(t)
-	in := t.TempDir()
-	out := t.TempDir()
-	runner := &recordingRunner{}
-	result, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image: "octane-tool:test",
-		Volumes: []Volume{
-			{Source: in, Target: "/aileron/in", ReadOnly: true},
-			{Source: out, Target: "/aileron/out"},
-		},
-		Env:          map[string]string{"HTTPS_PROXY": "http://host.docker.internal:1"},
-		ToolDispatch: true,
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.Runtime != "docker" {
-		t.Fatalf("runtime = %q, want docker", result.Runtime)
-	}
-	want := []string{
-		"run", "--rm", "-i",
-		"--volume", in + ":/aileron/in:ro",
-		"--volume", out + ":/aileron/out",
-		"--env", "HTTPS_PROXY=http://host.docker.internal:1",
-		"octane-tool:test",
-	}
-	if !reflect.DeepEqual(runner.args, want) {
-		t.Fatalf("args = %#v, want %#v (no --workdir, no workspace volume, no trailing command)", runner.args, want)
-	}
-}
-
-// TestRunToolDispatchRejectsCommand locks the other half of the contract: a
-// tool dispatch may never override the image's baked entrypoint, so a
-// non-empty Command is refused rather than silently appended.
-func TestRunToolDispatchRejectsCommand(t *testing.T) {
-	runner := &recordingRunner{}
-	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:        "octane-tool:test",
-		Command:      []string{"sh", "-c", "evil"},
-		ToolDispatch: true,
-	})
-	if err == nil || !strings.Contains(err.Error(), "baked entrypoint") {
-		t.Fatalf("err = %v, want the baked-entrypoint refusal", err)
-	}
-	if runner.name != "" {
-		t.Fatal("the runner must not be invoked when validation refuses the dispatch")
-	}
-}
-
 func TestRunCanOverrideContainerUser(t *testing.T) {
 	pinHostOSDarwin(t)
 	dir := t.TempDir()
