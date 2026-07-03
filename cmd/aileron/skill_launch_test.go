@@ -475,7 +475,8 @@ func TestDaemonActionName(t *testing.T) {
 }
 
 func TestParseResultPayload(t *testing.T) {
-	// A JSON object result decodes into a map the runtime can bind against.
+	// A plain JSON object result decodes into a map the runtime can bind
+	// against, passed through unchanged (no dispatch envelope to unwrap).
 	s := `{"series":[1,2]}`
 	m := parseResultPayload(&s)
 	if _, ok := m["series"]; !ok {
@@ -494,6 +495,79 @@ func TestParseResultPayload(t *testing.T) {
 	empty := ""
 	if got := parseResultPayload(&empty); len(got) != 0 {
 		t.Errorf("empty result = %v, want empty map", got)
+	}
+}
+
+// TestParseResultPayload_UnwrapsDispatchEnvelope is the #1801 regression: the
+// daemon's action executor returns the dispatch envelope
+// {"action", "output", "steps"} as the result string. parseResultPayload must
+// return the inner output map — not the whole envelope — so the runtime binds
+// steps.<id>.result to the real result (no action/steps keys nested in the
+// materialized artifact, and the audit query-execution-id lift fires because
+// QueryExecutionId sits at the top level of the bound value).
+func TestParseResultPayload_UnwrapsDispatchEnvelope(t *testing.T) {
+	env := `{"action":"query","output":{"QueryExecutionId":"qeid-1","ResultSet":{"rows":[1]}},"steps":{"run":{"QueryExecutionId":"qeid-1"}}}`
+	m := parseResultPayload(&env)
+	if m["QueryExecutionId"] != "qeid-1" {
+		t.Errorf("envelope must unwrap to inner output, got %v", m)
+	}
+	if _, ok := m["ResultSet"]; !ok {
+		t.Errorf("inner output fields must be present at top level, got %v", m)
+	}
+	// The outer envelope keys must NOT leak into the bound value.
+	for _, leaked := range []string{"action", "steps", "output"} {
+		if _, ok := m[leaked]; ok {
+			t.Errorf("envelope key %q must not leak into bound result, got %v", leaked, m)
+		}
+	}
+}
+
+// TestParseResultPayload_PassthroughNonEnvelope proves the unwrap only fires for
+// the real envelope shape. A StubExecutor-shaped result carries "action" but no
+// "output" object, and a plain result carries neither; both must pass through
+// unchanged so no non-envelope payload is mistaken for the envelope.
+func TestParseResultPayload_PassthroughNonEnvelope(t *testing.T) {
+	// StubExecutor shape: "action" present, "output" absent.
+	stub := `{"executed":false,"stub":true,"action":"query","args":{}}`
+	m := parseResultPayload(&stub)
+	if m["action"] != "query" || m["stub"] != true {
+		t.Errorf("stub result must pass through unchanged, got %v", m)
+	}
+	// "action" present but "output" is not an object: not the envelope.
+	notObj := `{"action":"query","output":"a string"}`
+	m = parseResultPayload(&notObj)
+	if m["output"] != "a string" {
+		t.Errorf("non-object output must pass through unchanged, got %v", m)
+	}
+	// Plain object with neither key: passes through unchanged.
+	plainObj := `{"series":[1,2]}`
+	m = parseResultPayload(&plainObj)
+	if _, ok := m["series"]; !ok {
+		t.Errorf("plain object must pass through unchanged, got %v", m)
+	}
+}
+
+// TestDaemonDispatcher_UnwrapsEnvelopeResult is the #1801 regression at the
+// dispatcher seam: a fake daemon returns an envelope-shaped result string, and
+// DispatchResult.Output must equal the inner output map, not the whole envelope.
+func TestDaemonDispatcher_UnwrapsEnvelopeResult(t *testing.T) {
+	withDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// result is the executor's dispatch envelope with the real result nested
+		// under "output"; the inner result JSON-escaped into the envelope string.
+		_, _ = w.Write([]byte(`{"audit_id":"a1","result":"{\"action\":\"query\",\"output\":{\"QueryExecutionId\":\"qeid-1\",\"ResultSet\":{\"rows\":[1]}},\"steps\":{\"run\":{\"QueryExecutionId\":\"qeid-1\"}}}"}`))
+	})
+	res, err := daemonDispatcher{}.Dispatch(context.Background(), "aileron:athena.query", nil)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if res.Output["QueryExecutionId"] != "qeid-1" {
+		t.Errorf("Output must be the inner output map, got %v", res.Output)
+	}
+	for _, leaked := range []string{"action", "steps"} {
+		if _, ok := res.Output[leaked]; ok {
+			t.Errorf("envelope key %q leaked into Output: %v", leaked, res.Output)
+		}
 	}
 }
 
@@ -902,6 +976,113 @@ func TestRunSkillLaunch_OutputMaterializedCarriesActorProvenanceEndToEnd(t *test
 	}
 	if csv["aileron.plan.signature_status"] != "verified" {
 		t.Errorf("plan.signature_status = %v, want verified", csv["aileron.plan.signature_status"])
+	}
+}
+
+// TestRunSkillLaunch_DaemonEnvelopeUnwrapsThroughMaterialize is the #1801
+// full-chain regression: the fake daemon returns the ACTUAL executor dispatch
+// envelope {action, output, steps} as the run result string, with an
+// Athena-shaped {QueryExecutionId, ResultSet} inner output. The launch must
+// unwrap that envelope at the dispatcher seam so:
+//
+//   - the materialized digest.csv artifact bytes are the inner result JSON only
+//     (no action/output/steps keys leaking from the envelope), and
+//   - the output.materialized record's step.inputs[] entry — walking back to the
+//     materializing step's bound upstream value — carries query_execution_id,
+//     which the #1771 lift can only find when QueryExecutionId sits at the top
+//     level of the bound value (it would nest under .output without the unwrap).
+//
+// Before the fix parseResultPayload bound the whole envelope, so both assertions
+// failed (the artifact carried the envelope keys and the qid never lifted).
+func TestRunSkillLaunch_DaemonEnvelopeUnwrapsThroughMaterialize(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeNoImageForLaunch(t, storeDir)
+
+	outDir := t.TempDir()
+	var mu sync.Mutex
+	byOutputName := map[string]map[string]any{}
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/run"):
+			w.WriteHeader(http.StatusOK)
+			if strings.Contains(r.URL.Path, "query_series") {
+				// The daemon executor wraps the last step's output in the dispatch
+				// envelope {action, output, steps}; output is the Athena-shaped
+				// result. This is the real over-the-wire shape (#1801), not the
+				// pre-fix flat assumption the other tests used.
+				_, _ = w.Write([]byte(`{"result":"{\"action\":\"query_series\",\"output\":{\"QueryExecutionId\":\"qeid-1\",\"ResultSet\":{\"rows\":[[\"cpu\",\"42\"]]}},\"steps\":{\"query_series\":{\"QueryExecutionId\":\"qeid-1\"}}}"}`))
+			} else {
+				// The file_issue action-call also returns the envelope; its inner
+				// output is a plain data result the run materializes directly.
+				_, _ = w.Write([]byte(`{"result":"{\"action\":\"create_issue\",\"output\":{\"issue\":\"filed\"},\"steps\":{\"create_issue\":{\"issue\":\"filed\"}}}"}`))
+			}
+		case r.URL.Path == "/v1/audit" && r.Method == http.MethodPost:
+			var body auditIngestRequest
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.EventType == string(model.EventTypeOutputMaterialized) {
+				name, _ := body.Payload["aileron.output.name"].(string)
+				mu.Lock()
+				byOutputName[name] = body.Payload
+				mu.Unlock()
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"audit_id":"audit-landed"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	stubLaunchSeams(t, daemonDispatcher{}, true)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origRun := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origRun })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", outDir, "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+
+	// The digest.csv artifact binds steps.query_metrics.series through the
+	// identity transform, so its bytes are the inner Athena output re-serialized
+	// as canonical JSON. The envelope's action/output/steps keys MUST NOT appear.
+	digest, err := os.ReadFile(filepath.Join(outDir, "digest.csv"))
+	if err != nil {
+		t.Fatalf("read materialized digest.csv: %v", err)
+	}
+	var artifact map[string]any
+	if err := json.Unmarshal(digest, &artifact); err != nil {
+		t.Fatalf("materialized artifact is not the declared result JSON: %v (%s)", err, digest)
+	}
+	if artifact["QueryExecutionId"] != "qeid-1" {
+		t.Errorf("materialized artifact = %s, want the inner Athena result", digest)
+	}
+	if _, ok := artifact["ResultSet"]; !ok {
+		t.Errorf("materialized artifact missing ResultSet: %s", digest)
+	}
+	for _, leaked := range []string{"action", "output", "steps"} {
+		if _, ok := artifact[leaked]; ok {
+			t.Errorf("envelope key %q leaked into materialized artifact: %s", leaked, digest)
+		}
+	}
+
+	// The output.materialized record walks step.inputs back to the bound upstream
+	// value (steps.query_metrics.series = the Athena output), so the qid lifts.
+	mu.Lock()
+	defer mu.Unlock()
+	csv, ok := byOutputName["digest.csv"]
+	if !ok {
+		t.Fatalf("no output.materialized for digest.csv; saw %v", byOutputName)
+	}
+	inputs, ok := csv["aileron.step.inputs"].([]any)
+	if !ok || len(inputs) == 0 {
+		t.Fatalf("step.inputs = %v, want at least one entry", csv["aileron.step.inputs"])
+	}
+	entry, _ := inputs[0].(map[string]any)
+	if entry["query_execution_id"] != "qeid-1" {
+		t.Errorf("step.inputs[0].query_execution_id = %v, want qeid-1 (the #1771 lift only fires when QueryExecutionId is top-level, i.e. the envelope was unwrapped)", entry["query_execution_id"])
 	}
 }
 

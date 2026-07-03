@@ -254,15 +254,46 @@ func daemonActionName(ref string) string {
 // parseResultPayload decodes the daemon's string result into a JSON map so the
 // runtime can bind downstream steps against it. A non-JSON or empty result
 // surfaces under a "result" key so a downstream binding still resolves.
+//
+// The daemon's action executor wraps the last step's output in a dispatch
+// envelope {"action": <name>, "output": <result>, "steps": {...}} (see
+// internal/action/executor.go). Binding that whole envelope to steps.<id>.result
+// nests the real result one level deep, which duplicates the payload in the
+// materialized artifact, misdirects redaction/multi-output reads at the outer
+// keys, and breaks the audit query-execution-id lift (issue #1801). So when the
+// parsed result is that envelope — a JSON object carrying an "action" string AND
+// an "output" object — unwrap it and return the inner output map. StubExecutor
+// results carry "action" but no "output", so requiring both keys leaves them
+// (and every other shape) passing through unchanged. The daemon's public
+// /v1/actions run envelope is untouched; only the launch-side binding is fixed.
 func parseResultPayload(result *string) map[string]any {
 	if result == nil || *result == "" {
 		return map[string]any{}
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(*result), &m); err == nil {
+		if out, ok := dispatchEnvelopeOutput(m); ok {
+			return out
+		}
 		return m
 	}
 	return map[string]any{"result": *result}
+}
+
+// dispatchEnvelopeOutput returns the inner output map when m is the daemon's
+// dispatch envelope: a JSON object carrying an "action" string AND an "output"
+// object. It returns ok=false for any other shape (including StubExecutor
+// results, which carry "action" but no "output") so those pass through
+// unchanged.
+func dispatchEnvelopeOutput(m map[string]any) (map[string]any, bool) {
+	if _, ok := m["action"].(string); !ok {
+		return nil, false
+	}
+	out, ok := m["output"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	return out, true
 }
 
 // daemonApprover defers to the daemon's own approval gate at the action
