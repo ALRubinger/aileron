@@ -306,6 +306,11 @@ func (r containerToolImageRunner) Run(ctx context.Context, spec runtime.ToolRunS
 		Image:   spec.Image,
 		Volumes: volumes,
 		Name:    toolContainerName(spec),
+		// ToolDispatch selects the rung-3 sealed-tool contract in the shared
+		// container builder: the image's baked entrypoint runs with no command,
+		// and no implicit operator-CWD workspace mount is emitted — the tool
+		// sees exactly the declared mounts above and nothing else.
+		ToolDispatch: true,
 	}
 
 	// Credential-injection enrichment (#1769): when a proxy bootstrapper is

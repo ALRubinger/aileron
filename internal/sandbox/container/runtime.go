@@ -302,6 +302,16 @@ type RunOptions struct {
 	// container cannot be stopped by name, so the launcher generates a
 	// deterministic per-session name and reuses it for StopContainer.
 	Name string
+	// ToolDispatch marks a rung-3 sealed-tool dispatch (#1733): the image's
+	// baked entrypoint runs with NO command (a non-empty Command is an error —
+	// the tool contract forbids overriding the entrypoint), and the implicit
+	// operator-CWD workspace mount is NOT emitted. A sealed tool sees only its
+	// declared Volumes (the read-only input mount and the writable collect
+	// mount); bind-mounting the launch directory read-write into it would hand
+	// the tool the operator's project, which the mount → run → collect contract
+	// exists to prevent. The default (false) keeps the agent-sandbox behavior:
+	// command required, workspace mounted at WorkspacePath.
+	ToolDispatch bool
 }
 
 // Volume describes an additional mount for a sandbox container. By default
@@ -731,12 +741,18 @@ func ImageMetadataLabel(ctx context.Context, runner Runner, runtimeName, image s
 	return imageLabel(ctx, runner, runtimeName, image, DevcontainerMetadataLabel)
 }
 
-// Run starts a one-shot sandbox container for an agent command.
+// Run starts a one-shot sandbox container for an agent command, or — when
+// opts.ToolDispatch is set — a rung-3 sealed-tool dispatch that runs the
+// image's baked entrypoint with no command and no implicit workspace mount.
 func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if opts.Image == "" {
 		return RunResult{}, fmt.Errorf("sandbox image is required")
 	}
-	if len(opts.Command) == 0 || strings.TrimSpace(opts.Command[0]) == "" {
+	if opts.ToolDispatch {
+		if len(opts.Command) != 0 {
+			return RunResult{}, fmt.Errorf("tool dispatch runs the image's baked entrypoint; command must be empty")
+		}
+	} else if len(opts.Command) == 0 || strings.TrimSpace(opts.Command[0]) == "" {
 		return RunResult{}, fmt.Errorf("sandbox command is required")
 	}
 	runner := b.Runner
@@ -1045,14 +1061,20 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	// no-op). Named volumes are managed by the runtime and already carry a
 	// container-accessible label, so they are not relabeled.
 	relabel := WorkspaceRelabelActive(runtimeName)
-	workspaceSpec := absWorkDir + ":" + WorkspacePath
-	if relabel {
-		workspaceSpec += ":z"
+	// A rung-3 tool dispatch never mounts the operator's CWD: the sealed tool
+	// sees only its declared Volumes (input mount + collect mount), and the
+	// image's own WORKDIR applies. The workspace mount is the agent-sandbox
+	// contract, not the tool contract.
+	if !opts.ToolDispatch {
+		workspaceSpec := absWorkDir + ":" + WorkspacePath
+		if relabel {
+			workspaceSpec += ":z"
+		}
+		args = append(args,
+			"--workdir", WorkspacePath,
+			"--volume", workspaceSpec,
+		)
 	}
-	args = append(args,
-		"--workdir", WorkspacePath,
-		"--volume", workspaceSpec,
-	)
 	for _, volume := range opts.Volumes {
 		if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
 			return nil, fmt.Errorf("sandbox volume source and target are required")
