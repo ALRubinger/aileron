@@ -81,8 +81,8 @@ The execution image is assembled from rungs ([ADR-0027](/adr/0027-flight-plan-se
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `rung1Image` | object | No | Rung one. Names a whole prebuilt operator-owned image. Freeze resolves it to a digest. |
-| `rung1Image.ref` | string | Yes within `rung1Image` | An OCI image reference. Freeze resolves a tag to an `image@sha256:` digest pin. |
+| `rung1Image` | object | No | Rung one. The skill runs in a whole prebuilt image. Freeze resolves it to a digest. Write `rung1Image: {}` to select the Aileron-provided runner image. |
+| `rung1Image.ref` | string | No | An optional OCI image reference. Omit it to resolve the Aileron-provided runner image for the freezing CLI's version. Freeze records the concrete ref plus an `image@sha256:` digest pin in the lock. A bare `rung1Image:` key with no value is null and is rejected, so authors write `rung1Image: {}` for the default. |
 | `rung2CapabilityUnits` | object | No | Rung two. Declares capability units composed onto the Aileron agent-free base image. |
 | `rung2CapabilityUnits.features` | array | Yes within `rung2CapabilityUnits` | The capability-unit devcontainer Feature references ([ADR-0026](/adr/0026-cli-capability-units)). |
 | `rung3PerStepImages` | object | No | Rung three. Per-step sealed sibling-image dispatch with mount and run-and-collect I/O. Freeze resolves each step's sibling image to a digest pin recorded in the lock. |
@@ -267,6 +267,6 @@ The version is the content hash plus a semver label. The content hash identifies
 
 ## Execution rungs
 
-A Flight Plan runs on a composed execution image assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Rung one pins a whole prebuilt operator-owned image, declared as `rung1Image`. Rung two declares capability units that Aileron composes onto a generic agent-free minimal base image, declared as `rung2CapabilityUnits` whose Features follow [ADR-0026](/adr/0026-cli-capability-units).
+A Flight Plan runs on a composed execution image assembled from rungs ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill) execution rungs). Rung one pins a whole prebuilt image, declared as `rung1Image`. The runner image is an implementation detail of the launch runtime. A workload names its own image under `rung1Image.ref` only for workload-specific tooling. When `rung1Image` declares no ref, freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock. Rung two declares capability units that Aileron composes onto a generic agent-free minimal base image, declared as `rung2CapabilityUnits` whose Features follow [ADR-0026](/adr/0026-cli-capability-units).
 
 Rung three is a per-step sealed sibling-image dispatch with mount and run-and-collect I/O carried in the `rung3PerStepImages` rung. Freeze resolves each step's sibling image to a content-addressed digest pinned in the lock. The execution image is agent-free. The base image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.

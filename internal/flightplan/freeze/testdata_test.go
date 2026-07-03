@@ -95,6 +95,38 @@ aileron:
 # Rung 1 Skill
 `
 
+// rung1DefaultMD is a minimal valid rung-1 manifest that declares no ref
+// under rung1Image, so freeze resolves the Aileron-provided default runner
+// image for the CLI version (#1808). It exercises the Unit-1 schema through
+// manifest.Parse (rung1Image: {} is valid).
+const rung1DefaultMD = `---
+name: rung1-default-skill
+description: A rung-1 skill using the default Aileron runner image.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung1Image: {}
+  inputs: []
+  outputs: []
+---
+
+# Rung 1 Default Skill
+`
+
 // noExecEnvMD is a valid manifest with an aileron block but no
 // executionEnvironment (composition-only, no images to resolve).
 const noExecEnvMD = `---

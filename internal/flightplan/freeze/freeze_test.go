@@ -128,6 +128,66 @@ func TestRun_Rung3PinsAndSigns(t *testing.T) {
 	}
 }
 
+// TestRun_Rung1DefaultImagePinsAndSigns is the #1808 end-to-end acceptance: a
+// full freeze over a rung-1 manifest that declares no ref pins the concrete
+// Aileron-provided default runner image for the CLI version plus its resolved
+// digest, and the produced signature verifies over the bytes that include that
+// pin. A dev CLIVersion selects the :edge tag.
+func TestRun_Rung1DefaultImagePinsAndSigns(t *testing.T) {
+	_, keyPath := genSigningKey(t)
+	var gotRef string
+	dr := DigestResolverFunc(func(_ context.Context, ref string) (string, error) {
+		gotRef = ref
+		return fakeDigest, nil
+	})
+	res, err := Run(context.Background(), []byte(rung1DefaultMD), Options{
+		Version:        "1.0.0",
+		CLIVersion:     "dev",
+		SigningKeyPath: keyPath,
+		Resolver:       dr,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantRef := "ghcr.io/alrubinger/aileron-sandbox-base:edge"
+	if gotRef != wantRef {
+		t.Errorf("resolver got ref %q, want the default runner image %q", gotRef, wantRef)
+	}
+	if len(res.Lock.ResolvedImages) != 1 {
+		t.Fatalf("a default rung-1 freeze must pin one image, got %+v", res.Lock.ResolvedImages)
+	}
+	if res.Lock.ResolvedImages[0].Ref != wantRef || res.Lock.ResolvedImages[0].Digest != fakeDigest {
+		t.Errorf("lock must record the concrete default ref + digest, got %+v", res.Lock.ResolvedImages[0])
+	}
+	if len(res.Lock.ResolvedCapabilitySet) != 0 {
+		t.Errorf("rung-1 pins no capability set, got %v", res.Lock.ResolvedCapabilitySet)
+	}
+
+	// The signature verifies over the canonical content bytes, so the default
+	// pin is covered by the plan content hash and signature.
+	lockNoHash := res.Lock.withoutContentHash()
+	mNoHash, err := injectLock([]byte(rung1DefaultMD), lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lfNoHash, err := MarshalLockfile(lockNoHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Verify(canonicalContent(mNoHash, lfNoHash), res.Signature, res.PublicKey); err != nil {
+		t.Errorf("signature must verify over the default pin: %v", err)
+	}
+
+	// The frozen manifest re-parses with the lock present, carrying the pin.
+	fm, err := manifest.Parse(res.FrozenManifest)
+	if err != nil {
+		t.Fatalf("frozen default rung-1 manifest must re-parse: %v", err)
+	}
+	if fm.Aileron.Lock["contentHash"] != res.ContentHash {
+		t.Errorf("frozen manifest lock.contentHash = %v, want %v", fm.Aileron.Lock["contentHash"], res.ContentHash)
+	}
+}
+
 // TestRun_Rung3SealsTrustContractReach is the #1775 end-to-end acceptance: a
 // full freeze over a rung-3 manifest with a per-step trust contract records the
 // declared hosts on the step's lock pin, and the produced signature verifies

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
 
 // digestPattern is the schema's content-addressed digest shape. A
@@ -65,7 +66,9 @@ const rung3Name = "rung3PerStepImages"
 //
 //   - instruction-only / no executionEnvironment: empty pins, no error
 //     (the skill still gets a contentHash and signature);
-//   - rung-1 (rung1Image.ref): resolve the named image to a digest pin;
+//   - rung-1 (rung1Image): resolve the named image to a digest pin, or when
+//     rung1Image.ref is omitted, resolve the Aileron-provided runner image for
+//     cliVersion (composition.BaseImage) to a digest pin (#1808);
 //   - rung-2 (rung2CapabilityUnits.features): compose the Features and pin
 //     the built image's digest plus the resolved capability set;
 //   - rung-3 (rung3PerStepImages.steps[].image): resolve each per-step
@@ -76,7 +79,12 @@ const rung3Name = "rung3PerStepImages"
 //
 // Every resolved digest is checked against digestPattern: a resolver that
 // yields a tag rather than a digest is rejected (pin by digest, never tag).
-func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer) (pins []ImagePin, capSet []string, err error) {
+// cliVersion is the Aileron CLI build version used to resolve the default
+// rung-1 runner image when a rung1Image declares no ref. It selects the
+// floating sandbox-base tag (dev/empty maps to :edge, a release maps to
+// :latest) through composition.BaseImage. It is distinct from the skill's
+// semver label recorded in the lock (Options.Version).
+func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver, fc FeatureComposer, cliVersion string) (pins []ImagePin, capSet []string, err error) {
 	if m == nil || m.InstructionOnly {
 		return nil, nil, nil
 	}
@@ -97,6 +105,14 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 		ref, err := rung1ImageRef(rung1)
 		if err != nil {
 			return nil, nil, err
+		}
+		if ref == "" {
+			// No ref declared: resolve the Aileron-provided runner image for the
+			// freezing CLI's version (#1808). The default flows through the same
+			// named-ref resolution below (resolver, requireDigest, digest pin), so
+			// the lock records the concrete resolved ref plus digest exactly as a
+			// named ref does.
+			ref = composition.BaseImage(cliVersion)
 		}
 		if dr == nil {
 			return nil, nil, fmt.Errorf("freeze: rung-1 image %q requires a digest resolver", ref)
@@ -185,17 +201,26 @@ func requireDigest(ref, digest string) error {
 }
 
 // rung1ImageRef extracts rung1Image.ref from the untyped execution
-// environment block. The ref MUST be a real string: a non-string scalar
-// coerced into an image reference would silently produce a bad pin, so a
-// non-string ref is rejected here rather than stringified.
+// environment block. An absent ref key is the default-runner contract
+// (#1808): it returns ("", nil), meaning "resolve the Aileron-provided
+// runner image for this CLI version". A ref key that IS present but is not a
+// real, non-empty string (non-string scalar, null, empty, or whitespace-only)
+// is a hard error, not a default: coercing it into an image reference would
+// silently produce a bad pin, and an explicit empty-string ref stays rejected
+// exactly as the schema rejects it.
 func rung1ImageRef(v any) (string, error) {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return "", fmt.Errorf("freeze: rung1Image is not a mapping")
 	}
-	ref, ok := m["ref"].(string)
+	raw, present := m["ref"]
+	if !present {
+		// No ref declared: use the default Aileron runner image (#1808).
+		return "", nil
+	}
+	ref, ok := raw.(string)
 	if !ok || strings.TrimSpace(ref) == "" {
-		return "", fmt.Errorf("freeze: rung1Image.ref is missing, empty, or not a string")
+		return "", fmt.Errorf("freeze: rung1Image.ref is present but empty or not a string")
 	}
 	return strings.TrimSpace(ref), nil
 }

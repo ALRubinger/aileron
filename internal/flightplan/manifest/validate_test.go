@@ -343,6 +343,7 @@ func TestExecutionEnvironmentRungValidity(t *testing.T) {
 	valid := map[string]string{
 		"rung1 only": `      rung1Image:
         ref: registry.example.com/runner:1.4`,
+		"rung1 with no ref": `      rung1Image: {}`,
 		"rung2 only": `      rung2CapabilityUnits:
         features:
           - ghcr.io/example/aileron-feature-metrics-cli:1`,
@@ -380,6 +381,10 @@ func TestExecutionEnvironmentRungValidity(t *testing.T) {
 		"rung3 with empty steps rejected": `      rung3PerStepImages:
         steps: []`,
 		"empty executionEnvironment rejected": `      {}`,
+		"rung1 empty-string ref rejected": `      rung1Image:
+        ref: ""`,
+		"rung1 non-string ref rejected": `      rung1Image:
+        ref: 7`,
 	}
 	for name, env := range invalid {
 		t.Run("invalid/"+name, func(t *testing.T) {

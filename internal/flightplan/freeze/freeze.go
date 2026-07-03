@@ -55,6 +55,13 @@ type Options struct {
 	// Version is the semver label recorded in the lock. Optional; empty
 	// records no version label.
 	Version string
+	// CLIVersion is the Aileron CLI build version that drives the default
+	// rung-1 runner image reference when a rung1Image declares no ref (#1808).
+	// It is distinct from Version (the skill's semver label): CLIVersion picks
+	// the floating sandbox-base tag the default resolves from. An empty value
+	// behaves as a dev build (resolves the :edge tag), matching the CLI's
+	// version default.
+	CLIVersion string
 	// SigningKeyPath is the path to the PEM ed25519 private key. Empty falls
 	// back to $AILERON_SIGNING_KEY (see LoadSigningKey).
 	SigningKeyPath string
@@ -93,7 +100,7 @@ func Run(ctx context.Context, raw []byte, opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	pins, capSet, err := resolveImages(ctx, m, opts.Resolver, opts.Composer)
+	pins, capSet, err := resolveImages(ctx, m, opts.Resolver, opts.Composer, opts.CLIVersion)
 	if err != nil {
 		return Result{}, err
 	}

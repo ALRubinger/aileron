@@ -346,6 +346,79 @@ aileron:
 	}
 }
 
+// TestRunSkillFreeze_Rung1DefaultImage is the #1808 CLI acceptance: a skill
+// whose executionEnvironment declares rung1Image with no ref freezes to a pin
+// of the Aileron-provided default runner image for the CLI's build version.
+// Test binaries carry version.Version == "dev", so the default resolves the
+// sandbox-base :edge tag; the stored lockfile records that concrete ref plus
+// the fake digest.
+func TestRunSkillFreeze_Rung1DefaultImage(t *testing.T) {
+	storeDir := withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	const rung1DefaultMD = `---
+name: rung1-default-skill
+description: Rung-1 skill using the default Aileron runner image.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:x.y
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+    executionEnvironment:
+      rung1Image: {}
+  inputs: []
+  outputs: []
+---
+
+# Rung 1 Default
+`
+	dir := filepath.Join(storeDir, "rung1-default-skill")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(rung1DefaultMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "rung1-default-skill"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a default rung-1 freeze must succeed, exit=%d stderr=%s", code, stderr.String())
+	}
+
+	s := store.New(storeDir)
+	ids, err := s.FrozenVersions("rung1-default-skill")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("FrozenVersions = %v, %v", ids, err)
+	}
+	v, err := s.ReadFrozen("rung1-default-skill", ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRef := composition.BaseImage("dev")
+	if !strings.Contains(string(v.Lockfile), wantRef) {
+		t.Errorf("a default rung-1 freeze must pin the default runner image %q, lockfile:\n%s", wantRef, v.Lockfile)
+	}
+	if !strings.Contains(string(v.Lockfile), fakeFreezeDigest) {
+		t.Errorf("a default rung-1 freeze must pin the resolved digest, lockfile:\n%s", v.Lockfile)
+	}
+	if len(v.Signature) == 0 {
+		t.Error("a default rung-1 freeze must still be signed")
+	}
+}
+
 func TestRunSkillFreeze_FromPath(t *testing.T) {
 	withTempStore(t)
 	stubFreezeResolvers(t, fakeFreezeDigest)
