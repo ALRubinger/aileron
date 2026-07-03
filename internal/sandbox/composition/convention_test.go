@@ -311,13 +311,14 @@ func TestGHConventionMatchesSealingSentinel(t *testing.T) {
 		} `json:"sentinel"`
 	}
 	for i := range sealing.Customizations.Aileron.CLI.Sealing {
-		if sealing.Customizations.Aileron.CLI.Sealing[i].EmitMechanism == "sentinel-swap" {
+		if sealing.Customizations.Aileron.CLI.Sealing[i].Host == "api.github.com" &&
+			sealing.Customizations.Aileron.CLI.Sealing[i].EmitMechanism == "sentinel-swap" {
 			swap = &sealing.Customizations.Aileron.CLI.Sealing[i]
 			break
 		}
 	}
 	if swap == nil {
-		t.Fatalf("gh cli.sealing has no sentinel-swap entry to compare against")
+		t.Fatalf("gh cli.sealing has no api.github.com sentinel-swap entry to compare against")
 	}
 
 	if string(conv.Scheme) != swap.Scheme {
