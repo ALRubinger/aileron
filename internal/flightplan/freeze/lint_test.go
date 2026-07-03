@@ -152,6 +152,32 @@ func TestLint_RejectsLLMMarkerOnToolStep(t *testing.T) {
 	}
 }
 
+// TestLint_RejectsDuplicateStepIDAcrossKinds proves the whole-graph
+// unique-step-id check spans ALL step kinds, not just tool steps. A tool step
+// and a non-tool step sharing an id would let freeze seal a stepTrust reach
+// onto an id an ambiguous non-tool step also declares; the lint must reject
+// the plan before sealing (steptrust.go only catches tool/tool collisions).
+func TestLint_RejectsDuplicateStepIDAcrossKinds(t *testing.T) {
+	m := manifestWithSteps([]any{
+		map[string]any{"id": "dup", "kind": "tool", "command": []any{"aws"}, "trustContract": map[string]any{"hosts": []any{"example.com"}}},
+		map[string]any{"id": "dup", "kind": "transform", "outputs": []any{"x"}},
+	})
+	err := Lint(m)
+	if err == nil {
+		t.Fatal("a tool step and a non-tool step sharing an id must fail lint")
+	}
+	var le *LintError
+	if !errors.As(err, &le) {
+		t.Fatalf("want *LintError, got %T", err)
+	}
+	if le.StepID != "dup" {
+		t.Errorf("error must name the colliding id, got %q", le.StepID)
+	}
+	if !strings.Contains(err.Error(), "duplicate step id") {
+		t.Errorf("error should describe the duplicate id, got: %v", err)
+	}
+}
+
 func TestLint_NilManifestClean(t *testing.T) {
 	if err := Lint(nil); err != nil {
 		t.Errorf("Lint(nil) must be clean: %v", err)

@@ -56,6 +56,13 @@ func Lint(m *manifest.Manifest) error {
 	if m == nil || m.InstructionOnly {
 		return nil
 	}
+	// seenIDs enforces whole-graph unique step ids across ALL step kinds,
+	// mirroring runtime/decode.go's launch-time duplicate check. Freeze runs
+	// this before sealing stepTrust (steptrust.go) so a sealed reach can never
+	// be keyed onto an id that an ambiguous non-tool step also declares:
+	// steptrust.go only rejects duplicates among tool steps, leaving a
+	// tool/non-tool id collision undetected without this whole-graph pass.
+	seenIDs := map[string]bool{}
 	for i, raw := range m.Aileron.Steps {
 		step, ok := raw.(map[string]any)
 		if !ok {
@@ -65,6 +72,15 @@ func Lint(m *manifest.Manifest) error {
 			}
 		}
 		id := scalarString(step["id"])
+		if id != "" {
+			if seenIDs[id] {
+				return &LintError{
+					StepID: id,
+					Reason: "duplicate step id (every step id must be unique across the whole graph)",
+				}
+			}
+			seenIDs[id] = true
+		}
 		kindVal, hasKind := step["kind"]
 		if !hasKind {
 			return &LintError{StepID: id, Reason: "missing kind (every step must declare a kind)"}
