@@ -411,16 +411,20 @@ aileron:
 `
 
 // fakeToolStepRunner records the tool-step specs the runtime hands the CLI
-// seam and returns a canned file-map output so the transform materializes it.
+// seam and returns the collected output in the PRODUCTION shape: the raw
+// string bytes of the collect file (inContainerToolStepRunner returns
+// string(out), never a decoded structure). Here the "tool" wrote a file-map
+// JSON document, so the downstream transform + materialize path is exercised
+// against exactly what a real collect readback yields.
 type fakeToolStepRunner struct {
 	specs []runtime.ToolStepSpec
 }
 
 func (f *fakeToolStepRunner) Run(_ context.Context, spec runtime.ToolStepSpec) (runtime.ToolStepResult, error) {
 	f.specs = append(f.specs, spec)
-	return runtime.ToolStepResult{Output: map[string]any{
-		"path": "out.txt", "mimeType": "text/plain", "encoding": "utf-8", "content": "collected\n",
-	}}, nil
+	return runtime.ToolStepResult{
+		Output: `{"path":"out.txt","mimeType":"text/plain","encoding":"utf-8","content":"collected\n"}`,
+	}, nil
 }
 
 // TestRunSkillLaunch_ToolStepsRunInSingleBoot is contract regression test 2

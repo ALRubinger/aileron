@@ -336,6 +336,14 @@ func (d stepDTO) populateToolStep(step *Step) error {
 	if len(d.Command) == 0 {
 		return decodeErrf("step %q: tool step declares no command (the argv is the executed identity)", d.ID)
 	}
+	// A tool step collects exactly one blob, so it must declare exactly one
+	// output to carry it. Refusing zero/multiple outputs at decode (not only
+	// in the executor, whose arity check is the direct-construct backstop)
+	// means a misdeclared step never reaches execution — its subprocess, and
+	// any side effects, never run for a result that could only be discarded.
+	if len(d.Outputs) != 1 {
+		return decodeErrf("step %q: a tool step must declare exactly one output (the collected value's landing), got %d", d.ID, len(d.Outputs))
+	}
 	for i, arg := range d.Command {
 		if arg == "" {
 			return decodeErrf("step %q: tool command element %d is empty", d.ID, i)

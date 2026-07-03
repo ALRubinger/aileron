@@ -315,6 +315,18 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 	if x.toolRunner == nil {
 		return nil, fmt.Errorf("flightplan: step %q is a tool step but no tool step runner is configured", step.ID)
 	}
+	// The collected output maps to the step's single declared output. A tool
+	// step collects exactly one blob, so the step must declare exactly one
+	// output to carry it. Zero outputs (a collect with nowhere to land) and
+	// multiple outputs (an ambiguous mapping for one blob) are both refused
+	// rather than silently dropping or duplicating the collected value.
+	// Checked BEFORE invoking the runner (decode also refuses the shape;
+	// this is the direct-construct backstop) so a misconfigured step never
+	// triggers an executed — and possibly non-idempotent — subprocess whose
+	// result would only be discarded.
+	if len(step.Outputs) != 1 {
+		return nil, fmt.Errorf("flightplan: step %q is a tool step and declares %d outputs; a tool step produces exactly one collected output", step.ID, len(step.Outputs))
+	}
 	// The mounted input is the step's resolved bindings. It is a
 	// binding-resolved value only, never a credential.
 	spec := ToolStepSpec{
@@ -328,15 +340,6 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 	res, err := x.toolRunner.Run(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("flightplan: step %q tool execution: %w", step.ID, err)
-	}
-
-	// The collected output maps to the step's single declared output. A tool
-	// step collects exactly one blob, so the step must declare exactly one
-	// output to carry it. Zero outputs (a collect with nowhere to land) and
-	// multiple outputs (an ambiguous mapping for one blob) are both refused
-	// rather than silently dropping or duplicating the collected value.
-	if len(step.Outputs) != 1 {
-		return nil, fmt.Errorf("flightplan: step %q is a tool step and declares %d outputs; a tool step produces exactly one collected output", step.ID, len(step.Outputs))
 	}
 	return map[string]any{step.Outputs[0]: res.Output}, nil
 }

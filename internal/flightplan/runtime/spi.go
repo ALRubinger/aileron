@@ -243,6 +243,16 @@ type ToolStepSpec struct {
 type ToolStepResult struct {
 	// Output is the value read back from CollectPath. It becomes the step's
 	// named output; a step that declared no collect returns a nil Output.
+	//
+	// The production runner returns the collect file's RAW BYTES as a
+	// string, never a decoded structure. That is the same contract the
+	// materialize path already speaks: a string carrier is parsed as the
+	// JSON it emitted (decodeCarrier), so a tool that wants its collected
+	// output to materialize as a file artifact writes a file-map JSON
+	// document ({path, mimeType, encoding, content}) or a JSON data
+	// object/array to its collect path. A non-JSON collect file still flows
+	// to downstream bindings as a plain string; it only refuses at the
+	// materialize boundary if a step tries to materialize it directly.
 	Output any
 }
 

@@ -134,6 +134,12 @@ func TestDecode_ToolStepRefusals(t *testing.T) {
 		{"empty argv element", map[string]any{
 			"id": "s1", "kind": "tool", "command": []any{"tool", ""}, "outputs": []any{"out"},
 		}, "command element 1 is empty"},
+		{"zero outputs", map[string]any{
+			"id": "s1", "kind": "tool", "command": []any{"tool"},
+		}, "exactly one output"},
+		{"multiple outputs", map[string]any{
+			"id": "s1", "kind": "tool", "command": []any{"tool"}, "outputs": []any{"a", "b"},
+		}, "exactly one output"},
 		{"empty mount path", map[string]any{
 			"id": "s1", "kind": "tool", "command": []any{"tool"}, "mount": map[string]any{"path": ""}, "outputs": []any{"out"},
 		}, "mount with an empty path"},
@@ -346,8 +352,11 @@ func TestExecute_ToolStepNoRunnerErrors(t *testing.T) {
 }
 
 // TestExecute_ToolStepMultipleOutputsErrors proves a tool step declaring
-// multiple outputs is refused: a single collected blob has no unambiguous
-// mapping across several declared outputs.
+// multiple outputs is refused BEFORE the subprocess runs: a single collected
+// blob has no unambiguous mapping across several declared outputs, and a
+// misdeclared step must never trigger a (possibly non-idempotent) execution
+// whose result would only be discarded. (Decode refuses this shape too; this
+// is the direct-construct backstop.)
 func TestExecute_ToolStepMultipleOutputsErrors(t *testing.T) {
 	p := toolStepPlan()
 	p.Steps[0].Outputs = []string{"a", "b"}
@@ -362,11 +371,14 @@ func TestExecute_ToolStepMultipleOutputsErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exactly one collected output") {
 		t.Fatalf("a multi-output tool step must error, got %v", err)
 	}
+	if len(runner.specs) != 0 {
+		t.Fatal("the arity refusal must fire BEFORE the subprocess runs")
+	}
 }
 
 // TestExecute_ToolStepZeroOutputsErrors proves a tool step declaring zero
-// outputs (materialize-only shape) is refused: the collected blob has
-// nowhere to land.
+// outputs (materialize-only shape) is refused before the subprocess runs:
+// the collected blob has nowhere to land.
 func TestExecute_ToolStepZeroOutputsErrors(t *testing.T) {
 	p := toolStepPlan()
 	p.Steps = p.Steps[:1]
@@ -379,6 +391,9 @@ func TestExecute_ToolStepZeroOutputsErrors(t *testing.T) {
 	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil || !strings.Contains(err.Error(), "exactly one collected output") {
 		t.Fatalf("a zero-output tool step must error, got %v", err)
+	}
+	if len(runner.specs) != 0 {
+		t.Fatal("the arity refusal must fire BEFORE the subprocess runs")
 	}
 }
 
