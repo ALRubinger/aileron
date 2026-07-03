@@ -117,6 +117,27 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		t.Fatalf("persist frozen composed unit: %v", err)
 	}
 
+	// Make the persisted store tree traversable by the in-container user. The
+	// store is bind-mounted read-only at /aileron/skills and the composed image
+	// boots as its non-root `agent` user, whose uid differs from the host
+	// runner's. t.TempDir() is 0o700 and os.MkdirTemp (used by WriteFrozen's
+	// atomic stage-then-rename) creates the version directory 0o700, so the
+	// container user cannot traverse them to reach the 0o644 SKILL.md. Widen
+	// every store directory to 0o755 (files are already 0o644). Production uses
+	// ~/.aileron/skills, which is 0o755-traversable, so this only bridges the
+	// test's owner-only temp tree; it does not relax any production permission.
+	if err := filepath.Walk(skillStoreDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return os.Chmod(path, 0o755)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("make the temp store tree container-traversable: %v", err)
+	}
+
 	// Read back the composed pin and assert its shape: a bootable LocalTag and a
 	// sha256: Digest (the freeze-built image's attested Id). This is the exact
 	// input the boot-time guard re-checks against the daemon.

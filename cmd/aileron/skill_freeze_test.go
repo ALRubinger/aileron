@@ -653,6 +653,54 @@ func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
 	}
 }
 
+// TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner covers the
+// managed branch of the #1866 fix: when the resolved toolchain is managed (the
+// default), ComposeDigest must wire the managed provisioner onto the Builder.
+// To exercise the managed branch without a network provision, this test sets
+// the managed escape-hatch env (AILERON_SANDBOX_NODE + AILERON_DEVCONTAINER_CLI)
+// to on-disk paths, which resolveDevcontainerCLI honors ahead of the wired
+// provisioner. The composer must resolve managed, wire the provisioner, take
+// the escape hatch, and compose successfully.
+func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
+	// Managed is the default; leave AILERON_SANDBOX_TOOLCHAIN unset (empty
+	// resolves to managed). Provide the escape hatch so the managed branch does
+	// not attempt a network provision.
+	t.Setenv(container.ToolchainModeEnv, "")
+	dir := t.TempDir()
+	node := filepath.Join(dir, "node")
+	cli := filepath.Join(dir, "devcontainer.js")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake node: %v", err)
+	}
+	if err := os.WriteFile(cli, []byte("// cli\n"), 0o644); err != nil {
+		t.Fatalf("write fake cli entrypoint: %v", err)
+	}
+	t.Setenv(container.NodeBinaryEnv, node)
+	t.Setenv(container.DevcontainerCLIEnv, cli)
+
+	base := "base@" + fakeFreezeDigest
+	features := []string{"aws-cli"}
+	tag := composition.LocalToolsImageTag(base, features)
+	wantID := "sha256:" + strings.Repeat("d", 64)
+	fr := &fakeRunner{
+		fails: map[string]error{
+			`image inspect --format {{json .RepoDigests}} ` + tag: errTestInspect,
+		},
+		outputs: map[string]string{
+			`image inspect --format {{.Id}} ` + tag: wantID + "\n",
+		},
+	}
+	withFakeInspector(t, fr)
+
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), base, features)
+	if err != nil {
+		t.Fatalf("ComposeDigest with managed toolchain + escape hatch: %v", err)
+	}
+	if got != wantID {
+		t.Errorf("digest = %q, want %q", got, wantID)
+	}
+}
+
 func TestImageInspector_ResolveDigest(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	fr := &fakeRunner{outputs: map[string]string{
