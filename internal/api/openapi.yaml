@@ -3420,6 +3420,68 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/sandbox-proxy/step-scopes:
+    post:
+      tags: [Connectors]
+      summary: Mint a step-scoped sandbox proxy credential
+      description: |
+        Mints an ephemeral, TTL-bounded proxy credential scoped to one
+        Flight Plan tool step's sealed network reach (#1829). The
+        in-container runtime posts the boot proxy session id, the step
+        id, and the step's sealed hosts before executing the step; the
+        returned token is used as the CONNECT password over the SAME
+        boot proxy session (username stays the session id, preserving
+        CA continuity). A CONNECT authenticated with a step-scope
+        token may reach ONLY the registered hosts; any other target is
+        refused 403 with a `sandbox.proxy.trust_denied` audit record.
+
+        Not idempotent by design: each mint is a fresh ephemeral
+        credential and the TTL cleans up an unreleased scope. The
+        registry is in-memory (a per-step ephemeral credential needs
+        no persistence). No credential material beyond the minted
+        token itself is carried by this contract.
+      operationId: createSandboxProxyStepScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxProxyStepScopeRequest"
+      responses:
+        "201":
+          description: Step scope minted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxProxyStepScopeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sandbox-proxy/step-scopes/{scope_id}:
+    delete:
+      tags: [Connectors]
+      summary: Release a step-scoped sandbox proxy credential
+      description: |
+        Releases a step-scoped proxy credential after the step's
+        subprocess exits. Idempotent: releasing an unknown or already
+        expired scope still returns 204 (the TTL is the backstop for a
+        runtime that crashes before releasing).
+      operationId: deleteSandboxProxyStepScope
+      parameters:
+        - name: scope_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The scope id returned by the mint call.
+      responses:
+        "204":
+          description: Scope released (or already gone).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/bindings:
     get:
       tags: [Bindings]
@@ -7031,6 +7093,53 @@ components:
         sandbox_image:
           type: string
           description: Resolved sandbox image reference, when known.
+
+    SandboxProxyStepScopeRequest:
+      type: object
+      description: |
+        Step-scope mint payload (#1829). session_id names the boot
+        proxy session the scoped CONNECTs ride on; step_id names the
+        tool step; hosts is the step's sealed network reach from the
+        verified lock's stepTrust section. Carries no credential
+        material.
+      required: [session_id, step_id, hosts]
+      properties:
+        session_id:
+          type: string
+          description: The boot proxy session id the scoped credential authenticates under (the CONNECT username).
+        step_id:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]+$"
+          description: The tool step id the scope is minted for.
+        hosts:
+          type: array
+          minItems: 1
+          description: |
+            The step's sealed network reach. Each entry is a host with
+            an optional port, no scheme, no path (for example
+            api.example.com or api.example.com:443), reusing the lock
+            stepTrust host vocabulary.
+          items:
+            type: string
+            pattern: "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+
+    SandboxProxyStepScopeResponse:
+      type: object
+      description: |
+        A minted step scope: the scope id (for release), the ephemeral
+        token used as the CONNECT password, and the expiry instant.
+      required: [scope_id, token, expires_at]
+      properties:
+        scope_id:
+          type: string
+          description: Opaque id identifying the scope for DELETE release.
+        token:
+          type: string
+          description: The ephemeral step-scope token. Used as the CONNECT Basic-auth password; compared constant-time daemon-side.
+        expires_at:
+          type: string
+          format: date-time
+          description: Instant the scope expires; an expired scope authenticates as 407.
 
     Binding:
       type: object

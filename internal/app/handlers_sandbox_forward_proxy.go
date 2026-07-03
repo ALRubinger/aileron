@@ -34,6 +34,13 @@ var errSandboxForwardProxyAmbiguousOperation = errors.New("sandbox proxy decrypt
 type sandboxProxyAuth struct {
 	SessionID string
 	Token     string
+	// StepScope is non-nil when the CONNECT authenticated with a
+	// step-scoped credential (#1829) rather than the full daemon token.
+	// A scoped CONNECT may reach ONLY the scope's registered hosts; the
+	// gate fires in handleSandboxForwardProxyConnect before any
+	// hijack/MITM handshake. Nil for the full-daemon-token path, which is
+	// untouched.
+	StepScope *sandboxProxyStepScope
 }
 
 func (s *apiServer) sandboxForwardProxyMiddleware(next http.Handler) http.Handler {
@@ -105,6 +112,17 @@ func (s *apiServer) handleSandboxForwardProxyConnect(w http.ResponseWriter, r *h
 	targetHost, err := sandboxForwardProxyConnectHost(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Step-scope enforcement (#1829): a CONNECT authenticated with a
+	// step-scoped credential may reach ONLY its registered hosts. The gate
+	// fires here, before any hijack or TLS MITM handshake, so a denied
+	// target never even completes the tunnel. Deny-by-default within the
+	// scope; the full-daemon-token path (StepScope == nil) is untouched.
+	if auth.StepScope != nil && !sandboxProxyStepScopeAllowsHost(*auth.StepScope, targetHost) {
+		s.recordSandboxProxyStepScopeTrustDenied(r, *auth.StepScope, targetHost)
+		w.Header().Set("X-Aileron-Session-Id", auth.SessionID)
+		http.Error(w, "sandbox proxy denied CONNECT: the target host is outside the step's sealed reach", http.StatusForbidden)
 		return
 	}
 	cert, err := s.sandboxForwardProxyCertificate(auth.SessionID, targetHost)
@@ -1005,11 +1023,27 @@ func (s *apiServer) authenticateSandboxForwardProxy(w http.ResponseWriter, r *ht
 		writeProxyAuthRequired(w, err.Error())
 		return sandboxProxyAuth{}, false
 	}
-	if s.localDaemonToken != "" && auth.Token != s.localDaemonToken {
-		writeProxyAuthRequired(w, "invalid sandbox proxy token")
-		return sandboxProxyAuth{}, false
+	// The full daemon token authenticates unscoped, exactly as before.
+	if s.localDaemonToken != "" && auth.Token == s.localDaemonToken {
+		return auth, true
 	}
-	return auth, true
+	// A live step-scope token (#1829) authenticates scoped: the CONNECT may
+	// reach only the scope's registered hosts. The lookup is constant-time
+	// per candidate and binds the scope to its own boot session; an expired
+	// scope never matches (407 below).
+	if scope, ok := s.lookupSandboxProxyStepScope(auth.SessionID, auth.Token); ok {
+		auth.StepScope = &scope
+		return auth, true
+	}
+	if s.localDaemonToken == "" {
+		// No local bearer token configured (dev mode with daemon auth off):
+		// preserve the historical accept-any posture. A step-scope credential
+		// was already given the chance to bind above, so a scoped token is
+		// never silently unscoped.
+		return auth, true
+	}
+	writeProxyAuthRequired(w, "invalid sandbox proxy token")
+	return sandboxProxyAuth{}, false
 }
 
 func parseSandboxProxyAuthorization(header string) (sandboxProxyAuth, error) {

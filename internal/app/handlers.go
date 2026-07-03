@@ -100,6 +100,8 @@ type apiServer struct {
 	oauth2HTTPClient     *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
 	sandboxProxyClient   *http.Client                  // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
 	sandboxProxyStateDir string                        // daemon state dir containing session-scoped sandbox proxy CA/key artifacts; empty disables CONNECT transport
+	stepScopesMu         sync.Mutex                    // guards stepScopes
+	stepScopes           map[string]sandboxProxyStepScope // live step-scoped proxy credentials (#1829), keyed by scope id; in-memory + TTL only, lazily initialized
 
 	// --- Hub (ADR-0013, #486, #487) ---
 	hub         *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints
