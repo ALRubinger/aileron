@@ -81,26 +81,26 @@ type apiServer struct {
 	localVaultMu         sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
 	vaultUnlockedCh      chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
 	newID                func() string
-	actions              *action.Store                 // installed actions in ~/.aileron/actions/ (ADR-0003)
-	actionState          action.StateStore             // per-action user preferences (enabled/disabled overlay); nil means defaults apply
-	executor             action.Executor               // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
-	installer            *cstore.Installer             // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
-	versionLister        cstore.VersionLister          // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
-	sandboxRuntime       sandbox.Runtime               // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
-	actionApprovals      *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
-	sessions             sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
-	webappURL            string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
-	localDaemonToken     string                        // local-daemon bearer token; empty disables local bearer auth
-	caveatIssuer         *auth.CaveatIssuer            // mints/validates session-scoped caveat tokens (ADR-0024, #958); nil disables caveat auth
-	actionApprovalTTL    time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
-	bindings             binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
-	hostBindings         binding.HostBindings          // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough
-	specLoader           connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
-	oauth2Sessions       *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
-	oauth2HTTPClient     *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
-	sandboxProxyClient   *http.Client                  // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
-	sandboxProxyStateDir string                        // daemon state dir containing session-scoped sandbox proxy CA/key artifacts; empty disables CONNECT transport
-	stepScopesMu         sync.Mutex                    // guards stepScopes
+	actions              *action.Store                    // installed actions in ~/.aileron/actions/ (ADR-0003)
+	actionState          action.StateStore                // per-action user preferences (enabled/disabled overlay); nil means defaults apply
+	executor             action.Executor                  // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
+	installer            *cstore.Installer                // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
+	versionLister        cstore.VersionLister             // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
+	sandboxRuntime       sandbox.Runtime                  // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
+	actionApprovals      *approval.ActionApprovalQueue    // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
+	sessions             sessions.Store                   // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
+	webappURL            string                           // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
+	localDaemonToken     string                           // local-daemon bearer token; empty disables local bearer auth
+	caveatIssuer         *auth.CaveatIssuer               // mints/validates session-scoped caveat tokens (ADR-0024, #958); nil disables caveat auth
+	actionApprovalTTL    time.Duration                    // how long RunAction holds the response open before timing out; default 5m, configurable for tests
+	bindings             binding.Store                    // capability bindings (ADR-0006); nil when no vault is wired
+	hostBindings         binding.HostBindings             // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough
+	specLoader           connectorSpecLoader              // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
+	oauth2Sessions       *oauth2Sessions                  // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
+	oauth2HTTPClient     *http.Client                     // for OAuth token exchanges; nil → http.DefaultClient
+	sandboxProxyClient   *http.Client                     // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
+	sandboxProxyStateDir string                           // daemon state dir containing session-scoped sandbox proxy CA/key artifacts; empty disables CONNECT transport
+	stepScopesMu         sync.Mutex                       // guards stepScopes
 	stepScopes           map[string]sandboxProxyStepScope // live step-scoped proxy credentials (#1829), keyed by scope id; in-memory + TTL only, lazily initialized
 
 	// --- Hub (ADR-0013, #486, #487) ---
