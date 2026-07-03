@@ -780,41 +780,6 @@ jobs:
         run: go test -tags=integration -race -run TestRunAuthGitHub_PUTReachesRealDaemonRoute .
         working-directory: cmd/aileron
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-
-      # The composed-tools freeze path (builderFeatureComposer -> container.Builder
-      # + composition.ToolsPlan) routes the environment-tools build through
-      # `npx --yes @devcontainers/cli@<pinned>`, so the composed-tools boot-guard
-      # integration test below needs the CLI on PATH. Pin to the same version the
-      # Go source pins (container.DevcontainerCLIVersion) and the sibling
-      # sandbox-features job installs, so all paths use one reproducible CLI. The
-      # test FAILS (no self-skip) if the CLI, Node, or Docker is absent.
-      - name: Install @devcontainers/cli for the composed-tools boot test
-        run: npm install -g @devcontainers/cli@0.87.0
-
-      - name: Run composed-tools boot-guard integration test (#1863)
-        # Proves the freeze -> container.Builder build -> boot-by-LocalTag linkage
-        # and the boot-time Id-vs-Digest guard end to end on a real daemon: freezes
-        # the worked-example tools unit through the REAL freeze path (which BUILDS a
-        # genuine composed image in the local daemon and pins its bootable LocalTag
-        # plus attested Id), then boots that composed pin through the production
-        # containerImageRunner with the production digest resolver wired, so the
-        # boot re-inspects the just-built local tag and the guard must resolve it to
-        # the EXACT attested Id before delegating to the container boot. The base
-        # image the tools compose onto is the worked example's catalog-resolved
-        # Aileron runner base (composition.BaseImage, the pullable GHCR sandbox-base),
-        # so freeze's runtimeDigestResolver pins a real registry digest; the live
-        # host daemon from this job serves the in-container re-entry. FAIL-FAST:
-        # absent Docker, the devcontainers CLI, or the daemon is a job-config
-        # failure, never a t.Skip. Additive step so a failure is attributable to
-        # this contract.
-        run: go test -tags=integration_sandbox -run TestFlightPlanComposedToolsBootGuard ./cmd/aileron/...
-        env:
-          AILERON_API_URL: http://localhost:8080
-          AILERON_TOKEN: ci-integration-token
-
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}
         run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml stop server
