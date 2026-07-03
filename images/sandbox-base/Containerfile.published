@@ -1,11 +1,18 @@
 # Published sandbox-base (ghcr.io/alrubinger/aileron-sandbox-base).
 #
-# Unlike the local Tier 0 Containerfile, this recipe BAKES aileron-mcp into the
-# image and stamps an `ai.aileron.mcp.version` label. A sealed customer-operated
-# runtime ships only this image with no host-side aileron-mcp to bind-mount, so
-# the binary has to travel inside the image (issue #957, the ADR-0024 image-bake
-# flip). The launcher detects the label and skips the host-mount; unlabeled
-# images (local Tier 0, devcontainers, BYO) keep the host-mount fallback.
+# Unlike the local Tier 0 Containerfile, this recipe BAKES two Go binaries into
+# the image and stamps a version label for each:
+#   - aileron-mcp (issue #957, ADR-0024 image-bake flip) with
+#     `ai.aileron.mcp.version`. A sealed customer-operated runtime ships only
+#     this image with no host-side aileron-mcp to bind-mount, so the binary has
+#     to travel inside the image. The launcher detects the mcp label and skips
+#     the host-mount; unlabeled images (local Tier 0, devcontainers, BYO) keep
+#     the host-mount fallback.
+#   - the aileron CLI (issue #1807, ADR-0027 image-boot re-entry) with
+#     `ai.aileron.cli.version`. The image-boot contract requires `aileron` on
+#     PATH inside the sandbox so the sealed runtime can re-enter the CLI without
+#     a host binary; the version-stamped label lets consumers (#1808/#1809)
+#     detect the baked CLI the same way they detect the baked MCP.
 #
 # Build context is the REPO ROOT (`.github/workflows/sandbox-base.yml` passes
 # `context: .`), because the builder stage needs go.work and the Go source. A
@@ -52,6 +59,45 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
       -X github.com/ALRubinger/aileron/internal/version.Commit=${AILERON_COMMIT}" \
     -o /out/aileron-mcp .
 
+# Builder stage: cross-compile the aileron CLI for the target platform. This
+# mirrors mcp-builder exactly (same toolchain pin, reconstructed workspace,
+# shared go.work.sum, cross-compile flags, and version -X ldflags) so the baked
+# CLI is version-aligned with the baked aileron-mcp. Satisfying the ADR-0027 /
+# issue #1731 image-boot re-entry contract requires `aileron` on PATH in the
+# sealed runtime; this stage produces that binary. BuildKit runs this stage in
+# parallel with mcp-builder since both read the same context layers.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS cli-builder
+WORKDIR /build
+
+# Like aileron-mcp, the aileron CLI resolves its module graph through the repo
+# workspace (go.work), so reconstruct a minimal workspace with the modules it
+# needs (cmd/aileron links only ./internal; ./sdk/go is kept for stage symmetry
+# with mcp-builder and the shared go.work.sum covers the superset either way),
+# reusing the committed go.work.sum for a reproducible, offline-checksummed
+# build.
+ENV CGO_ENABLED=0
+
+COPY internal/ internal/
+COPY sdk/go/ sdk/go/
+COPY cmd/aileron/ cmd/aileron/
+COPY go.work.sum go.work.sum
+RUN go work init ./internal ./sdk/go ./cmd/aileron
+
+# Version stamp injected via the same -X ldflags `task build` uses, so the
+# baked CLI's `--version` and the ai.aileron.cli.version image label report the
+# release identity.
+ARG AILERON_VERSION=dev
+ARG AILERON_COMMIT=unknown
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /build/cmd/aileron
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X github.com/ALRubinger/aileron/internal/version.Version=${AILERON_VERSION} \
+      -X github.com/ALRubinger/aileron/internal/version.Commit=${AILERON_COMMIT}" \
+    -o /out/aileron .
+
 FROM alpine:3.24
 
 LABEL org.opencontainers.image.title="Aileron sandbox base"
@@ -65,6 +111,14 @@ LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
 # sync. ARGs do not cross the FROM boundary, so AILERON_VERSION is re-declared.
 ARG AILERON_VERSION=dev
 LABEL ai.aileron.mcp.version="${AILERON_VERSION}"
+
+# ai.aileron.cli.version carries the baked aileron CLI's release identity,
+# stamped from the same ARG as the mcp label because both binaries build from
+# the same context and build-args (always version-aligned). It backs the
+# ADR-0027 image-boot re-entry contract: consumers (#1808/#1809) detect the
+# baked CLI on PATH by reading this label, the same way the launcher detects
+# the baked MCP via ai.aileron.mcp.version.
+LABEL ai.aileron.cli.version="${AILERON_VERSION}"
 
 # Base substrate packages. github-cli is NOT installed here: gh ships as a
 # composable devcontainer Feature (images/sandbox-features/gh) layered onto this
@@ -108,6 +162,13 @@ RUN chmod 0755 \
 # the RequireMCPBinary smoke check both target this path.
 COPY --from=mcp-builder /out/aileron-mcp /usr/local/bin/aileron-mcp
 RUN chmod 0755 /usr/local/bin/aileron-mcp
+
+# Baked aileron CLI from the cli-builder stage. Root-owned, world-executable
+# (matches aileron-mcp and the proxy-CA helpers). The ADR-0027 image-boot
+# re-entry contract requires `aileron` on PATH here so the sealed runtime can
+# re-enter the CLI without a host binary.
+COPY --from=cli-builder /out/aileron /usr/local/bin/aileron
+RUN chmod 0755 /usr/local/bin/aileron
 
 WORKDIR /home/agent/workspace
 USER agent
