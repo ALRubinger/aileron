@@ -116,6 +116,138 @@ func TestContainerImageRunner_BootsExactImageWithMounts(t *testing.T) {
 	}
 }
 
+// indexOf returns the position of want in args, or -1 if absent. It is a small
+// helper for asserting the ordered emission of --input flags on the re-entry.
+func indexOf(args []string, want string) int {
+	for i, a := range args {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestContainerImageRunner_ReEmitsInputOverrides is the #1802 regression proof:
+// launch input overrides carried in ImageRunSpec.Inputs must be re-emitted as
+// --input name=value on the in-container re-entry, in sorted-key order, so the
+// inner binary applies them rather than silently resolving defaults. Before the
+// fix the command carried no --input flags and this asserts they are present,
+// value-exact, and deterministically ordered.
+func TestContainerImageRunner_ReEmitsInputOverrides(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+		Inputs: runtime.LaunchArgs{
+			"window_days": "30",
+			"format":      "csv",
+			"account":     "acme",
+		},
+	}
+	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Every override is re-emitted as an adjacent --input name=value pair.
+	joined := strings.Join(got.Command, " ")
+	for _, want := range []string{
+		"--input account=acme",
+		"--input format=csv",
+		"--input window_days=30",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("command %v must carry %q", got.Command, want)
+		}
+	}
+
+	// The emission is deterministically ordered by sorted key: account < format <
+	// window_days, so the value flags appear in that relative order.
+	iAccount := indexOf(got.Command, "account=acme")
+	iFormat := indexOf(got.Command, "format=csv")
+	iWindow := indexOf(got.Command, "window_days=30")
+	if iAccount == -1 || iFormat == -1 || iWindow == -1 {
+		t.Fatalf("all overrides must be present in the command: %v", got.Command)
+	}
+	if !(iAccount < iFormat && iFormat < iWindow) {
+		t.Errorf("overrides must be emitted in sorted-key order, got command %v", got.Command)
+	}
+}
+
+// TestContainerImageRunner_NoOverridesLeavesCommandUnchanged proves a launch with
+// no input overrides emits no --input flags, so the boot command is unchanged for
+// the common no-override case (#1802).
+func TestContainerImageRunner_NoOverridesLeavesCommandUnchanged(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+
+	spec := runtime.ImageRunSpec{
+		Image:   "registry.example.com/runner:1.4@sha256:abc",
+		Name:    "weekly-metrics-digest",
+		Version: "1.0.0",
+	}
+	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, a := range got.Command {
+		if a == "--input" {
+			t.Errorf("a no-override launch must emit no --input flags, got %v", got.Command)
+		}
+	}
+	if strings.Join(got.Command, " ") != "aileron skill launch weekly-metrics-digest --store-dir /aileron/skills --version 1.0.0" {
+		t.Errorf("no-override command = %v, want the base re-entry unchanged", got.Command)
+	}
+}
+
+// TestContainerImageRunner_NonStringOverrideRefusesBoot proves a non-string value
+// in the map[string]any seam type has no exact name=value round-trip, so the
+// runner refuses the boot with an explicit error rather than coercing or dropping
+// it (#1802's never-silently-drop requirement). The boot must not fire.
+func TestContainerImageRunner_NonStringOverrideRefusesBoot(t *testing.T) {
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+
+	booted := false
+	orig := containerRunFlightPlan
+	stubBakedCLIVersion(t, "")
+	containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+		booted = true
+		return sandboxcontainer.RunResult{}, nil
+	}
+	t.Cleanup(func() { containerRunFlightPlan = orig })
+
+	spec := runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+		Inputs: runtime.LaunchArgs{
+			"window_days": 7, // non-string: no exact CLI round-trip
+		},
+	}
+	_, err := (containerImageRunner{}).Run(context.Background(), spec)
+	if err == nil {
+		t.Fatal("a non-string override must refuse the boot with an error")
+	}
+	if !strings.Contains(err.Error(), "window_days") {
+		t.Errorf("error must name the offending input, got %v", err)
+	}
+	if booted {
+		t.Error("the image must NOT boot when an override cannot be passed exactly")
+	}
+}
+
 // fakeImageDaemonEnv is a canned imageDaemonEnv for the runner tests: it returns
 // the recorded env map and ok flag so the runner's RunOptions.Env wiring is
 // asserted with no live daemon and no Docker.

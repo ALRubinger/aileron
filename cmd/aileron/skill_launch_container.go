@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -157,6 +158,30 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	}
 	if spec.OutDir != "" {
 		command = append(command, "--out-dir", outDirMount)
+	}
+	// Re-emit the launch input overrides as --input name=value on the in-container
+	// re-entry (#1802). Without this the inner binary sees no overrides and every
+	// input silently resolves to its default, while the runner still echoes
+	// spec.Inputs as ResolvedInputs — falsely telling the operator the overrides
+	// applied. CLI-path values arrive as strings via inputFlag.Set, and the inner
+	// re-entry parses them with the same inputFlag, so the string round-trip is
+	// exact. Keys are appended in sorted order so the emitted command is
+	// deterministic. A non-string value in the map[string]any seam type has no
+	// exact name=value round-trip, so refuse the boot with an explicit error
+	// rather than coerce or drop it (the issue's never-silently-drop requirement).
+	if len(spec.Inputs) > 0 {
+		keys := make([]string, 0, len(spec.Inputs))
+		for k := range spec.Inputs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			s, ok := spec.Inputs[k].(string)
+			if !ok {
+				return runtime.ImageRunResult{}, fmt.Errorf("skill launch: image-boot re-entry cannot pass non-string override for input %q (got %T): refusing to boot rather than drop or coerce it", k, spec.Inputs[k])
+			}
+			command = append(command, "--input", k+"="+s)
+		}
 	}
 
 	opts := sandboxcontainer.RunOptions{
