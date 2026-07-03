@@ -77,13 +77,13 @@ func TestPrepareSandboxProxyBootstrap_RejectsInvalidAgentEndpointURL(t *testing.
 	}
 }
 
-func TestPrepareToolContainerProxy_WritesCARewritesURLAndMountsRO(t *testing.T) {
+func TestPrepareContainerProxy_WritesCARewritesURLAndMountsRO(t *testing.T) {
 	stateDir := t.TempDir()
 	// A loopback daemon root (no /v1) must be rewritten to host.docker.internal
 	// and carry the sessionID:token userinfo the CONNECT handshake needs.
-	got, err := PrepareToolContainerProxy(stateDir, "session-abc", "http://127.0.0.1:48123", "docker", "daemon-token")
+	got, err := PrepareContainerProxy(stateDir, "session-abc", "http://127.0.0.1:48123", "docker", "daemon-token")
 	if err != nil {
-		t.Fatalf("PrepareToolContainerProxy: %v", err)
+		t.Fatalf("PrepareContainerProxy: %v", err)
 	}
 	if got.ProxyURL != "http://session-abc:daemon-token@host.docker.internal:48123" {
 		t.Fatalf("ProxyURL = %q, want loopback rewritten + authed", got.ProxyURL)
@@ -121,49 +121,49 @@ func TestPrepareToolContainerProxy_WritesCARewritesURLAndMountsRO(t *testing.T) 
 	}
 }
 
-func TestPrepareToolContainerProxy_NoTokenOmitsPassword(t *testing.T) {
-	got, err := PrepareToolContainerProxy(t.TempDir(), "session-abc", "http://localhost:9999", "docker", "")
+func TestPrepareContainerProxy_NoTokenOmitsPassword(t *testing.T) {
+	got, err := PrepareContainerProxy(t.TempDir(), "session-abc", "http://localhost:9999", "docker", "")
 	if err != nil {
-		t.Fatalf("PrepareToolContainerProxy: %v", err)
+		t.Fatalf("PrepareContainerProxy: %v", err)
 	}
 	if got.ProxyURL != "http://session-abc@host.docker.internal:9999" {
 		t.Fatalf("ProxyURL = %q, want session userinfo with no password", got.ProxyURL)
 	}
 }
 
-func TestPrepareToolContainerProxy_RejectsBadInput(t *testing.T) {
-	if _, err := PrepareToolContainerProxy(t.TempDir(), "", "http://127.0.0.1:1", "docker", ""); err == nil {
+func TestPrepareContainerProxy_RejectsBadInput(t *testing.T) {
+	if _, err := PrepareContainerProxy(t.TempDir(), "", "http://127.0.0.1:1", "docker", ""); err == nil {
 		t.Fatal("expected empty session id error")
 	}
-	if _, err := PrepareToolContainerProxy(t.TempDir(), "../escape", "http://127.0.0.1:1", "docker", ""); err == nil {
+	if _, err := PrepareContainerProxy(t.TempDir(), "../escape", "http://127.0.0.1:1", "docker", ""); err == nil {
 		t.Fatal("expected unsafe session id error")
 	}
-	if _, err := PrepareToolContainerProxy(t.TempDir(), "session-abc", "", "docker", ""); err == nil {
+	if _, err := PrepareContainerProxy(t.TempDir(), "session-abc", "", "docker", ""); err == nil {
 		t.Fatal("expected empty daemon root error")
 	}
-	if _, err := PrepareToolContainerProxy(t.TempDir(), "session-abc", "http://", "docker", ""); err == nil {
+	if _, err := PrepareContainerProxy(t.TempDir(), "session-abc", "http://", "docker", ""); err == nil {
 		t.Fatal("expected invalid daemon root error")
 	}
 }
 
-func TestCleanupToolContainerProxy_RemovesSessionDirAndGuardsID(t *testing.T) {
+func TestCleanupContainerProxy_RemovesSessionDirAndGuardsID(t *testing.T) {
 	stateDir := t.TempDir()
-	if _, err := PrepareToolContainerProxy(stateDir, "session-abc", "http://127.0.0.1:1", "docker", "t"); err != nil {
-		t.Fatalf("PrepareToolContainerProxy: %v", err)
+	if _, err := PrepareContainerProxy(stateDir, "session-abc", "http://127.0.0.1:1", "docker", "t"); err != nil {
+		t.Fatalf("PrepareContainerProxy: %v", err)
 	}
 	dir := filepath.Join(stateDir, "sessions", "session-abc", "sandbox-proxy")
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("session dir must exist before cleanup: %v", err)
 	}
-	if err := CleanupToolContainerProxy(stateDir, "session-abc"); err != nil {
-		t.Fatalf("CleanupToolContainerProxy: %v", err)
+	if err := CleanupContainerProxy(stateDir, "session-abc"); err != nil {
+		t.Fatalf("CleanupContainerProxy: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("session dir must be removed after cleanup, stat err = %v", err)
 	}
 	// An unsafe session id is rejected before any RemoveAll so the guard can
 	// never direct the delete outside the sessions tree.
-	if err := CleanupToolContainerProxy(stateDir, "../escape"); err == nil {
+	if err := CleanupContainerProxy(stateDir, "../escape"); err == nil {
 		t.Fatal("expected unsafe session id rejection")
 	}
 }

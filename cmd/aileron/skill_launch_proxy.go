@@ -1,42 +1,48 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-// toolProxyBootstrapper is the seam the rung-3 tool-container dispatch uses to
-// route a step's HTTPS egress through the ADR-0019 daemon forward proxy so a
-// matched host binding injects the operator's vault-bound credential at the
-// boundary (#1769). It is injected onto containerToolImageRunner rather than
-// read from ambient config: a zero-value runner has proxy == nil and stays
+// planProxyBootstrapper is the seam the whole-plan image boot uses to route the
+// booted plan container's HTTPS egress through the ADR-0019 daemon forward proxy
+// so a matched host binding injects the operator's vault-bound credential at the
+// boundary (#1828). It is injected onto containerImageRunner rather than read
+// from ambient config: a zero-value runner has proxy == nil and stays
 // passthrough, which keeps the CLI unit tests deterministic irrespective of any
 // live ~/.aileron daemon on the dev/CI box. Production wires the daemon-backed
-// bootstrapper via newLaunchToolImageRunner.
-type toolProxyBootstrapper interface {
-	// Prepare provisions a fresh session CA + authed proxy URL for one tool
-	// dispatch and returns the env/CA enrichment, a cleanup func to remove the
+// bootstrapper via newLaunchImageRunner.
+type planProxyBootstrapper interface {
+	// Prepare provisions a fresh session CA + authed proxy URL for one whole-plan
+	// boot and returns the env/CA enrichment, a cleanup func to remove the
 	// session CA after the run, and ok=false when daemon config is absent
-	// (passthrough). A non-nil error means daemon config resolved but the CA
-	// could not be written; the dispatch must fail closed rather than egress
-	// un-proxied.
-	Prepare(runtimeName, stepID string) (toolProxyBootstrap, func(), bool, error)
+	// (passthrough). A non-nil error means daemon config resolved but the boot
+	// could not be provisioned (CA write failed, or the image's declared
+	// credential conventions were malformed); the boot must fail closed rather
+	// than egress un-proxied. On the error path the returned cleanup is still
+	// runnable so a partial session CA never leaks.
+	Prepare(ctx context.Context, runtimeName, image, planName string) (planProxyBootstrap, func(), bool, error)
 }
 
-// toolProxyBootstrap carries the enrichment applied to a tool dispatch's
+// planProxyBootstrap carries the enrichment applied to a whole-plan boot's
 // RunOptions: the environment variables that point the container's HTTPS client
 // at the proxy and trust the mounted CA, plus the read-only CA bind mount.
-type toolProxyBootstrap struct {
+type planProxyBootstrap struct {
 	// Env is merged onto RunOptions.Env: the CA-bundle vars pointing at the
-	// mounted CA, HTTPS_PROXY/https_proxy carrying the authed proxy URL, and the
-	// placeholder AWS creds that make botocore pre-sign so the proxy can re-sign.
+	// mounted CA, HTTPS_PROXY/https_proxy carrying the authed proxy URL,
+	// NO_PROXY/no_proxy so loopback/daemon traffic bypasses the proxy, and the
+	// catalog-derived placeholder creds that make each declared tool pre-sign so
+	// the proxy can re-sign or swap at the boundary.
 	Env map[string]string
-	// Mount is the read-only CA bind mount appended to the run's volumes.
+	// Mount is the read-only CA bind mount appended to the boot's volumes.
 	Mount sandboxcontainer.Volume
 }
 
@@ -55,73 +61,104 @@ var caBundleEnvVars = []string{
 	"CURL_CA_BUNDLE",
 }
 
-// Placeholder AWS credentials seeded into the tool container so botocore
-// pre-signs the request locally; the daemon proxy Header.Del's the client
-// signature and re-signs with the vault secret at the boundary. These are
-// non-secret constants, harmless when unused by a non-AWS tool: they carry no
-// entitlement and never reach an AWS endpoint (the proxy discards the
-// placeholder-derived signature). They exist only so a request leaves the
-// container in a shape the proxy can re-sign.
-const (
-	placeholderAWSAccessKeyID = "AKIAIOSFODNN7PLACEHLDR"
-	placeholderAWSSecretKey   = "placeholderAileronInjectsRealSecretXXXXXX"
-)
+// bootNoProxyHosts are the hosts the booted plan container must reach WITHOUT
+// routing through the egress proxy. Unlike a per-step tool container, the booted
+// plan container calls the host daemon (AILERON_API_URL at host.docker.internal,
+// #1759) for every action + audit POST; loopback and the daemon host must never
+// CONNECT through the forward proxy. This is a deliberate delta from the removed
+// per-dispatch env set, which carried no NO_PROXY.
+const bootNoProxyHosts = "localhost,127.0.0.1,::1,host.docker.internal"
 
-// daemonToolProxyBootstrapper is the production toolProxyBootstrapper. It
+// containerImageMetadataLabel reads the devcontainer.metadata OCI label of the
+// pinned image (empty when unlabeled or uninspectable). It is a package variable
+// so the CLI tests swap it for a fake and never shell out to
+// `docker image inspect`, mirroring the containerBakedCLIVersion seam. The
+// label carries the declared tools' merged customizations.aileron.credential
+// blocks, from which the boot derives the placeholder env union.
+var containerImageMetadataLabel = func(ctx context.Context, runtimeName, image string) string {
+	return sandboxcontainer.ImageMetadataLabel(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
+}
+
+// daemonPlanProxyBootstrapper is the production planProxyBootstrapper. It
 // resolves the daemon base URL, auth token, and state dir WITHOUT triggering a
 // daemon spawn (it reads env/discovery only), so a launch with no running
 // daemon stays passthrough rather than forcing a daemon boot. When config
-// resolves it provisions the session CA via launch.PrepareToolContainerProxy
-// and assembles the env map.
+// resolves it provisions the session CA via launch.PrepareContainerProxy, reads
+// the booted image's declared credential conventions from its
+// devcontainer.metadata label, and assembles the env map.
 //
 // Activation gates on daemon-config PRESENCE (token + base URL from
 // AILERON_TOKEN/AILERON_API_URL or ~/.aileron discovery), not on daemon
 // LIVENESS: a stale ~/.aileron discovery entry (token present) with no daemon
-// actually listening still enriches HTTPS_PROXY/CA and routes every rung-3 tool
-// step through a non-existent proxy, failing with CONNECT connection-refused — a
-// regression versus direct-egress passthrough. Config-presence gating is
+// actually listening still enriches HTTPS_PROXY/CA and routes the booted plan's
+// egress through a non-existent proxy, failing with CONNECT connection-refused —
+// a regression versus direct-egress passthrough. Config-presence gating is
 // accepted; liveness-probing / fail-open is deferred to a follow-up. See
-// ADR-0019, "Rung-3 tool-container egress reuses the data plane".
-type daemonToolProxyBootstrapper struct{}
+// ADR-0019.
+type daemonPlanProxyBootstrapper struct{}
 
-func (daemonToolProxyBootstrapper) Prepare(runtimeName, stepID string) (toolProxyBootstrap, func(), bool, error) {
+func (daemonPlanProxyBootstrapper) Prepare(ctx context.Context, runtimeName, image, planName string) (planProxyBootstrap, func(), bool, error) {
 	stateDir, err := defaultStateDir()
 	if err != nil {
-		return toolProxyBootstrap{}, nil, false, nil
+		return planProxyBootstrap{}, nil, false, nil
 	}
 	root, ok := resolveDaemonRootURL(stateDir)
 	if !ok {
-		return toolProxyBootstrap{}, nil, false, nil
+		return planProxyBootstrap{}, nil, false, nil
 	}
 	token, ok := resolveDaemonProxyToken(stateDir)
 	if !ok {
-		return toolProxyBootstrap{}, nil, false, nil
+		return planProxyBootstrap{}, nil, false, nil
 	}
 
-	// Mint a UNIQUE session id per dispatch so no two dispatches (and no agent
-	// launch) share a session CA directory. The cleanup closure is defined
-	// against that id up front and returned on BOTH the success and the
-	// error path, so a PrepareToolContainerProxy that fails after writing a
-	// partial CA dir never leaks daemon-side state: the caller runs cleanup.
-	sessionID := "flightplan-tool-" + sanitizeSessionSegment(stepID) + "-" + randomSuffix()
-	cleanup := func() { _ = launch.CleanupToolContainerProxy(stateDir, sessionID) }
+	// Mint a UNIQUE session id per boot so no two boots (and no agent launch)
+	// share a session CA directory. The cleanup closure is defined against that
+	// id up front and returned on BOTH the success and the error path, so a
+	// PrepareContainerProxy that fails after writing a partial CA dir, or a
+	// malformed-metadata refusal after the CA is written, never leaks daemon-side
+	// state: the caller runs cleanup.
+	sessionID := "flightplan-boot-" + sanitizeSessionSegment(planName) + "-" + randomSuffix()
+	cleanup := func() { _ = launch.CleanupContainerProxy(stateDir, sessionID) }
 
-	prepared, err := launch.PrepareToolContainerProxy(stateDir, sessionID, root, runtimeName, token)
+	prepared, err := launch.PrepareContainerProxy(stateDir, sessionID, root, runtimeName, token)
 	if err != nil {
-		return toolProxyBootstrap{}, cleanup, false, fmt.Errorf("skill launch: provision tool container proxy: %w", err)
+		return planProxyBootstrap{}, cleanup, false, fmt.Errorf("skill launch: provision plan container proxy: %w", err)
 	}
 
-	env := map[string]string{
-		"HTTPS_PROXY":           prepared.ProxyURL,
-		"https_proxy":           prepared.ProxyURL,
-		"AWS_ACCESS_KEY_ID":     placeholderAWSAccessKeyID,
-		"AWS_SECRET_ACCESS_KEY": placeholderAWSSecretKey,
+	// Read the declared tools' credential conventions off the exact signed pin
+	// being booted (its devcontainer.metadata label) and derive the placeholder
+	// env union. An unlabeled/uninspectable image reads as "" and contributes an
+	// empty union (fail-soft, matching ImageMetadataLabel's posture); a present
+	// but malformed convention is a loud error that refuses the boot (a
+	// present-but-broken convention must not silently ship nothing — #1825).
+	convs, err := composition.ConventionsFromMetadata([]byte(containerImageMetadataLabel(ctx, runtimeName, image)))
+	if err != nil {
+		return planProxyBootstrap{}, cleanup, false, fmt.Errorf("skill launch: read image credential conventions: %w", err)
 	}
+	placeholders, err := composition.PlaceholderEnv(convs)
+	if err != nil {
+		return planProxyBootstrap{}, cleanup, false, fmt.Errorf("skill launch: assemble placeholder env: %w", err)
+	}
+
+	// Seed the catalog-derived placeholders FIRST, then let the reserved
+	// proxy/CA keys overwrite them, so an image-declared placeholder can never
+	// clobber the authoritative HTTPS_PROXY/NO_PROXY/CA-bundle settings and
+	// weaken the fail-closed egress mediation. A placeholder that (mis)declares a
+	// reserved env is silently overridden by the reserved value below rather than
+	// winning.
+	env := map[string]string{}
+	for k, v := range placeholders {
+		env[k] = v
+	}
+	env["HTTPS_PROXY"] = prepared.ProxyURL
+	env["https_proxy"] = prepared.ProxyURL
+	env["NO_PROXY"] = bootNoProxyHosts
+	env["no_proxy"] = bootNoProxyHosts
 	for _, v := range caBundleEnvVars {
 		env[v] = prepared.CAContainerPath
 	}
 
-	return toolProxyBootstrap{Env: env, Mount: prepared.CAMount}, cleanup, true, nil
+	return planProxyBootstrap{Env: env, Mount: prepared.CAMount}, cleanup, true, nil
 }
 
 // imageDaemonEnv is the seam the Flight Plan image-boot path (#1759) uses to
@@ -151,7 +188,7 @@ type imageDaemonEnv interface {
 // actually listening still injects env, and the inner launch's audit POST fails
 // with connection-refused — a regression versus the ephemeral in-container
 // daemon. Config-presence gating is accepted; liveness-probing / fail-open is
-// deferred to a follow-up, mirroring daemonToolProxyBootstrapper.
+// deferred to a follow-up, mirroring daemonPlanProxyBootstrapper.
 type daemonImageEnv struct{}
 
 func (daemonImageEnv) Env(runtimeName string) (map[string]string, bool) {
@@ -177,8 +214,8 @@ func (daemonImageEnv) Env(runtimeName string) (map[string]string, bool) {
 // container: the daemon root (no /v1) is loopback-rewritten to
 // host.docker.internal so the in-container process reaches the host-bound
 // daemon, then the /v1 API prefix is appended. The inner launch's
-// bindingAPIBaseURL uses this value directly as `base + "/actions/..."` and
-// `base + "/audit"`, so the injected value MUST carry the /v1 suffix (the host
+// bindingAPIBaseURL uses this value directly as base + "/actions/..." and
+// base + "/audit", so the injected value MUST carry the /v1 suffix (the host
 // rewrite is applied to the host portion only and preserves the path). This is
 // the container-facing analogue of internal/launch's daemonAPIBaseURL over
 // ContainerURLForRuntime.
@@ -204,8 +241,7 @@ func resolveDaemonRootURL(stateDir string) (string, bool) {
 // resolveDaemonProxyToken resolves the daemon auth token from AILERON_TOKEN or
 // discovery, without spawning a daemon. It returns ok=false when neither source
 // yields a token: the CONNECT handshake authenticates password=daemonToken, so
-// a missing token means the proxy would 407 and the dispatch must stay
-// passthrough.
+// a missing token means the proxy would 407 and the boot must stay passthrough.
 //
 // The token resolved here is the FULL daemon token, and daemonImageEnv.Env
 // injects it verbatim as AILERON_TOKEN into the booted container. This differs
@@ -235,13 +271,13 @@ func stripV1Suffix(raw string) string {
 	return strings.TrimSuffix(trimmed, "/v1")
 }
 
-// sanitizeSessionSegment reduces a step id to a safe path segment for the
-// session directory name so an odd step id can never escape the sessions tree
-// (the launch primitive also guards this). It keeps alphanumerics, '-' and '_'
-// and replaces everything else with '-', defaulting to "step" when empty.
-func sanitizeSessionSegment(stepID string) string {
+// sanitizeSessionSegment reduces an id to a safe path segment for the session
+// directory name so an odd plan name can never escape the sessions tree (the
+// launch primitive also guards this). It keeps alphanumerics, '-' and '_' and
+// replaces everything else with '-', defaulting to "plan" when empty.
+func sanitizeSessionSegment(id string) string {
 	var b strings.Builder
-	for _, r := range stepID {
+	for _, r := range id {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 			b.WriteRune(r)
@@ -250,7 +286,7 @@ func sanitizeSessionSegment(stepID string) string {
 		}
 	}
 	if b.Len() == 0 {
-		return "step"
+		return "plan"
 	}
 	return b.String()
 }

@@ -183,56 +183,60 @@ func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonT
 	}, nil
 }
 
-// ToolContainerProxy is the result of provisioning a session CA + authed proxy
-// URL for a rung-3 tool container dispatch (#1769). Unlike the agent bootstrap
-// (which drives aileron-run-with-proxy-ca via AILERON_SANDBOX_PROXY_* env), the
-// tool-container path trusts the mounted CA purely through the standard
-// CA-bundle env vars the caller assembles from these fields; no agent preflight
-// runs. The three fields carry everything the dispatch needs: the authed proxy
-// URL to set on HTTPS_PROXY, the read-only CA Volume to append to the run's
-// mounts, and the in-container path the mounted CA lands at.
-type ToolContainerProxy struct {
+// ContainerProxy is the result of provisioning a session CA + authed proxy
+// URL for a container boot that routes its HTTPS egress through the ADR-0019
+// daemon forward proxy (#1769). The sole caller after #1828 is the whole-plan
+// image boot, which enriches the booted plan container with these fields;
+// #1829's step-scoped credentials will reuse the same primitive. Unlike the
+// agent bootstrap (which drives aileron-run-with-proxy-ca via
+// AILERON_SANDBOX_PROXY_* env), this path trusts the mounted CA purely through
+// the standard CA-bundle env vars the caller assembles from these fields; no
+// agent preflight runs. The three fields carry everything the boot needs: the
+// authed proxy URL to set on HTTPS_PROXY, the read-only CA Volume to append to
+// the run's mounts, and the in-container path the mounted CA lands at.
+type ContainerProxy struct {
 	// ProxyURL is the daemon forward-proxy root, loopback-rewritten to
 	// host.docker.internal, carrying the sessionID:token userinfo the CONNECT
 	// handshake authenticates against.
 	ProxyURL string
 	// CAMount is the read-only bind mount placing the freshly generated session
-	// CA at CAContainerPath inside the tool container.
+	// CA at CAContainerPath inside the booted container.
 	CAMount sandboxcontainer.Volume
 	// CAContainerPath is the in-container path the CA is mounted at; the caller
 	// points the CA-bundle env vars at it.
 	CAContainerPath string
 }
 
-// PrepareToolContainerProxy provisions a fresh session CA for a rung-3 tool
-// container and returns the authed proxy URL, the read-only CA mount, and the
-// in-container CA path. It reuses the exact on-disk CA layout the daemon reader
-// expects (<stateDir>/sessions/<sessionID>/sandbox-proxy/{ca.pem,ca.key}) and
-// the same session-authed proxy-URL shape as the agent path, so the daemon
-// MITM machinery accepts the CONNECT and signs per-host leaves from this CA.
+// PrepareContainerProxy provisions a fresh session CA for a container boot and
+// returns the authed proxy URL, the read-only CA mount, and the in-container CA
+// path. It reuses the exact on-disk CA layout the daemon reader expects
+// (<stateDir>/sessions/<sessionID>/sandbox-proxy/{ca.pem,ca.key}) and the same
+// session-authed proxy-URL shape as the agent path, so the daemon MITM
+// machinery accepts the CONNECT and signs per-host leaves from this CA. The
+// whole-plan image boot (#1828) is the caller.
 //
 // daemonRootURL is the daemon base WITHOUT the /v1 suffix; it is
 // loopback-rewritten to host.docker.internal via ContainerURLForRuntime so a
 // process inside the container reaches the host-bound daemon. The agent
 // bootstrap (prepareSandboxProxyBootstrap / applySandboxProxyBootstrapEnv) is
-// deliberately left untouched: this is a dedicated seam for the tool-container
-// dispatch that never runs the sandbox-base preflight.
+// deliberately left untouched: this is a dedicated seam for the plan/tool
+// container path that never runs the sandbox-base preflight.
 //
-// The sessionID MUST be UNIQUE per dispatch. This is a per-dispatch primitive:
-// it regenerates the session CA and CleanupToolContainerProxy removes the whole
+// The sessionID MUST be UNIQUE per boot. This is a per-boot primitive: it
+// regenerates the session CA and CleanupContainerProxy removes the whole
 // session directory, so two callers sharing a session id would clobber each
-// other's CA. The production caller mints a fresh id per dispatch, disjoint from
+// other's CA. The production caller mints a fresh id per boot, disjoint from
 // the agent path's session ids, so no sharing occurs.
-func PrepareToolContainerProxy(stateDir, sessionID, daemonRootURL, runtimeName, daemonToken string) (ToolContainerProxy, error) {
+func PrepareContainerProxy(stateDir, sessionID, daemonRootURL, runtimeName, daemonToken string) (ContainerProxy, error) {
 	if strings.TrimSpace(sessionID) == "" {
-		return ToolContainerProxy{}, fmt.Errorf("session id is required")
+		return ContainerProxy{}, fmt.Errorf("session id is required")
 	}
 	if err := validateProxyBootstrapSessionID(sessionID); err != nil {
-		return ToolContainerProxy{}, err
+		return ContainerProxy{}, err
 	}
 	root := strings.TrimSpace(daemonRootURL)
 	if root == "" {
-		return ToolContainerProxy{}, fmt.Errorf("daemon root URL is required")
+		return ContainerProxy{}, fmt.Errorf("daemon root URL is required")
 	}
 	// Rewrite loopback -> host.docker.internal so the in-container client reaches
 	// the host daemon, then attach the session:token userinfo the CONNECT
@@ -240,15 +244,15 @@ func PrepareToolContainerProxy(stateDir, sessionID, daemonRootURL, runtimeName, 
 	containerURL := ContainerURLForRuntime(strings.TrimRight(root, "/"), runtimeName)
 	proxyURL, err := sandboxProxyURLWithSessionAuth(containerURL, sessionID, daemonToken)
 	if err != nil {
-		return ToolContainerProxy{}, err
+		return ContainerProxy{}, err
 	}
 	caDir := filepath.Join(stateDir, "sessions", sessionID, "sandbox-proxy")
 	caPath := filepath.Join(caDir, "ca.pem")
 	keyPath := filepath.Join(caDir, "ca.key")
 	if err := writeSessionCA(caPath, keyPath, sessionID); err != nil {
-		return ToolContainerProxy{}, err
+		return ContainerProxy{}, err
 	}
-	return ToolContainerProxy{
+	return ContainerProxy{
 		ProxyURL: proxyURL,
 		CAMount: sandboxcontainer.Volume{
 			Source:   caPath,
@@ -259,11 +263,11 @@ func PrepareToolContainerProxy(stateDir, sessionID, daemonRootURL, runtimeName, 
 	}, nil
 }
 
-// CleanupToolContainerProxy removes the per-dispatch session CA directory
-// written by PrepareToolContainerProxy. It applies the same
+// CleanupContainerProxy removes the per-boot session CA directory
+// written by PrepareContainerProxy. It applies the same
 // validateProxyBootstrapSessionID guard so a malformed session id can never
 // direct the RemoveAll outside the sessions tree.
-func CleanupToolContainerProxy(stateDir, sessionID string) error {
+func CleanupContainerProxy(stateDir, sessionID string) error {
 	if err := validateProxyBootstrapSessionID(sessionID); err != nil {
 		return err
 	}

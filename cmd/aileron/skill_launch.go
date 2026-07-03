@@ -31,11 +31,14 @@ var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink { return daemo
 // image string and never touches Docker, mirroring the other launch seams.
 // The production runner injects the daemon-backed env resolver so the
 // re-entered in-container launch reaches the SAME host daemon action + audit
-// boundary and its records surface in the host `aileron audit list` (#1759).
-// The resolver stays passthrough (injects no env) when no daemon config is
-// resolvable, gating on config presence, so a no-daemon launch still boots.
+// boundary and its records surface in the host `aileron audit list` (#1759),
+// and the daemon-backed plan proxy bootstrapper so the booted plan container's
+// HTTPS egress routes through the ADR-0019 daemon forward proxy for host-binding
+// credential injection (#1828). Both seams stay passthrough (inject nothing)
+// when no daemon config is resolvable, gating on config presence, so a no-daemon
+// launch still boots.
 var newLaunchImageRunner = func() runtime.ImageRunner {
-	return containerImageRunner{daemonEnv: daemonImageEnv{}}
+	return containerImageRunner{daemonEnv: daemonImageEnv{}, proxy: daemonPlanProxyBootstrapper{}}
 }
 
 // newLaunchToolImageRunner returns the production tool-image runner that
@@ -43,12 +46,13 @@ var newLaunchImageRunner = func() runtime.ImageRunner {
 // collect I/O (#1733). It is a package-level seam so CLI tests swap in a fake
 // that records the pinned image and mount/collect wiring and never touches
 // Docker, mirroring newLaunchImageRunner.
-// The production runner injects the daemon-backed proxy bootstrapper so a
-// rung-3 tool step's HTTPS egress is routed through the ADR-0019 daemon forward
-// proxy for host-binding credential injection (#1769). The bootstrapper stays
-// passthrough when no daemon config is resolvable.
+// Per-dispatch egress is UN-PROXIED in the interim window (#1828/#1829): the
+// boot-time credential injection moved to the whole-plan boot
+// (newLaunchImageRunner wires daemonPlanProxyBootstrapper). A rung-3 tool step
+// therefore egresses passthrough until #1829 retargets per-step proxy scoping
+// onto this dispatch.
 var newLaunchToolImageRunner = func() runtime.ToolImageRunner {
-	return containerToolImageRunner{proxy: daemonToolProxyBootstrapper{}}
+	return containerToolImageRunner{}
 }
 
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
