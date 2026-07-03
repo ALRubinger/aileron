@@ -24,6 +24,8 @@ Every surface shares one Launch contract. The per-surface dimensions specialize 
 
 Every Launch binds a frozen Flight Plan version. The version is the content hash plus the semver label from the manifest `lock` section ([Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) freeze and lock section). A surface invokes the deterministic Launch runtime against a digest-pinned, signed version. A surface never invokes an unfrozen skill.
 
+Booting a pinned rung-1 or rung-2 image runs the aileron binary baked into that image against the host CLI that started the Launch ([ADR-0027](/adr/0027-flight-plan-sealed-installable-skill)). The launcher reads the image's `ai.aileron.cli.version` label and compares it to the host CLI version. A mismatch prints a stderr warning naming both versions. The Launch never fails on version skew. An image that carries no such label boots silently, because a custom image's contract is the operator's responsibility under ADR-0027.
+
 Every Launch resolves its declared inputs once, at the launch boundary ([#1523](https://github.com/ALRubinger/aileron/issues/1523)). A surface passes literal-input overrides into that single resolution step. A surface never resolves inputs itself and never resolves them more than once.
 
 Every Launch carries an idempotency key. The key identifies one Launch attempt so a retried submission from the same surface does not double-run a Flight. The key is supplied by the surface and recorded with the run.

@@ -652,18 +652,19 @@ func (b Builder) imageExists(ctx context.Context, runner Runner, runtimeName, im
 // keep this string in sync with that file (the Containerfile cannot import it).
 const MCPVersionLabel = "ai.aileron.mcp.version"
 
-// BakedMCPVersion reports the aileron-mcp version baked into image, read from
-// the MCPVersionLabel OCI label via `<runtime> image inspect`. It returns the
-// trimmed label value, or "" when the image is unlabeled, not present locally,
-// or the inspect fails. Callers treat "" as "not baked" and fall back to the
-// host-mount path, so an inspect error is deliberately not propagated as fatal:
-// "cannot determine" degrades to "host-mount", never a broken launch.
-func BakedMCPVersion(ctx context.Context, runner Runner, runtimeName, image string) string {
+// imageLabel reports the trimmed value of a single OCI label on image, read via
+// `<runtime> image inspect --format`. It returns "" when the image carries no
+// such label, is not present locally, or the inspect fails, and it maps the Go
+// template "<no value>" sentinel (rendered for a missing key) to "". A nil
+// runner defaults to the production execRunner. This is the shared fail-soft
+// inspect plumbing behind BakedMCPVersion, ImageMetadataLabel, and
+// BakedCLIVersion: "cannot determine" always degrades to "", never a fatal.
+func imageLabel(ctx context.Context, runner Runner, runtimeName, image, label string) string {
 	if runner == nil {
 		runner = execRunner{}
 	}
 	var stdout bytes.Buffer
-	format := "{{ index .Config.Labels \"" + MCPVersionLabel + "\" }}"
+	format := "{{ index .Config.Labels \"" + label + "\" }}"
 	args := []string{"image", "inspect", "--format", format, image}
 	if err := runner.Run(ctx, runtimeName, args, &stdout, io.Discard); err != nil {
 		return ""
@@ -671,11 +672,41 @@ func BakedMCPVersion(ctx context.Context, runner Runner, runtimeName, image stri
 	out := strings.TrimSpace(stdout.String())
 	// An image with no labels at all renders the missing key as the Go
 	// template "<no value>" sentinel rather than an empty string; treat it
-	// as "not baked".
+	// as absent.
 	if out == "<no value>" {
 		return ""
 	}
 	return out
+}
+
+// BakedMCPVersion reports the aileron-mcp version baked into image, read from
+// the MCPVersionLabel OCI label via `<runtime> image inspect`. It returns the
+// trimmed label value, or "" when the image is unlabeled, not present locally,
+// or the inspect fails. Callers treat "" as "not baked" and fall back to the
+// host-mount path, so an inspect error is deliberately not propagated as fatal:
+// "cannot determine" degrades to "host-mount", never a broken launch.
+func BakedMCPVersion(ctx context.Context, runner Runner, runtimeName, image string) string {
+	return imageLabel(ctx, runner, runtimeName, image, MCPVersionLabel)
+}
+
+// CLIVersionLabel is the OCI image label the published sandbox-base image
+// carries to advertise the aileron CLI version baked into it (issue #1807).
+// The image-boot re-entry runs that baked binary against the host's launch
+// (ADR-0027 / #1731), so the launcher reads this label to detect version skew
+// between the pinned image and the booting host and warn the operator. The
+// label is stamped by images/sandbox-base/Containerfile.published; keep this
+// string in sync with that file (the Containerfile cannot import it).
+const CLIVersionLabel = "ai.aileron.cli.version"
+
+// BakedCLIVersion reports the aileron CLI version baked into image, read from
+// the CLIVersionLabel OCI label via `<runtime> image inspect`. It returns the
+// trimmed label value, or "" when the image is unlabeled, not present locally,
+// or the inspect fails. Callers treat "" as "cannot determine" and stay silent
+// (an unlabeled custom image is the operator's contract under ADR-0027), so an
+// inspect error is deliberately not propagated as fatal: skew detection degrades
+// to "no warning", never a broken launch.
+func BakedCLIVersion(ctx context.Context, runner Runner, runtimeName, image string) string {
+	return imageLabel(ctx, runner, runtimeName, image, CLIVersionLabel)
 }
 
 // DevcontainerMetadataLabel is the OCI image label the devcontainer CLI
@@ -697,23 +728,7 @@ const DevcontainerMetadataLabel = "devcontainer.metadata"
 // layer", never a broken startup. This mirrors BakedMCPVersion's fail-soft
 // posture and inspect plumbing.
 func ImageMetadataLabel(ctx context.Context, runner Runner, runtimeName, image string) string {
-	if runner == nil {
-		runner = execRunner{}
-	}
-	var stdout bytes.Buffer
-	format := "{{ index .Config.Labels \"" + DevcontainerMetadataLabel + "\" }}"
-	args := []string{"image", "inspect", "--format", format, image}
-	if err := runner.Run(ctx, runtimeName, args, &stdout, io.Discard); err != nil {
-		return ""
-	}
-	out := strings.TrimSpace(stdout.String())
-	// An image with no labels at all renders the missing key as the Go
-	// template "<no value>" sentinel rather than an empty string; treat it
-	// as "no metadata".
-	if out == "<no value>" {
-		return ""
-	}
-	return out
+	return imageLabel(ctx, runner, runtimeName, image, DevcontainerMetadataLabel)
 }
 
 // Run starts a one-shot sandbox container for an agent command.
