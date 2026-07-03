@@ -14,6 +14,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/version"
 )
 
 // containerImageRunner is the production runtime.ImageRunner: it boots the
@@ -46,6 +47,19 @@ type containerImageRunner struct {
 	// the in-container launch reaches the host daemon. nil (the zero value) is
 	// passthrough (no injected env).
 	daemonEnv imageDaemonEnv
+	// diag is where the pre-boot CLI-version-skew warning is written. nil (the
+	// zero value) means os.Stderr in production; tests set a buffer to assert the
+	// warning end-to-end through Run.
+	diag io.Writer
+}
+
+// diagWriter returns the destination for the skew warning: the injected diag
+// writer, or os.Stderr when unset (production wiring leaves diag nil).
+func (r containerImageRunner) diagWriter() io.Writer {
+	if r.diag != nil {
+		return r.diag
+	}
+	return os.Stderr
 }
 
 // envSkillImageBooted marks the image-boot re-entry (#1731). The image runner
@@ -68,6 +82,30 @@ var containerRunFlightPlan = func(ctx context.Context, runtimeName string, stdou
 	}.Run(ctx, opts)
 }
 
+// containerBakedCLIVersion reads the aileron CLI version baked into the pinned
+// image (empty when unlabeled or uninspectable). It is a package variable so the
+// CLI tests swap it for a fake and never shell out to `docker image inspect`,
+// mirroring the containerRunFlightPlan and sandboxCheckBakedVersionFn seams.
+var containerBakedCLIVersion = func(ctx context.Context, runtimeName, image string) string {
+	return sandboxcontainer.BakedCLIVersion(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
+}
+
+// reportBakedCLIVersion surfaces version skew between the pinned rung-1/rung-2
+// image's baked aileron CLI and the host CLI that is booting it (#1809). The
+// image-boot re-entry runs the baked binary against this host's launch
+// (ADR-0027 / #1731), so a mismatch is worth a heads-up but is never fatal: the
+// launch always proceeds. A baked value of "" (unlabeled or uninspectable
+// image) is silent because a custom image's contract is the operator's
+// responsibility under ADR-0027; a match is silent so the stdout of
+// `aileron skill launch` stays byte-identical (unlike the sandbox-check
+// precedent, this emits no OK line).
+func reportBakedCLIVersion(stderr io.Writer, image, baked, host string) {
+	if baked == "" || baked == host {
+		return
+	}
+	fmt.Fprintf(stderr, "warning: pinned image %q bakes aileron CLI version %s but the host CLI booting it is version %s. The image-boot re-entry (ADR-0027 / #1731) runs the baked binary against this host's launch; keep both sides on the same release. The launch proceeds.\n", image, baked, host)
+}
+
 func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec) (runtime.ImageRunResult, error) {
 	if spec.Image == "" {
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: image runner requires a pinned image")
@@ -76,6 +114,14 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	if err != nil {
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: resolve container runtime: %w", err)
 	}
+
+	// Preflight the CLI-version skew (#1809). The image-boot re-entry runs the
+	// image's baked aileron binary against THIS host's launch (ADR-0027 / #1731),
+	// so mismatched releases on the two sides are worth a heads-up. This warns on
+	// stderr and never fails the launch: an unlabeled/uninspectable image reads as
+	// "" and stays silent (custom-image contract is the operator's under ADR-0027),
+	// a matching version stays silent (stdout unchanged), and any other value warns.
+	reportBakedCLIVersion(r.diagWriter(), spec.Image, containerBakedCLIVersion(ctx, runtimeName, spec.Image), version.Version)
 
 	// Mount the frozen store read-only so the in-container run reads the exact
 	// bytes verified on the host, and the out-dir writable so materialized

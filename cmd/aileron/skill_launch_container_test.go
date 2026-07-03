@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,18 +12,40 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/version"
 )
 
 // stubContainerBoot swaps the single real-Docker call site for a recorder so the
 // container image runner's spec-construction is testable with no live runtime.
+// It also stubs the CLI-version-skew preflight to "" so every Run test stays
+// Docker-free and warning-silent by default; skew tests override it via
+// stubBakedCLIVersion.
 func stubContainerBoot(t *testing.T, capture *sandboxcontainer.RunOptions, err error) {
 	t.Helper()
+	stubBakedCLIVersion(t, "")
 	orig := containerRunFlightPlan
 	containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
 		*capture = opts
 		return sandboxcontainer.RunResult{}, err
 	}
 	t.Cleanup(func() { containerRunFlightPlan = orig })
+}
+
+// stubBakedCLIVersion swaps the CLI-version inspect seam for a fake returning
+// value, recording the image it was asked to inspect. This keeps the preflight
+// off `docker image inspect` in unit tests and lets skew tests assert the
+// three cases (match, mismatch, missing label) through Run. It returns a pointer
+// to the recorded image so tests can assert the pin was passed, never re-resolved.
+func stubBakedCLIVersion(t *testing.T, value string) *string {
+	t.Helper()
+	var inspected string
+	orig := containerBakedCLIVersion
+	containerBakedCLIVersion = func(_ context.Context, _ string, image string) string {
+		inspected = image
+		return value
+	}
+	t.Cleanup(func() { containerBakedCLIVersion = orig })
+	return &inspected
 }
 
 func TestContainerImageRunner_BootsExactImageWithMounts(t *testing.T) {
@@ -216,6 +239,136 @@ func TestNewLaunchImageRunner_WiresDaemonEnvResolver(t *testing.T) {
 	}
 	if _, ok := runner.daemonEnv.(daemonImageEnv); !ok {
 		t.Errorf("daemonEnv = %T, want daemonImageEnv (the production resolver)", runner.daemonEnv)
+	}
+}
+
+// --- CLI-version skew preflight (#1809) ---
+
+// newSkewTestSpec returns a minimal spec with the store dir pointed at a temp
+// dir so Run reaches the boot without touching the real store.
+func newSkewTestSpec(t *testing.T) runtime.ImageRunSpec {
+	t.Helper()
+	storeDir := t.TempDir()
+	origStore := skillStoreDir
+	skillStoreDir = storeDir
+	t.Cleanup(func() { skillStoreDir = origStore })
+	return runtime.ImageRunSpec{
+		Image: "registry.example.com/runner:1.4@sha256:abc",
+		Name:  "weekly-metrics-digest",
+	}
+}
+
+// TestContainerImageRunner_SkewWarnsOnMismatch proves a baked CLI version that
+// differs from the host version prints one stderr warning naming both versions
+// and the image, still boots the exact pin, and returns no error.
+func TestContainerImageRunner_SkewWarnsOnMismatch(t *testing.T) {
+	spec := newSkewTestSpec(t)
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+	inspected := stubBakedCLIVersion(t, "9.9.9")
+
+	var buf bytes.Buffer
+	if _, err := (containerImageRunner{diag: &buf}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "warning:") {
+		t.Errorf("expected a stderr warning, got %q", out)
+	}
+	if !strings.Contains(out, "9.9.9") {
+		t.Errorf("warning must name the baked version 9.9.9: %q", out)
+	}
+	if !strings.Contains(out, version.Version) {
+		t.Errorf("warning must name the host version %q: %q", version.Version, out)
+	}
+	if !strings.Contains(out, spec.Image) {
+		t.Errorf("warning must name the image %q: %q", spec.Image, out)
+	}
+	// The launch proceeds with the exact pin regardless of skew.
+	if got.Image != spec.Image {
+		t.Errorf("booted image = %q, want the exact pin %q", got.Image, spec.Image)
+	}
+	// The preflight inspects the pin, never a re-resolved image.
+	if *inspected != spec.Image {
+		t.Errorf("preflight inspected %q, want the pin %q", *inspected, spec.Image)
+	}
+}
+
+// TestContainerImageRunner_SkewSilentOnMatch proves a baked CLI version equal to
+// the host version emits nothing (stdout stays byte-identical, no OK line) and
+// still boots the pin.
+func TestContainerImageRunner_SkewSilentOnMatch(t *testing.T) {
+	spec := newSkewTestSpec(t)
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+	stubBakedCLIVersion(t, version.Version)
+
+	var buf bytes.Buffer
+	if _, err := (containerImageRunner{diag: &buf}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("matching version must be silent, got %q", buf.String())
+	}
+	if got.Image != spec.Image {
+		t.Errorf("booted image = %q, want the exact pin %q", got.Image, spec.Image)
+	}
+}
+
+// TestContainerImageRunner_SkewSilentOnMissingLabel proves an unlabeled or
+// uninspectable image (baked == "") stays silent because a custom image's
+// contract is the operator's under ADR-0027, and still boots.
+func TestContainerImageRunner_SkewSilentOnMissingLabel(t *testing.T) {
+	spec := newSkewTestSpec(t)
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+	stubBakedCLIVersion(t, "")
+
+	var buf bytes.Buffer
+	if _, err := (containerImageRunner{diag: &buf}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("missing label must be silent, got %q", buf.String())
+	}
+	if got.Image != spec.Image {
+		t.Errorf("booted image = %q, want the exact pin %q", got.Image, spec.Image)
+	}
+}
+
+// TestContainerImageRunner_DiagDefaultsToStderr proves the zero-value diag field
+// resolves to os.Stderr in production wiring, so a nil diag never routes the
+// warning to a discarded writer.
+func TestContainerImageRunner_DiagDefaultsToStderr(t *testing.T) {
+	if got := (containerImageRunner{}).diagWriter(); got != os.Stderr {
+		t.Errorf("zero-value diag writer = %v, want os.Stderr", got)
+	}
+	var buf bytes.Buffer
+	if got := (containerImageRunner{diag: &buf}).diagWriter(); got != &buf {
+		t.Errorf("injected diag writer = %v, want the injected buffer", got)
+	}
+}
+
+// TestReportBakedCLIVersion covers the skew helper's three-way contract directly.
+func TestReportBakedCLIVersion(t *testing.T) {
+	cases := []struct {
+		name       string
+		baked      string
+		host       string
+		wantOutput bool
+	}{
+		{name: "empty is silent", baked: "", host: "0.0.5", wantOutput: false},
+		{name: "match is silent", baked: "0.0.5", host: "0.0.5", wantOutput: false},
+		{name: "mismatch warns", baked: "9.9.9", host: "0.0.5", wantOutput: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			reportBakedCLIVersion(&buf, "img:test", tc.baked, tc.host)
+			if got := buf.Len() > 0; got != tc.wantOutput {
+				t.Fatalf("output presence = %v, want %v (got %q)", got, tc.wantOutput, buf.String())
+			}
+		})
 	}
 }
 
