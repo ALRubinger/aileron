@@ -10,7 +10,7 @@ Freeze is the author-time step that seals an installed Aileron skill into a Flig
 Freeze runs a fixed sequence over one `SKILL.md` document.
 
 1. It parses and lints the manifest. The lint rejects any step that could reach an LLM outside the marked `llm-seam` (see [the manifest spec](/development/flight-plan-manifest-spec)).
-2. It resolves the execution environment to image digests. A rung-1 `rung1Image.ref` is resolved to its `sha256:` digest. A rung-2 `rung2CapabilityUnits.features` set is composed and the built image is pinned by digest.
+2. It resolves the execution environment to image digests. A rung-1 `rung1Image.ref` is resolved to its `sha256:` digest. When a rung-1 `rung1Image` declares no ref, freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock. A rung-2 `rung2CapabilityUnits.features` set is composed and the built image is pinned by digest.
 3. It builds the lockfile. The lockfile records the resolved image pins, the resolved capability set, the content hash, and the semver label.
 4. It content-addresses the unit. The content hash is a `sha256` over the canonical frozen manifest bytes plus the lockfile bytes.
 5. It signs the content with a detached ed25519 signature.

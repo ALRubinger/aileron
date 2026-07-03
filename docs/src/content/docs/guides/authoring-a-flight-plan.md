@@ -107,7 +107,7 @@ Declare the minimum each action needs. The contract is verbose by design. A plan
 
 `requires.executionEnvironment` declares the image the Flight Plan runs in, as one rung. The three rungs are mutually exclusive, so exactly one is declared.
 
-- `rung1Image.ref` names a whole prebuilt operator-owned image. Freeze resolves a tag to an `image@sha256:` digest pin.
+- `rung1Image.ref` names a whole prebuilt operator-owned image. Freeze resolves a tag to an `image@sha256:` digest pin. `rung1Image.ref` is optional. When `rung1Image` declares no ref (write `rung1Image: {}`), freeze resolves the Aileron-provided runner image for the freezing CLI's version and records that concrete ref plus its digest pin in the lock.
 - `rung2CapabilityUnits.features` declares the capability-unit devcontainer Features composed onto the Aileron agent-free base image. Freeze composes them and pins the built image by digest.
 - `rung3PerStepImages.steps` declares one sibling image per step, each with an optional `id`, `mount`, and `collect`. Freeze resolves each step's image to an `image@sha256:` digest pin recorded in the lock.
 
