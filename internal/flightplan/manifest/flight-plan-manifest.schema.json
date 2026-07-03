@@ -30,6 +30,9 @@
         "requires": {
           "$ref": "#/$defs/requires"
         },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
         "inputs": {
           "type": "array",
           "description": "Declared inputs (REQUIRED). Every input the Flight Plan depends on is declared here, each with a resolution rule. A value that varies by use case (for example a time window) is a declared input rather than a constant baked into the composition, so one composition serves many operators. See ADR-0027 inputs/resolution and the determinism correction in #1523.",
@@ -42,8 +45,8 @@
         },
         "steps": {
           "type": "array",
-          "$comment": "OPTIONAL. `steps` is the deterministic no-LLM composition (the step graph). It is optional so a manifest without a composition still validates and stays lossless-if-stripped: the whole `aileron` block remains removable, and within the block a manifest that only declares requires/inputs/outputs is still complete. When present, `steps` wires declared actions and deterministic transforms into a directed acyclic graph. The single ADR-0027-permitted non-deterministic seam is the `llm-seam` kind; no other kind can reach an LLM, which makes the no-LLM guarantee structurally checkable because `kind` is a closed enum. Cross-step references (a binding to a prior step's output) and acyclicity are graph properties a JSON Schema cannot express; the prose states them as invariants, the freeze/lint step (#1509) checks them, and the runtime (#1511) enforces them.",
-          "description": "The deterministic step graph (OPTIONAL). Wires declared actions and deterministic transforms into a directed acyclic graph. Bindings reference resolved inputs and prior step outputs by name, never by value. The only non-deterministic seam is the marked `llm-seam` kind.",
+          "$comment": "OPTIONAL. `steps` is the deterministic no-LLM composition (the step graph). It is optional so a manifest without a composition still validates and stays lossless-if-stripped: the whole `aileron` block remains removable, and within the block a manifest that only declares requires/inputs/outputs is still complete. When present, `steps` wires declared actions, deterministic transforms, and deterministic tool invocations into a directed acyclic graph. The single ADR-0027-permitted non-deterministic seam is the `llm-seam` kind; no other kind can reach an LLM, which makes the no-LLM guarantee structurally checkable because `kind` is a closed enum. Cross-step references (a binding to a prior step's output) and acyclicity are graph properties a JSON Schema cannot express; the prose states them as invariants, the freeze/lint step (#1509) checks them, and the runtime (#1511) enforces them.",
+          "description": "The deterministic step graph (OPTIONAL). Wires declared actions, deterministic transforms, and deterministic tool invocations into a directed acyclic graph. Bindings reference resolved inputs and prior step outputs by name, never by value. The only non-deterministic seam is the marked `llm-seam` kind.",
           "items": { "$ref": "#/$defs/step" }
         },
         "lock": {
@@ -53,7 +56,7 @@
     },
     "requires": {
       "type": "object",
-      "description": "Dependency declaration. Lists both the actions the Flight Plan calls and the execution-environment dependencies it runs in. An unsatisfied entry is a missing-requirement signal the runtime surfaces, never a parse failure.",
+      "description": "Dependency declaration. Lists the actions the Flight Plan calls. The execution environment lives in the sibling `environment` block, not here. An unsatisfied entry is a missing-requirement signal the runtime surfaces, never a parse failure.",
       "additionalProperties": false,
       "required": ["actions"],
       "properties": {
@@ -62,9 +65,6 @@
           "description": "The actions the Flight Plan calls. Each entry attaches to the action model of ADR-0003 and carries a per-action trust contract.",
           "minItems": 1,
           "items": { "$ref": "#/$defs/actionRequirement" }
-        },
-        "executionEnvironment": {
-          "$ref": "#/$defs/executionEnvironment"
         }
       }
     },
@@ -81,127 +81,30 @@
         "trustContract": { "$ref": "#/$defs/trustContract" }
       }
     },
-    "executionEnvironment": {
+    "environment": {
       "type": "object",
-      "description": "The execution-environment dependency. Exactly one of rung-1 (a pinned prebuilt image), rung-2 (composed capability units on the Aileron base), or rung-3 (per-step sealed sibling-image dispatch) is declared per ADR-0027 execution rungs; the three rungs are mutually exclusive. Freeze resolves the declared rung to content-addressed digest pins recorded in the lock section.",
+      "description": "The execution environment (OPTIONAL). One container per run. `tools` declares curated-catalog tools freeze composes onto the Aileron-provided runner base; `image` names a custom base image as the escape hatch for tooling the catalog does not carry. Declaring both composes the declared tools onto the custom base. A present block must declare at least one of the two; a skill with no environment needs omits the block entirely (an empty environment: {} is rejected). Freeze resolves the declared environment to a single content-addressed digest pin recorded in the lock section.",
       "additionalProperties": false,
-      "oneOf": [
-        {
-          "required": ["rung1Image"],
-          "not": {
-            "anyOf": [
-              { "required": ["rung2CapabilityUnits"] },
-              { "required": ["rung3PerStepImages"] }
-            ]
-          }
-        },
-        {
-          "required": ["rung2CapabilityUnits"],
-          "not": {
-            "anyOf": [
-              { "required": ["rung1Image"] },
-              { "required": ["rung3PerStepImages"] }
-            ]
-          }
-        },
-        {
-          "required": ["rung3PerStepImages"],
-          "not": {
-            "anyOf": [
-              { "required": ["rung1Image"] },
-              { "required": ["rung2CapabilityUnits"] }
-            ]
-          }
-        }
+      "anyOf": [
+        { "required": ["tools"] },
+        { "required": ["image"] }
       ],
       "properties": {
-        "rung1Image": {
-          "type": "object",
-          "description": "Rung one. The skill runs in a whole prebuilt image and freeze resolves it to a digest pin. Omit ref to select the Aileron-provided runner image for the freezing CLI's version; a workload names its own image only for workload-specific tooling. Write rung1Image: {} for the default (a bare rung1Image: key with no value parses as null and is rejected).",
-          "additionalProperties": false,
-          "properties": {
-            "ref": {
-              "type": "string",
-              "description": "An optional OCI image reference. Omit it to select the Aileron-provided runner image for the freezing CLI's version. When present, pre-freeze this may be a tag (for example registry.example.com/runner:1.4). Freeze resolves the selected image to an image@sha256: digest pin recorded in the lock section.",
-              "minLength": 1
-            }
+        "tools": {
+          "type": "array",
+          "description": "The curated-catalog tools the plan's steps invoke, each as <name>@<version> (for example aws-cli@2.x). The name vocabulary is closed to the curated catalog; an unknown name is rejected at validation, before freeze. Freeze resolves each entry to its catalog devcontainer Feature recipe and composes one image.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "description": "A curated tool reference in the form <name>@<version>. The name set is the curated catalog; the version grammar is deliberately loose (2, 2.x, and 2.19.1 all validate) and freeze resolves it against the catalog.",
+            "pattern": "^(aws-cli|gh)@[A-Za-z0-9][A-Za-z0-9._-]*$"
           }
         },
-        "rung2CapabilityUnits": {
-          "type": "object",
-          "description": "Rung two. The skill declares capability units to compose onto a generic Aileron-provided agent-free minimal base image. Freeze composes the operator-owned capability-unit devcontainer Features and pins the result. The capability-unit shape is ADR-0026.",
-          "additionalProperties": false,
-          "required": ["features"],
-          "properties": {
-            "features": {
-              "type": "array",
-              "description": "The capability-unit devcontainer Feature references composed onto the base image.",
-              "minItems": 1,
-              "items": {
-                "type": "string",
-                "description": "A devcontainer Feature reference for a capability unit (ADR-0026).",
-                "minLength": 1
-              }
-            }
-          }
-        },
-        "rung3PerStepImages": {
-          "type": "object",
-          "description": "Rung three. Per-step sealed sibling-image dispatch with mount and run-and-collect I/O (ADR-0027 rung three). Each step names a sibling image freeze resolves to a content-addressed digest, pinned in the lock section alongside the rung-1 and rung-2 pins. The per-step image is the operator-owned tool the step dispatches to.",
-          "additionalProperties": false,
-          "required": ["steps"],
-          "properties": {
-            "steps": {
-              "type": "array",
-              "description": "The per-step sibling images. Each entry names an image freeze resolves to a digest pin, with an optional identifier and an optional mount and run-and-collect I/O declaration.",
-              "minItems": 1,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["image"],
-                "properties": {
-                  "id": {
-                    "type": "string",
-                    "description": "An optional step identifier, unique within the rung-3 step set.",
-                    "minLength": 1
-                  },
-                  "image": {
-                    "type": "string",
-                    "description": "An OCI image reference for the per-step sibling tool. Pre-freeze this may be a fixed-version tag (for example registry.example.com/aws-cli:2). Freeze resolves it to an image@sha256: digest pin recorded in the lock section.",
-                    "minLength": 1
-                  },
-                  "mount": {
-                    "type": "object",
-                    "description": "An optional mount declaration for the step's input I/O (ADR-0027 mount boundary).",
-                    "additionalProperties": false,
-                    "properties": {
-                      "path": {
-                        "type": "string",
-                        "description": "The mount path inside the per-step image.",
-                        "minLength": 1
-                      }
-                    }
-                  },
-                  "collect": {
-                    "type": "object",
-                    "description": "An optional run-and-collect declaration for the step's output I/O (ADR-0027 run-and-collect boundary).",
-                    "additionalProperties": false,
-                    "properties": {
-                      "path": {
-                        "type": "string",
-                        "description": "The path inside the per-step image whose contents are collected as the step output.",
-                        "minLength": 1
-                      }
-                    }
-                  },
-                  "trustContract": {
-                    "$ref": "#/$defs/trustContract",
-                    "description": "The optional per-step trust contract for this rung-3 sibling image. It reuses the per-action trust-contract shape: its `hosts` declare the step's network reach, the access-scope declaration that IS the security boundary, and `effect` records the operation effect. Freeze seals the declared reach onto the step's lock pin so it is covered by the signature and not re-suppliable at launch. Optional: a rung-3 step with no trust contract declares no reach; a declared contract must be non-empty (hosts minItems:1)."
-                  }
-                }
-              }
-            }
-          }
+        "image": {
+          "type": "string",
+          "description": "An OCI image reference for a custom base image, the escape hatch when the curated catalog does not carry the needed tooling. Pre-freeze this may be a tag (for example registry.example.com/base:1.4). Freeze resolves the selected image to an image@sha256: digest pin recorded in the lock section.",
+          "minLength": 1
         }
       }
     },
@@ -551,11 +454,12 @@
     },
     "step": {
       "type": "object",
-      "description": "One step in the deterministic step graph. Discriminated by `kind`. The closed `kind` enum is the structural no-LLM guarantee: an `action-call` invokes a declared action, a `transform` runs deterministic no-LLM logic, and the single `llm-seam` is the only kind that reaches an LLM (ADR-0027). Every step kind is a closed object (additionalProperties:false), so no step field may carry a secret; a step binds references, never values.",
+      "description": "One step in the deterministic step graph. Discriminated by `kind`. The closed `kind` enum is the structural no-LLM guarantee: an `action-call` invokes a declared action, a `transform` runs deterministic no-LLM logic, a `tool` runs a declared environment tool as a deterministic subprocess, and the single `llm-seam` is the only kind that reaches an LLM (ADR-0027). Every step kind is a closed object (additionalProperties:false), so no step field may carry a secret; a step binds references, never values.",
       "required": ["id", "kind"],
       "oneOf": [
         { "$ref": "#/$defs/actionCallStep" },
         { "$ref": "#/$defs/transformStep" },
+        { "$ref": "#/$defs/toolStep" },
         { "$ref": "#/$defs/llmSeamStep" }
       ]
     },
@@ -617,6 +521,70 @@
         "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
       }
     },
+    "toolStep": {
+      "type": "object",
+      "description": "A step that runs a tool from the declared environment as a deterministic subprocess. `command` is an argv array, never a shell string: the runtime executes it with no shell interpretation, so the invocation is deterministic and carries no injection surface. A tool step never reaches an LLM. Bindings reference resolved inputs or prior step outputs by name, never by value; the optional mount and collect declarations are the step's file I/O boundary (ADR-0027), and the optional trust contract declares the step's network reach.",
+      "additionalProperties": false,
+      "required": ["id", "kind", "command"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The step id, unique within the step graph.",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "kind": {
+          "const": "tool",
+          "description": "Runs a declared environment tool as a deterministic subprocess. Never reaches an LLM."
+        },
+        "command": {
+          "type": "array",
+          "description": "The argv array the step executes. The first element is the program; the rest are its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion.",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "description": "One argv element.",
+            "minLength": 1
+          }
+        },
+        "bindings": {
+          "type": "object",
+          "description": "The named inputs to the tool invocation. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
+          "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "mount": {
+          "type": "object",
+          "description": "An optional mount declaration for the step's input I/O (ADR-0027 mount boundary).",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The mount path inside the execution environment where the step's input files are placed.",
+              "minLength": 1
+            }
+          }
+        },
+        "collect": {
+          "type": "object",
+          "description": "An optional run-and-collect declaration for the step's output I/O (ADR-0027 run-and-collect boundary).",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The path inside the execution environment whose contents are collected as the step output.",
+              "minLength": 1
+            }
+          }
+        },
+        "trustContract": {
+          "$ref": "#/$defs/trustContract",
+          "description": "The optional per-step trust contract for this tool step. It reuses the per-action trust-contract shape: its `hosts` declare the step's network reach, the access-scope declaration that IS the security boundary, and `effect` records the operation effect. Freeze seals the declared reach so it is covered by the signature and not re-suppliable at launch. Optional: a tool step with no trust contract declares no reach; a declared contract must be non-empty (hosts minItems:1)."
+        },
+        "outputs": { "$ref": "#/$defs/stepOutputs" },
+        "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
+      }
+    },
     "llmSeamStep": {
       "type": "object",
       "description": "The single ADR-0027-permitted non-deterministic seam. The `kind: llm-seam` value is the first-class mark #1509 lint checks; by construction no other step kind reaches an LLM, so the no-LLM guarantee is structurally checkable because `kind` is a closed enum and only this one value reaches an LLM. Bindings reference resolved inputs or prior step outputs by name, never by value; the seam holds no credential and binds no secret.",
@@ -662,12 +630,12 @@
               },
               "id": {
                 "type": "string",
-                "description": "For a rung-3 per-step pin, the id of the step that dispatches to this image (its declared `id`, or a positional fallback). Links the pin to its step so association does not key on the mutable image reference. Absent for rung-1 and rung-2 pins, which boot a single whole-plan image with no per-step linkage.",
+                "description": "For a per-step pin, the id of the step that dispatches to this image (its declared `id`, or a positional fallback). Links the pin to its step so association does not key on the mutable image reference. Absent for whole-plan environment pins, which boot a single image with no per-step linkage.",
                 "minLength": 1
               },
               "hosts": {
                 "type": "array",
-                "description": "For a rung-3 per-step pin, the network reach freeze sealed from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary. Freeze stamps the declared reach here so it is covered by the content hash and signature: a resolved, signed assertion of the step's reach that cannot be re-supplied at launch. Absent for rung-1/rung-2 pins and for a rung-3 step that declares no trust contract.",
+                "description": "For a per-step pin, the network reach freeze sealed from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary. Freeze stamps the declared reach here so it is covered by the content hash and signature: a resolved, signed assertion of the step's reach that cannot be re-supplied at launch. Absent for whole-plan environment pins and for a step that declares no trust contract.",
                 "items": {
                   "type": "string",
                   "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",

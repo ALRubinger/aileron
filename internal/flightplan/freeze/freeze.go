@@ -56,20 +56,20 @@ type Options struct {
 	// records no version label.
 	Version string
 	// CLIVersion is the Aileron CLI build version that drives the default
-	// rung-1 runner image reference when a rung1Image declares no ref (#1808).
-	// It is distinct from Version (the skill's semver label): CLIVersion picks
-	// the floating sandbox-base tag the default resolves from. An empty value
-	// behaves as a dev build (resolves the :edge tag), matching the CLI's
-	// version default.
+	// runner image reference in the retained legacy default-image branch
+	// (#1808, dormant until #1827 rewires it). It is distinct from Version
+	// (the skill's semver label): CLIVersion picks the floating sandbox-base
+	// tag the default resolves from. An empty value behaves as a dev build
+	// (resolves the :edge tag), matching the CLI's version default.
 	CLIVersion string
 	// SigningKeyPath is the path to the PEM ed25519 private key. Empty falls
 	// back to $AILERON_SIGNING_KEY (see LoadSigningKey).
 	SigningKeyPath string
-	// Resolver resolves a rung-1 image reference to a digest. May be nil for
-	// instruction-only / no-execution-environment skills.
+	// Resolver resolves an environment custom-base image reference to a
+	// digest. May be nil for instruction-only / no-environment skills.
 	Resolver DigestResolver
-	// Composer composes a rung-2 capability-unit Feature set and pins the
-	// built image's digest. May be nil when no rung-2 skill is frozen.
+	// Composer composes a declared environment tool set and pins the built
+	// image's digest. May be nil when no tools-declaring skill is frozen.
 	Composer FeatureComposer
 }
 

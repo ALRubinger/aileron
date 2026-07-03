@@ -81,11 +81,9 @@ aileron:
               - response-summary
               - result
             sink: audit/tracker-writes
-    executionEnvironment:
-      rung2CapabilityUnits:
-        features:
-          - ghcr.io/example/aileron-feature-metrics-cli:1
-          - ghcr.io/example/aileron-feature-tracker-cli:1
+  environment:
+    tools:
+      - aws-cli@2.x
   inputs:
     - name: window_days
       type: number
@@ -169,6 +167,10 @@ The `aileron.steps` block wires this work as a deterministic step graph.
 
 Each step binds its inputs by name to a resolved input (`inputs.<name>`) or a prior step output (`steps.<stepId>.<output>`). A binding is a reference, never a value. The references form a directed acyclic graph the runtime executes in topological order.
 
+## Execution environment
+
+The `aileron.environment` block declares the container the plan runs in. Every run gets exactly one container. This skill declares one curated tool, `aws-cli@2.x`, which fits its SigV4-signed metrics read. Freeze composes the declared tools onto the Aileron runner base and pins the built image to a single digest recorded in the `lock` section. A skill that needs tooling outside the curated catalog can name a custom base with `environment.image` instead.
+
 ## Inputs
 
 - `window_days`: how far back to look. Defaults to the last seven days.
@@ -184,4 +186,4 @@ Each step binds its inputs by name to a resolved input (`inputs.<name>`) or a pr
 
 Binary outputs (for example a rendered chart image) are a deferred follow-up. v1 materializes text artifacts only. When binary outputs land, they will declare `encoding: base64` and ride the mount / run-and-collect boundary.
 
-This skill is not yet a Flight Plan. It carries no `lock` section because it has not been frozen. Freeze (tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509)) resolves the rung-2 capability-unit `features` to image digests, pins the resolved capability set, attaches the per-action trust contract above, and signs the result. After freeze the `aileron.lock` section is present and immutable for that version.
+This skill is not yet a Flight Plan. It carries no `lock` section because it has not been frozen. Freeze (tracked in [#1509](https://github.com/ALRubinger/aileron/issues/1509)) resolves the declared `environment.tools` to one composed image digest, pins the resolved capability set, attaches the per-action trust contract above, and signs the result. After freeze the `aileron.lock` section is present and immutable for that version.

@@ -58,12 +58,12 @@ func frozenExample(t *testing.T) store.FrozenVersion {
 	}
 }
 
-// frozenNoImage freezes a no-execution-environment variant of the worked
-// example: the same fully-stepped plan with the `executionEnvironment` block
-// removed, so freeze pins no image. The runtime must stay on the in-process
-// path for it. Deriving from the worked example keeps the plan a real,
-// decodable step graph (the minimal no-step manifests Decode rejects) while
-// isolating exactly the no-rung condition.
+// frozenNoImage freezes a no-environment variant of the worked example: the
+// same fully-stepped plan with the `environment` block removed, so freeze
+// pins no image. The runtime must stay on the in-process path for it.
+// Deriving from the worked example keeps the plan a real, decodable step
+// graph (the minimal no-step manifests Decode rejects) while isolating
+// exactly the no-environment condition.
 func frozenNoImage(t *testing.T) store.FrozenVersion {
 	t.Helper()
 	keyPath := writeSigningKey(t)
@@ -72,14 +72,14 @@ func frozenNoImage(t *testing.T) store.FrozenVersion {
 	if err != nil {
 		t.Fatalf("read worked example: %v", err)
 	}
-	stripped := stripExecutionEnvironment(t, string(raw))
+	stripped := stripEnvironment(t, string(raw))
 
 	res, err := freeze.Run(context.Background(), []byte(stripped), freeze.Options{
 		Version:        "1.0.0",
 		SigningKeyPath: keyPath,
 	})
 	if err != nil {
-		t.Fatalf("freeze.Run no-exec-env variant: %v", err)
+		t.Fatalf("freeze.Run no-environment variant: %v", err)
 	}
 	return store.FrozenVersion{
 		ID:        "test",
@@ -90,40 +90,40 @@ func frozenNoImage(t *testing.T) store.FrozenVersion {
 	}
 }
 
-// stripExecutionEnvironment removes the `executionEnvironment:` mapping (and
-// its indented children) from the worked-example frontmatter, leaving a valid
-// no-rung manifest. It drops the block by 4-space indent boundary: the block
-// header sits at 4 spaces and its children are more deeply indented, so
-// dropping from the header until the next line at 4-or-fewer spaces excises
-// exactly the block.
-func stripExecutionEnvironment(t *testing.T, md string) string {
+// stripEnvironment removes the `environment:` mapping (and its indented
+// children) from the worked-example frontmatter, leaving a valid
+// no-environment manifest. It drops the block by 2-space indent boundary:
+// the block header sits at 2 spaces under the aileron block and its children
+// are more deeply indented, so dropping from the header until the next line
+// at 2-or-fewer spaces excises exactly the block.
+func stripEnvironment(t *testing.T, md string) string {
 	t.Helper()
 	lines := strings.Split(md, "\n")
 	out := make([]string, 0, len(lines))
 	skipping := false
 	for _, ln := range lines {
 		if !skipping {
-			if strings.TrimSpace(ln) == "executionEnvironment:" &&
-				strings.HasPrefix(ln, "    executionEnvironment:") {
+			if strings.TrimSpace(ln) == "environment:" &&
+				strings.HasPrefix(ln, "  environment:") {
 				skipping = true
 				continue
 			}
 			out = append(out, ln)
 			continue
 		}
-		// While skipping: a line indented deeper than 4 spaces (or blank) is a
-		// child of the block; a line at 4-or-fewer spaces ends it.
+		// While skipping: a line indented deeper than 2 spaces (or blank) is a
+		// child of the block; a line at 2-or-fewer spaces ends it.
 		trimmed := strings.TrimLeft(ln, " ")
 		indent := len(ln) - len(trimmed)
-		if trimmed == "" || indent > 4 {
+		if trimmed == "" || indent > 2 {
 			continue
 		}
 		skipping = false
 		out = append(out, ln)
 	}
 	res := strings.Join(out, "\n")
-	if strings.Contains(res, "executionEnvironment:") {
-		t.Fatalf("stripExecutionEnvironment left the block in place")
+	if strings.Contains(res, "environment:") {
+		t.Fatalf("stripEnvironment left the block in place")
 	}
 	return res
 }
