@@ -410,15 +410,18 @@ const (
 	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
 	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
 
-	// EventTypeFlightPlanLaunchReach is one per-tool-dispatch declared-reach
-	// event (#1784). The in-process launch runtime emits one such record for each
-	// tool-dispatch step whose per-step trust contract declares a network
-	// reach (its Effect and Hosts). The flat `aileron.*` payload carries the
-	// dispatching step id, the declared effect, the declared hosts, and the
-	// literal `aileron.reach.enforced: false` marker. The record is audit-only:
-	// the declared reach is surfaced for observability and is NOT enforced (egress
-	// stays passthrough; the credential is injected per host binding). Actor is
-	// {type: service, id: "flightplan-launch"}.
+	// EventTypeFlightPlanLaunchReach is one per-tool-dispatch reach event
+	// (#1784, enforcement truth from #1829). The in-process launch runtime emits
+	// one such record for each tool-dispatch step whose per-step trust contract
+	// declares a network reach (its Effect and Hosts). The flat `aileron.*`
+	// payload carries the dispatching step id, the declared effect, the hosts the
+	// step ran under, and the truthful per-record `aileron.reach.enforced`
+	// boolean. That boolean is true when the step ran under a step-scoped proxy
+	// credential restricted to the verified lock's sealed reach, and false when
+	// the step declared a contract with no sealed entry. The single source of
+	// truth for the marker's semantics is buildReachRecord in
+	// internal/flightplan/runtime/audit.go. Actor is {type: service, id:
+	// "flightplan-launch"}.
 	EventTypeFlightPlanLaunchReach EventType = "flightplan.launch.reach"
 
 	// EventTypeOutputMaterialized is one per-output-per-step provenance event

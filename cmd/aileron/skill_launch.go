@@ -345,10 +345,14 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 			payload = map[string]any{}
 		}
 	case runtime.RecordKindReach:
-		// A declared-reach record (#1784) carries the same flat `aileron.*`
-		// payload treatment as an output record: the reach attributes surface as
-		// top-level keys (including `aileron.reach.enforced: false`), not nested
-		// under `fields`. It is audit-only and enforces nothing.
+		// A reach record (#1784, enforcement truth from #1829) carries the same
+		// flat `aileron.*` payload treatment as an output record: the reach
+		// attributes surface as top-level keys (including the truthful per-record
+		// `aileron.reach.enforced` boolean), not nested under `fields`. That
+		// boolean is true when the step ran under a step-scoped proxy credential
+		// restricted to the verified sealed reach and false otherwise; its
+		// semantics are single-sourced to buildReachRecord in
+		// internal/flightplan/runtime/audit.go.
 		eventType = string(model.EventTypeFlightPlanLaunchReach)
 		payload = rec.Fields
 		if payload == nil {
