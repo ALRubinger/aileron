@@ -410,9 +410,9 @@ const (
 	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
 	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
 
-	// EventTypeFlightPlanLaunchReach is one per-rung-3-dispatch declared-reach
+	// EventTypeFlightPlanLaunchReach is one per-tool-dispatch declared-reach
 	// event (#1784). The in-process launch runtime emits one such record for each
-	// rung-3 tool-dispatch step whose per-step trust contract declares a network
+	// tool-dispatch step whose per-step trust contract declares a network
 	// reach (its Effect and Hosts). The flat `aileron.*` payload carries the
 	// dispatching step id, the declared effect, the declared hosts, and the
 	// literal `aileron.reach.enforced: false` marker. The record is audit-only:

@@ -943,7 +943,7 @@ func firstAgentBinary(agent Agent) string {
 // inside a container can reach the host-bound daemon. Non-loopback and
 // unparseable URLs are returned unchanged. runtimeName is retained as the
 // runtime seam; v4 is Docker-only, so the loopback host always rewrites to
-// host.docker.internal. It is exported so the rung-3 tool-container proxy
+// host.docker.internal. It is exported so the tool-container proxy
 // bootstrap can compute the container-facing proxy URL without duplicating the
 // loopback-rewrite rule.
 func ContainerURLForRuntime(rawURL, runtimeName string) string {
