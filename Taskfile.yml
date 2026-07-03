@@ -430,9 +430,9 @@ tasks:
       - go test -tags=integration_sandbox -race -run 'TestSandboxProxyCurlIntegration|TestSandboxProxyAWSSigV4Integration' ./internal/app/...
 
   test:integration:sandbox-proxy-tool-container:
-    desc: "Run the real-container rung-3 tool-egress credential-injection e2e (#1769): a real `docker run amazon/aws-cli` reaches an in-process sigv4-resign proxy through host.docker.internal, trusting a mounted session CA via AWS_CA_BUNDLE, and the proxy re-signs with the vault secret — asserting a valid SigV4 reached upstream with no credential bytes in the container image/env/mounts/args. Fail-fast — requires `docker` on PATH (no self-skip)."
+    desc: "Run the real-container in-container step-egress e2e suite (#1769/#1829): (1) a real `docker run amazon/aws-cli` reaches an in-process sigv4-resign proxy through host.docker.internal, trusting a mounted session CA via AWS_CA_BUNDLE, and the proxy re-signs with the vault secret — no credential bytes in the container image/env/mounts/args; (2) a real `docker run curlimages/curl` egressing under a daemon-minted STEP-SCOPED proxy credential reaches its declared sealed host and is refused 403 at CONNECT for an undeclared one. Fail-fast — requires `docker` on PATH (no self-skip)."
     cmds:
-      - go test -tags=integration_sandbox -race -run TestSandboxProxyToolContainerIntegration ./internal/app/...
+      - go test -tags=integration_sandbox -race -run 'TestSandboxProxyToolContainerIntegration|TestSandboxProxyToolStepScopeContainerIntegration' ./internal/app/...
 
   test:integration:launch-anthropic-probe:
     desc: "Run the composed launch->gateway->Anthropic-probe regression guard (#1699): renders the real api-key AuthSpec (ANTHROPIC_API_KEY + key-aware onboarding doc), stands up the real daemon mux order against a spec-compliant Anthropic upstream (401 without x-api-key, 200+org with it), and asserts Claude Code's GET /api/oauth/profile probe authenticates through the daemon with the rendered key. In-process, no Docker/subprocess prereqs (no self-skip). Fails before #1698, passes after."

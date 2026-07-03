@@ -176,6 +176,23 @@ func TestAuthenticateSandboxForwardProxy_ExpiredStepScope407(t *testing.T) {
 	}
 }
 
+// TestRecordSandboxProxyStepScopeTrustDenied_NilRecorderSafe proves the
+// audit emitter mirrors its siblings' nil-recorder discipline: with no
+// recorder it still mints an id (the injected newID when set, the default
+// otherwise) and never panics.
+func TestRecordSandboxProxyStepScopeTrustDenied_NilRecorderSafe(t *testing.T) {
+	req := httptest.NewRequest(http.MethodConnect, "https://api.example.com:443", nil)
+	scope := sandboxProxyStepScope{SessionID: "s", StepID: "extract"}
+
+	srv := &apiServer{newID: func() string { return "id-from-newid" }}
+	if got := srv.recordSandboxProxyStepScopeTrustDenied(req, scope, "api.example.com"); got != "id-from-newid" {
+		t.Errorf("id = %q, want the injected newID", got)
+	}
+	if got := (&apiServer{}).recordSandboxProxyStepScopeTrustDenied(req, scope, "api.example.com"); got == "" {
+		t.Error("a fully-zero server must still mint a default id")
+	}
+}
+
 // stepScopeProxySetup wires a fake TLS upstream, an apiServer with the
 // step-scope registry, and the real CONNECT/TLS forward proxy, mirroring
 // newPassthroughIntegrationSetup but exposing the apiServer so the test can

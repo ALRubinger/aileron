@@ -1,34 +1,40 @@
 //go:build integration_sandbox
 
-// Real-container end-to-end coverage for the rung-3 tool-container credential
-// injection substrate (#1769).
+// Real-container end-to-end coverage for in-container step egress through the
+// ADR-0019 daemon forward proxy (#1769 substrate, #1829 step scoping).
 //
-// This test proves the load-bearing #1769 contract: a real tool container's
-// HTTPS egress, configured only with an HTTPS_PROXY pointing at the ADR-0019
-// daemon forward proxy and a mounted session CA trusted via AWS_CA_BUNDLE, is
-// intercepted, MITM-terminated against the mounted CA, and re-signed by a
-// matched `sigv4-resign` host binding with the operator's vault-bound secret,
-// with NO credential bytes in the image, env, mounts, or args.
+// Tool steps run as subprocesses INSIDE the single booted plan container
+// (#1829) — there is no per-step sibling container — so what these tests
+// exercise is exactly that model's egress path: a containerized process whose
+// only network configuration is an HTTPS_PROXY pointing at the daemon forward
+// proxy and a mounted session CA trusted via a CA-bundle env var.
 //
-// Unlike the host-subprocess sigv4 test
-// (TestSandboxProxyAWSSigV4Integration_RealClientProducesValidSignatureAndSeals,
-// which drives an `aws` binary directly on the host), this test drives a real
-// `docker run amazon/aws-cli` so the exact production wiring is exercised: the
-// container reaches the host-bound in-process proxy through
+// Two contracts are proven against a real `docker run`:
+//
+//  1. TestSandboxProxyToolContainerIntegration (#1769): the container's
+//     egress is intercepted, MITM-terminated against the mounted CA, and
+//     re-signed by a matched `sigv4-resign` host binding with the operator's
+//     vault-bound secret, with NO credential bytes in the image, env, mounts,
+//     or args.
+//  2. TestSandboxProxyToolStepScopeContainerIntegration (#1829): a
+//     containerized client egressing under a daemon-minted STEP-SCOPED proxy
+//     credential reaches its declared (sealed) host and is refused 403 at
+//     CONNECT time for an undeclared one — the containerized twin of the
+//     in-process step-scope contract test.
+//
+// The containers reach the host-bound in-process proxy through
 // host.docker.internal (Docker Desktop, or `--add-host
-// host.docker.internal:host-gateway` on Linux), trusts the CA via the
-// CA-bundle env var, and pre-signs with placeholder creds the proxy strips and
-// re-signs. It mirrors the sigv4 test's scaffold (state dir + generated session
-// CA + logical-host DialContext redirect + SigV4-validating fake upstream) and
-// reuses its same-package helpers.
+// host.docker.internal:host-gateway` on Linux). The scaffold mirrors the
+// sigv4 test's (state dir + generated session CA + logical-host DialContext
+// redirect + fake upstream) and reuses its same-package helpers.
 //
-// The test is gated behind the `integration_sandbox` build tag so it does not
-// run during the normal `task test:go` suite. Run with:
+// The tests are gated behind the `integration_sandbox` build tag so they do
+// not run during the normal `task test:go` suite. Run with:
 //
 //	task test:integration:sandbox-proxy-tool-container
 //
-// `docker` availability: per repo policy (no skip-when-unsupported), the test
-// FAILS (t.Fatalf) if `docker` is not on PATH rather than skipping.
+// `docker` availability: per repo policy (no skip-when-unsupported), the tests
+// FAIL (t.Fatalf) if `docker` is not on PATH rather than skipping.
 package app
 
 import (
@@ -282,5 +288,174 @@ func TestSandboxProxyToolContainerIntegration(t *testing.T) {
 		if strings.Contains(string(payloadJSON), forbidden) {
 			t.Errorf("audit payload leaked %q: %s", forbidden, payloadJSON)
 		}
+	}
+}
+
+// TestSandboxProxyToolStepScopeContainerIntegration is the containerized twin
+// of the in-process step-scope contract test (#1829): a real `docker run
+// curlimages/curl` egressing under a daemon-minted STEP-SCOPED proxy
+// credential (the boot session id as the CONNECT username, the scope token as
+// the password, so CA continuity holds against the mounted boot-session CA)
+//
+//  1. reaches its declared (sealed) host through the MITM + passthrough
+//     path, and
+//  2. is refused 403 at CONNECT time for an undeclared host, with a
+//     sandbox.proxy.trust_denied audit event (reason step_scope_host_denied)
+//     and no upstream dial.
+func TestSandboxProxyToolStepScopeContainerIntegration(t *testing.T) {
+	dockerPath, err := exec.LookPath("docker")
+	if err != nil {
+		// Fail-fast, not skip: repo policy forbids skip-when-unsupported.
+		t.Fatalf("docker not on PATH; install Docker to run this integration test: %v", err)
+	}
+
+	const sessionID = "flightplan-boot-stepscope"
+	const logicalHost = "api.step-scope.test"
+	const logicalHostPort = logicalHost + ":443"
+
+	var upstreamHits int
+	var hitsMu sync.Mutex
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hitsMu.Lock()
+		upstreamHits++
+		hitsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"scoped":"container-ok"}`))
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, sessionID)
+
+	outboundTransport := &http.Transport{
+		TLSClientConfig: upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if addr == logicalHostPort {
+				addr = upstreamURL.Host
+			}
+			d := net.Dialer{}
+			return d.DialContext(ctx, network, addr)
+		},
+	}
+	outboundTransport.TLSClientConfig.InsecureSkipVerify = true // upstream cert is for 127.0.0.1; reached under the logical hostname.
+
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		auditStore:           auditStore,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-step-scope-container" }),
+		specLoader:           func() ([]connectorspec.Spec, error) { return nil, nil },
+		sandboxProxyClient:   &http.Client{Transport: outboundTransport},
+	}
+
+	// Mint the step scope through the real handler: sealed reach = the
+	// declared logical host only.
+	minted := mintStepScope(t, srv, sessionID, "extract", []string{logicalHost})
+
+	// Bind the proxy on ALL interfaces so the container reaches it via
+	// host.docker.internal.
+	proxyLn, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	proxyServer := &http.Server{Handler: srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())}
+	go func() { _ = proxyServer.Serve(proxyLn) }()
+	defer proxyServer.Close()
+	proxyPort := proxyLn.Addr().(*net.TCPAddr).Port
+
+	caBundleDir := t.TempDir()
+	caBundleHost := filepath.Join(caBundleDir, "ca.pem")
+	if err := os.WriteFile(caBundleHost, caPEM, 0o644); err != nil {
+		t.Fatalf("write ca bundle: %v", err)
+	}
+	const caContainerPath = "/etc/aileron/proxy/ca.pem"
+
+	// The STEP-SCOPED proxy URL: boot session as the username (CA
+	// continuity), the minted scope token as the password.
+	scopedProxyURL := (&url.URL{
+		Scheme: "http",
+		User:   url.UserPassword(sessionID, minted.Token),
+		Host:   net.JoinHostPort("host.docker.internal", strconv.Itoa(proxyPort)),
+	}).String()
+
+	runCurl := func(target string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, dockerPath,
+			"run", "--rm",
+			"--add-host", "host.docker.internal:host-gateway",
+			"-e", "HTTPS_PROXY="+scopedProxyURL,
+			"-e", "https_proxy="+scopedProxyURL,
+			"-e", "CURL_CA_BUNDLE="+caContainerPath,
+			"-v", caBundleHost+":"+caContainerPath+":ro",
+			"curlimages/curl",
+			"-sS", "--fail-with-body", target,
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	// (1) Declared host: the scoped containerized client completes the MITM +
+	// passthrough round trip.
+	out, err := runCurl("https://" + logicalHost + "/data")
+	if err != nil {
+		t.Fatalf("scoped curl to the declared host: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, `"scoped":"container-ok"`) {
+		t.Fatalf("declared-host output = %q, want the upstream body", out)
+	}
+	hitsMu.Lock()
+	hits := upstreamHits
+	hitsMu.Unlock()
+	if hits != 1 {
+		t.Fatalf("upstream hits = %d, want 1", hits)
+	}
+
+	// (2) Undeclared host: refused 403 at CONNECT time; the upstream is never
+	// dialed.
+	out, err = runCurl("https://api.undeclared.test/data")
+	if err == nil {
+		t.Fatalf("scoped curl to an undeclared host must fail; output:\n%s", out)
+	}
+	if !strings.Contains(out, "403") {
+		t.Errorf("undeclared-host output = %q, want a 403 CONNECT refusal", out)
+	}
+	hitsMu.Lock()
+	hits = upstreamHits
+	hitsMu.Unlock()
+	if hits != 1 {
+		t.Errorf("upstream hits = %d after the denied CONNECT, want still 1", hits)
+	}
+
+	// The denial is audited with the stable step-scope reason and never the
+	// scope token.
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var denied int
+	for _, evt := range events {
+		if evt.EventType != model.EventTypeSandboxProxyTrustDenied {
+			continue
+		}
+		denied++
+		if got := evt.Payload["aileron.proxy.reject_reason"]; got != "step_scope_host_denied" {
+			t.Errorf("reject_reason = %v, want step_scope_host_denied", got)
+		}
+		if got := evt.Payload["aileron.proxy.upstream.host"]; got != "api.undeclared.test" {
+			t.Errorf("upstream.host = %v, want api.undeclared.test", got)
+		}
+		payloadJSON, _ := json.Marshal(evt.Payload)
+		if strings.Contains(string(payloadJSON), minted.Token) {
+			t.Errorf("audit payload leaked the scope token: %s", payloadJSON)
+		}
+	}
+	if denied != 1 {
+		t.Fatalf("trust_denied events = %d, want exactly 1; events=%+v", denied, events)
 	}
 }

@@ -728,18 +728,22 @@ jobs:
         run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
         working-directory: internal
 
-      - name: Run rung-3 tool-container credential-injection e2e (#1769)
-        # Proves the #1769 substrate end to end: a real `docker run
-        # amazon/aws-cli` reaches an in-process sigv4-resign forward proxy
-        # through host.docker.internal (--add-host host-gateway), trusting a
-        # mounted session CA via AWS_CA_BUNDLE, and the proxy re-signs with the
-        # vault secret. Asserts a cryptographically valid SigV4 reached the fake
-        # upstream with NO credential bytes in the container image/env/mounts/
-        # args, and a single sandbox.proxy.binding_injected audit event. Docker
-        # is available on the ubuntu runner; the container image is pulled at
-        # run time (no host `aws` needed). Additive step so a failure is
-        # attributable to this specific contract.
-        run: go test -tags=integration_sandbox -race -run TestSandboxProxyToolContainerIntegration ./app/...
+      - name: Run in-container step-egress e2e (#1769/#1829)
+        # Proves in-container step egress end to end against a real
+        # `docker run`. (1) #1769: amazon/aws-cli reaches an in-process
+        # sigv4-resign forward proxy through host.docker.internal (--add-host
+        # host-gateway), trusting a mounted session CA via AWS_CA_BUNDLE, and
+        # the proxy re-signs with the vault secret — a cryptographically valid
+        # SigV4 reaches the fake upstream with NO credential bytes in the
+        # container image/env/mounts/args, plus a single
+        # sandbox.proxy.binding_injected audit event. (2) #1829:
+        # curlimages/curl egressing under a daemon-minted STEP-SCOPED proxy
+        # credential reaches its declared sealed host and is refused 403 at
+        # CONNECT for an undeclared one, with the trust_denied audit event.
+        # Docker is available on the ubuntu runner; the container images are
+        # pulled at run time (no host `aws`/`curl` needed). Additive step so a
+        # failure is attributable to this specific contract.
+        run: go test -tags=integration_sandbox -race -run 'TestSandboxProxyToolContainerIntegration|TestSandboxProxyToolStepScopeContainerIntegration' ./app/...
         working-directory: internal
 
       - name: Run launch->gateway->Anthropic-probe regression guard (#1699)
