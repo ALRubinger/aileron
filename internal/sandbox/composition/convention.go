@@ -48,7 +48,13 @@ type CredentialPlaceholder struct {
 // launcher plants. It is the parse result freeze/launch consumers depend on.
 type CredentialConvention struct {
 	// Scheme names how the resolved secret is bound onto the outbound request
-	// at the network boundary. It is always a valid [inject.Scheme].
+	// at the network boundary. It is always a valid [inject.Scheme]: catalog
+	// parse routes it through [inject.ParseScheme], which only checks closed-set
+	// membership (rejecting non-members with [inject.ErrUnknownScheme]). Parse
+	// does not check that the scheme is actually implemented; a member that is
+	// recognized but unwired parses clean here. Implementability is enforced
+	// later, at the injection boundary in internal/credential/inject, which
+	// rejects such a scheme with [inject.ErrSchemeNotImplemented].
 	Scheme inject.Scheme
 	// Placeholders are the non-secret env/value pairs the launcher plants. At
 	// least one is present, each has a non-empty env and value, and no two
