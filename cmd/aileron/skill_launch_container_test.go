@@ -565,6 +565,67 @@ func TestContainerImageRunner_ProxyPrepareErrorFailsClosed(t *testing.T) {
 	}
 }
 
+// TestContainerImageRunner_RejectsReservedBootKeyFromBootstrap proves that a
+// bootstrap/placeholder env declaring one of the reserved boot keys (the daemon
+// coordinates AILERON_TOKEN / AILERON_API_URL or the AILERON_SKILL_IMAGE_BOOTED
+// sentinel) fails the boot closed with an error naming the offending variable,
+// rather than letting the merge clobber the authoritative daemon token/URL or
+// the re-entry sentinel (#1828). An image-declared credential placeholder is
+// the realistic source of such a key: PlaceholderEnv only rejects
+// convention-vs-convention collisions, so a placeholder that mis-declares a
+// reserved key would otherwise reach the merge site. The boot must NOT run.
+func TestContainerImageRunner_RejectsReservedBootKeyFromBootstrap(t *testing.T) {
+	for _, reserved := range []string{"AILERON_TOKEN", "AILERON_API_URL", envSkillImageBooted} {
+		reserved := reserved
+		t.Run(reserved, func(t *testing.T) {
+			storeDir := t.TempDir()
+			origStore := skillStoreDir
+			skillStoreDir = storeDir
+			t.Cleanup(func() { skillStoreDir = origStore })
+
+			var got sandboxcontainer.RunOptions
+			booted := false
+			orig := containerRunFlightPlan
+			containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+				booted = true
+				got = opts
+				return sandboxcontainer.RunResult{}, nil
+			}
+			t.Cleanup(func() { containerRunFlightPlan = orig })
+
+			daemon := &fakeImageDaemonEnv{
+				env: map[string]string{
+					"AILERON_API_URL": "http://host.docker.internal:48123/v1",
+					"AILERON_TOKEN":   "daemon-token",
+				},
+				ok: true,
+			}
+			// A placeholder union that mis-declares a reserved boot key.
+			proxy := &fakePlanProxyBootstrapper{
+				ok: true,
+				env: map[string]string{
+					"HTTPS_PROXY": "http://sess:tok@host.docker.internal:48123",
+					reserved:      "poisoned-by-placeholder",
+				},
+			}
+			spec := runtime.ImageRunSpec{Image: "registry.example.com/runner@sha256:abc", Name: "weekly-metrics-digest"}
+			_, err := (containerImageRunner{daemonEnv: daemon, proxy: proxy}).Run(context.Background(), spec)
+			if err == nil {
+				t.Fatalf("a bootstrap env declaring reserved key %q must fail the boot closed", reserved)
+			}
+			if !strings.Contains(err.Error(), reserved) {
+				t.Errorf("error must name the offending variable %q, got %v", reserved, err)
+			}
+			if booted {
+				t.Errorf("the image must NOT boot when a reserved boot key is present, got %+v", got)
+			}
+			if !proxy.cleaned {
+				t.Error("the returned cleanup must run on the reserved-key rejection path so a partial CA never leaks")
+			}
+		})
+	}
+}
+
 // --- CLI-version skew preflight (#1809) ---
 
 // newSkewTestSpec returns a minimal spec with the store dir pointed at a temp

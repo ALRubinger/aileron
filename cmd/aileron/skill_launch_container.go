@@ -79,6 +79,24 @@ func (r containerImageRunner) diagWriter() io.Writer {
 // recurse; the image carries no nested container runtime).
 const envSkillImageBooted = "AILERON_SKILL_IMAGE_BOOTED"
 
+// reservedBootEnvKeys are the authoritative boot-env keys that
+// containerImageRunner.Run sets ITSELF on opts.Env before merging the
+// proxy/placeholder bootstrap env: the host daemon coordinates (#1759) and the
+// image-boot sentinel. The bootstrap env is a union of the ADR-0019 proxy/CA
+// keys and the image-declared credential placeholders (from the pin's
+// devcontainer.metadata label). PlaceholderEnv only rejects convention-vs-
+// convention collisions and the proxy overlay only shadows its own keys, so a
+// placeholder that (mis)declares one of these reserved keys would otherwise
+// reach the merge below and clobber the authoritative daemon token/URL or the
+// boot sentinel silently. Guard the merge: reject any bootstrap key that is a
+// reserved boot key, failing closed with a loud, variable-naming error rather
+// than booting with a poisoned token/URL or a lost re-entry sentinel.
+var reservedBootEnvKeys = map[string]struct{}{
+	"AILERON_TOKEN":     {},
+	"AILERON_API_URL":   {},
+	envSkillImageBooted: {},
+}
+
 // containerRunFlightPlan boots the pinned image and runs the plan inside it. It
 // is a package variable purely for symmetry with sandboxRunContainer; the
 // production launch swaps the whole runtime.ImageRunner via newLaunchImageRunner
@@ -234,11 +252,13 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// fails closed: a boot that resolved daemon config but could not write its
 	// session CA (or whose declared conventions were malformed) must NOT silently
 	// egress un-proxied; it runs cleanup and fails the boot. The proxy env and
-	// the sentinel + daemon env are disjoint key sets
+	// the sentinel + daemon env are expected to be disjoint key sets
 	// (HTTPS_PROXY/CA/placeholders vs
-	// AILERON_SKILL_IMAGE_BOOTED/AILERON_API_URL/AILERON_TOKEN), so the merge
-	// never clobbers the sentinel or daemon coordinates. Cleanup is deferred so
-	// the session CA is removed after the (synchronous) run completes.
+	// AILERON_SKILL_IMAGE_BOOTED/AILERON_API_URL/AILERON_TOKEN); the
+	// reservedBootEnvKeys guard below ENFORCES that invariant, failing the boot if
+	// any bootstrap/placeholder key collides with a reserved boot key rather than
+	// letting the merge clobber the sentinel or daemon coordinates. Cleanup is
+	// deferred so the session CA is removed after the (synchronous) run completes.
 	if r.proxy != nil {
 		bootstrap, cleanup, ok, err := r.proxy.Prepare(ctx, runtimeName, spec.Image, spec.Name)
 		if err != nil {
@@ -250,6 +270,11 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		if ok {
 			if cleanup != nil {
 				defer cleanup()
+			}
+			for k := range bootstrap.Env {
+				if _, reserved := reservedBootEnvKeys[k]; reserved {
+					return runtime.ImageRunResult{}, fmt.Errorf("skill launch: bootstrap/placeholder env declares reserved boot key %q: refusing to boot rather than clobber the authoritative daemon coordinates or the image-boot sentinel", k)
+				}
 			}
 			opts.Volumes = append(opts.Volumes, bootstrap.Mount)
 			if opts.Env == nil {
