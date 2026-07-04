@@ -368,6 +368,39 @@ func TestDecode_ActionCallToUndeclaredAction(t *testing.T) {
 	}
 }
 
+// TestDecode_ToolOnlyPlanNoActions is the decode-side half of the #1932
+// guarantee: a plan that declares no requires.actions and runs only a tool
+// step decodes cleanly. The counterpart guardrail
+// (TestDecode_ActionCallToUndeclaredAction) proves a plan that DOES call an
+// action still needs the ref declared, so relaxing the schema to make actions
+// optional does not weaken the declared-ref check.
+func TestDecode_ToolOnlyPlanNoActions(t *testing.T) {
+	m := &manifest.Manifest{
+		Name: "tool-only",
+		Aileron: manifest.AileronBlock{
+			SchemaVersion: "aileron.flightplan.v1",
+			// Requires left zero: no declared actions, as a tool-only plan.
+			Steps: []any{
+				step(map[string]any{
+					"id": "render", "kind": "tool",
+					"command": []any{"aws", "s3", "ls"},
+					"outputs": []any{"listing"},
+				}),
+			},
+		},
+	}
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("a tool-only plan with no declared actions must decode, got: %v", err)
+	}
+	if len(p.Actions) != 0 {
+		t.Errorf("a tool-only plan decodes no actions, got: %v", p.Actions)
+	}
+	if len(p.Steps) != 1 || p.Steps[0].Kind != KindTool {
+		t.Fatalf("expected one tool step, got: %+v", p.Steps)
+	}
+}
+
 func TestDecodeError_Type(t *testing.T) {
 	_, err := Decode(parseInline(t, "---\nname: x\ndescription: y\n---\n\n# X\n"))
 	var de *DecodeError

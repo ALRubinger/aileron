@@ -85,9 +85,11 @@ Open the frontmatter block at the top; close it; write the body underneath. The 
 
 The `requires:` block lists the actions the plan calls. The sibling `environment:` block declares the container it runs in. Together they are the dependency declaration freeze reads when it pins and binds.
 
+The `requires:` block is optional. A tool-only plan whose every effectful step is an in-container `tool` step dispatches no connector action, so it declares no actions and omits the block entirely. Do not carry a dummy action ref to satisfy the schema: an unused ref names nothing the plan calls and surfaces a spurious "not satisfiable here" warning at `aileron skill install`. Declare an action only when a step actually calls it.
+
 ### Actions and the per-action trust contract
 
-Each `requires.actions[]` entry names one action by `ref` and carries a per-action `trustContract`. The `ref` is `aileron:<connector>.<action>`, and it attaches to the [action model](/concepts/actions/). An unsatisfied `requires:` entry is a missing-requirement signal the runtime surfaces, never a parse failure.
+Each `requires.actions[]` entry names one action by `ref` and carries a per-action `trustContract`. The `ref` is `aileron:<connector>.<action>`, and it attaches to the [action model](/concepts/actions/). An unsatisfied `requires:` entry is a missing-requirement signal the runtime surfaces, never a parse failure. The declared set stays load-bearing for a plan that does call actions: the runtime refuses an `action-call` step whose ref is not declared here, so every called action must appear.
 
 The trust contract is the security surface for that action. You write it; freeze attaches it; the detached signature is the human attestation that it is correct. Every field below records something the runtime enforces or the user sees.
 
