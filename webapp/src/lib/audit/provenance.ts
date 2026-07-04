@@ -17,7 +17,7 @@
 
 import type { AuditEvent, AuditTraceResponse } from '$lib/api';
 
-export type ProvenanceNodeKind = 'artifact' | 'step' | 'literal' | 'launch';
+export type ProvenanceNodeKind = 'artifact' | 'step' | 'literal' | 'plan_input' | 'launch';
 
 export type ProvenanceNode = {
 	/** Stable node id, unique within the graph. */

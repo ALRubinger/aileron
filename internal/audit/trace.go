@@ -20,6 +20,12 @@ const (
 	TraceNodeStep TraceNodeKind = "step"
 	// TraceNodeLiteral is a terminal input leaf carrying no content hash.
 	TraceNodeLiteral TraceNodeKind = "literal"
+	// TraceNodePlanInput is a terminal input leaf that carries a content
+	// hash but is a plan-provided root input (source `inputs.*`), not a
+	// `steps.*` lineage edge. It legitimately has a hash and no producing
+	// record, so it is a resolved leaf (Dangling=false), never the red
+	// "(unresolved artifact)" node.
+	TraceNodePlanInput TraceNodeKind = "plan_input"
 	// TraceNodeLaunch is the terminal plan/actor node.
 	TraceNodeLaunch TraceNodeKind = "launch"
 )
@@ -224,12 +230,13 @@ func resolveRoots(ctx context.Context, store eventLister, root TraceRoot) ([]Eve
 // traceWalker holds the mutable state of one assembly: the accumulating
 // nodes/edges, the seen-hash cycle guard, and a literal-leaf sequence.
 type traceWalker struct {
-	ctx        context.Context
-	store      eventLister
-	nodes      []TraceNode
-	edges      []TraceEdge
-	seen       map[string]bool
-	literalSeq int
+	ctx          context.Context
+	store        eventLister
+	nodes        []TraceNode
+	edges        []TraceEdge
+	seen         map[string]bool
+	literalSeq   int
+	planInputSeq int
 	// err holds the first store error encountered while resolving an
 	// upstream. A store failure is distinct from a missing record (which
 	// is a legitimate dangling upstream): the walk records it here and
@@ -303,6 +310,33 @@ func (w *traceWalker) walk(event Event, depth int) string {
 				Literal:  &TraceLiteral{Binding: input.Binding, Source: input.Source},
 			})
 			w.edges = append(w.edges, TraceEdge{From: stepNodeID, To: litID})
+			continue
+		}
+
+		if !strings.HasPrefix(input.Source, "steps.") {
+			// Plan-provided root input: a hashed input whose source is not
+			// a `steps.*` lineage edge (e.g. `inputs.region`). It has a
+			// content hash but no producing `output.materialized` record by
+			// design, so it is a resolved terminal leaf, never the red
+			// "(unresolved artifact)" dangling node. Keyed per-node like a
+			// literal and not added to the cycle set: a plan input has no
+			// upstream to recurse into, so it cannot participate in a cycle.
+			piID := fmt.Sprintf("plan_input:%d", w.planInputSeq)
+			w.planInputSeq++
+			title := input.Binding
+			if title == "" {
+				title = "(plan input)"
+			}
+			w.nodes = append(w.nodes, TraceNode{
+				ID:          piID,
+				Kind:        TraceNodePlanInput,
+				Title:       title,
+				Subtitle:    shortHash(input.ContentHash),
+				Depth:       depth + 2,
+				ContentHash: input.ContentHash,
+				Literal:     &TraceLiteral{Binding: input.Binding, Source: input.Source},
+			})
+			w.edges = append(w.edges, TraceEdge{From: stepNodeID, To: piID})
 			continue
 		}
 

@@ -110,6 +110,33 @@ describe('mapTraceResponse — snake→camel projection', () => {
 		expect(dangling?.kind).toBe('artifact');
 	});
 
+	it('maps a plan_input node through non-red, preserving hash and literal', () => {
+		// #1927: a plan-provided root input (source `inputs.*`) carries a
+		// content hash but has no producing record by design. The server
+		// emits it as a terminal `plan_input` leaf (not the red dangling
+		// artifact); the pure map must carry that kind through unchanged and
+		// never set `dangling`.
+		const resp = traceResponse({
+			nodes: [
+				...traceResponse().nodes,
+				{
+					id: 'plan_input:0',
+					kind: 'plan_input',
+					title: 'region',
+					subtitle: 'sha256:reg',
+					depth: 2,
+					content_hash: 'sha256:region',
+					literal: { binding: 'region', source: 'inputs.region' }
+				}
+			]
+		});
+		const g = mapTraceResponse(resp);
+		const pi = g.nodes.find((n) => n.kind === 'plan_input')!;
+		expect(pi.contentHash).toBe('sha256:region');
+		expect(pi.literal).toEqual({ binding: 'region', source: 'inputs.region' });
+		expect(pi.dangling).toBeFalsy();
+	});
+
 	it('passes title, subtitle, depth, and kind through verbatim', () => {
 		const g = mapTraceResponse(traceResponse());
 		const step = g.nodes.find((n) => n.kind === 'step')!;
