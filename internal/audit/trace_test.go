@@ -379,6 +379,37 @@ func TestAssembleTrace_UnknownRootNotFound(t *testing.T) {
 	}
 }
 
+// failOnHashStore wraps a MemStore and returns an error whenever
+// ListEvents is queried for a specific content hash, so a store failure
+// encountered mid-walk (resolving an upstream) can be exercised.
+type failOnHashStore struct {
+	*MemStore
+	failHash string
+	err      error
+}
+
+func (f failOnHashStore) ListEvents(ctx context.Context, filter EventFilter) ([]Event, error) {
+	if filter.ContentHash == f.failHash {
+		return nil, f.err
+	}
+	return f.MemStore.ListEvents(ctx, filter)
+}
+
+// TestAssembleTrace_UpstreamStoreErrorSurfaces proves a store failure
+// while resolving an upstream is returned as an error, not masked as a
+// dangling node. The root resolves fine (its hash differs), but the
+// upstream lookup fails.
+func TestAssembleTrace_UpstreamStoreErrorSurfaces(t *testing.T) {
+	base, hashA, hashB := buildTwoStepChain(t)
+	boom := errors.New("store unavailable")
+	store := failOnHashStore{MemStore: base, failHash: hashA, err: boom}
+
+	_, err := AssembleTrace(context.Background(), store, TraceRoot{ContentHash: hashB})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the wrapped store error", err)
+	}
+}
+
 func TestAssembleTrace_RootUnspecified(t *testing.T) {
 	store := NewMemStore()
 	_, err := AssembleTrace(context.Background(), store, TraceRoot{})

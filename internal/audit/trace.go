@@ -169,6 +169,15 @@ func AssembleTrace(ctx context.Context, store eventLister, root TraceRoot) (Trac
 		rootArtifactIDs = append(rootArtifactIDs, id)
 	}
 
+	// A store error encountered while resolving an upstream during the walk
+	// must surface as an error, not be silently rendered as a dangling
+	// node: a dangling marker means "no such record", whereas a store
+	// failure means the graph is unknown. Returning the error lets the
+	// handler map it to a 500 instead of a misleading partial graph.
+	if w.err != nil {
+		return TraceGraph{}, w.err
+	}
+
 	// Terminal launch/actor node. All roots of one launch share the same
 	// plan/actor provenance, so a single launch node hangs off each root's
 	// step. Placed one below the deepest node.
@@ -221,6 +230,11 @@ type traceWalker struct {
 	edges      []TraceEdge
 	seen       map[string]bool
 	literalSeq int
+	// err holds the first store error encountered while resolving an
+	// upstream. A store failure is distinct from a missing record (which
+	// is a legitimate dangling upstream): the walk records it here and
+	// AssembleTrace surfaces it rather than fabricating a dangling node.
+	err error
 }
 
 // walk expands one artifact event: it emits the artifact node, its step
@@ -327,10 +341,19 @@ func (w *traceWalker) walk(event Event, depth int) string {
 }
 
 // resolve returns the `output.materialized` event that produced the
-// given content hash, or ok=false when none is recorded (dangling).
+// given content hash, or ok=false when none is recorded (a legitimate
+// dangling upstream). A store error is recorded on the walker (not
+// conflated with "not found") so AssembleTrace can surface it; resolve
+// still returns ok=false so the in-flight walk unwinds cleanly.
 func (w *traceWalker) resolve(hash string) (Event, bool) {
 	events, err := w.store.ListEvents(w.ctx, EventFilter{ContentHash: hash, Limit: 1})
-	if err != nil || len(events) == 0 {
+	if err != nil {
+		if w.err == nil {
+			w.err = err
+		}
+		return Event{}, false
+	}
+	if len(events) == 0 {
 		return Event{}, false
 	}
 	return events[0], true
