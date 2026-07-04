@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { decideActionApproval, getHubInstallDecision } from './api';
-import type { HubInstallDecision } from './api';
+import {
+	decideActionApproval,
+	getHubInstallDecision,
+	listRecentMaterialized,
+	getAuditByContentHash,
+	getAuditByInvocation
+} from './api';
+import type { HubInstallDecision, AuditEvent } from './api';
 
 // Regression target: the user clicked "Approve" in the webapp, the
 // daemon executed the action successfully, but the page surfaced
@@ -170,5 +176,117 @@ describe('getHubInstallDecision — key_divergence mirror (#1419)', () => {
 
 		expect(got.key_divergence).toBeUndefined();
 		expect(got.trust_state).toBe('already_trusted');
+	});
+});
+
+// --- Audit provenance wrappers (#1891) ---
+//
+// The provenance view reads `GET /v1/audit` same-origin via `apiFetch`.
+// These tests pin the URL each wrapper builds (with encoding), the
+// unwrap of `AuditListResponse.events`, and the empty-result contract.
+// The handshake is a cached module-level promise; because it is resolved
+// by an earlier test's fetch, we locate the audit call by URL rather than
+// by call index so ordering does not matter.
+
+function auditCall(
+	fetchSpy: ReturnType<typeof vi.spyOn>,
+	needle: string
+): string {
+	const call = fetchSpy.mock.calls.find((args: unknown[]) =>
+		String(args[0]).includes(needle)
+	);
+	expect(call, `expected a fetch to a URL containing ${needle}`).toBeTruthy();
+	return String(call![0]);
+}
+
+function auditResponse(events: AuditEvent[]): Response {
+	return new Response(JSON.stringify({ events }), {
+		status: 200,
+		headers: { 'Content-Type': 'application/json' }
+	});
+}
+
+const materializedEvent: AuditEvent = {
+	audit_id: 'a1',
+	event_type: 'output.materialized',
+	timestamp: '2026-07-04T00:00:00Z',
+	payload: {
+		'aileron.output.name': 'report.csv',
+		'aileron.output.content_hash': 'sha256:deadbeef'
+	}
+};
+
+const nonMaterializedEvent: AuditEvent = {
+	audit_id: 'a2',
+	event_type: 'flightplan.launch',
+	timestamp: '2026-07-04T00:00:00Z',
+	payload: { sourceInputBindings: {} }
+};
+
+describe('audit wrappers — URL construction and unwrap', () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, 'fetch');
+	});
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it('listRecentMaterialized requests /v1/audit?limit and keeps only records with an output content hash', async () => {
+		fetchSpy.mockResolvedValue(
+			auditResponse([materializedEvent, nonMaterializedEvent])
+		);
+
+		const got = await listRecentMaterialized(25);
+
+		const url = auditCall(fetchSpy, '/v1/audit?limit=');
+		expect(url).toContain('limit=25');
+		expect(got).toHaveLength(1);
+		expect(got[0].audit_id).toBe('a1');
+	});
+
+	it('getAuditByContentHash encodes the hash into the content_hash filter', async () => {
+		fetchSpy.mockResolvedValue(auditResponse([materializedEvent]));
+
+		const got = await getAuditByContentHash('sha256:dead beef');
+
+		const url = auditCall(fetchSpy, 'content_hash=');
+		expect(url).toContain('content_hash=sha256%3Adead%20beef');
+		expect(got).toHaveLength(1);
+	});
+
+	it('getAuditByInvocation encodes the id into the invocation_id filter', async () => {
+		fetchSpy.mockResolvedValue(
+			auditResponse([materializedEvent, nonMaterializedEvent])
+		);
+
+		const got = await getAuditByInvocation('inv/42');
+
+		const url = auditCall(fetchSpy, 'invocation_id=');
+		expect(url).toContain('invocation_id=inv%2F42');
+		// No client-side filtering on invocation: both records come back.
+		expect(got).toHaveLength(2);
+	});
+
+	it('returns [] when the daemon reports no events', async () => {
+		// A Response body can only be read once, so return a fresh Response
+		// per fetch call rather than sharing one instance across awaits.
+		fetchSpy.mockImplementation(async () => auditResponse([]));
+		expect(await getAuditByContentHash('sha256:none')).toEqual([]);
+		expect(await getAuditByInvocation('inv-none')).toEqual([]);
+		expect(await listRecentMaterialized()).toEqual([]);
+	});
+
+	it('surfaces a non-2xx via apiFetch throwing', async () => {
+		fetchSpy.mockResolvedValue(
+			new Response(JSON.stringify({ error: { message: 'audit list failed' } }), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+		await expect(getAuditByContentHash('sha256:x')).rejects.toThrow(
+			'audit list failed'
+		);
 	});
 });
