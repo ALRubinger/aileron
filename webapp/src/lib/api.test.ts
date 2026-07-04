@@ -4,9 +4,10 @@ import {
 	getHubInstallDecision,
 	listRecentMaterialized,
 	getAuditByContentHash,
-	getAuditByInvocation
+	getAuditByInvocation,
+	getAuditTrace
 } from './api';
-import type { HubInstallDecision, AuditEvent } from './api';
+import type { HubInstallDecision, AuditEvent, AuditTraceResponse } from './api';
 
 // Regression target: the user clicked "Approve" in the webapp, the
 // daemon executed the action successfully, but the page surfaced
@@ -287,6 +288,109 @@ describe('audit wrappers — URL construction and unwrap', () => {
 		);
 		await expect(getAuditByContentHash('sha256:x')).rejects.toThrow(
 			'audit list failed'
+		);
+	});
+});
+
+// --- Server-assembled provenance trace (#1913/#1930) ---
+//
+// `getAuditTrace` collapses the old N+1 client walk into one round-trip
+// against `GET /v1/audit/trace`. These tests pin the URL it builds (with
+// encoding + content_hash precedence), the unwrap of `{root_id,nodes,edges}`,
+// and the 404→null contract that preserves the #1894 unknown-hash empty
+// state without a throw. Every other non-2xx still throws.
+
+function traceResponse(resp: AuditTraceResponse): Response {
+	return new Response(JSON.stringify(resp), {
+		status: 200,
+		headers: { 'Content-Type': 'application/json' }
+	});
+}
+
+const sampleTrace: AuditTraceResponse = {
+	root_id: 'artifact:sha256:root',
+	nodes: [
+		{
+			id: 'artifact:sha256:root',
+			kind: 'artifact',
+			title: 'report.csv',
+			depth: 0,
+			content_hash: 'sha256:root'
+		}
+	],
+	edges: []
+};
+
+describe('getAuditTrace — URL construction, unwrap, and 404→null', () => {
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		fetchSpy = vi.spyOn(globalThis, 'fetch');
+	});
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it('encodes content_hash into the trace query', async () => {
+		fetchSpy.mockResolvedValue(traceResponse(sampleTrace));
+
+		await getAuditTrace({ contentHash: 'sha256:dead beef' });
+
+		const url = auditCall(fetchSpy, '/v1/audit/trace?');
+		expect(url).toContain('content_hash=sha256%3Adead%20beef');
+	});
+
+	it('roots on content_hash when both content_hash and invocation_id are supplied', async () => {
+		fetchSpy.mockResolvedValue(traceResponse(sampleTrace));
+
+		await getAuditTrace({ contentHash: 'sha256:root', invocationId: 'inv-9' });
+
+		const url = auditCall(fetchSpy, '/v1/audit/trace?');
+		expect(url).toContain('content_hash=sha256%3Aroot');
+		expect(url).not.toContain('invocation_id=');
+	});
+
+	it('roots on invocation_id when only that is given', async () => {
+		fetchSpy.mockResolvedValue(traceResponse(sampleTrace));
+
+		await getAuditTrace({ invocationId: 'inv/42' });
+
+		const url = auditCall(fetchSpy, '/v1/audit/trace?');
+		expect(url).toContain('invocation_id=inv%2F42');
+		expect(url).not.toContain('content_hash=');
+	});
+
+	it('unwraps a 200 into {root_id,nodes,edges}', async () => {
+		fetchSpy.mockResolvedValue(traceResponse(sampleTrace));
+
+		const got = await getAuditTrace({ contentHash: 'sha256:root' });
+
+		expect(got).toEqual(sampleTrace);
+		expect(got?.root_id).toBe('artifact:sha256:root');
+		expect(got?.nodes[0].content_hash).toBe('sha256:root');
+	});
+
+	it('resolves to null on a 404 (unknown hash) rather than throwing', async () => {
+		fetchSpy.mockResolvedValue(
+			new Response(JSON.stringify({ error: { message: 'not found' } }), {
+				status: 404,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		await expect(getAuditTrace({ contentHash: 'sha256:none' })).resolves.toBeNull();
+	});
+
+	it('still throws on a non-404 error', async () => {
+		fetchSpy.mockResolvedValue(
+			new Response(JSON.stringify({ error: { message: 'trace assembly failed' } }), {
+				status: 500,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		await expect(getAuditTrace({ contentHash: 'sha256:x' })).rejects.toThrow(
+			'trace assembly failed'
 		);
 	});
 });

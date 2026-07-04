@@ -4,12 +4,12 @@
 	import { Button } from '$lib/components/ui/button';
 	import {
 		listRecentMaterialized,
-		getAuditByContentHash,
+		getAuditTrace,
 		getAuditByInvocation,
 		type AuditEvent
 	} from '$lib/api';
 	import {
-		assembleProvenance,
+		mapTraceResponse,
 		type ProvenanceGraph,
 		type ProvenanceNode
 	} from '$lib/audit/provenance';
@@ -42,17 +42,6 @@
 
 	let selectedNode = $state<ProvenanceNode | null>(null);
 
-	// Production resolver: the walk-back asks for the record that produced
-	// a content hash. `content_hash` may match several events (the same
-	// artifact re-materialized); the first is the producing record.
-	async function resolveByHash(hash: string): Promise<AuditEvent | null> {
-		const events = await getAuditByContentHash(hash);
-		const materialized = events.find(
-			(e) => p.outputContentHash(e) === hash
-		);
-		return materialized ?? events[0] ?? null;
-	}
-
 	async function openArtifact(hash: string) {
 		resolving = true;
 		graphError = '';
@@ -63,13 +52,18 @@
 		timelineEvents = [];
 		timelineError = '';
 		try {
-			const startEvent = await resolveByHash(hash);
-			if (!startEvent) {
+			// One round-trip: the daemon assembles the whole provenance graph
+			// (#1913). A 404 (unknown hash) resolves to null — the friendly
+			// empty state, not an error (#1894 contract).
+			const resp = await getAuditTrace({ contentHash: hash });
+			const rootNode = resp?.nodes.find((n) => n.id === resp.root_id);
+			if (!resp || !rootNode) {
 				graphError = `No artifact found for ${hash}.`;
 				return;
 			}
-			root = startEvent;
-			graph = await assembleProvenance(startEvent, resolveByHash);
+			// The root node's embedded event backs the header + timeline id.
+			root = rootNode.event ?? null;
+			graph = mapTraceResponse(resp);
 		} catch (e) {
 			graphError = e instanceof Error ? e.message : String(e);
 		} finally {
