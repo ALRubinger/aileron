@@ -68,8 +68,10 @@ export function stepInputs(e: AuditEvent): StepInput[] {
 	for (const item of raw) {
 		if (item === null || typeof item !== 'object') continue;
 		const obj = item as Record<string, unknown>;
-		const binding = typeof obj.binding === 'string' ? obj.binding : '';
-		const entry: StepInput = { binding };
+		// A step input without a real binding name is not a usable walk-back
+		// entry; skip it alongside the other malformed shapes.
+		if (typeof obj.binding !== 'string' || obj.binding.length === 0) continue;
+		const entry: StepInput = { binding: obj.binding };
 		if (typeof obj.source === 'string') entry.source = obj.source;
 		if (typeof obj.content_hash === 'string') entry.content_hash = obj.content_hash;
 		if (typeof obj.query_execution_id === 'string')

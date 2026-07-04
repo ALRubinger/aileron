@@ -11,6 +11,7 @@
 	let hashInput = $state('');
 	let hashing = $state(false);
 	let dropError = $state('');
+	let fileInput: HTMLInputElement;
 
 	function normalize(raw: string): string {
 		const trimmed = raw.trim();
@@ -34,11 +35,10 @@
 		return `sha256:${hex}`;
 	}
 
-	async function onDrop(e: DragEvent) {
-		e.preventDefault();
+	// Shared file → hash → lookup path for both drag-drop and the keyboard/
+	// click-triggered hidden file input.
+	async function ingestFile(file: File) {
 		dropError = '';
-		const file = e.dataTransfer?.files?.[0];
-		if (!file) return;
 		hashing = true;
 		try {
 			const h = await hashFile(file);
@@ -49,6 +49,17 @@
 		} finally {
 			hashing = false;
 		}
+	}
+
+	async function onDrop(e: DragEvent) {
+		e.preventDefault();
+		const file = e.dataTransfer?.files?.[0];
+		if (file) await ingestFile(file);
+	}
+
+	async function onFileSelected(e: Event) {
+		const file = (e.target as HTMLInputElement).files?.[0];
+		if (file) await ingestFile(file);
 	}
 </script>
 
@@ -77,11 +88,25 @@
 		class="mt-3 flex h-20 items-center justify-center rounded border border-dashed border-border text-sm text-muted-foreground"
 		ondragover={(e) => e.preventDefault()}
 		ondrop={onDrop}
+		onclick={() => fileInput.click()}
+		onkeydown={(e) => {
+			if (e.key === 'Enter' || e.key === ' ') {
+				e.preventDefault();
+				fileInput.click();
+			}
+		}}
 	>
+		<input
+			bind:this={fileInput}
+			type="file"
+			class="sr-only"
+			data-testid="lookup-file-input"
+			onchange={onFileSelected}
+		/>
 		{#if hashing}
 			Hashing file…
 		{:else}
-			Drop a file here to hash it locally and look up its provenance
+			Drop a file here (or press Enter to browse) to hash it locally and look up its provenance
 		{/if}
 	</div>
 	{#if dropError}

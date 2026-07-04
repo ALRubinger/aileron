@@ -59,6 +59,9 @@
 		graph = null;
 		root = null;
 		view = 'graph';
+		// Switching artifacts must not leave a stale timeline behind.
+		timelineEvents = [];
+		timelineError = '';
 		try {
 			const startEvent = await resolveByHash(hash);
 			if (!startEvent) {
@@ -79,22 +82,31 @@
 		graph = null;
 		graphError = '';
 		view = 'graph';
+		timelineEvents = [];
+		timelineError = '';
 	}
 
 	async function showTimeline() {
 		view = 'timeline';
 		timelineError = '';
+		timelineEvents = [];
 		if (!root) return;
 		const inv = p.invocationId(root);
 		if (!inv) {
 			timelineError = 'This artifact has no invocation id to correlate a timeline.';
-			timelineEvents = [];
 			return;
 		}
 		try {
-			timelineEvents = await getAuditByInvocation(inv);
+			const events = await getAuditByInvocation(inv);
+			// Drop the result if the focused artifact changed while this
+			// request was in flight, so an older fetch can't overwrite a newer.
+			if (root && p.invocationId(root) === inv) {
+				timelineEvents = events;
+			}
 		} catch (e) {
-			timelineError = e instanceof Error ? e.message : String(e);
+			if (root && p.invocationId(root) === inv) {
+				timelineError = e instanceof Error ? e.message : String(e);
+			}
 		}
 	}
 

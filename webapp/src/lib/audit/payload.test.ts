@@ -54,9 +54,9 @@ describe('stepInputs', () => {
 		expect(stepInputs(ev({ 'aileron.step.inputs': 'nope' }))).toEqual([]);
 		expect(stepInputs(ev({}))).toEqual([]);
 	});
-	it('skips malformed entries', () => {
-		expect(stepInputs(ev({ 'aileron.step.inputs': [null, 42, { binding: 'ok' }] }))).toEqual([
-			{ binding: 'ok' }
-		]);
+	it('skips malformed entries, including objects without a real binding', () => {
+		expect(
+			stepInputs(ev({ 'aileron.step.inputs': [null, 42, {}, { binding: '' }, { binding: 'ok' }] }))
+		).toEqual([{ binding: 'ok' }]);
 	});
 });
