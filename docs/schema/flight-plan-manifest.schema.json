@@ -665,6 +665,11 @@
             }
           }
         },
+        "publisher": {
+          "type": "string",
+          "description": "The publisher authority the plan is attributed to, a connector-style authority (github://owner/repo or bare github://owner). Optional; recorded by freeze --publisher. Being inside the lock, it is covered by the content hash and signature and cannot be re-supplied at launch. When present, launch resolves the plan's signing key against the keyring for this authority and refuses when the publisher is not trusted.",
+          "minLength": 1
+        },
         "contentHash": {
           "type": "string",
           "description": "The content hash identifying the exact frozen manifest bytes.",

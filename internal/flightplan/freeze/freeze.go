@@ -55,6 +55,15 @@ type Options struct {
 	// Version is the semver label recorded in the lock. Optional; empty
 	// records no version label.
 	Version string
+	// Publisher is the connector-style publisher authority the frozen plan is
+	// attributed to (`github://owner/repo` or bare `github://owner`). Optional;
+	// empty records no publisher and carries no launch-time publisher-trust
+	// gate. When set, it is written into the lock (covered by the content hash
+	// and signature) so a launch can resolve the plan's signing key against the
+	// keyring for this authority. Validation of the authority shape is the
+	// CLI's responsibility (it parses through cstore.ParseFQN); freeze records
+	// the value verbatim.
+	Publisher string
 	// CLIVersion is the Aileron CLI build version. It drives the default
 	// composition base: a tools-declaring skill with no custom image composes
 	// onto the Aileron runner base for this version (composition.BaseImage).
@@ -123,6 +132,7 @@ func Run(ctx context.Context, raw []byte, opts Options) (Result, error) {
 		ResolvedImages:        pins,
 		ResolvedCapabilitySet: capSet,
 		StepTrust:             stepTrust,
+		Publisher:             opts.Publisher,
 		Version:               opts.Version,
 	}
 

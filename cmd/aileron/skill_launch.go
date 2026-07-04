@@ -107,6 +107,21 @@ var newLaunchToolStepRunner = func() runtime.ToolStepRunner {
 	return inContainerToolStepRunner{}
 }
 
+// launchPublisherVerifier returns the host-side publisher-trust gate wired
+// into the runtime (#1900), or nil on the image-boot re-entry. The nil-skip
+// mirrors the InPinnedImage guard: when AILERON_SKILL_IMAGE_BOOTED is set this
+// launch is the re-entry INSIDE the sealed pin, where the host already gated
+// before boot and the keyring is not mounted, so wiring the gate here would
+// resolve an empty container keyring and fail closed for every image-pinned
+// plan. On a host launch it returns the keyring-backed verifier; the runtime
+// still skips the gate for a plan that declares no publisher.
+func launchPublisherVerifier(stderr io.Writer) runtime.PublisherVerifier {
+	if os.Getenv(envSkillImageBooted) != "" {
+		return nil
+	}
+	return newLaunchPublisherVerifier(stderr)
+}
+
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
 // nil by default, which is the v1 contract: a plan with an llm-seam step
 // errors unless a provider is configured, so a default launch reaches no LLM.
@@ -202,6 +217,15 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// environment and must run the plan in-process, not boot the pin
 		// again.
 		InPinnedImage: os.Getenv(envSkillImageBooted) != "",
+		// PublisherVerifier is the host-side publisher-trust gate (#1900). It is
+		// nil on the image-boot re-entry (the same sentinel that sets
+		// InPinnedImage): the host already ran the gate before booting the pin,
+		// no keyring is mounted into the sealed container, and re-checking here
+		// would resolve the container's empty home to an empty keyring and fail
+		// closed for every image-pinned plan. On a host launch it is the
+		// keyring-backed verifier; the runtime still skips the gate for a plan
+		// that declares no publisher.
+		PublisherVerifier: launchPublisherVerifier(stderr),
 		// ToolRunner executes each `kind: tool` step as a scoped subprocess in
 		// the current (pinned) environment (#1829). No sibling container is
 		// ever dispatched.

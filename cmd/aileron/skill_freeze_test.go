@@ -215,6 +215,111 @@ func TestRunSkillFreeze_MissingSigningKey(t *testing.T) {
 	}
 }
 
+// TestRunSkillFreeze_PublisherRecordedInLock proves `--publisher` is threaded
+// into the frozen lock (#1900), so a launch can enforce publisher trust.
+func TestRunSkillFreeze_PublisherRecordedInLock(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	// No omitted-publisher warning when --publisher is supplied.
+	if strings.Contains(stderr.String(), "without --publisher") {
+		t.Errorf("supplying --publisher must not warn: %q", stderr.String())
+	}
+	s := store.New(storeDir)
+	ids, err := s.FrozenVersions("weekly-metrics-digest")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("FrozenVersions = %v, %v", ids, err)
+	}
+	v, err := s.ReadFrozen("weekly-metrics-digest", ids[0])
+	if err != nil {
+		t.Fatalf("ReadFrozen: %v", err)
+	}
+	if !strings.Contains(string(v.Lockfile), "publisher: github://acme/plans") {
+		t.Errorf("lockfile must record the publisher:\n%s", v.Lockfile)
+	}
+	if !strings.Contains(string(v.SkillMD), "publisher: github://acme/plans") {
+		t.Errorf("frozen manifest lock block must record the publisher:\n%s", v.SkillMD)
+	}
+}
+
+// TestRunSkillFreeze_OmittedPublisherWarnsButSucceeds proves omitting
+// --publisher prints a warning to stderr (never silently succeeds) and still
+// freezes (#1900, P1).
+func TestRunSkillFreeze_OmittedPublisherWarnsButSucceeds(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("omitting --publisher must still freeze; exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "without --publisher") {
+		t.Errorf("omitting --publisher must warn on stderr, got: %q", stderr.String())
+	}
+	s := store.New(storeDir)
+	ids, _ := s.FrozenVersions("weekly-metrics-digest")
+	v, err := s.ReadFrozen("weekly-metrics-digest", ids[0])
+	if err != nil {
+		t.Fatalf("ReadFrozen: %v", err)
+	}
+	if strings.Contains(string(v.Lockfile), "publisher:") {
+		t.Errorf("a publisher-less freeze must not emit a publisher key:\n%s", v.Lockfile)
+	}
+}
+
+// TestRunSkillFreeze_BareOwnerPublisherAccepted proves a bare-owner publisher
+// authority (github://owner, which ParseFQN alone rejects) is accepted and
+// sealed, matching the input forms `aileron keyring trust` accepts.
+func TestRunSkillFreeze_BareOwnerPublisherAccepted(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a bare-owner --publisher must be accepted; exit=%d stderr=%s", code, stderr.String())
+	}
+	s := store.New(storeDir)
+	ids, _ := s.FrozenVersions("weekly-metrics-digest")
+	v, err := s.ReadFrozen("weekly-metrics-digest", ids[0])
+	if err != nil {
+		t.Fatalf("ReadFrozen: %v", err)
+	}
+	if !strings.Contains(string(v.Lockfile), "publisher: github://acme") {
+		t.Errorf("lockfile must record the bare-owner publisher:\n%s", v.Lockfile)
+	}
+}
+
+// TestRunSkillFreeze_InvalidPublisherFails proves a malformed --publisher fails
+// fast before signing rather than sealing an unusable authority.
+func TestRunSkillFreeze_InvalidPublisherFails(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "not-a-valid-authority", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a malformed --publisher must exit non-zero")
+	}
+	if !strings.Contains(stderr.String(), "invalid --publisher") {
+		t.Errorf("stderr = %q, want an invalid-publisher message", stderr.String())
+	}
+}
+
 func TestRunSkillFreeze_InstructionStyleNoExecEnvStillSigns(t *testing.T) {
 	storeDir := withTempStore(t)
 	stubFreezeResolvers(t, fakeFreezeDigest)

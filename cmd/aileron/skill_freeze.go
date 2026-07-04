@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -31,6 +32,7 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	signingKey := flags.String("signing-key", "", "Path to the PEM ed25519 signing key (falls back to $"+freeze.SigningKeyEnv+")")
 	version := flags.String("version", "", "Semver label recorded in the lock (for example 1.0.0)")
+	publisher := flags.String("publisher", "", "Publisher authority to attribute the plan to (github://owner/repo or github://owner). When set, launch enforces publisher trust against the keyring.")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
@@ -41,6 +43,19 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	}
 	target := positionals[0]
 
+	// A publisher is optional (#1900), but omitting it means the frozen plan
+	// carries no launch-time publisher-trust gate: any locally-signed plan
+	// launches. Warn (never silently succeed) so the author knows the plan is
+	// self-attesting only. When set, validate the authority parses as a
+	// connector-style FQN before freezing so a malformed value fails fast
+	// rather than sealing an unusable publisher into the signed lock.
+	if *publisher == "" {
+		fmt.Fprintln(stderr, "warning: freezing without --publisher; the frozen plan carries no publisher-trust gate and any locally-signed copy will launch")
+	} else if perr := validatePublisherAuthority(*publisher); perr != nil {
+		fmt.Fprintf(stderr, "error: invalid --publisher %q: %v\n", *publisher, perr)
+		return 1
+	}
+
 	raw, err := readSkillForFreeze(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -49,6 +64,7 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 
 	res, err := freeze.Run(context.Background(), raw, freeze.Options{
 		Version:        *version,
+		Publisher:      *publisher,
 		CLIVersion:     cliversion.Version,
 		SigningKeyPath: *signingKey,
 		Resolver:       newDigestResolver(),
@@ -82,6 +98,23 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  ContentHash: %s\n", res.ContentHash)
 	fmt.Fprintf(stdout, "  Stored at:   %s\n", s.FrozenDir(res.Name, id))
 	return 0
+}
+
+// validatePublisherAuthority checks that a --publisher value is a connector-
+// style authority freeze can seal into the lock (#1900). Both shapes the launch
+// gate resolves are accepted: a full per-repo FQN (`github://owner/repo`, via
+// cstore.ParseFQN) and a bare owner (`github://owner`, which ParseFQN rejects
+// as "missing repo segment" but the keyring's owner grants are keyed on). This
+// mirrors the input forms `aileron keyring trust` accepts, so a publisher
+// trusted there matches a publisher sealed here.
+func validatePublisherAuthority(authority string) error {
+	if isBareOwnerAuthority(authority) {
+		return nil
+	}
+	if _, err := cstore.ParseFQN(authority); err != nil {
+		return err
+	}
+	return nil
 }
 
 // readSkillForFreeze loads the SKILL.md bytes to freeze. The target is

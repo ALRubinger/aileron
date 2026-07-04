@@ -37,6 +37,12 @@ const publisherKeyFetchTimeout = 15 * time.Second
 // keys registered for the FQN's authority. Without an entry, install
 // fails closed with class signature_failure.
 //
+// The same trust/list/revoke surface also covers Flight-Plan publishers
+// (#1900): a plan frozen with `freeze --publisher <authority>` is gated at
+// `aileron skill launch` against the same owner/per-repo grants this map
+// holds, so trusting a publisher here trusts both their connectors and their
+// Flight Plans with no functional change to the shared owners/publishers map.
+//
 // The keyring file lives at `~/.aileron/keyring.json`; users edit it
 // to authorize a publisher (or use these subcommands).
 func runKeyring(args []string, stdout, stderr io.Writer) int {

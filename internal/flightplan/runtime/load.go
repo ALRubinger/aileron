@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"crypto/ed25519"
 	"fmt"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
@@ -39,6 +40,18 @@ type LoadedPlan struct {
 	// launch audit as the plan's signer identity (#1752). Populated only on the
 	// verified path, so it names the key that actually attested this unit.
 	SignerFingerprint string
+	// Publisher is the connector-style publisher authority the frozen plan
+	// declares in its verified lock (`github://owner/repo` or bare
+	// `github://owner`), or "" when the plan declares no publisher. The
+	// host-side publisher-trust gate (#1900) enforces trust only when this is
+	// non-empty. Populated only on the verified path from freeze.VerifyFrozen,
+	// so a tampered publisher refuses at verification before it is read here.
+	Publisher string
+	// SignerKey is the raw ed25519 public key the plan's signature verified
+	// against (from freeze.VerifyFrozen). The publisher-trust gate checks its
+	// membership in the keyring for the declared Publisher. Populated only on
+	// the verified path.
+	SignerKey ed25519.PublicKey
 }
 
 // LoadVerified loads a frozen skill version from the store, verifies it
@@ -85,6 +98,8 @@ func verifyAndDecode(fv store.FrozenVersion) (LoadedPlan, error) {
 		ResolvedImages:    verified.ResolvedImages,
 		StepTrust:         verified.StepTrust,
 		SignerFingerprint: verified.SignerFingerprint,
+		Publisher:         verified.Publisher,
+		SignerKey:         verified.SignerKey,
 	}, nil
 }
 

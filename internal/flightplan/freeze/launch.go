@@ -1,6 +1,7 @@
 package freeze
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -45,6 +46,20 @@ type VerifiedFrozen struct {
 	// path, alongside a successful signature check, so the fingerprint names
 	// the key that actually attested the frozen unit.
 	SignerFingerprint string
+	// Publisher is the connector-style publisher authority the frozen plan is
+	// attributed to (`github://owner/repo` or bare `github://owner`), copied
+	// from the manifest's OWN verified lock block (the region the content-hash
+	// reconstruction proved). A tampered publisher changes the recomputed hash
+	// and refuses before this field is read, so the value is exactly the one
+	// the signature attested. Empty for a publisher-less frozen unit. The
+	// launch-time publisher-trust gate reads it (only) from here.
+	Publisher string
+	// SignerKey is the raw ed25519 public key the signature verified against,
+	// parsed from the same `pubPEM` after Verify succeeded. It is the key whose
+	// membership in the keyring the launch-time publisher-trust gate checks
+	// against the declared Publisher. Nil only when parsing the verified PEM
+	// fails (which cannot happen after a successful Verify).
+	SignerKey ed25519.PublicKey
 }
 
 // VerifyFrozen is the Launch-time verification gate (ADR-0027, #1509/#1511).
@@ -140,6 +155,16 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 		return VerifiedFrozen{}, err
 	}
 
+	// Parse the verified public key into its raw ed25519 form so the
+	// publisher-trust gate can check membership against the keyring. This runs
+	// only after Verify succeeded, so pubPEM is the exact key that attested the
+	// unit; a parse failure here would be an internal inconsistency (Verify
+	// already parsed it), so surface it rather than returning a nil key.
+	signerKey, err := parsePublicKeyPEM(pubPEM)
+	if err != nil {
+		return VerifiedFrozen{}, fmt.Errorf("freeze: parse verified public key: %w", err)
+	}
+
 	// Return a defensive copy of the verified manifest bytes so a later mutation
 	// of the caller's slice can never change what was verified. The resolved
 	// image pins are copied from the manifest's OWN lock block (the region the
@@ -168,6 +193,8 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 		ResolvedImages:    pins,
 		StepTrust:         stepTrust,
 		SignerFingerprint: signerFingerprint(pubPEM),
+		Publisher:         manifestLock.Publisher,
+		SignerKey:         signerKey,
 	}, nil
 }
 
