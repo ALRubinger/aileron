@@ -1103,7 +1103,7 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 		t.Fatalf("runtime = %q, want docker", result.Runtime)
 	}
 	want := []string{
-		"run", "--rm", "-i",
+		"run", "--rm",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
 		"--env", "A_VAR=first",
@@ -1130,7 +1130,7 @@ func TestRunCanOverrideContainerUser(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	want := []string{
-		"run", "--rm", "-i",
+		"run", "--rm",
 		"--user", "root",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
@@ -1165,7 +1165,7 @@ func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
 	}
 	absExtra, _ := filepath.Abs(extra)
 	want := []string{
-		"run", "--rm", "-i",
+		"run", "--rm",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
 		"--volume", absExtra + ":/opt/aileron/manifests/actions:ro",
@@ -1287,15 +1287,88 @@ func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 func TestRunAddsTTYWhenRequested(t *testing.T) {
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron-sandbox-base:test",
-		Command: []string{"claude"},
-		TTY:     true,
+		Image:       "aileron-sandbox-base:test",
+		Command:     []string{"claude"},
+		Interactive: true,
+		TTY:         true,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if !reflect.DeepEqual(runner.args[:4], []string{"run", "--rm", "-i", "-t"}) {
 		t.Fatalf("args prefix = %#v, want tty run prefix", runner.args[:4])
+	}
+}
+
+// TestRunBatchOmitsInteractiveFlag is the regression guard for issue
+// #1889: a default (batch) RunOptions must NOT emit docker's `-i`. The
+// skill-launch path leaves Interactive false, and a batch `docker run
+// -i` on a real terminal keeps stdin attached with no EOF so the run
+// never returns and the caller hangs.
+func TestRunBatchOmitsInteractiveFlag(t *testing.T) {
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron-sandbox-base:test",
+		Command: []string{"aileron", "skill", "run"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !reflect.DeepEqual(runner.args[:2], []string{"run", "--rm"}) {
+		t.Fatalf("args prefix = %#v, want [run --rm] with no -i", runner.args[:2])
+	}
+	for _, a := range runner.args {
+		if a == "-i" {
+			t.Fatalf("batch run args must not contain -i: %#v", runner.args)
+		}
+		if a == "-t" {
+			t.Fatalf("batch run args must not contain -t: %#v", runner.args)
+		}
+	}
+}
+
+// TestRunInteractiveEmitsInteractiveFlag pins the interactive contract:
+// an Interactive RunOptions (the agent-shell launch path) emits `-i` so
+// the in-container process keeps stdin open.
+func TestRunInteractiveEmitsInteractiveFlag(t *testing.T) {
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:       "aileron-sandbox-base:test",
+		Command:     []string{"claude"},
+		Interactive: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !reflect.DeepEqual(runner.args[:3], []string{"run", "--rm", "-i"}) {
+		t.Fatalf("args prefix = %#v, want [run --rm -i]", runner.args[:3])
+	}
+	for _, a := range runner.args {
+		if a == "-t" {
+			t.Fatalf("non-TTY interactive run must not contain -t: %#v", runner.args)
+		}
+	}
+}
+
+func TestInteractiveRun(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"run with -i", []string{"run", "--rm", "-i", "img", "claude"}, true},
+		{"run without -i", []string{"run", "--rm", "img", "codex"}, false},
+		{"exec with -i", []string{"exec", "-i", "c", "gh", "auth", "login"}, true},
+		{"exec without -i", []string{"exec", "c", "gh", "auth", "token"}, false},
+		{"build is never interactive", []string{"build", "-t", "tag", "."}, false},
+		{"empty", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := interactiveRun(tc.args); got != tc.want {
+				t.Fatalf("interactiveRun(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1336,7 +1409,7 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		t.Fatalf("runtime = %q, want docker", runner.name)
 	}
 	wantPrefix := []string{
-		"run", "--rm", "-i",
+		"run", "--rm",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
 		"--env", "HTTPS_PROXY=http://host.docker.internal:48123",

@@ -1356,15 +1356,16 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	)
 
 	runOpts := sandboxcontainer.RunOptions{
-		Runtime: plan.Runtime,
-		Image:   plan.Image,
-		WorkDir: config.Dir,
-		Env:     agentEnv,
-		Volumes: mounts,
-		Command: command,
-		User:    user,
-		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
-		Name:    containerName,
+		Runtime:     plan.Runtime,
+		Image:       plan.Image,
+		WorkDir:     config.Dir,
+		Env:         agentEnv,
+		Volumes:     mounts,
+		Command:     command,
+		User:        user,
+		Interactive: true,
+		TTY:         term.IsTerminal(int(os.Stdin.Fd())),
+		Name:        containerName,
 	}
 
 	// Graceful-shutdown salvage (ADR-0025, R13/R15): the one-shot

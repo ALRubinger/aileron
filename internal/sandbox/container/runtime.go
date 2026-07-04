@@ -148,7 +148,14 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 		}
 	}
 
-	cmd.Stdin = os.Stdin
+	// Bind the host's stdin only for an interactive run (`-i` present).
+	// A batch run reads no host stdin; leaving os.Stdin attached to the
+	// docker CLI's stdin pump keeps stdin open with no EOF on a real
+	// terminal, so the run never returns and the caller hangs (issue
+	// #1889). Mirror the arg-inspection pattern interactiveTTYRun uses.
+	if interactiveRun(args) {
+		cmd.Stdin = os.Stdin
+	}
 	return cmd.Run()
 }
 
@@ -190,6 +197,23 @@ func interactiveTTYRun(args []string) bool {
 	}
 	for _, a := range args {
 		if a == "-t" {
+			return true
+		}
+	}
+	return false
+}
+
+// interactiveRun reports whether args describe a container `run` or
+// `exec` that keeps STDIN open (`-i`). Only such a command needs the
+// host's os.Stdin bound to the runtime child; a batch run reads no host
+// stdin, and binding it would leave stdin open with no EOF on a real
+// terminal so the run never returns (issue #1889).
+func interactiveRun(args []string) bool {
+	if len(args) == 0 || (args[0] != "run" && args[0] != "exec") {
+		return false
+	}
+	for _, a := range args {
+		if a == "-i" {
 			return true
 		}
 	}
@@ -295,7 +319,14 @@ type RunOptions struct {
 	Volumes []Volume
 	Command []string
 	User    string
-	TTY     bool
+	// Interactive maps to docker's `-i` (keep STDIN open even if not
+	// attached). Set it for runs whose in-container process reads the
+	// host's stdin (an agent shell). Leave it false for batch runs that
+	// read no host stdin: a batch `docker run -i` on a real terminal
+	// leaves stdin attached with no EOF, so the run never returns and the
+	// caller hangs (issue #1889).
+	Interactive bool
+	TTY         bool
 	// Name, when non-empty, is passed as `--name <Name>` so the
 	// container is addressable for a later `stop` (the AuthSpec
 	// graceful-shutdown salvage path; see ADR-0025). An anonymous
@@ -1014,7 +1045,10 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox workdir: %w", err)
 	}
-	args := []string{"run", "--rm", "-i"}
+	args := []string{"run", "--rm"}
+	if opts.Interactive {
+		args = append(args, "-i")
+	}
 	if opts.TTY {
 		args = append(args, "-t")
 	}
