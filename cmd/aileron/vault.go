@@ -26,6 +26,7 @@ const envVaultPassphrase = "AILERON_VAULT_PASSPHRASE"
 const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/<purpose> --from-file <path>
+  aileron vault put user/<service> [--from-file <path>]
   aileron vault delete <path-as-listed> [--yes]
   aileron vault list [--scope agent|user|all] [--prefix agents/] [--include-control-plane] [--json]
 
@@ -43,18 +44,26 @@ are removed from the local vault (where secret set writes them).
 Control-plane entries (connected-accounts/, llm-config/) are managed by
 the control plane, not this CLI.
 
-vault put remains agents-only: you create a binding with ` + "`binding setup`" + `,
-not ` + "`vault put`" + `.`
+vault put targets the agent namespace (agents/<name>/<purpose>, from a
+file) or the user namespace (user/<service>). For a user credential the
+value is entered at a hidden prompt by default, or read verbatim from
+--from-file. Routing user credentials through this verb base64-encodes
+them correctly on the wire; a hand-crafted curl PUT that passes a raw
+secret (a 40-char AWS secret key is itself valid base64) silently decodes
+to garbage. You still create a binding with ` + "`binding setup`" + `, not
+` + "`vault put`" + `.`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
 // init opens the local vault file directly (first-run flow); the
 // put/delete/list verbs are thin daemon-backed HTTP clients that never
-// open the vault file themselves. put is namespace-locked to
-// `agents/<name>/<purpose>` (you create a binding with `binding setup`,
-// not `vault put`); delete classifies the path and dispatches to the
-// matching namespace-scoped daemon endpoint (agents/, user/, or a
-// binding), so anything `vault list` prints is deletable.
+// open the vault file themselves. put targets the agent namespace
+// (agents/<name>/<purpose>, from a file) or the user namespace
+// (user/<service>, from a hidden prompt or a file) — you still create a
+// binding with `binding setup`, not `vault put`; delete classifies the
+// path and dispatches to the matching namespace-scoped daemon endpoint
+// (agents/, user/, or a binding), so anything `vault list` prints is
+// deletable.
 func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, vaultUsage)
@@ -159,57 +168,145 @@ type userSummary struct {
 	Metadata *vaultSummaryMetadata `json:"metadata,omitempty"`
 }
 
-// runVaultPut stores a credential envelope read verbatim from a file
-// at agents/<name>/<purpose> via the daemon. The file bytes are stored
-// as-is (whole-file read, no trailing-newline munging) since agent
-// credential files (Claude's .credentials.json, Codex's auth.json) are
-// exact-byte artifacts.
+// runVaultPut stores a credential envelope via the daemon. It dispatches
+// on the target namespace:
+//
+//   - agents/<name>/<purpose> — file-only. Agent credential files (Claude's
+//     .credentials.json, Codex's auth.json) are exact-byte JSON artifacts,
+//     so the bytes are read verbatim from --from-file (no trailing-newline
+//     munging) and there is no interactive entry.
+//   - user/<service> — the value may be entered at a hidden prompt (the
+//     default) or read from --from-file. User credentials are frequently
+//     raw secrets an operator holds in hand (an AWS secret key, an API
+//     token); typing one at a no-echo prompt keeps it out of argv and shell
+//     history, and — crucially — routing it through this verb base64-encodes
+//     it correctly on the wire. Hand-crafting the PUT with a raw
+//     already-"looks-like-base64" secret (a 40-char AWS secret key is valid
+//     base64) silently decodes to garbage server-side and later surfaces as
+//     AWS SignatureDoesNotMatch (#1822).
+//
+// Any other namespace is rejected before any HTTP call: you create a binding
+// with `binding setup`, not `vault put`.
 func runVaultPut(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("vault put", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	fromFile := flags.String("from-file", "", "Read the credential bytes verbatim from the named file")
-	flags.Bool("yes", false, "Accepted for symmetry with delete; put never prompts")
+	fromFile := flags.String("from-file", "", "Read the credential bytes verbatim from the named file (required for agents/, optional for user/)")
+	flags.Bool("yes", false, "Accepted for symmetry with delete; put never prompts for confirmation")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
 	}
 	if len(positionals) != 1 {
 		fmt.Fprintln(stderr, "usage: aileron vault put agents/<name>/<purpose> --from-file <path>")
+		fmt.Fprintln(stderr, "       aileron vault put user/<service> [--from-file <path>]")
 		return 1
 	}
-	name, purpose, err := agentPathNameAndPurpose(positionals[0])
+	arg := positionals[0]
+	scope, _ := vaultscope.Classify(arg)
+	switch scope {
+	case vaultscope.ScopeAgent:
+		return runVaultPutAgent(arg, *fromFile, stdout, stderr)
+	case vaultscope.ScopeUser:
+		return runVaultPutUser(arg, *fromFile, stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "error: vault put accepts agents/<name>/<purpose> or user/<service> (got %q)\n", arg)
+		fmt.Fprintln(stderr, "create a binding with `binding setup`, not `vault put`.")
+		return 1
+	}
+}
+
+// runVaultPutAgent stores an agent credential envelope read verbatim from a
+// file at agents/<name>/<purpose>. The file bytes are stored as-is
+// (whole-file read, no trailing-newline munging) since agent credential
+// files are exact-byte artifacts; interactive entry is deliberately not
+// offered for this namespace.
+func runVaultPutAgent(arg, fromFile string, stdout, stderr io.Writer) int {
+	// Classify already confirmed the agents/<name>/<purpose> shape, so this
+	// wrapper cannot error; the check is defensive.
+	name, purpose, err := agentPathNameAndPurpose(arg)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	if *fromFile == "" {
-		fmt.Fprintln(stderr, "error: --from-file <path> is required")
+	if fromFile == "" {
+		fmt.Fprintln(stderr, "error: --from-file <path> is required for agent credentials")
 		return 1
 	}
-	data, err := os.ReadFile(*fromFile)
+	data, err := os.ReadFile(fromFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "error reading %q: %v\n", *fromFile, err)
+		fmt.Fprintf(stderr, "error reading %q: %v\n", fromFile, err)
 		return 1
 	}
 	if len(data) == 0 {
-		fmt.Fprintf(stderr, "error: %q is empty\n", *fromFile)
+		fmt.Fprintf(stderr, "error: %q is empty\n", fromFile)
+		return 1
+	}
+	return vaultPutCredential(agentCredentialPath(name, purpose), data,
+		"agents/"+name+"/"+purpose, stdout, stderr)
+}
+
+// runVaultPutUser stores a user-level credential envelope at user/<service>.
+// The value comes from --from-file (read verbatim) or, when that flag is
+// absent, an interactive hidden prompt on the controlling terminal so the
+// secret never reaches argv or shell history. Either way the bytes are
+// base64-encoded on the wire by agentCredentialsBody, which is the whole
+// point: it is the correct encoding the raw curl PUT footgun gets wrong
+// (#1822).
+func runVaultPutUser(arg, fromFile string, stdout, stderr io.Writer) int {
+	// Classify already confirmed the user/<service> shape and that <service>
+	// passes the allow-list; the check is defensive.
+	service, ok := vaultscope.UserServiceFromVaultPath(arg)
+	if !ok {
+		fmt.Fprintf(stderr, "error: invalid user service path %q\n", arg)
 		return 1
 	}
 
+	var data []byte
+	if fromFile != "" {
+		b, err := os.ReadFile(fromFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "error reading %q: %v\n", fromFile, err)
+			return 1
+		}
+		data = b
+	} else {
+		// Hidden, no-echo entry mirrors `secret set`: print the prompt to
+		// stderr, then read with no additional prompt (promptPassphrase is an
+		// overridable var so tests can inject the typed value).
+		fmt.Fprintf(stderr, "Value for user/%s: ", service)
+		value, err := promptPassphrase("", nil)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stderr) // newline after hidden input
+		data = []byte(value)
+	}
+	if len(data) == 0 {
+		fmt.Fprintln(stderr, "error: value cannot be empty")
+		return 1
+	}
+	return vaultPutCredential(userCredentialDaemonPath(service), data,
+		"user/"+service, stdout, stderr)
+}
+
+// vaultPutCredential base64-encodes data into the shared AgentCredentials
+// wire shape, PUTs it to httpPath via the daemon, and maps the response to a
+// CLI exit code. label is the namespaced identifier echoed on success.
+func vaultPutCredential(httpPath string, data []byte, label string, stdout, stderr io.Writer) int {
 	body, err := json.Marshal(agentCredentialsBody{Value: data})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	status, respBody, err := vaultDoRequest(http.MethodPut,
-		agentCredentialPath(name, purpose), body)
+	status, respBody, err := vaultDoRequest(http.MethodPut, httpPath, body)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	switch status {
 	case http.StatusNoContent:
-		fmt.Fprintf(stdout, "Stored agents/%s/%s\n", name, purpose)
+		fmt.Fprintf(stdout, "Stored %s\n", label)
 		return 0
 	case http.StatusLocked:
 		fmt.Fprintln(stderr, "error: vault is locked; unlock it first")
@@ -221,6 +318,15 @@ func runVaultPut(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
 		return 1
 	}
+}
+
+// userCredentialDaemonPath builds the daemon path for a user-level
+// credential. The service segment is path-escaped defensively; callers pass
+// values already constrained by vaultscope.UserServiceFromVaultPath, but
+// escaping keeps a stray special character from corrupting the request. It
+// is the write-side twin of the DELETE path vaultDeleteTargetFor builds.
+func userCredentialDaemonPath(service string) string {
+	return "/vault/user/" + url.PathEscape(service) + "/credentials"
 }
 
 // vaultDeleteTarget describes a classified, CLI-deletable vault path: the
@@ -270,7 +376,7 @@ func vaultDeleteTargetFor(arg string) (vaultDeleteTarget, bool) {
 		service, _ := vaultscope.UserServiceFromVaultPath(arg)
 		label := "user/" + service
 		return vaultDeleteTarget{
-			httpPath:   "/vault/user/" + url.PathEscape(service) + "/credentials",
+			httpPath:   userCredentialDaemonPath(service),
 			label:      label,
 			successMsg: "Deleted " + label,
 			notFound:   "error: no credential entry for " + label,
