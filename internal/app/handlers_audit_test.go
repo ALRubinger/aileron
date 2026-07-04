@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -570,5 +572,237 @@ func TestListAudit_AuditIDFilterAlone(t *testing.T) {
 	resp := decodeAuditList(t, rec)
 	if len(resp.Events) != 1 || resp.Events[0].AuditId != "want" {
 		t.Errorf("got = %+v; want only 'want'", resp.Events)
+	}
+}
+
+// --- GET /v1/audit/trace ---
+
+// traceDigest returns a real sha256:<hex> digest so trace fixtures never
+// hand-author a hash; the artifact→input linkage the walk resolves is
+// authentic (mirrors #1912's real-fixture discipline).
+func traceDigest(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// seedTraceChain records a real two-step provenance chain (artifact A
+// produced by s1, artifact B produced by s2 consuming A) into a fresh
+// test server, returning the server and the two content hashes.
+func seedTraceChain(t *testing.T) (*apiServer, string, string) {
+	t.Helper()
+	rawBytes := []byte(`{"rows":[1,2,3]}`)
+	hashA := traceDigest(rawBytes)
+	reportBytes := []byte("a,b\n1,2\n")
+	hashB := traceDigest(reportBytes)
+
+	evA := audit.Event{
+		EventID:   "evt-a",
+		EventType: "output.materialized",
+		Timestamp: time.Now(),
+		Actor:     model.ActorRef{Type: model.ActorTypeAgent, ID: "runtime", IdentityLabel: "analytics@corp"},
+		Payload: map[string]any{
+			"aileron.output.name":         "raw.json",
+			"aileron.output.content_hash": hashA,
+			"aileron.output.bytes":        len(rawBytes),
+			"aileron.step.id":             "s1",
+			"aileron.step.kind":           "action-call",
+			"aileron.invocation.id":       "inv-1",
+			"aileron.plan.skill":          "athena-report",
+		},
+	}
+	evB := audit.Event{
+		EventID:   "evt-b",
+		EventType: "output.materialized",
+		Timestamp: time.Now().Add(time.Second),
+		Actor:     model.ActorRef{Type: model.ActorTypeAgent, ID: "runtime", IdentityLabel: "analytics@corp"},
+		Payload: map[string]any{
+			"aileron.output.name":         "report.csv",
+			"aileron.output.content_hash": hashB,
+			"aileron.output.bytes":        len(reportBytes),
+			"aileron.step.id":             "s2",
+			"aileron.step.kind":           "transform",
+			"aileron.step.transform":      "to-csv",
+			"aileron.step.inputs": []map[string]any{
+				{"binding": "data", "source": "steps.s1.out", "content_hash": hashA},
+				{"binding": "label", "source": "inputs.label"},
+			},
+			"aileron.invocation.id": "inv-1",
+			"aileron.plan.skill":    "athena-report",
+		},
+	}
+	srv, _ := newAuditTestServer(t, evA, evB)
+	return srv, hashA, hashB
+}
+
+func decodeTrace(t *testing.T, rec *httptest.ResponseRecorder) api.AuditTraceResponse {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp api.AuditTraceResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v; body = %s", err, rec.Body.String())
+	}
+	return resp
+}
+
+func TestGetAuditTrace_ByContentHashAssemblesGraph(t *testing.T) {
+	srv, hashA, hashB := seedTraceChain(t)
+
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{ContentHash: &hashB})
+	resp := decodeTrace(t, rec)
+
+	if resp.RootId != "artifact:"+hashB {
+		t.Fatalf("root_id = %q, want %q", resp.RootId, "artifact:"+hashB)
+	}
+	// Both artifacts present.
+	byID := map[string]api.AuditTraceNode{}
+	for _, n := range resp.Nodes {
+		byID[n.Id] = n
+	}
+	if _, ok := byID["artifact:"+hashA]; !ok {
+		t.Error("upstream artifact A missing")
+	}
+	// Embedded event surfaced on the root artifact node via toAPIAuditEvent.
+	root := byID["artifact:"+hashB]
+	if root.Event == nil || root.Event.AuditId != "evt-b" {
+		t.Errorf("root artifact event = %+v, want backing evt-b", root.Event)
+	}
+	// The producing-artifact edge (the #1912 linkage) survives serialization.
+	var linked bool
+	for _, e := range resp.Edges {
+		if e.From == "step:artifact:"+hashB && e.To == "artifact:"+hashA {
+			linked = true
+		}
+	}
+	if !linked {
+		t.Error("missing edge from B's step to producing artifact A")
+	}
+	// A launch terminal is present.
+	var launch bool
+	for _, n := range resp.Nodes {
+		if n.Kind == api.AuditTraceNodeKind("launch") {
+			launch = true
+		}
+	}
+	if !launch {
+		t.Error("missing launch terminal node")
+	}
+}
+
+func TestGetAuditTrace_ByInvocationID(t *testing.T) {
+	srv, _, hashB := seedTraceChain(t)
+	inv := "inv-1"
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{InvocationId: &inv})
+	resp := decodeTrace(t, rec)
+	if resp.RootId != "artifact:"+hashB {
+		t.Errorf("root_id = %q, want newest terminal %q", resp.RootId, "artifact:"+hashB)
+	}
+	if len(resp.Nodes) == 0 {
+		t.Error("expected a non-empty invocation trace")
+	}
+}
+
+func TestGetAuditTrace_UnknownRootReturns404(t *testing.T) {
+	srv, _, _ := seedTraceChain(t)
+	missing := "sha256:deadbeef"
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{ContentHash: &missing})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetAuditTrace_NeitherParamReturns400(t *testing.T) {
+	srv, _, _ := seedTraceChain(t)
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetAuditTrace_NoStoreReturns404(t *testing.T) {
+	srv := &apiServer{log: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	h := "sha256:whatever"
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{ContentHash: &h})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// failingListStore embeds a MemStore but forces ListEvents to fail, so
+// the trace handler's 500 path can be exercised.
+type failingListStore struct {
+	*audit.MemStore
+	err error
+}
+
+func (f failingListStore) ListEvents(context.Context, audit.EventFilter) ([]audit.Event, error) {
+	return nil, f.err
+}
+
+func TestGetAuditTrace_StoreErrorReturns500(t *testing.T) {
+	srv := &apiServer{
+		log:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		auditStore: failingListStore{MemStore: audit.NewMemStore(), err: errors.New("boom")},
+	}
+	h := "sha256:whatever"
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{ContentHash: &h})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetAuditTrace_DanglingUpstreamMappedToWire(t *testing.T) {
+	// Only the consumer B is recorded; its upstream hash resolves to nothing.
+	missing := traceDigest([]byte("never-stored-upstream"))
+	reportBytes := []byte("only-b-here")
+	hashB := traceDigest(reportBytes)
+	evB := audit.Event{
+		EventID:   "evt-b",
+		EventType: "output.materialized",
+		Timestamp: time.Now(),
+		Actor:     model.ActorRef{Type: model.ActorTypeAgent, ID: "runtime"},
+		Payload: map[string]any{
+			"aileron.output.name":         "report.csv",
+			"aileron.output.content_hash": hashB,
+			"aileron.step.id":             "s2",
+			"aileron.step.kind":           "transform",
+			"aileron.step.inputs": []map[string]any{
+				{"binding": "data", "source": "steps.s1.out", "content_hash": missing},
+			},
+		},
+	}
+	srv, _ := newAuditTestServer(t, evB)
+	rec := httptest.NewRecorder()
+	srv.GetAuditTrace(rec, httptest.NewRequest(http.MethodGet, "/v1/audit/trace", nil),
+		api.GetAuditTraceParams{ContentHash: &hashB})
+	resp := decodeTrace(t, rec)
+
+	var dangling *api.AuditTraceNode
+	for i := range resp.Nodes {
+		if resp.Nodes[i].Id == "artifact:"+missing {
+			dangling = &resp.Nodes[i]
+		}
+	}
+	if dangling == nil {
+		t.Fatal("dangling upstream node missing from wire response")
+	}
+	if dangling.Dangling == nil || !*dangling.Dangling {
+		t.Error("dangling flag not set on wire node")
+	}
+	if dangling.ContentHash == nil || *dangling.ContentHash != missing {
+		t.Errorf("dangling content_hash = %v, want %q", dangling.ContentHash, missing)
 	}
 }

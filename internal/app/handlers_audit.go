@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
@@ -69,6 +70,42 @@ func (s *apiServer) GetAudit(w http.ResponseWriter, _ *http.Request, auditID str
 		return
 	}
 	writeJSON(w, http.StatusOK, toAPIAuditEvent(ev))
+}
+
+// GetAuditTrace assembles the provenance graph for a materialized
+// artifact (by `content_hash`) or a launch (by `invocation_id`), walking
+// the recorded `output.materialized` events back through each step's
+// inputs. Read-only; the traversal goes through the store's ListEvents
+// surface. Returns 400 when neither param is supplied, 404 when the root
+// resolves to no record, and 500 on a store error.
+func (s *apiServer) GetAuditTrace(w http.ResponseWriter, r *http.Request, params api.GetAuditTraceParams) {
+	if s.auditStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "audit trace not found")
+		return
+	}
+
+	var root audit.TraceRoot
+	if params.ContentHash != nil {
+		root.ContentHash = *params.ContentHash
+	}
+	if params.InvocationId != nil {
+		root.InvocationID = *params.InvocationId
+	}
+
+	graph, err := audit.AssembleTrace(r.Context(), s.auditStore, root)
+	switch {
+	case errors.Is(err, audit.ErrTraceRootUnspecified):
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"at least one of content_hash or invocation_id is required")
+		return
+	case errors.Is(err, audit.ErrTraceRootNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "audit trace not found")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "audit_trace_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPITraceGraph(graph))
 }
 
 // CreateAudit appends a single audit event via the recorder and returns
@@ -173,6 +210,56 @@ func toAPIAuditEvent(e audit.Event) api.AuditEvent {
 		out.Actor.CredentialBinding = &e.Actor.CredentialBinding
 	}
 	return out
+}
+
+// toAPITraceGraph maps the assembled provenance graph onto the wire
+// response, reusing toAPIAuditEvent for the events backing each node.
+func toAPITraceGraph(g audit.TraceGraph) api.AuditTraceResponse {
+	nodes := make([]api.AuditTraceNode, 0, len(g.Nodes))
+	for _, n := range g.Nodes {
+		node := api.AuditTraceNode{
+			Id:    n.ID,
+			Kind:  api.AuditTraceNodeKind(n.Kind),
+			Title: n.Title,
+			Depth: n.Depth,
+		}
+		if n.Subtitle != "" {
+			s := n.Subtitle
+			node.Subtitle = &s
+		}
+		if n.ContentHash != "" {
+			h := n.ContentHash
+			node.ContentHash = &h
+		}
+		if n.Dangling {
+			d := true
+			node.Dangling = &d
+		}
+		if n.Event != nil {
+			ev := toAPIAuditEvent(*n.Event)
+			node.Event = &ev
+		}
+		if n.Literal != nil {
+			node.Literal = &struct {
+				Binding string  `json:"binding"`
+				Source  *string `json:"source,omitempty"`
+			}{Binding: n.Literal.Binding}
+			if n.Literal.Source != "" {
+				src := n.Literal.Source
+				node.Literal.Source = &src
+			}
+		}
+		nodes = append(nodes, node)
+	}
+	edges := make([]api.AuditTraceEdge, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		edges = append(edges, api.AuditTraceEdge{From: e.From, To: e.To})
+	}
+	return api.AuditTraceResponse{
+		RootId: g.RootID,
+		Nodes:  nodes,
+		Edges:  edges,
+	}
 }
 
 // payloadString returns the string value at key in payload, reporting false

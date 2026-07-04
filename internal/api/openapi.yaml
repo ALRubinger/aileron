@@ -2456,6 +2456,67 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/audit/trace:
+    get:
+      tags: [Audit]
+      summary: Assemble the provenance trace for an artifact or launch
+      description: |
+        Server-assembled provenance graph. Given a materialized
+        artifact's `content_hash` (or a launch's `invocation_id`), walks
+        the recorded `output.materialized` events back through each
+        step's `aileron.step.inputs[]` and returns a node/edge graph:
+        the artifact, its materializing step, literal-input leaves,
+        recursively-resolved upstream artifacts, and a terminal launch
+        node carrying the plan/actor provenance.
+
+        This mirrors the client-side walk the webapp performs, assembled
+        once on the server so any consumer gets the same graph without
+        re-implementing the traversal. At least one of `content_hash`
+        or `invocation_id` is required; when both are supplied,
+        `content_hash` roots the walk. Read-only; safe to poll.
+
+        The traversal terminates at literal inputs (no `content_hash`),
+        at dangling upstreams (a hash that resolves to no record, marked
+        `dangling: true` rather than failing), at a cycle (an already
+        expanded content hash), and at a depth cap of 32. Like
+        `GET /v1/audit`, the recorder is in-memory in v1; the graph is
+        scoped to the running daemon process.
+      operationId: getAuditTrace
+      parameters:
+        - name: content_hash
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Root the walk at the `output.materialized` event carrying
+            this content hash (`sha256:<hex>`). Primary rooting; takes
+            precedence over `invocation_id` when both are supplied.
+        - name: invocation_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Root the walk at every `output.materialized` event carrying
+            this launch-scoped `aileron.invocation.id`. Used when
+            `content_hash` is absent.
+      responses:
+        "200":
+          description: The assembled provenance graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditTraceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/connectors/check:
     get:
       tags: [Connectors]
@@ -4651,6 +4712,96 @@ components:
         audit_id:
           type: string
           description: The id the recorder minted for the appended event.
+
+    AuditTraceResponse:
+      type: object
+      required: [root_id, nodes, edges]
+      description: |
+        Response shape for `GET /v1/audit/trace`. A provenance graph
+        assembled server-side from recorded `output.materialized`
+        events. `root_id` is the id of the node the walk started at
+        (the rooting artifact). `nodes` and `edges` describe the DAG;
+        edges run parent → child (downstream consumer → upstream
+        producer). Field names and node kinds mirror the client-side
+        provenance model so a consumer can render either without
+        reshaping.
+      properties:
+        root_id:
+          type: string
+          description: Id of the root artifact node the walk started at.
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditTraceNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditTraceEdge"
+
+    AuditTraceNode:
+      type: object
+      required: [id, kind, title, depth]
+      description: |
+        One node in a provenance graph. `kind` distinguishes an
+        `artifact` (a materialized output), the `step` that produced
+        it, a `literal` input leaf (an input with no content hash), and
+        the terminal `launch` node carrying plan/actor provenance.
+      properties:
+        id:
+          type: string
+          description: Stable node id, unique within the graph.
+        kind:
+          type: string
+          enum: [artifact, step, literal, launch]
+          description: The node's role in the provenance graph.
+        title:
+          type: string
+          description: One-line summary the consumer renders.
+        subtitle:
+          type: string
+          description: Optional secondary detail line.
+        depth:
+          type: integer
+          description: Distance from the root artifact (0 = root).
+        content_hash:
+          type: string
+          description: |
+            For an artifact node, the content hash it materialized
+            (`sha256:<hex>`). Absent on step and literal nodes.
+        dangling:
+          type: boolean
+          description: |
+            True when an artifact node's content hash could not be
+            resolved to a producing record (dangling upstream). Such a
+            node is marked, not fatal.
+        event:
+          $ref: "#/components/schemas/AuditEvent"
+        literal:
+          type: object
+          required: [binding]
+          description: |
+            For a literal node, the input binding/source it stands for.
+          properties:
+            binding:
+              type: string
+              description: The input binding name.
+            source:
+              type: string
+              description: The reference the input resolved (raw source).
+
+    AuditTraceEdge:
+      type: object
+      required: [from, to]
+      description: |
+        A directed edge in a provenance graph, running parent → child
+        (downstream consumer → upstream producer).
+      properties:
+        from:
+          type: string
+          description: Parent (downstream/consumer) node id.
+        to:
+          type: string
+          description: Child (upstream/producer) node id.
 
     StatusResponse:
       type: object
