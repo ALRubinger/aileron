@@ -2,6 +2,7 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Collapsible from '$lib/components/ui/collapsible';
 	import { Badge } from '$lib/components/ui/badge';
+	import type { AuditEvent } from '$lib/api';
 	import type { ProvenanceNode } from '$lib/audit/provenance';
 	import * as p from '$lib/audit/payload';
 
@@ -30,36 +31,56 @@
 
 	type Row = { label: string; value: string; mono?: boolean };
 
-	// Full field rows for an artifact/step node, read from the backing
-	// event's flat payload. Ordered for readability.
+	function rowsFrom(
+		e: AuditEvent,
+		specs: Array<[label: string, v: string | number | undefined, mono?: boolean]>
+	): Row[] {
+		const out: Row[] = [];
+		for (const [label, v, mono = false] of specs) {
+			if (v !== undefined && v !== '') out.push({ label, value: String(v), mono });
+		}
+		return out;
+	}
+
+	// Artifact/step record fields, minus the chain-of-custody group below.
 	const rows = $derived.by((): Row[] => {
 		if (!node?.event) return [];
 		const e = node.event;
-		const out: Row[] = [];
-		const add = (label: string, v: string | number | undefined, mono = false) => {
-			if (v !== undefined && v !== '') out.push({ label, value: String(v), mono });
-		};
-		add('Name', p.outputName(e));
-		add('MIME', p.outputMime(e));
-		add('Content hash', p.outputContentHash(e), true);
-		add('Bytes', p.outputBytes(e));
-		add('Path', p.outputPath(e), true);
-		add('Step id', p.stepId(e));
-		add('Step kind', p.stepKind(e));
-		add('Transform', p.stepTransform(e));
-		add('Command', p.stepCommand(e), true);
-		add('Plan / skill', p.planSkill(e));
-		add('Plan hash', p.planContentHash(e), true);
-		add('Signed by', p.planSignedBy(e), true);
-		add('Signature status', p.planSignatureStatus(e));
-		add('Actor', p.actorIdentityLabel(e));
-		add('Credential binding', p.actorCredentialBinding(e));
-		add('Connector version', p.actorConnectorVersion(e));
-		add('Connector hash', p.actorConnectorHash(e), true);
-		add('Consent', p.consentDecision(e));
-		add('Invocation id', p.invocationId(e), true);
-		return out;
+		return rowsFrom(e, [
+			['Name', p.outputName(e)],
+			['MIME', p.outputMime(e)],
+			['Content hash', p.outputContentHash(e), true],
+			['Bytes', p.outputBytes(e)],
+			['Path', p.outputPath(e), true],
+			['Step id', p.stepId(e)],
+			['Step kind', p.stepKind(e)],
+			['Transform', p.stepTransform(e)],
+			['Command', p.stepCommand(e), true],
+			['Plan / skill', p.planSkill(e)],
+			['Plan hash', p.planContentHash(e), true],
+			['Invocation id', p.invocationId(e), true]
+		]);
 	});
+
+	// The explicit chain-of-custody group: who signed the plan, whether the
+	// signature verified, the acting identity, its credential binding, and the
+	// consent decision. Grouped so the trust story reads as one unit.
+	const custodyRows = $derived.by((): Row[] => {
+		if (!node?.event) return [];
+		const e = node.event;
+		return rowsFrom(e, [
+			['Signed by', p.planSignedBy(e), true],
+			['Signature status', p.planSignatureStatus(e)],
+			['Actor', p.actorIdentityLabel(e)],
+			['Credential binding', p.actorCredentialBinding(e)],
+			['Connector version', p.actorConnectorVersion(e)],
+			['Connector hash', p.actorConnectorHash(e), true],
+			['Consent', p.consentDecision(e)]
+		]);
+	});
+
+	const custodyVerified = $derived(node?.event ? p.signatureVerified(node.event) : false);
+	const showCustody = $derived(!!node?.dangling || custodyRows.length > 0);
 
 	const inputs = $derived(node?.event ? p.stepInputs(node.event) : []);
 </script>
@@ -109,6 +130,37 @@
 							</div>
 						{/each}
 					</dl>
+
+					{#if showCustody}
+						<div class="mt-4 rounded-md border border-border p-3" data-testid="custody-section">
+							<div class="mb-2 flex items-center justify-between gap-2">
+								<h3 class="text-xs font-semibold text-muted-foreground">Chain of custody</h3>
+								{#if custodyRows.length > 0}
+									<Badge
+										variant={custodyVerified ? 'default' : 'destructive'}
+										data-testid="custody-indicator"
+									>
+										{custodyVerified ? 'Verified' : 'Unverified'}
+									</Badge>
+								{/if}
+							</div>
+							{#if node.dangling}
+								<p class="mb-2 text-xs font-medium text-destructive" data-testid="custody-gap-note">
+									Producer not recorded — provenance gap
+								</p>
+							{/if}
+							{#if custodyRows.length > 0}
+								<dl class="grid grid-cols-1 gap-y-2 text-sm">
+									{#each custodyRows as row (row.label)}
+										<div class="flex flex-col">
+											<dt class="text-xs font-medium text-muted-foreground">{row.label}</dt>
+											<dd class="break-all {row.mono ? 'font-mono text-xs' : ''}">{row.value}</dd>
+										</div>
+									{/each}
+								</dl>
+							{/if}
+						</div>
+					{/if}
 
 					{#if inputs.length > 0}
 						<div class="mt-4">

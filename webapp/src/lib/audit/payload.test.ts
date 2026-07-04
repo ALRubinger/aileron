@@ -1,6 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { shortHash, formatBytes, stepInputs } from './payload';
+import {
+	shortHash,
+	formatBytes,
+	stepInputs,
+	signatureVerified,
+	SIGNATURE_STATUS_VERIFIED
+} from './payload';
 import type { AuditEvent } from '$lib/api';
+
+function eventWith(payload: Record<string, unknown>): AuditEvent {
+	return { audit_id: 'x', event_type: 'output.materialized', timestamp: 't', payload };
+}
+
+describe('signatureVerified', () => {
+	it('mirrors the daemon constant', () => {
+		expect(SIGNATURE_STATUS_VERIFIED).toBe('verified');
+	});
+	it('is true only when the plan signature status is "verified"', () => {
+		expect(signatureVerified(eventWith({ 'aileron.plan.signature_status': 'verified' }))).toBe(true);
+	});
+	it('is false for a non-verified status', () => {
+		expect(signatureVerified(eventWith({ 'aileron.plan.signature_status': 'unverified' }))).toBe(
+			false
+		);
+		expect(signatureVerified(eventWith({ 'aileron.plan.signature_status': 'failed' }))).toBe(false);
+	});
+	it('is false when the status is missing or empty', () => {
+		expect(signatureVerified(eventWith({}))).toBe(false);
+		expect(signatureVerified(eventWith({ 'aileron.plan.signature_status': '' }))).toBe(false);
+	});
+});
 
 describe('shortHash', () => {
 	it('abbreviates a sha256 hash keeping the algorithm prefix', () => {

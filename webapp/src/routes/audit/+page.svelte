@@ -161,7 +161,7 @@
 		</div>
 	</div>
 
-	<ProvenanceHeader {root} />
+	<ProvenanceHeader {root} {graph} />
 
 	{#if view === 'graph'}
 		<GraphView {graph} onselect={onNodeSelect} />
