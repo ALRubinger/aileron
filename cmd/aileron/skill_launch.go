@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -23,7 +24,31 @@ import (
 // returns the daemon-backed implementation in production.
 var newLaunchDispatcher = func() runtime.ActionDispatcher { return daemonDispatcher{} }
 var newLaunchApprover = func() runtime.Approver { return daemonApprover{} }
-var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink { return daemonAuditSink{stderr: stderr} }
+var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink {
+	return daemonAuditSink{stderr: stderr, actorID: operatorActorID()}
+}
+
+// operatorActorID resolves the CLI operator's identity as "<user>@<host>" so
+// every launch-scoped audit record correlates back to the human who ran the
+// invocation rather than the runtime component that emitted it (#1875). It is a
+// package-level seam so tests can stamp a deterministic identity without
+// depending on the host's real user/hostname. Lookup errors degrade to
+// "unknown" for the missing half rather than failing the launch: audit
+// provenance is best-effort (see daemonAuditSink), and a partial identity is
+// still more useful than mislabeling the operator as the runtime service. This
+// is the cheap operator-identity floor; a vault-anchored configured identity is
+// a deliberate follow-up (#1875).
+var operatorActorID = func() string {
+	name := "unknown"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		name = u.Username
+	}
+	host := "unknown"
+	if h, err := os.Hostname(); err == nil && h != "" {
+		host = h
+	}
+	return name + "@" + host
+}
 
 // newLaunchImageRunner returns the production image runner that boots the
 // verified pinned environment image and runs the plan inside it (#1731). It
@@ -344,6 +369,10 @@ func (daemonApprover) Approve(_ context.Context, _ runtime.ApprovalRequest) (run
 // the recorder's own best-effort append discipline (ADR-0010).
 type daemonAuditSink struct {
 	stderr io.Writer
+	// actorID is the operator identity ("<user>@<host>") stamped as the human
+	// Actor on every record this sink emits, resolved once at construction via
+	// operatorActorID (#1875).
+	actorID string
 }
 
 func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) string {
@@ -389,7 +418,7 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 
 	body, err := json.Marshal(auditIngestRequest{
 		EventType: eventType,
-		Actor:     auditIngestActor{Type: string(model.ActorTypeService), ID: "flightplan-launch"},
+		Actor:     auditIngestActor{Type: string(model.ActorTypeHuman), ID: s.actorID},
 		Payload:   payload,
 	})
 	if err != nil {

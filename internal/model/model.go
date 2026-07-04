@@ -405,8 +405,8 @@ const (
 	// Flight-Plan launch provenance events (#1751). The in-process launch
 	// runtime's audit sink emits one per-action record (ActionRef set) and
 	// one per-launch summary record so `aileron audit list` / `aileron audit
-	// show` surface launch provenance. Actor is {type: service, id:
-	// "flightplan-launch"}.
+	// show` surface launch provenance. Actor is {type: human, id:
+	// "<user>@<host>"}, the operator who ran the launch (#1875).
 	EventTypeFlightPlanLaunchAction EventType = "flightplan.launch.action"
 	EventTypeFlightPlanLaunch       EventType = "flightplan.launch"
 
@@ -420,8 +420,8 @@ const (
 	// credential restricted to the verified lock's sealed reach, and false when
 	// the step declared a contract with no sealed entry. The single source of
 	// truth for the marker's semantics is buildReachRecord in
-	// internal/flightplan/runtime/audit.go. Actor is {type: service, id:
-	// "flightplan-launch"}.
+	// internal/flightplan/runtime/audit.go. Actor is {type: human, id:
+	// "<user>@<host>"}, the operator who ran the launch (#1875).
 	EventTypeFlightPlanLaunchReach EventType = "flightplan.launch.reach"
 
 	// EventTypeOutputMaterialized is one per-output-per-step provenance event
@@ -431,6 +431,7 @@ const (
 	// its own event rather than being lumped into the launch summary). The
 	// flat `aileron.*` payload carries the output's content hash, mime, byte
 	// count, and originating step provenance plus the plan/invocation identity.
-	// Actor is {type: service, id: "flightplan-launch"}.
+	// Actor is {type: human, id: "<user>@<host>"}, the operator who ran the
+	// launch (#1875).
 	EventTypeOutputMaterialized EventType = "output.materialized"
 )
