@@ -59,6 +59,7 @@
 				>Approvals</a
 			>
 			<a href="/hub" class="text-foreground hover:text-primary no-underline">Hub</a>
+			<a href="/audit" class="text-foreground hover:text-primary no-underline">Audit</a>
 		</nav>
 	</div>
 </header>

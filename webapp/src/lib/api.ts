@@ -98,6 +98,78 @@ export async function unlockLocalVault(passphrase: string): Promise<LocalVaultSt
 	return res.json();
 }
 
+// --- Audit provenance (#1891) ---
+//
+// The provenance view (`/audit`) reads `GET /v1/audit` same-origin via
+// `apiFetch`. The wire shape is `AuditListResponse` = `{ events: [] }`
+// where each `AuditEvent` carries a free-form `payload` map. The
+// provenance keys we render (`aileron.output.*`, `aileron.step.*`,
+// `aileron.plan.*`, `aileron.actor.*`, `aileron.invocation.id`) live
+// flat inside that payload (see internal/flightplan/runtime/audit.go),
+// so the webapp models `payload` as an untyped map and reads the keys
+// through the typed getters in `$lib/audit/payload`. Filtering the wire
+// shape into a strong type here would lie about what the daemon sends.
+
+/** Actor reference on an audit event. Mirrors `ActorRef` in the spec;
+ *  the daemon normalizes `aileron.actor.identity_label` /
+ *  `aileron.actor.credential_binding` onto this object at ingest. */
+export type AuditActorRef = {
+	id: string;
+	type: 'agent' | 'human' | 'service' | 'connector_runtime';
+	display_name?: string;
+	identity_label?: string;
+	credential_binding?: string;
+};
+
+/** One audit-log entry. `payload` is deliberately untyped: the provenance
+ *  keys are flat `aileron.*` strings inside it, read through the payload
+ *  getters rather than a strongly-typed wire shape. */
+export type AuditEvent = {
+	audit_id: string;
+	event_type: string;
+	timestamp: string;
+	actor?: AuditActorRef;
+	payload: Record<string, unknown>;
+};
+
+type AuditListResponse = {
+	events?: AuditEvent[];
+};
+
+/** The `output.materialized` discriminator (internal/model EventTypeOutputMaterialized). */
+export const EVENT_OUTPUT_MATERIALIZED = 'output.materialized';
+
+/** Lists recent materialized-output provenance records for the landing
+ *  view. Fetches the most recent audit events and filters to those that
+ *  carry `aileron.output.content_hash` in their payload — robust to the
+ *  exact discriminator string, since only a materialized-output record
+ *  carries that key. */
+export async function listRecentMaterialized(limit = 100): Promise<AuditEvent[]> {
+	const resp = await apiFetch<AuditListResponse>(`/v1/audit?limit=${encodeURIComponent(String(limit))}`);
+	const events = resp.events ?? [];
+	return events.filter(
+		(e) => typeof e.payload?.['aileron.output.content_hash'] === 'string'
+	);
+}
+
+/** Resolves the audit event(s) for a single artifact content hash. The
+ *  daemon supports the `content_hash` filter on `GET /v1/audit`. */
+export async function getAuditByContentHash(hash: string): Promise<AuditEvent[]> {
+	const resp = await apiFetch<AuditListResponse>(
+		`/v1/audit?content_hash=${encodeURIComponent(hash)}`
+	);
+	return resp.events ?? [];
+}
+
+/** Resolves every audit record correlated by a launch invocation id.
+ *  The daemon supports the `invocation_id` filter (#1893/#1907). */
+export async function getAuditByInvocation(id: string): Promise<AuditEvent[]> {
+	const resp = await apiFetch<AuditListResponse>(
+		`/v1/audit?invocation_id=${encodeURIComponent(id)}`
+	);
+	return resp.events ?? [];
+}
+
 // --- Action-level approvals (#418) ---
 //
 // The action-approval queue is the runtime-blocking shape: one entry
