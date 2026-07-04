@@ -169,9 +169,14 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	_ = res2
 }
 
-// exampleManifestPath returns the absolute path to the committed worked-example
-// SKILL.md, the tools-declaring manifest this test freezes.
+// exampleManifestPath returns the absolute path to the dedicated tools-declaring
+// fixture this test freezes. It is a minimal offline plan (one curated tool, a
+// literal input, and a single html-render transform, with no source input,
+// action-call, or llm-seam) so the in-container launch runs to completion without
+// a live connector. The shared docs example (weekly-metrics-digest) reads a
+// source input from a live metrics API, which returns 401 in CI, so it cannot be
+// used to prove the freeze->build->boot linkage end to end.
 func exampleManifestPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(repoRootForTest(t), "docs", "schema", "flight-plan-manifest.example.skill.md")
+	return filepath.Join(repoRootForTest(t), "cmd", "aileron", "testdata", "composed-tools-boot.skill.md")
 }
