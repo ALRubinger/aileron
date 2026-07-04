@@ -44,6 +44,11 @@ type EventFilter struct {
 	// `aileron.output.content_hash` (a full `sha256:<hex>` digest).
 	// Matching is exact string equality.
 	ContentHash string
+	// InvocationID, when non-empty, matches every event whose payload
+	// carries this launch-scoped id under `aileron.invocation.id` (a
+	// UUID minted per `aileron launch`, correlating one launch's
+	// records). Matching is exact string equality.
+	InvocationID string
 	// Limit caps the number of events returned. <=0 means no cap.
 	Limit int
 }
@@ -99,6 +104,12 @@ func matchEventFilter(ev Event, f EventFilter) bool {
 	if f.ContentHash != "" {
 		got, _ := ev.Payload["aileron.output.content_hash"].(string)
 		if got != f.ContentHash {
+			return false
+		}
+	}
+	if f.InvocationID != "" {
+		got, _ := ev.Payload["aileron.invocation.id"].(string)
+		if got != f.InvocationID {
 			return false
 		}
 	}

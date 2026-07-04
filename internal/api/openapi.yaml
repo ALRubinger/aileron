@@ -2271,7 +2271,10 @@ paths:
         matches the failure class on failure events (no effect on
         success events). `output_name` and `content_hash` match
         `output.materialized` events by the artifact's name and its
-        content hash (`sha256:<hex>`) respectively. `audit_id`
+        content hash (`sha256:<hex>`) respectively. `invocation_id`
+        matches every event carrying this launch-scoped id under
+        `aileron.invocation.id` (one `aileron launch`'s records).
+        `audit_id`
         collapses the result to the single event with that id,
         mirroring `/v1/audit/{audit_id}` but in a list shape so callers
         can branch on length without a 404.
@@ -2318,6 +2321,12 @@ paths:
           schema:
             type: string
           description: Match the `output.materialized` event with this content hash (`sha256:<hex>`).
+        - name: invocation_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match events with this `aileron.invocation.id` (one launch's records).
         - name: limit
           in: query
           required: false
