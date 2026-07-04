@@ -238,6 +238,9 @@ export async function getAuditTrace(opts: {
 	contentHash?: string;
 	invocationId?: string;
 }): Promise<AuditTraceResponse | null> {
+	if (!opts.contentHash && !opts.invocationId) {
+		throw new Error('getAuditTrace requires contentHash or invocationId');
+	}
 	const query = opts.contentHash
 		? `content_hash=${encodeURIComponent(opts.contentHash)}`
 		: `invocation_id=${encodeURIComponent(opts.invocationId ?? '')}`;

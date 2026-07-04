@@ -381,6 +381,11 @@ describe('getAuditTrace — URL construction, unwrap, and 404→null', () => {
 		await expect(getAuditTrace({ contentHash: 'sha256:none' })).resolves.toBeNull();
 	});
 
+	it('throws without issuing a request when neither identifier is supplied', async () => {
+		await expect(getAuditTrace({})).rejects.toThrow(/requires contentHash or invocationId/);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it('still throws on a non-404 error', async () => {
 		fetchSpy.mockResolvedValue(
 			new Response(JSON.stringify({ error: { message: 'trace assembly failed' } }), {
