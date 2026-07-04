@@ -233,6 +233,80 @@ func TestMaterialize_RawDataFromJSONString(t *testing.T) {
 	}
 }
 
+func TestInputContentDigest_JSONStringCarrierMatchesProducer(t *testing.T) {
+	// Regression (#1933): a tool step's downstream result is a JSON *string*
+	// (execute.go returns the collected file content as a string). The producer
+	// digests the parsed, canonicalized object bytes via materialize()/
+	// decodeCarrier; the consumer must digest those SAME bytes, not the quoted,
+	// escaped string literal json.Marshal produces for a raw string value. Before
+	// the fix inputContentDigest called canonicalValueDigest(string) and the two
+	// digests diverged, so a `tool → transform` (or `action-call → transform`)
+	// edge dangled as "unresolved upstream" in the /audit walk-back.
+	result := `{"QueryExecutionId":"qeid-1","ResultSet":{"rows":[1,2,3]}}`
+
+	// Producer: materialize the JSON-string carrier as a plain data result.
+	p := planWithOutput(Output{Name: "x.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "x.json"})
+	step := fileMapStep("x.json")
+	art, err := materialize(p, step, map[string]any{"file": result})
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	// Consumer: the input walk-back digests the same resolved string value.
+	got, err := inputContentDigest(result)
+	if err != nil {
+		t.Fatalf("inputContentDigest: %v", err)
+	}
+	if got != art.Digest {
+		t.Errorf("consumer input digest %q must equal producer artifact digest %q for a JSON-string carrier", got, art.Digest)
+	}
+
+	// And it must NOT be the quoted-literal digest the old path produced, so a
+	// future regression to canonicalValueDigest(v) is caught.
+	quoted, err := canonicalValueDigest(result)
+	if err != nil {
+		t.Fatalf("canonicalValueDigest: %v", err)
+	}
+	if got == quoted {
+		t.Error("input digest must be over the parsed object bytes, not the quoted JSON-string literal")
+	}
+}
+
+func TestInputContentDigest_DecodedObjectUnchanged(t *testing.T) {
+	// An already-decoded plain-data object carrier keeps the exact digest the
+	// prior whole-value path produced: decodeCarrier's canonicalization
+	// (marshal → unmarshal → marshal) yields the same bytes canonicalValueDigest
+	// did, so plain-data edges are unchanged by the #1933 fix.
+	v := map[string]any{"b": 2, "a": 1}
+	got, err := inputContentDigest(v)
+	if err != nil {
+		t.Fatalf("inputContentDigest: %v", err)
+	}
+	want, err := canonicalValueDigest(v)
+	if err != nil {
+		t.Fatalf("canonicalValueDigest: %v", err)
+	}
+	if got != want {
+		t.Errorf("decoded-object digest = %q, want %q (unchanged)", got, want)
+	}
+}
+
+func TestInputContentDigest_ScalarFallsBackToCanonical(t *testing.T) {
+	// A bare scalar is not a decodable carrier, so the digest falls back to
+	// canonicalValueDigest exactly as before the #1933 fix.
+	got, err := inputContentDigest("plain text, not json")
+	if err != nil {
+		t.Fatalf("inputContentDigest: %v", err)
+	}
+	want, err := canonicalValueDigest("plain text, not json")
+	if err != nil {
+		t.Fatalf("canonicalValueDigest: %v", err)
+	}
+	if got != want {
+		t.Errorf("scalar digest = %q, want canonicalValueDigest %q", got, want)
+	}
+}
+
 func TestMaterialize_EmptyFileMapContentStaysEmpty(t *testing.T) {
 	// A genuine file-map that explicitly emits empty content keeps writing an
 	// empty file: the `content`-key discriminator preserves the ability to
