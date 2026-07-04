@@ -124,6 +124,24 @@ func buildOpenURL(base string, target openTarget, approvalID string) string {
 	}
 }
 
+// buildAuditDashboardURL composes the URL for the `/audit` provenance
+// walk-back view from the daemon's base URL and an optional content
+// hash. When a hash is supplied it is carried in the `content_hash`
+// query parameter, matching the deep-link contract the webapp's /audit
+// route honors (webapp/src/routes/audit/+page.svelte). Trailing slashes
+// on the base URL are stripped so the result never has a doubled slash.
+//
+// It is a sibling of buildOpenURL rather than a new openTarget: the
+// audit dashboard is a distinct surface with its own query grammar, and
+// a separate helper keeps each independently unit-testable.
+func buildAuditDashboardURL(base, contentHash string) string {
+	base = strings.TrimRight(base, "/")
+	if contentHash == "" {
+		return base + "/audit"
+	}
+	return base + "/audit?content_hash=" + url.QueryEscape(contentHash)
+}
+
 // openInBrowser shells out to the platform's URL-opener. macOS and
 // Linux pass the URL as a single argv element with no shell. Windows
 // goes through `cmd /c start`, whose command-line parser treats `&` and
