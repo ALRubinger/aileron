@@ -156,10 +156,20 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	// resolve it to pin.Digest (the exact freeze-built Id) or fail closed. A
 	// successful boot is the proof that the guard resolves the genuine daemon
 	// image to the attested Id and lets the linkage through.
+	// The plan materializes report.html into the out-dir, which is bind-mounted
+	// into the container at /aileron/out. t.TempDir() is 0700 and the in-container
+	// process runs under a different UID, so make the out-dir world-writable or
+	// the artifact write fails with "permission denied".
+	outDir := t.TempDir()
+	if err := os.Chmod(outDir, 0o777); err != nil {
+		t.Fatalf("make out-dir writable: %v", err)
+	}
+
 	res2, err := runtime.Run(ctx, runtime.Options{
 		Store:               s,
 		Name:                res.Name,
 		Version:             id,
+		OutDir:              outDir,
 		ImageRunner:         containerImageRunner{daemonEnv: daemonImageEnv{}},
 		ImageDigestResolver: containerImageDigestResolver{},
 	})
