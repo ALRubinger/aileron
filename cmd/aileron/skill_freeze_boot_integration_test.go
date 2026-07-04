@@ -117,6 +117,25 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		t.Fatalf("persist frozen composed unit: %v", err)
 	}
 
+	// The boot bind-mounts this store read-only into a container whose process
+	// runs under a different UID than the test. t.TempDir() is 0700, so the mount
+	// root is not traversable by that UID and the in-container read of SKILL.md
+	// fails with "permission denied". Make the whole store tree world-readable and
+	// traversable (the sibling boot test avoids this by pointing skillStoreDir at
+	// the CI-provisioned AILERON_SANDBOX_FLIGHTPLAN_STORE instead of a TempDir).
+	if err := filepath.Walk(skillStoreDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if info.IsDir() {
+			mode = 0o755
+		}
+		return os.Chmod(p, mode)
+	}); err != nil {
+		t.Fatalf("make frozen store container-readable: %v", err)
+	}
+
 	// Read back the composed pin and assert its shape: a bootable LocalTag and a
 	// sha256: Digest (the freeze-built image's attested Id). This is the exact
 	// input the boot-time guard re-checks against the daemon.
