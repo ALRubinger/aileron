@@ -179,6 +179,17 @@ func (s *apiServer) PutUserCredentials(w http.ResponseWriter, r *http.Request, s
 	}
 
 	meta := agentCredentialsMetadataFromRequest(req.Metadata)
+	// Default the metadata type to the namespace. The host-binding
+	// VaultResolver admits a `user/<service>` credential_ref only when the
+	// stored entry's Metadata.Type equals the ref's first segment ("user"),
+	// so an entry written without an explicit type — which is what
+	// `aileron vault put user/<service>` sends — would be stored
+	// successfully and then be unresolvable at injection time, failing the
+	// launch with "host-binding credential is unavailable". A caller that
+	// sets an explicit type keeps it.
+	if meta.Type == "" {
+		meta.Type = "user"
+	}
 	err := s.vault.Put(ctx, userCredentialVaultPath(service), req.Value, meta)
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",

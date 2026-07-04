@@ -110,6 +110,44 @@ func TestPutUserCredentials_StoresAtUserServicePath(t *testing.T) {
 	}
 }
 
+// TestPutUserCredentials_DefaultsMetadataTypeToUser locks the resolver
+// contract: a PUT with no metadata (what `aileron vault put user/<service>`
+// sends) must store Type "user", or the host-binding VaultResolver rejects
+// the entry at injection time and the launch fails with "host-binding
+// credential is unavailable" — found live on the first run of the guided
+// verb. An explicit type is kept verbatim.
+func TestPutUserCredentials_DefaultsMetadataTypeToUser(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newUserCredentialsServer(t, v)
+
+	rec := putUserCredential(t, s, "aws", api.AgentCredentials{Value: []byte("x")})
+	assertStatus(t, rec, http.StatusNoContent)
+	entries, err := v.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, e := range entries {
+		if e.Path == "user/aws" {
+			got = e.Metadata.Type
+		}
+	}
+	if got != "user" {
+		t.Fatalf("stored Metadata.Type = %q, want %q (no-metadata PUT must default to the namespace)", got, "user")
+	}
+
+	explicit := "api_key"
+	rec = putUserCredential(t, s, "github", api.AgentCredentials{Value: []byte("x"),
+		Metadata: &api.AgentCredentialsMetadata{Type: &explicit}})
+	assertStatus(t, rec, http.StatusNoContent)
+	entries, _ = v.List(context.Background())
+	for _, e := range entries {
+		if e.Path == "user/github" && e.Metadata.Type != "api_key" {
+			t.Fatalf("explicit Metadata.Type overwritten: got %q, want api_key", e.Metadata.Type)
+		}
+	}
+}
+
 func TestGetUserCredentials_MissingEntryReturnsNotFound(t *testing.T) {
 	s := newUserCredentialsServer(t, vault.NewMemVault())
 	rec := httptest.NewRecorder()
