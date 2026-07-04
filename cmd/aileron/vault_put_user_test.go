@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -199,5 +200,89 @@ func TestRunVaultPutUser_LockedAndNoVault(t *testing.T) {
 func TestUserCredentialDaemonPath(t *testing.T) {
 	if got := userCredentialDaemonPath("github"); got != "/vault/user/github/credentials" {
 		t.Errorf("userCredentialDaemonPath(github) = %q, want /vault/user/github/credentials", got)
+	}
+}
+
+// vault put with the wrong number of positionals prints usage and makes no
+// HTTP call — the dispatcher never reaches a namespace branch.
+func TestRunVaultPut_WrongPositionalCount(t *testing.T) {
+	for _, args := range [][]string{{"put"}, {"put", "user/a", "user/b"}} {
+		called := false
+		fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})
+		var stdout, stderr bytes.Buffer
+		code := runVault(args, strings.NewReader(""), &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("args %v: exit = 0, want non-zero", args)
+		}
+		if called {
+			t.Errorf("args %v: HTTP issued", args)
+		}
+		if !strings.Contains(stderr.String(), "usage:") {
+			t.Errorf("args %v: stderr = %q, want usage", args, stderr.String())
+		}
+	}
+}
+
+// A hidden-prompt read failure (e.g. no controlling terminal) surfaces a
+// non-zero exit and makes no HTTP call, so a failed read never stores an
+// empty or partial credential.
+func TestRunVaultPutUser_PromptError(t *testing.T) {
+	prev := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prev })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		return "", io.ErrUnexpectedEOF
+	}
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"put", "user/github"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero on prompt error")
+	}
+	if called {
+		t.Errorf("HTTP issued despite prompt error")
+	}
+}
+
+// An unexpected daemon status surfaces the server code and body so the
+// operator sees what actually went wrong.
+func TestRunVaultPutUser_UnexpectedStatus(t *testing.T) {
+	defer scriptPrompt("a-secret")()
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, "boom")
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"put", "user/github"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for 500")
+	}
+	if !strings.Contains(stderr.String(), "server returned 500") {
+		t.Errorf("stderr = %q, want it to surface the 500", stderr.String())
+	}
+}
+
+// --from-file pointing at a missing file surfaces a read error before any
+// HTTP call.
+func TestRunVaultPutUser_FromFileMissing(t *testing.T) {
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"put", "user/github", "--from-file", filepath.Join(t.TempDir(), "nope")},
+		strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for missing file")
+	}
+	if called {
+		t.Errorf("HTTP issued for missing file")
+	}
+	if !strings.Contains(stderr.String(), "error reading") {
+		t.Errorf("stderr = %q, want a read error", stderr.String())
 	}
 }
