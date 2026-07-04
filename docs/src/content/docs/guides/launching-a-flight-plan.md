@@ -17,6 +17,8 @@ aileron skill launch weekly-metrics-digest --out-dir ./run
 
 The runtime loads the most recent frozen version of that skill from the canonical store. Pass `--version` to launch a specific version id. Pass `--input name=value` once per literal input you want to override. File-target outputs are written under `--out-dir`.
 
+The launch prints a result summary: the version, the content hash, the written artifacts, and the audit-record count. The resolved inputs are listed by name with a compact `<type, size>` summary rather than their full values, so a plan that passes a large input (such as an inlined document) does not bury the result under a wall of text. Pass `--verbose` (or `-v`) to print the full resolved-input values.
+
 ```sh
 aileron skill launch weekly-metrics-digest \
   --version 5f2a9c1e4b7d8a30 \

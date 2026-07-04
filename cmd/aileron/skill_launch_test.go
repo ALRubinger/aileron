@@ -543,8 +543,98 @@ func TestRunSkillLaunch_InputOverrideReachesImageRunner(t *testing.T) {
 	if runner.spec.Inputs["window_days"] != "30" {
 		t.Errorf("input override not threaded into the image spec: %v", runner.spec.Inputs)
 	}
-	if !strings.Contains(stdout.String(), "window_days = 30") {
-		t.Errorf("override not reflected in resolved inputs: %q", stdout.String())
+	// The default result summary lists the input by name with a "<type, size>"
+	// summary, not the raw value (#1888).
+	if !strings.Contains(stdout.String(), "window_days = <string,") {
+		t.Errorf("override not reflected in resolved-input summary: %q", stdout.String())
+	}
+}
+
+func TestHumanByteSize(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KB"},
+		{50000, "48.8 KB"},
+		{1048576, "1.0 MB"},
+		{5 * 1024 * 1024, "5.0 MB"},
+		{1073741824, "1.0 GB"},
+	}
+	for _, c := range cases {
+		if got := humanByteSize(c.n); got != c.want {
+			t.Errorf("humanByteSize(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
+func TestSummarizeInputValue(t *testing.T) {
+	if got := summarizeInputValue("30"); got != "<string, 2 B>" {
+		t.Errorf("string summary = %q", got)
+	}
+	// Non-string values still summarize by their Go type and stringified size.
+	if got := summarizeInputValue(42); got != "<int, 2 B>" {
+		t.Errorf("int summary = %q", got)
+	}
+}
+
+// TestRunSkillLaunch_ResolvedInputsSummarizedByDefault proves the result
+// summary no longer dumps full input values: a large-valued input renders as a
+// compact "<type, size>" line rather than flooding stdout with the value
+// (#1888).
+func TestRunSkillLaunch_ResolvedInputsSummarizedByDefault(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+
+	big := strings.Repeat("x", 50000)
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ResolvedInputs: map[string]any{
+			"dashboard_template": big,
+			"window_days":        "30",
+		}},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, big) {
+		t.Errorf("full input value leaked into stdout; want summary only: %q", out)
+	}
+	if !strings.Contains(out, "dashboard_template = <string, 48.8 KB>") {
+		t.Errorf("large input not summarized as <type, size>: %q", out)
+	}
+	if !strings.Contains(out, "window_days = <string, 2 B>") {
+		t.Errorf("small input not summarized: %q", out)
+	}
+}
+
+// TestRunSkillLaunch_VerboseDumpsFullValues proves -v/--verbose restores the
+// full-value dump for operators who want to inspect resolved inputs (#1888).
+func TestRunSkillLaunch_VerboseDumpsFullValues(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ResolvedInputs: map[string]any{"window_days": "30"}},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+
+	for _, flag := range []string{"--verbose", "-v"} {
+		var stdout, stderr bytes.Buffer
+		code := runSkillLaunch([]string{"--out-dir", t.TempDir(), flag, "weekly-metrics-digest"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("%s launch exit = %d, stderr=%s", flag, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "window_days = 30") {
+			t.Errorf("%s did not dump full input value: %q", flag, stdout.String())
+		}
 	}
 }
 
