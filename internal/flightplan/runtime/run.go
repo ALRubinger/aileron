@@ -64,6 +64,16 @@ type Options struct {
 	// seam is unset, that step is an explicit error, never a silent skip
 	// (mirrors the ImageRunner nil-guard discipline).
 	ToolRunner ToolStepRunner
+	// PublisherVerifier is the host-side publisher-trust gate (#1900). When it
+	// is wired and the loaded plan declares a publisher in its verified lock,
+	// Run resolves the plan's verified signing key against the operator's
+	// keyring for that publisher and refuses to run when the publisher is not
+	// trusted (fail-closed), before any boot or step. Nil skips the gate; a
+	// plan that declares no publisher also skips it. The CLI wires the
+	// keyring-backed impl for a host launch and wires nil on the image-boot
+	// re-entry (the host already gated before boot, and no keyring is mounted
+	// into the sealed container).
+	PublisherVerifier PublisherVerifier
 	// InPinnedImage marks this run as already executing INSIDE the verified
 	// pinned environment image, the image-boot re-entry (#1731). It routes
 	// a whole-plan-pinned unit onto the in-process path instead of booting the
@@ -110,6 +120,15 @@ type RunResult struct {
 func Run(ctx context.Context, opts Options) (RunResult, error) {
 	lp, err := LoadVerified(opts.Store, opts.Name, opts.Version)
 	if err != nil {
+		return RunResult{}, err
+	}
+	// Host-side publisher-trust gate (#1900). It runs after verification (the
+	// signing key and declared publisher are proven against the content hash)
+	// and before any boot or step, so the host, which holds the keyring,
+	// enforces trust before booting a pinned image. It is a no-op when no
+	// verifier is wired or the plan declares no publisher (the CLI nils the
+	// verifier on the image-boot re-entry, where the host already gated).
+	if err := gatePublisher(opts.PublisherVerifier, lp); err != nil {
 		return RunResult{}, err
 	}
 	// A tool step requires the plan's declared environment: its argv is

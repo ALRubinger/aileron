@@ -51,6 +51,16 @@ type Lockfile struct {
 	// byte-identical to the pre-stepTrust format). yaml.v3 marshals map keys
 	// sorted, so the emitted section is byte-deterministic across freezes.
 	StepTrust map[string]StepReach `yaml:"stepTrust,omitempty" json:"stepTrust,omitempty"`
+	// Publisher is the connector-style publisher authority the frozen plan is
+	// attributed to (`github://owner/repo` or bare `github://owner`), recorded
+	// from `freeze --publisher`. It is NOT cleared by withoutContentHash, so it
+	// participates in the content hash and is covered by the signature: the
+	// declared publisher cannot be re-supplied at launch. Launch resolves the
+	// plan's signing key against the keyring for this authority and refuses when
+	// the publisher is not trusted. Empty for a publisher-less plan (omitempty
+	// keeps those locks byte-identical to the pre-publisher format), which
+	// carries no launch-time publisher-trust gate.
+	Publisher string `yaml:"publisher,omitempty" json:"publisher,omitempty"`
 	// ContentHash identifies the exact frozen manifest bytes
 	// (`sha256:<hex>`). It is computed last and excluded from the bytes it
 	// hashes, so a Lockfile passed to the content hasher must have it empty.

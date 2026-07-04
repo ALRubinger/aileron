@@ -96,6 +96,18 @@ The signature is detached. The signature covers the content-addressed manifest p
 
 The version is the content hash plus a semver label. The content hash identifies the exact frozen bytes. The semver label is the human-facing version name.
 
+### Publisher trust at launch
+
+Freeze accepts an optional `--publisher` flag. The value is a connector-style authority, either `github://owner/repo` or a bare `github://owner`. Freeze records the publisher inside the lock section. The publisher field is covered by the content hash and the signature, so it cannot be re-supplied at launch. Omitting `--publisher` freezes a publisher-less plan and prints a warning, so an author who wants no trust gate makes that choice explicitly.
+
+Launch enforces publisher trust only when the lock declares a publisher. Launch resolves the plan's verified signing key against the operator's keyring for the declared publisher. The resolution reuses the keyring's owner-level and per-repo union from [ADR-0013](/adr/0013-connector-hub-and-trust-distribution), so the same `aileron keyring trust <publisher>` that trusts a connector publisher also trusts that publisher's Flight Plans. A signing key that is not a member of the union fails closed, and the plan does not run. A publisher-less plan carries no gate, so a local freeze-then-launch keeps working.
+
+The keyring's owner-level scope and its per-repo scope can each hold keys for the same publisher. When both scopes hold keys, the sets differ, and the signing key is a member of the union, the launch is permitted and the divergence is surfaced as a diagnostic on stderr. This owner-versus-per-repo divergence is a distinct signal from the connector `trust_state:conflict` of [ADR-0013](/adr/0013-connector-hub-and-trust-distribution), which fires when a fetched key is not in the trusted owner set at preview. A fetched key that is not in the union at the launch gate is simply a refusal, not a conflict.
+
+The gate is host-side only. The host holds the keyring and runs the gate before it boots a pinned image. The image-boot re-entry runs inside the sealed container with no keyring mounted, so it skips the gate rather than resolving an empty keyring and failing closed. The host already enforced the gate before the boot, so the inner re-check would be redundant.
+
+Trust is enforced at launch only. Install handles unsigned pre-freeze bytes that carry no publisher lock to verify, so install gating is out of scope for this decision.
+
 ### Layer split at freeze
 
 The architectural split sits at the freeze step. There are two sub-layers.

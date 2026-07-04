@@ -49,6 +49,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -94,14 +95,34 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		t.Fatalf("read worked example: %v", err)
 	}
 	keyPath := writeSigningKey(t)
+	// Freeze WITH a declared publisher (#1900) so the boot below exercises the
+	// host-side publisher-trust gate on a real image, not just the digest guard.
+	const bootPublisher = "github://acme/plans"
 	res, err := freeze.Run(ctx, raw, freeze.Options{
 		Version:        "1.0.0",
+		Publisher:      bootPublisher,
 		SigningKeyPath: keyPath,
 		Resolver:       newDigestResolver(),
 		Composer:       newFeatureComposer(),
 	})
 	if err != nil {
 		t.Fatalf("freeze the composed-tools unit through the real build path: %v", err)
+	}
+
+	// Build a keyring on disk that trusts the freeze's own signing key for the
+	// declared publisher's owner authority, so the gate resolves and permits the
+	// boot. The public key comes from the freeze result (PEM), parsed into the
+	// raw form the keyring stores. Do not weaken the boot: the gate must pass
+	// against a genuinely-trusted key.
+	pub, err := cstore.ParsePEMPublicKey(res.PublicKey)
+	if err != nil {
+		t.Fatalf("parse freeze public key: %v", err)
+	}
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	trustRing := cstore.NewEd25519Keyring()
+	trustRing.AddOwner("github://acme", pub)
+	if err := trustRing.SaveKeyring(keyringPath); err != nil {
+		t.Fatalf("save trust keyring: %v", err)
 	}
 
 	// Persist the frozen unit into the store the boot mounts.
@@ -172,6 +193,9 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		OutDir:              outDir,
 		ImageRunner:         containerImageRunner{daemonEnv: daemonImageEnv{}},
 		ImageDigestResolver: containerImageDigestResolver{},
+		// The host runs the publisher-trust gate before booting the pin; the
+		// keyring above trusts the freeze's key, so the gate permits the boot.
+		PublisherVerifier: keyringPublisherVerifier{path: keyringPath},
 	})
 	if err != nil {
 		t.Fatalf("boot the composed pin (guard must resolve the just-built local tag %q to the attested %s): %v", pin.LocalTag, pin.Digest, err)

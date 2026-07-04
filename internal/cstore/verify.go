@@ -140,6 +140,98 @@ func (k *Ed25519Keyring) Verify(authority string, binary, manifest, signature []
 		"signature does not verify against any key registered for authority %q", authority)
 }
 
+// PublisherTrustResult reports the outcome of resolving a Flight-Plan
+// publisher's signing key against the keyring (ADR-0013, #1900).
+type PublisherTrustResult struct {
+	// Trusted reports whether the signing key is a member of the resolved
+	// union of the owner-level grant and the per-repo grant for the publisher
+	// authority. Fail-closed: an empty union (neither scope trusts a key) or a
+	// signing key that is not a member yields Trusted=false, and the launch
+	// gate refuses.
+	Trusted bool
+	// Conflict is a non-blocking (P2) diagnostic signal: the owner-grant
+	// keyset and the per-repo-grant keyset are both non-empty AND differ, and
+	// membership already passed (Trusted=true). It flags that the two scopes
+	// disagree on the trusted key material for the same publisher, which is
+	// worth surfacing to the operator even though the launch is permitted. It
+	// is distinct from the connector HubTrustState conflict (a fetched key not
+	// in the trusted owner set at preview): this one is an owner-vs-per-repo
+	// divergence observed at the launch gate, where a fetched-key-not-in-union
+	// is simply "refuse" (Trusted=false), not a conflict.
+	Conflict bool
+}
+
+// PublisherTrust resolves the Flight-Plan publisher's signing key against the
+// keyring for the given connector-style authority (ADR-0013 per-publisher
+// trust, #1900). It reuses the same owner∪per-repo union Verify resolves: the
+// owner-level grant (`<scheme>://<owner>`) and the per-repo grant
+// (`authority`). The owner authority is derived through ParseFQN exactly like
+// Verify, so a malformed authority degrades to per-repo-only (still
+// fail-closed) rather than widening trust.
+//
+// Semantics (mirroring Verify's documented positive-only union):
+//
+//   - Trusted is true when signingKey is a member of the owner keys OR the
+//     per-repo keys. Fail-closed: an empty union, or a non-empty union that
+//     does not contain signingKey, yields Trusted=false.
+//   - Conflict is true only when Trusted is true AND both scopes are non-empty
+//     AND their key sets differ. It is a P2 non-blocking signal; a caller may
+//     surface it as a diagnostic but must still permit the launch.
+//
+// There is no per-repo deny override of an owner grant, identical to Verify.
+func (k *Ed25519Keyring) PublisherTrust(authority string, signingKey ed25519.PublicKey) (PublisherTrustResult, error) {
+	var ownerAuthority string
+	if parsed, err := ParseFQN(authority); err == nil {
+		ownerAuthority = parsed.OwnerAuthority()
+	}
+
+	k.mu.RLock()
+	perRepo := append([]ed25519.PublicKey(nil), k.keys[authority]...)
+	var owner []ed25519.PublicKey
+	// ownerAuthority == authority cannot happen for a well-formed FQN (the
+	// owner key has no repo segment); "" maps to no entry. Guarding keeps a
+	// malformed authority from double-reading the per-repo scope as the owner.
+	if ownerAuthority != "" && ownerAuthority != authority {
+		owner = append([]ed25519.PublicKey(nil), k.keys[ownerAuthority]...)
+	}
+	k.mu.RUnlock()
+
+	trusted := keySetContains(owner, signingKey) || keySetContains(perRepo, signingKey)
+
+	conflict := false
+	if trusted && len(owner) > 0 && len(perRepo) > 0 && !keySetsEqual(owner, perRepo) {
+		conflict = true
+	}
+	return PublisherTrustResult{Trusted: trusted, Conflict: conflict}, nil
+}
+
+// keySetContains reports whether target is present in keys.
+func keySetContains(keys []ed25519.PublicKey, target ed25519.PublicKey) bool {
+	for _, k := range keys {
+		if k.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// keySetsEqual reports whether two key sets contain the same keys (order- and
+// multiplicity-insensitive, membership only). Used to decide whether the
+// owner-level and per-repo scopes agree on trusted key material.
+func keySetsEqual(a, b []ed25519.PublicKey) bool {
+	for _, k := range a {
+		if !keySetContains(b, k) {
+			return false
+		}
+	}
+	for _, k := range b {
+		if !keySetContains(a, k) {
+			return false
+		}
+	}
+	return true
+}
+
 // PermissiveVerifier accepts every signature unconditionally. Intended
 // **only** for tests and local development bootstrapping; never wire this
 // into a production install pipeline.
