@@ -279,6 +279,99 @@ func TestAssembleTrace_DanglingUpstreamMarkedNotFatal(t *testing.T) {
 	}
 }
 
+// TestAssembleTrace_PlanInputRootVsDanglingStep proves the #1927 fix: a
+// plan-provided root input (source `inputs.*`) that carries a content hash
+// but has no producing `output.materialized` record renders as a resolved
+// terminal `plan_input` leaf (not the red dangling node), while a `steps.*`
+// lineage input whose producer is missing still lands as a dangling
+// artifact. Both inputs carry a real (never hand-authored) hash; only the
+// source distinguishes a root input from a broken lineage edge.
+func TestAssembleTrace_PlanInputRootVsDanglingStep(t *testing.T) {
+	store := NewMemStore()
+	ctx := context.Background()
+
+	// A plan root input: hashed, sourced from `inputs.*`, no producer.
+	rootInputBytes := []byte(`{"region":"us-east-1"}`)
+	planHash := digest(rootInputBytes)
+	// A broken lineage edge: hashed, sourced from `steps.*`, producer never
+	// recorded.
+	missing := digest([]byte("upstream that was never stored"))
+	reportBytes := []byte("only-b")
+	hashB := digest(reportBytes)
+
+	evB := materializedEvent{
+		id:          "evt-b",
+		name:        "report.csv",
+		contentHash: hashB,
+		bytes:       len(reportBytes),
+		stepID:      "s2",
+		stepKind:    "transform",
+		inputs: []map[string]any{
+			{"binding": "region", "source": "inputs.region", "content_hash": planHash},
+			{"binding": "data", "source": "steps.s1.out", "content_hash": missing},
+		},
+		invocationID: "inv-3",
+	}.toEvent()
+	if err := store.Append(ctx, evB); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	g, err := AssembleTrace(ctx, store, TraceRoot{ContentHash: hashB})
+	if err != nil {
+		t.Fatalf("AssembleTrace: %v", err)
+	}
+	nodes := nodeByID(g)
+
+	// The plan-provided root input is a resolved terminal leaf, not red.
+	var planInput *TraceNode
+	for i := range g.Nodes {
+		if g.Nodes[i].Kind == TraceNodePlanInput {
+			planInput = &g.Nodes[i]
+			break
+		}
+	}
+	if planInput == nil {
+		t.Fatal("plan_input leaf missing for inputs.* root input")
+	}
+	if planInput.Dangling {
+		t.Error("plan_input leaf must not be marked dangling")
+	}
+	if planInput.Title != "region" {
+		t.Errorf("plan_input title = %q, want binding %q", planInput.Title, "region")
+	}
+	if planInput.ContentHash != planHash {
+		t.Errorf("plan_input content hash = %q, want %q", planInput.ContentHash, planHash)
+	}
+	if planInput.Literal == nil || planInput.Literal.Source != "inputs.region" {
+		t.Errorf("plan_input literal = %+v, want source inputs.region", planInput.Literal)
+	}
+	if planInput.Event != nil {
+		t.Error("plan_input leaf should have no backing event")
+	}
+	if !hasEdge(g, "step:artifact:"+hashB, planInput.ID) {
+		t.Error("missing edge from B's step to the plan_input leaf")
+	}
+	// A plan input is never rooted as an artifact under its own hash.
+	if _, ok := nodes["artifact:"+planHash]; ok {
+		t.Error("plan input hash must not appear as an artifact node")
+	}
+
+	// The broken lineage edge (steps.*) stays a red dangling artifact.
+	dangling, ok := nodes["artifact:"+missing]
+	if !ok {
+		t.Fatal("dangling upstream node missing for steps.* input")
+	}
+	if !dangling.Dangling {
+		t.Error("steps.* upstream with no producer should be dangling")
+	}
+	if dangling.Title != "(unresolved artifact)" {
+		t.Errorf("dangling title = %q, want (unresolved artifact)", dangling.Title)
+	}
+	if !hasEdge(g, "step:artifact:"+hashB, "artifact:"+missing) {
+		t.Error("missing edge to dangling upstream")
+	}
+}
+
 func TestAssembleTrace_CycleGuard(t *testing.T) {
 	store := NewMemStore()
 	ctx := context.Background()

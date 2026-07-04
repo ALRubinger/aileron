@@ -207,7 +207,7 @@ export type AuditTraceEdge = {
  *  model (`ProvenanceNode`) only by `content_hash` being snake_case. */
 export type AuditTraceNode = {
 	id: string;
-	kind: 'artifact' | 'step' | 'literal' | 'launch';
+	kind: 'artifact' | 'step' | 'literal' | 'plan_input' | 'launch';
 	title: string;
 	subtitle?: string;
 	depth: number;

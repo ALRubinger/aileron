@@ -2466,6 +2466,8 @@ paths:
         the recorded `output.materialized` events back through each
         step's `aileron.step.inputs[]` and returns a node/edge graph:
         the artifact, its materializing step, literal-input leaves,
+        plan-input leaves (plan-provided root inputs sourced from
+        `inputs.*` that carry a content hash but no producing record),
         recursively-resolved upstream artifacts, and a terminal launch
         node carrying the plan/actor provenance.
 
@@ -2476,7 +2478,10 @@ paths:
         `content_hash` roots the walk. Read-only; safe to poll.
 
         The traversal terminates at literal inputs (no `content_hash`),
-        at dangling upstreams (a hash that resolves to no record, marked
+        at plan-provided root inputs (source `inputs.*`, emitted as a
+        resolved `plan_input` leaf rather than recursed or marked
+        dangling), at dangling upstreams (a `steps.*` lineage hash that
+        resolves to no record, marked
         `dangling: true` rather than failing), at a cycle (an already
         expanded content hash), and at a depth cap of 32. Like
         `GET /v1/audit`, the recorder is in-memory in v1; the graph is
@@ -4744,15 +4749,18 @@ components:
       description: |
         One node in a provenance graph. `kind` distinguishes an
         `artifact` (a materialized output), the `step` that produced
-        it, a `literal` input leaf (an input with no content hash), and
-        the terminal `launch` node carrying plan/actor provenance.
+        it, a `literal` input leaf (an input with no content hash), a
+        `plan_input` leaf (a plan-provided root input sourced from
+        `inputs.*` that carries a content hash but has no producing
+        record by design), and the terminal `launch` node carrying
+        plan/actor provenance.
       properties:
         id:
           type: string
           description: Stable node id, unique within the graph.
         kind:
           type: string
-          enum: [artifact, step, literal, launch]
+          enum: [artifact, step, literal, plan_input, launch]
           description: The node's role in the provenance graph.
         title:
           type: string
@@ -4766,8 +4774,9 @@ components:
         content_hash:
           type: string
           description: |
-            For an artifact node, the content hash it materialized
-            (`sha256:<hex>`). Absent on step and literal nodes.
+            For an artifact node, the content hash it materialized, or
+            for a `plan_input` node, the hash of the plan-provided root
+            input value (`sha256:<hex>`). Absent on step and literal nodes.
         dangling:
           type: boolean
           description: |
@@ -4780,7 +4789,8 @@ components:
           type: object
           required: [binding]
           description: |
-            For a literal node, the input binding/source it stands for.
+            For a `literal` or `plan_input` node, the input
+            binding/source it stands for.
           properties:
             binding:
               type: string

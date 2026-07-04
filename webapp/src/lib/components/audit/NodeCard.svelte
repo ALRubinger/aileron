@@ -13,6 +13,7 @@
 		artifact: 'Artifact',
 		step: 'Step',
 		literal: 'Literal input',
+		plan_input: 'Plan input',
 		launch: 'Launch'
 	};
 
@@ -20,6 +21,7 @@
 		artifact: 'default',
 		step: 'secondary',
 		literal: 'outline',
+		plan_input: 'outline',
 		launch: 'outline'
 	};
 </script>
