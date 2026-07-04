@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/user"
+	"sort"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -150,6 +151,13 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	storeDir := flags.String("store-dir", skillStoreDir, "Skill store directory (defaults to ~/.aileron/skills)")
 	var inputs inputFlag
 	flags.Var(&inputs, "input", "Launch input override as name=value; repeatable")
+	// verbose restores the full resolved-input value dump. By default the
+	// result summary prints a per-input "<type, size>" line instead of the raw
+	// value, so a plan that passes a large input (e.g. an inlined HTML
+	// document) no longer floods the terminal and buries the launch result
+	// (#1888). -v is an alias.
+	verbose := flags.Bool("verbose", false, "Print full resolved input values instead of a type+size summary")
+	flags.BoolVar(verbose, "v", false, "Shorthand for --verbose")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
@@ -210,8 +218,18 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  ContentHash: %s\n", res.ContentHash)
 	if len(res.ResolvedInputs) > 0 {
 		fmt.Fprintln(stdout, "  Resolved inputs:")
-		for k, v := range res.ResolvedInputs {
-			fmt.Fprintf(stdout, "    %s = %v\n", k, v)
+		keys := make([]string, 0, len(res.ResolvedInputs))
+		for k := range res.ResolvedInputs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := res.ResolvedInputs[k]
+			if *verbose {
+				fmt.Fprintf(stdout, "    %s = %v\n", k, v)
+			} else {
+				fmt.Fprintf(stdout, "    %s = %s\n", k, summarizeInputValue(v))
+			}
 		}
 	}
 	if len(res.Artifacts) > 0 {
@@ -228,6 +246,33 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  Audit records: %d\n", len(res.AuditIDs))
 	}
 	return 0
+}
+
+// summarizeInputValue renders a resolved launch input as a compact
+// "<type, size>" summary (e.g. "<string, 48.2 KB>") rather than its full
+// value. The size is the byte length of the value's default string form,
+// which is exactly what an unbounded %v print would have emitted, so the
+// summary tells the operator how large a value they suppressed. This keeps a
+// plan with a large-valued input from flooding the terminal and burying the
+// launch result (#1888); -v/--verbose restores the full-value dump.
+func summarizeInputValue(v any) string {
+	s := fmt.Sprintf("%v", v)
+	return fmt.Sprintf("<%T, %s>", v, humanByteSize(len(s)))
+}
+
+// humanByteSize renders a byte count as a compact human-readable string
+// (e.g. "48.2 KB"). Counts under 1 KiB render as bytes.
+func humanByteSize(n int) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := int64(n) / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // resolveLaunchVersion resolves the version id to launch: the explicit
