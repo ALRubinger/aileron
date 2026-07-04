@@ -306,3 +306,184 @@ func TestRunOpen_DiscoveryReadGenericErrorReturns1(t *testing.T) {
 		t.Errorf("stderr should include underlying error; got %q", stderr.String())
 	}
 }
+
+// --- buildAuditDashboardURL contract ---
+
+func TestBuildAuditDashboardURL(t *testing.T) {
+	cases := []struct {
+		name        string
+		base        string
+		contentHash string
+		want        string
+	}{
+		{
+			name: "no hash opens audit root",
+			base: "http://127.0.0.1:5041",
+			want: "http://127.0.0.1:5041/audit",
+		},
+		{
+			name:        "hash is carried as content_hash query",
+			base:        "http://127.0.0.1:5041",
+			contentHash: "sha256:abc",
+			want:        "http://127.0.0.1:5041/audit?content_hash=sha256%3Aabc",
+		},
+		{
+			name: "trailing slash on base is trimmed",
+			base: "http://127.0.0.1:5041/",
+			want: "http://127.0.0.1:5041/audit",
+		},
+		{
+			name:        "hash needing escaping is query-escaped",
+			base:        "http://127.0.0.1:5041",
+			contentHash: "sha256:a b&c",
+			want:        "http://127.0.0.1:5041/audit?content_hash=sha256%3Aa+b%26c",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildAuditDashboardURL(tc.base, tc.contentHash)
+			if got != tc.want {
+				t.Errorf("buildAuditDashboardURL(%q, %q) = %q, want %q", tc.base, tc.contentHash, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- runAuditDashboard ---
+
+func TestRunAuditDashboard_OpensAuditView(t *testing.T) {
+	info := discovery.Info{URL: "http://127.0.0.1:50419"}
+	opener := withStubs(t, info, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard(nil, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(opener.called) != 1 || opener.called[0] != "http://127.0.0.1:50419/audit" {
+		t.Fatalf("opener.called = %v, want [http://127.0.0.1:50419/audit]", opener.called)
+	}
+	if !strings.Contains(stdout.String(), "http://127.0.0.1:50419/audit") {
+		t.Errorf("stdout missing URL; got %q", stdout.String())
+	}
+}
+
+func TestRunAuditDashboard_ContentHashDeepLinks(t *testing.T) {
+	info := discovery.Info{URL: "http://127.0.0.1:50419"}
+	opener := withStubs(t, info, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard([]string{"--content-hash", "sha256:abc"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(opener.called) != 1 || opener.called[0] != "http://127.0.0.1:50419/audit?content_hash=sha256%3Aabc" {
+		t.Fatalf("opener.called = %v, want deep-linked audit URL", opener.called)
+	}
+}
+
+func TestRunAuditDashboard_DaemonNotRunningReturns1AndPrintsHint(t *testing.T) {
+	opener := withStubs(t, discovery.Info{}, discovery.ErrNotRunning, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard(nil, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "daemon is not running") {
+		t.Errorf("stderr missing not-running message; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "aileron launch") {
+		t.Errorf("stderr missing actionable hint; got %q", stderr.String())
+	}
+	if len(opener.called) != 0 {
+		t.Errorf("opener should not be called when daemon is down; got %v", opener.called)
+	}
+}
+
+func TestRunAuditDashboard_DiscoveryReadGenericErrorReturns1(t *testing.T) {
+	opener := withStubs(t, discovery.Info{}, errors.New("permission denied"), nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard(nil, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if strings.Contains(stderr.String(), "is not running") {
+		t.Errorf("stderr should not mislead with 'not running' on generic error; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("stderr should include underlying error; got %q", stderr.String())
+	}
+	if len(opener.called) != 0 {
+		t.Errorf("opener should not be called on read error; got %v", opener.called)
+	}
+}
+
+func TestRunAuditDashboard_OpenerFailurePrintsURLForCopyPaste(t *testing.T) {
+	info := discovery.Info{URL: "http://127.0.0.1:50419"}
+	withStubs(t, info, nil, errors.New("no xdg-open"))
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard(nil, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "http://127.0.0.1:50419/audit") {
+		t.Errorf("stderr should print URL for copy-paste; got %q", stderr.String())
+	}
+}
+
+func TestRunAuditDashboard_ExtraPositionalArgReturns1AndPrintsUsage(t *testing.T) {
+	info := discovery.Info{URL: "http://127.0.0.1:50419"}
+	opener := withStubs(t, info, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard([]string{"bogus"}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "audit dashboard") {
+		t.Errorf("stderr should include usage; got %q", stderr.String())
+	}
+	if len(opener.called) != 0 {
+		t.Errorf("opener should not be called on bad args; got %v", opener.called)
+	}
+}
+
+func TestRunAuditDashboard_UnknownFlagReturns1(t *testing.T) {
+	info := discovery.Info{URL: "http://127.0.0.1:50419"}
+	opener := withStubs(t, info, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard([]string{"--nope"}, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if len(opener.called) != 0 {
+		t.Errorf("opener should not be called on flag parse error; got %v", opener.called)
+	}
+}
+
+func TestRunAuditDashboard_StateDirErrorReturns1(t *testing.T) {
+	prev := defaultStateDirFn
+	defaultStateDirFn = func() (string, error) { return "", errors.New("no home directory") }
+	t.Cleanup(func() { defaultStateDirFn = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := runAuditDashboard(nil, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no home directory") {
+		t.Errorf("stderr should surface state-dir error; got %q", stderr.String())
+	}
+}

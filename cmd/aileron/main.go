@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -4227,7 +4228,8 @@ type auditListWire struct {
 
 const auditUsage = `usage:
   aileron audit list  [--since RFC3339] [--audit-id ID] [--connector FQN] [--class CLASS] [--output NAME] [--content-hash sha256:...] [--invocation-id ID] [--limit N] [--json]
-  aileron audit show  <audit-id> [--json] [--verbose|-v]`
+  aileron audit show  <audit-id> [--json] [--verbose|-v]
+  aileron audit dashboard [--content-hash sha256:...]`
 
 // auditListFetcher and auditGetFetcher are the HTTP clients for the
 // two audit endpoints. Replaceable in tests so they don't depend on a
@@ -4346,11 +4348,64 @@ func runAudit(args []string, stdout, stderr io.Writer) int {
 		return runAuditList(args[1:], stdout, stderr)
 	case "show":
 		return runAuditShow(args[1:], stdout, stderr)
+	case "dashboard":
+		return runAuditDashboard(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown audit command: %q\n", args[0])
 		fmt.Fprintln(stderr, auditUsage)
 		return 1
 	}
+}
+
+// runAuditDashboard opens the `/audit` provenance walk-back view in the
+// operator's default browser. It resolves the running daemon's webapp
+// URL from <stateDir>/daemon.json (same discovery path as `aileron
+// open`) and shells out to the OS opener. An optional `--content-hash`
+// deep-links the view to the trace that produced that materialized
+// output, matching the query contract the /audit route honors.
+//
+// This is a read-only local convenience: it talks to the webapp through
+// the browser and adds no API surface. If the daemon isn't running it
+// exits 1 with a hint rather than auto-spawning one — the operator who
+// wants the dashboard has already run something that started the daemon.
+func runAuditDashboard(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("audit dashboard", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	contentHash := flags.String("content-hash", "", "Deep-link the view to the trace with this output content hash (sha256:<hex>)")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(stderr, "aileron: `audit dashboard` takes no positional arguments; got %q\n", flags.Arg(0))
+		fmt.Fprintln(stderr, auditUsage)
+		return 1
+	}
+
+	stateDir, err := defaultStateDirFn()
+	if err != nil {
+		fmt.Fprintf(stderr, "aileron: %v\n", err)
+		return 1
+	}
+	info, err := discoveryReadFn(stateDir)
+	if err != nil {
+		if errors.Is(err, discovery.ErrNotRunning) {
+			fmt.Fprintln(stderr, "aileron: daemon is not running.")
+			fmt.Fprintln(stderr, "Hint: any 'aileron <command>' or 'aileron launch <agent>' will start it.")
+			return 1
+		}
+		fmt.Fprintf(stderr, "aileron: read daemon.json: %v\n", err)
+		return 1
+	}
+
+	openURL := buildAuditDashboardURL(info.URL, *contentHash)
+
+	if err := openInBrowserFn(context.Background(), openURL); err != nil {
+		fmt.Fprintf(stderr, "aileron: failed to launch browser: %v\n", err)
+		fmt.Fprintf(stderr, "Open this URL manually: %s\n", openURL)
+		return 1
+	}
+	fmt.Fprintln(stdout, openURL)
+	return 0
 }
 
 func runAuditList(args []string, stdout, stderr io.Writer) int {
