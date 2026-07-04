@@ -10,15 +10,6 @@ import (
 // must validate it) but violates exactly one required-field rule.
 func TestParseInvalidBlocks(t *testing.T) {
 	cases := map[string]string{
-		"missing requires": `---
-name: s
-description: d
-aileron:
-  inputs: []
-  outputs: []
----
-body
-`,
 		"missing inputs": `---
 name: s
 description: d
@@ -40,17 +31,6 @@ aileron:
       - ref: aileron:metrics.query_series
         trustContract: {}
   inputs: []
----
-body
-`,
-		"empty actions array": `---
-name: s
-description: d
-aileron:
-  requires:
-    actions: []
-  inputs: []
-  outputs: []
 ---
 body
 `,
@@ -101,6 +81,73 @@ body
 			}
 			if !strings.Contains(err.Error(), "schema validation") {
 				t.Errorf("error should cite schema validation, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestParseToolOnlyPlanNeedsNoActions is the #1932 regression: a tool-only
+// plan whose every effectful step is an in-container tool step dispatches no
+// connector action, so it must not be forced to declare a dummy
+// requires.actions entry. An omitted `requires`, a `requires: {}`, and an
+// empty `actions: []` must all validate — before this change the schema
+// mandated `requires` with a non-empty `actions` array, which forced a
+// vestigial ref that then tripped a spurious "not satisfiable here" install
+// warning.
+func TestParseToolOnlyPlanNeedsNoActions(t *testing.T) {
+	cases := map[string]string{
+		"requires omitted entirely": `---
+name: s
+description: d
+aileron:
+  environment:
+    tools:
+      - aws-cli@2.x
+  inputs: []
+  outputs: []
+---
+body
+`,
+		"requires present but empty": `---
+name: s
+description: d
+aileron:
+  requires: {}
+  environment:
+    tools:
+      - aws-cli@2.x
+  inputs: []
+  outputs: []
+---
+body
+`,
+		"empty actions array": `---
+name: s
+description: d
+aileron:
+  requires:
+    actions: []
+  environment:
+    tools:
+      - aws-cli@2.x
+  inputs: []
+  outputs: []
+---
+body
+`,
+	}
+
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			m, err := Parse([]byte(doc))
+			if err != nil {
+				t.Fatalf("a tool-only plan must validate for %q, got: %v", name, err)
+			}
+			if m.InstructionOnly {
+				t.Errorf("a plan with an aileron block must not be InstructionOnly")
+			}
+			if len(m.Refs()) != 0 {
+				t.Errorf("a tool-only plan declares no action refs, got: %v", m.Refs())
 			}
 		})
 	}

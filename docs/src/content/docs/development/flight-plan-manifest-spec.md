@@ -54,7 +54,7 @@ The tables below give every field's type, required-ness, and semantics. Field na
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `schemaVersion` | string | No | When present, must be `aileron.flightplan.v1`. Identifies the block contract this manifest was authored against. |
-| `requires` | object | Yes | The action dependencies. |
+| `requires` | object | No | The action dependencies. Optional: a tool-only plan that dispatches no connector actions omits it. |
 | `environment` | object | No | The single container the plan runs in. Declares `tools`, an `image`, or both. Absent when the plan needs no environment. |
 | `inputs` | array | Yes | The declared inputs, each with a resolution rule. |
 | `outputs` | array | Yes | The declared output artifacts. |
@@ -65,7 +65,7 @@ The tables below give every field's type, required-ness, and semantics. Field na
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `actions` | array | Yes | The actions the plan calls. At least one entry. Each entry carries a per-action trust contract. |
+| `actions` | array | No | The actions the plan calls, each with a per-action trust contract. Absent or empty for a tool-only plan that dispatches no connector actions. A plan that does call actions must declare each called action here: the runtime refuses an `action-call` step whose ref is not declared. |
 
 Each `actions[]` entry:
 

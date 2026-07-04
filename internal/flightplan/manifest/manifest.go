@@ -136,8 +136,9 @@ func Parse(raw []byte) (*Manifest, error) {
 
 	// The aileron block is present. Validate the full required set against
 	// the embedded schema (not just the per-ref regex): aileronBlock
-	// requires requires/inputs/outputs; requires requires a non-empty
-	// actions array; each actionRequirement requires ref + trustContract.
+	// requires inputs/outputs; `requires` and its `actions` array are both
+	// optional (a tool-only plan declares no connector actions, #1932);
+	// each actionRequirement that IS declared requires ref + trustContract.
 	if err := validateFrontmatter(front); err != nil {
 		return nil, err
 	}

@@ -20,7 +20,7 @@
       "type": "object",
       "description": "The single namespaced top-level key that holds every Aileron-specific field. Namespacing under one key keeps the extension lossless if stripped.",
       "additionalProperties": false,
-      "required": ["requires", "inputs", "outputs"],
+      "required": ["inputs", "outputs"],
       "properties": {
         "schemaVersion": {
           "type": "string",
@@ -56,14 +56,12 @@
     },
     "requires": {
       "type": "object",
-      "description": "Dependency declaration. Lists the actions the Flight Plan calls. The execution environment lives in the sibling `environment` block, not here. An unsatisfied entry is a missing-requirement signal the runtime surfaces, never a parse failure.",
+      "description": "Dependency declaration. Lists the actions the Flight Plan calls. OPTIONAL, and `actions` within it is OPTIONAL: a tool-only plan whose every effectful step is an in-container `tool` step calls no connector action and declares none, so an omitted `requires`, a `requires: {}`, and an empty `actions: []` all validate. The execution environment lives in the sibling `environment` block, not here. An unsatisfied entry is a missing-requirement signal the runtime surfaces, never a parse failure.",
       "additionalProperties": false,
-      "required": ["actions"],
       "properties": {
         "actions": {
           "type": "array",
-          "description": "The actions the Flight Plan calls. Each entry attaches to the action model of ADR-0003 and carries a per-action trust contract.",
-          "minItems": 1,
+          "description": "The actions the Flight Plan calls (OPTIONAL). Absent or empty for a tool-only plan that dispatches no connector actions. Each entry attaches to the action model of ADR-0003 and carries a per-action trust contract. The declared set stays load-bearing for a plan that does call actions: the runtime refuses an action-call step whose ref is not declared here, so every called action must appear.",
           "items": { "$ref": "#/$defs/actionRequirement" }
         }
       }

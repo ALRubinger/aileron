@@ -113,6 +113,59 @@ func TestInstallInstructionOnlyClean(t *testing.T) {
 	}
 }
 
+// toolOnlySkill is a #1932 tool-only plan: it carries an aileron block (so it
+// is NOT instruction-only) but declares no requires.actions because its one
+// effectful step is an in-container tool step. It must install exactly like a
+// no-action skill: the resolver is never consulted and nothing is unsatisfied,
+// so `aileron skill install` prints no "not satisfiable here" warning.
+const toolOnlySkill = `---
+name: tool-only-plan
+description: A tool-only plan that dispatches no connector actions.
+aileron:
+  environment:
+    tools:
+      - aws-cli@2.x
+  inputs: []
+  outputs: []
+---
+
+# Tool-only plan
+Runs a tool step, calls no connector action.
+`
+
+func TestInstallToolOnlyPlanNoActionsClean(t *testing.T) {
+	s := New(t.TempDir())
+	src := writeSkill(t, toolOnlySkill)
+
+	// A fetcher that fails if touched proves a tool-only plan with no declared
+	// actions never reaches the daemon: with no refs to resolve there is
+	// nothing to warn about.
+	fetcher := &recordingFetcher{err: errors.New("daemon down")}
+
+	res, err := s.Install(context.Background(), src, InstallOptions{Fetcher: fetcher})
+	if err != nil {
+		t.Fatalf("tool-only install must be clean: %v", err)
+	}
+	if fetcher.called {
+		t.Error("resolver/daemon seam was consulted for a plan with no action refs")
+	}
+	if res.InstructionOnly {
+		t.Error("a plan with an aileron block must not be marked InstructionOnly")
+	}
+	if res.ResolverConsulted {
+		t.Error("ResolverConsulted should be false when no actions are declared")
+	}
+	if len(res.Unsatisfied) != 0 {
+		t.Errorf("a tool-only plan has no unsatisfied refs, got: %v", res.Unsatisfied)
+	}
+	if res.Degraded() {
+		t.Error("a tool-only install must not degrade")
+	}
+	if res.Name != "tool-only-plan" {
+		t.Errorf("name = %q", res.Name)
+	}
+}
+
 func TestInstallCredentialedSatisfiable(t *testing.T) {
 	s := New(t.TempDir())
 	src := credentialedSkillDir(t)
