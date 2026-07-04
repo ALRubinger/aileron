@@ -73,18 +73,28 @@ func canonicalValueDigest(v any) (string, error) {
 // walk-back records for a resolved binding value, in the SAME digest-space as
 // the producer's `aileron.output.content_hash`.
 //
-// A file-map carrier (a JSON object with a `content` key, #1519) is digested
-// over its carried `entry.Content` bytes — the exact bytes materialize() digests
-// into Artifact.Digest — so a downstream input walks back to the producing
+// It shares materialize()'s exact carrier-decode → digest path so the producer
+// and the consumer always land in the same digest-space. A file-map carrier
+// (a JSON object with a `content` key, #1519) is digested over its carried
+// `entry.Content` bytes — the exact bytes materialize() digests into
+// Artifact.Digest — so a downstream input walks back to the producing
 // `output.materialized` record by an equal hash (#1891/#1912). A plain-data
-// carrier keeps canonicalValueDigest over the whole value object, which already
-// equals the producer's digest for a plain-data carrier (materialize() digests
-// the same canonical bytes). On any decode error the value falls back to
-// canonicalValueDigest so non-file-map / edge values behave exactly as before.
+// carrier is digested over decodeCarrier's canonicalized `rawContent`, the same
+// bytes materialize() digests for a non-file-map carrier; this closes the
+// `tool → transform` (and `action-call → transform`) edge, where the resolved
+// value is a JSON *string* whose canonicalValueDigest would hash the quoted,
+// escaped literal instead of the parsed object bytes the producer digested
+// (#1933). For an already-decoded plain-data object this yields the identical
+// bytes canonicalValueDigest produced, so those edges are unchanged. On any
+// decode error (a scalar or undecodable value) the digest falls back to
+// canonicalValueDigest so non-carrier / edge values behave exactly as before.
 func inputContentDigest(v any) (string, error) {
-	entry, _, isFileMap, err := decodeCarrier(v)
-	if err == nil && isFileMap {
-		return contentDigest([]byte(entry.Content)), nil
+	entry, rawContent, isFileMap, err := decodeCarrier(v)
+	if err == nil {
+		if isFileMap {
+			return contentDigest([]byte(entry.Content)), nil
+		}
+		return contentDigest(rawContent), nil
 	}
 	return canonicalValueDigest(v)
 }
