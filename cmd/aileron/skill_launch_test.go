@@ -669,10 +669,73 @@ func TestDaemonDispatcher_UnwrapsEnvelopeResult(t *testing.T) {
 	}
 }
 
+// TestOperatorActorID_ComposesUserAtHost proves the operator-identity helper
+// resolves a non-empty "<user>@<host>" string so launch records correlate to
+// the human operator (#1875). Both halves come from the host, so the test
+// asserts the shape (exactly one "@", non-empty parts) rather than a fixed
+// value.
+func TestOperatorActorID_ComposesUserAtHost(t *testing.T) {
+	got := operatorActorID()
+	user, host, ok := strings.Cut(got, "@")
+	if !ok {
+		t.Fatalf("operatorActorID() = %q, want a single \"@\"-joined user@host", got)
+	}
+	if user == "" || host == "" {
+		t.Errorf("operatorActorID() = %q, want non-empty user and host halves", got)
+	}
+	if strings.Contains(host, "@") {
+		t.Errorf("operatorActorID() = %q, want exactly one \"@\" separator", got)
+	}
+}
+
+// TestNewLaunchAuditSink_StampsOperatorHumanActor is the #1875 regression: the
+// production sink seam must stamp the operator identity as a {type: human,
+// id: "<user>@<host>"} Actor on every record kind it emits — the launch
+// summary, per-action, reach, and output records — rather than the old
+// {type: service, id: "flightplan-launch"} runtime component. It overrides the
+// operatorActorID seam so the assertion is deterministic and independent of the
+// host user/hostname.
+func TestNewLaunchAuditSink_StampsOperatorHumanActor(t *testing.T) {
+	origActor := operatorActorID
+	operatorActorID = func() string { return "bob@ci-runner" }
+	t.Cleanup(func() { operatorActorID = origActor })
+
+	var gotBody auditIngestRequest
+	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"audit_id":"audit-op"}`))
+	})
+
+	sink := newLaunchAuditSink(io.Discard)
+	for _, tc := range []struct {
+		name string
+		rec  runtime.AuditRecord
+	}{
+		{"launch-summary", runtime.AuditRecord{Kind: runtime.RecordKindLaunch, Fields: map[string]any{"artifacts": 1}}},
+		{"per-action", runtime.AuditRecord{Kind: runtime.RecordKindAction, ActionRef: "aileron:x.y"}},
+		{"reach", runtime.AuditRecord{Kind: runtime.RecordKindReach, Fields: map[string]any{"aileron.step.id": "s"}}},
+		{"output", runtime.AuditRecord{Kind: runtime.RecordKindOutput, Fields: map[string]any{"aileron.output.name": "o"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotBody = auditIngestRequest{}
+			if id := sink.Record(context.Background(), tc.rec); id != "audit-op" {
+				t.Fatalf("Record returned %q, want audit-op", id)
+			}
+			if gotBody.Actor.Type != string(model.ActorTypeHuman) {
+				t.Errorf("actor.type = %q, want human", gotBody.Actor.Type)
+			}
+			if gotBody.Actor.ID != "bob@ci-runner" {
+				t.Errorf("actor.id = %q, want bob@ci-runner", gotBody.Actor.ID)
+			}
+		})
+	}
+}
+
 // TestDaemonAuditSink_PostsPerActionRecord proves a record with an ActionRef
-// posts a flightplan.launch.action event to /v1/audit carrying the service
-// actor and the actionRef/fields/sink payload, and threads the 201's minted
-// audit_id back as the Record return value.
+// posts a flightplan.launch.action event to /v1/audit carrying the human
+// operator actor and the actionRef/fields/sink payload, and threads the 201's
+// minted audit_id back as the Record return value.
 func TestDaemonAuditSink_PostsPerActionRecord(t *testing.T) {
 	var gotPath string
 	var gotBody auditIngestRequest
@@ -685,7 +748,7 @@ func TestDaemonAuditSink_PostsPerActionRecord(t *testing.T) {
 		_, _ = w.Write([]byte(`{"audit_id":"audit-per-action"}`))
 	})
 
-	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
+	id := daemonAuditSink{stderr: io.Discard, actorID: "alice@dev-box"}.Record(context.Background(), runtime.AuditRecord{
 		ActionRef: "aileron:metrics.query_series",
 		Fields:    map[string]any{"rows": 3},
 		Sink:      "customer-store",
@@ -699,8 +762,8 @@ func TestDaemonAuditSink_PostsPerActionRecord(t *testing.T) {
 	if gotBody.EventType != string(model.EventTypeFlightPlanLaunchAction) {
 		t.Errorf("event_type = %q, want %q", gotBody.EventType, model.EventTypeFlightPlanLaunchAction)
 	}
-	if gotBody.Actor.Type != string(model.ActorTypeService) || gotBody.Actor.ID != "flightplan-launch" {
-		t.Errorf("actor = %+v, want {service, flightplan-launch}", gotBody.Actor)
+	if gotBody.Actor.Type != string(model.ActorTypeHuman) || gotBody.Actor.ID != "alice@dev-box" {
+		t.Errorf("actor = %+v, want {human, alice@dev-box}", gotBody.Actor)
 	}
 	if gotBody.Payload["actionRef"] != "aileron:metrics.query_series" {
 		t.Errorf("payload.actionRef = %v", gotBody.Payload["actionRef"])
