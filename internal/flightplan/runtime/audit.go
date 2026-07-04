@@ -230,7 +230,12 @@ func buildOutputRecord(o materializedOutput, prov launchProvenance, dispatchBySt
 // resolved (`source`, the raw `inputs.<name>` / `steps.<id>.<out>` string), and
 // the `content_hash` of the value it carried — the input-side snapshot
 // identifier that makes the output walk back to its exact inputs by hash,
-// never by inlining the dataset (ADR-0027 audit boundary). A `query_execution_id`
+// never by inlining the dataset (ADR-0027 audit boundary). For a file-map
+// carrier the `content_hash` is the digest over its carried content bytes — the
+// same digest-space as the producer's `aileron.output.content_hash` — so the
+// input links to the producing `output.materialized` record (#1891/#1912); a
+// plain-data input keeps the whole-value-object digest, which already matches
+// the producer's digest for a plain-data carrier. A `query_execution_id`
 // is lifted (not synthesized) only when the resolved value is a JSON object
 // carrying a `QueryExecutionId` string, mirroring auditFieldValue's
 // omit-rather-than-guess discipline for non-query inputs. A value that cannot
@@ -247,7 +252,7 @@ func buildStepInputs(o materializedOutput) []map[string]any {
 		b := o.Binds[name]
 		entry := map[string]any{"binding": name, "source": b.Raw}
 		value := o.Resolved[name]
-		if digest, err := canonicalValueDigest(value); err == nil {
+		if digest, err := inputContentDigest(value); err == nil {
 			entry["content_hash"] = digest
 		}
 		if qid := queryExecutionID(value); qid != "" {

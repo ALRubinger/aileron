@@ -69,6 +69,26 @@ func canonicalValueDigest(v any) (string, error) {
 	return contentDigest(canonical), nil
 }
 
+// inputContentDigest returns the `sha256:<hex>` snapshot identifier the input
+// walk-back records for a resolved binding value, in the SAME digest-space as
+// the producer's `aileron.output.content_hash`.
+//
+// A file-map carrier (a JSON object with a `content` key, #1519) is digested
+// over its carried `entry.Content` bytes — the exact bytes materialize() digests
+// into Artifact.Digest — so a downstream input walks back to the producing
+// `output.materialized` record by an equal hash (#1891/#1912). A plain-data
+// carrier keeps canonicalValueDigest over the whole value object, which already
+// equals the producer's digest for a plain-data carrier (materialize() digests
+// the same canonical bytes). On any decode error the value falls back to
+// canonicalValueDigest so non-file-map / edge values behave exactly as before.
+func inputContentDigest(v any) (string, error) {
+	entry, _, isFileMap, err := decodeCarrier(v)
+	if err == nil && isFileMap {
+		return contentDigest([]byte(entry.Content)), nil
+	}
+	return canonicalValueDigest(v)
+}
+
 // fileMapEntry is one entry of the typed JSON file-map transport a
 // materializesOutput step produces: {path, mimeType, encoding, content}
 // (#1519). Materialization is pure deterministic code; no LLM interprets the
