@@ -6,12 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 )
 
 // genKeyPair returns a fresh ed25519 keypair plus the path to its PKCS#8 PEM
@@ -203,6 +205,20 @@ func freezeNoImageWithPublisher(t *testing.T, storeDir, publisher string) ed2551
 	return pub
 }
 
+// stubLaunchPublisherVerifier points the launch's publisher-verifier seam at a
+// verifier reading the keyring at path, so tests control trust without touching
+// the host home directory (cross-platform: os.UserHomeDir reads %USERPROFILE%
+// on Windows, not $HOME). The launch's boot-sentinel nil-skip still applies:
+// launchPublisherVerifier only calls this seam on a host launch.
+func stubLaunchPublisherVerifier(t *testing.T, path string) {
+	t.Helper()
+	orig := newLaunchPublisherVerifier
+	newLaunchPublisherVerifier = func(diag io.Writer) runtime.PublisherVerifier {
+		return keyringPublisherVerifier{path: path, diag: diag}
+	}
+	t.Cleanup(func() { newLaunchPublisherVerifier = orig })
+}
+
 // launchInProcessDispatcher returns the dispatcher wiring the no-image worked
 // example needs to complete in-process.
 func launchInProcessDispatcher() *fakeLaunchDispatcher {
@@ -223,9 +239,9 @@ func TestRunSkillLaunch_TrustedPublisherLaunches(t *testing.T) {
 	storeDir := withTempStore(t)
 	pub := freezeNoImageWithPublisher(t, storeDir, "github://acme/plans")
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeOwnerKeyring(t, filepath.Join(home, ".aileron", "keyring.json"), "github://acme", pub)
+	keyringPath := filepath.Join(t.TempDir(), "keyring.json")
+	writeOwnerKeyring(t, keyringPath, "github://acme", pub)
+	stubLaunchPublisherVerifier(t, keyringPath)
 
 	stubLaunchSeams(t, launchInProcessDispatcher())
 	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
@@ -249,8 +265,9 @@ func TestRunSkillLaunch_UntrustedPublisherFailsClosed(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeNoImageWithPublisher(t, storeDir, "github://acme/plans")
 
-	home := t.TempDir() // empty keyring: nothing trusted
-	t.Setenv("HOME", home)
+	// Point the verifier at a keyring path that does not exist: an empty keyring
+	// trusts nothing, so the gate fails closed.
+	stubLaunchPublisherVerifier(t, filepath.Join(t.TempDir(), "keyring.json"))
 
 	stubLaunchSeams(t, launchInProcessDispatcher())
 	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
@@ -275,8 +292,9 @@ func TestRunSkillLaunch_PublisherlessLaunchesLocally(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeNoImageWithPublisher(t, storeDir, "") // no publisher declared
 
-	home := t.TempDir() // empty keyring
-	t.Setenv("HOME", home)
+	// A verifier is wired, but the plan declares no publisher, so the runtime
+	// must skip the gate and never read the (nonexistent) keyring.
+	stubLaunchPublisherVerifier(t, filepath.Join(t.TempDir(), "keyring.json"))
 
 	stubLaunchSeams(t, launchInProcessDispatcher())
 	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
@@ -310,11 +328,13 @@ func TestRunSkillLaunch_ImageBootedPublisherPlanNoKeyring(t *testing.T) {
 		t.Fatalf("freeze image plan with publisher: %s", ferr.String())
 	}
 
-	// Simulate the in-container re-entry: the boot sentinel is set and there is
-	// no keyring (empty HOME). InPinnedImage keeps the run in-process.
+	// Simulate the in-container re-entry: the boot sentinel is set and no keyring
+	// exists. InPinnedImage keeps the run in-process. The verifier seam points at
+	// a nonexistent keyring: if the boot-sentinel nil-skip regressed and the gate
+	// ran, that empty keyring would fail closed and this test would fail. With the
+	// nil-skip intact the seam is never consulted and the launch proceeds.
 	t.Setenv(envSkillImageBooted, "1")
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	stubLaunchPublisherVerifier(t, filepath.Join(t.TempDir(), "keyring.json"))
 
 	stubLaunchSeams(t, launchInProcessDispatcher())
 	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
