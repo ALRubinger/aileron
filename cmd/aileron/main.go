@@ -4453,10 +4453,10 @@ func runAuditShow(args []string, stdout, stderr io.Writer) int {
 // keys are omitted; empty values are never printed. The payload comes from
 // arbitrary decoded JSON, so every type assertion is guarded.
 func renderAuditShow(w io.Writer, e *auditEventWire, verbose bool) {
-	fmt.Fprintf(w, "Audit ID:    %s\n", e.AuditID)
-	fmt.Fprintf(w, "Event:       %s\n", e.EventType)
+	printAuditField(w, "Audit ID:", e.AuditID)
+	printAuditField(w, "Event:", e.EventType)
 	if !e.Timestamp.IsZero() {
-		fmt.Fprintf(w, "Timestamp:   %s\n", e.Timestamp.Local().Format("2006-01-02 15:04:05"))
+		printAuditField(w, "Timestamp:", e.Timestamp.Local().Format("2006-01-02 15:04:05"))
 	}
 	p := e.Payload
 
@@ -4469,9 +4469,7 @@ func renderAuditShow(w io.Writer, e *auditEventWire, verbose bool) {
 	if s := payloadString(p, "aileron.actor.id"); s != "" {
 		actorID = s
 	}
-	if actorType != "" || actorID != "" {
-		fmt.Fprintf(w, "Actor:       %s\n", strings.TrimSpace(actorType+" "+actorID))
-	}
+	printAuditField(w, "Actor:", strings.TrimSpace(actorType+" "+actorID))
 
 	// Plan / skill + signer.
 	printAuditField(w, "Plan:", payloadString(p, "aileron.plan.name"))
@@ -4487,7 +4485,7 @@ func renderAuditShow(w io.Writer, e *auditEventWire, verbose bool) {
 		for _, a := range cmd {
 			parts = append(parts, fmt.Sprintf("%v", a))
 		}
-		fmt.Fprintf(w, "Command:     %s\n", strings.Join(parts, " "))
+		printAuditField(w, "Command:", strings.Join(parts, " "))
 	}
 
 	// Output provenance.
@@ -4550,12 +4548,15 @@ func payloadString(p map[string]any, key string) string {
 }
 
 // printAuditField writes a "label value" line only when value is non-empty,
-// mirroring auditPayloadSummary's omit-missing discipline.
+// mirroring auditPayloadSummary's omit-missing discipline. The label is
+// padded to a fixed column and always followed by a separating space, so a
+// label at (or past) the column width still renders "label value", never
+// "labelvalue".
 func printAuditField(w io.Writer, label, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(w, "%-13s%s\n", label, value)
+	fmt.Fprintf(w, "%-13s %s\n", label, value)
 }
 
 // auditPayloadSummary renders a one-line, human-readable hint about
