@@ -61,6 +61,31 @@ func TestPreflightHostBindings_CleanDescriptorPasses(t *testing.T) {
 	}
 }
 
+// TestPreflightHostBindings_NoDescriptorPasses proves the common case: with
+// no user-layer descriptor file present, the preflight loads only the embedded
+// built-in defaults, passes with no error, and emits no warning noise. Every
+// Launch runs this preflight unconditionally, so the no-descriptor path must
+// not become a launch blocker.
+func TestPreflightHostBindings_NoDescriptorPasses(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	if runtime.GOOS == "windows" {
+		vol := filepath.VolumeName(dir)
+		t.Setenv("HOMEDRIVE", vol)
+		t.Setenv("HOMEPATH", dir[len(vol):])
+	}
+	// Deliberately do not write ~/.aileron/binding-descriptors.yaml.
+
+	var out bytes.Buffer
+	if err := preflightHostBindings(&out); err != nil {
+		t.Fatalf("preflightHostBindings = %v, want nil with no user descriptor", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("preflight output = %q; want no output for the built-in-only path", out.String())
+	}
+}
+
 // TestPreflightHostBindings_PlaceholderFailsLaunch is the regression for
 // feedback #1874 surface 2: a copy-paste placeholder in a descriptor field
 // fails the preflight with the loader's field-named error, instead of the
