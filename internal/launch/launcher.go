@@ -24,6 +24,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	skillstore "github.com/ALRubinger/aileron/internal/flightplan/store"
+	"github.com/ALRubinger/aileron/internal/proxybinding"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	sandboxtoolchain "github.com/ALRubinger/aileron/internal/sandbox/toolchain"
@@ -593,6 +594,29 @@ var sandboxBakedMCPVersion = func(ctx context.Context, runtimeName, image string
 	return sandboxcontainer.BakedMCPVersion(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
 }
 
+// preflightHostBindings validates the merged host-binding descriptor table
+// (built-in defaults overlaid with the user layer) before the agent
+// environment boots. It reuses the loader's existing validation output (no
+// new validation): a `<...>` placeholder in any descriptor field returns the
+// loader's file/entry/field-named error, which fails the launch; non-fatal
+// suspect-shape warnings (e.g. a sigv4-resign access_key_id that does not
+// match the AWS key shape) are written to w and never block the launch.
+//
+// Without this preflight a placeholder only fails at daemon boot or
+// incidentally via the gh-gated sentinel-swap path, so a bad athena/sigv4
+// descriptor surfaces minutes later as an opaque upstream auth failure
+// instead of at launch time.
+func preflightHostBindings(w io.Writer) error {
+	_, warnings, err := proxybinding.LoadHostBindingsWithWarnings(proxybinding.DefaultLoadOptions())
+	if err != nil {
+		return fmt.Errorf("host-binding descriptor preflight: %w", err)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(w, "aileron: host-binding warning: %s\n", warning)
+	}
+	return nil
+}
+
 // Launch starts the agent as a child process under Aileron's daemon.
 //
 // Per ADR-0015 the launcher is the daemon-connection + MCP-registration
@@ -605,6 +629,15 @@ var sandboxBakedMCPVersion = func(ctx context.Context, runtimeName, image string
 // Codex/Goose/OpenCode write config files), points the agent's
 // LLM-endpoint env at the daemon if applicable, then execs the agent.
 func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
+	// Preflight the host-binding descriptors before the environment boots.
+	// A copy-paste placeholder (e.g. a sigv4-resign access_key_id left as
+	// "<AccessKeyId>") hard-fails the launch here with the loader's
+	// file/entry/field-named error, instead of surfacing minutes later as
+	// an opaque upstream auth failure (an AWS UnrecognizedClientException).
+	// Non-fatal suspect-shape warnings are printed to stderr.
+	if err := preflightHostBindings(os.Stderr); err != nil {
+		return LaunchResult{}, err
+	}
 	stateDir, err := resolveStateDir()
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("state dir: %w", err)

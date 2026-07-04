@@ -25,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/oauth"
+	"github.com/ALRubinger/aileron/internal/proxybinding"
 	"github.com/ALRubinger/aileron/internal/sandbox/spawnhelper"
 	"github.com/ALRubinger/aileron/internal/suite"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -1404,6 +1405,8 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		showStatusNotifications(dir, stdout)
 		fmt.Fprintln(stdout)
 		showStatusVault(dir, stdout)
+		fmt.Fprintln(stdout)
+		showStatusHostBindings(stdout)
 		return 0
 	case "runtime":
 		showStatusRuntime(stdout)
@@ -1414,9 +1417,12 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	case "vault":
 		showStatusVault(dir, stdout)
 		return 0
+	case "host-bindings":
+		showStatusHostBindings(stdout)
+		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown status section: %q\n", section)
-		fmt.Fprintln(stderr, "usage: aileron status [runtime|notifications|vault]")
+		fmt.Fprintln(stderr, "usage: aileron status [runtime|notifications|vault|host-bindings]")
 		return 1
 	}
 }
@@ -1570,6 +1576,39 @@ func showStatusVault(dir string, w io.Writer) {
 	fmt.Fprintf(w, "  Secrets:    %d stored\n", len(names))
 	for _, name := range names {
 		fmt.Fprintf(w, "    - %s\n", name)
+	}
+}
+
+// showStatusHostBindings surfaces the merged host-binding descriptor table
+// (built-in defaults overlaid with the user layer at
+// `~/.aileron/binding-descriptors.yaml`) the same way `aileron status vault`
+// surfaces the vault: a local read with no daemon dependency, so an operator
+// can spot a broken descriptor before launch.
+//
+// It reuses the loader's existing validation output (no new validation).
+// A `<...>` copy-paste placeholder in any descriptor field hard-fails the
+// whole proxybinding.Load with the file/entry/field-named error, which this
+// section prints as its state. On a clean load it lists each entry's host and
+// scheme, plus any non-fatal suspect-shape warning (e.g. a sigv4-resign
+// access_key_id that does not match the AWS key shape) surfaced by
+// Entry.Warnings.
+func showStatusHostBindings(w io.Writer) {
+	fmt.Fprintln(w, "\033[1mHost bindings\033[0m")
+
+	entries, err := proxybinding.Load(proxybinding.DefaultLoadOptions())
+	if err != nil {
+		fmt.Fprintf(w, "  error: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(w, "  Descriptors: %s\n", proxybinding.DefaultUserPath())
+	fmt.Fprintf(w, "  Bindings:    %d configured\n", len(entries))
+	for i := range entries {
+		e := entries[i]
+		fmt.Fprintf(w, "    - %s (%s)\n", e.Host, e.Scheme)
+		for _, warning := range e.Warnings() {
+			fmt.Fprintf(w, "      warning: %s\n", warning)
+		}
 	}
 }
 
