@@ -127,7 +127,7 @@ func (f *inputFlag) Set(s string) error {
 func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("skill launch", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	version := flags.String("version", "", "Frozen version id to launch (defaults to the only/most recent version)")
+	version := flags.String("version", "", "Frozen version id to launch (defaults to the only/most recently frozen version)")
 	outDir := flags.String("out-dir", ".", "Directory file-target artifacts are written to")
 	// storeDir defaults to the process store seam. The in-container re-entry on
 	// the image-boot path passes the bind-mounted store path here so the inner
@@ -147,7 +147,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	name := positionals[0]
 
 	s := store.New(*storeDir)
-	id, err := resolveLaunchVersion(s, name, *version)
+	id, err := resolveLaunchVersion(s, name, *version, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -217,20 +217,31 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 }
 
 // resolveLaunchVersion resolves the version id to launch: the explicit
-// --version when given, otherwise the single frozen version (or the most
-// recent when several exist, since FrozenVersions returns sorted ids).
-func resolveLaunchVersion(s *store.Store, name, version string) (string, error) {
+// --version when given, otherwise the most-recently-frozen version.
+//
+// Version ids are content-hash slugs, so the store's sorted-ids order is
+// lexicographic, not chronological; picking the sorted max could launch an
+// older version over a newer one (issue #1880). This selects by freeze time
+// (LatestFrozen), so a bare launch always runs the newest frozen version.
+//
+// When more than one version exists and no --version was pinned, a banner is
+// printed to stdout naming the auto-selected version and the total count, so
+// the implicit choice is visible and the operator knows how to pin it.
+func resolveLaunchVersion(s *store.Store, name, version string, stdout io.Writer) (string, error) {
 	if version != "" {
 		return version, nil
 	}
-	ids, err := s.FrozenVersions(name)
+	id, count, err := s.LatestFrozen(name)
 	if err != nil {
 		return "", fmt.Errorf("list frozen versions for %q: %w", name, err)
 	}
-	if len(ids) == 0 {
+	if count == 0 {
 		return "", fmt.Errorf("skill %q has no frozen versions; run `aileron skill freeze %s` first", name, name)
 	}
-	return ids[len(ids)-1], nil
+	if count > 1 {
+		fmt.Fprintf(stdout, "launching %s (newest of %d; use --version to pin)\n", id, count)
+	}
+	return id, nil
 }
 
 // daemonDispatcher dispatches an action through the daemon's

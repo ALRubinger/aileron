@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func sampleVersion(id string) FrozenVersion {
@@ -171,6 +172,104 @@ func TestFrozenVersions_SortedAndEmpty(t *testing.T) {
 	}
 	if len(ids) != 3 || ids[0] != "v1" || ids[1] != "v2" || ids[2] != "v3" {
 		t.Errorf("FrozenVersions = %v, want sorted [v1 v2 v3]", ids)
+	}
+}
+
+func TestLatestFrozen_EmptyReturnsZero(t *testing.T) {
+	s := New(t.TempDir())
+	id, count, err := s.LatestFrozen("demo")
+	if err != nil {
+		t.Fatalf("LatestFrozen on empty: %v", err)
+	}
+	if id != "" || count != 0 {
+		t.Errorf("LatestFrozen on empty = (%q, %d), want (\"\", 0)", id, count)
+	}
+}
+
+// TestLatestFrozen_PicksNewestByMtimeNotLexical is the regression test for
+// issue #1880: content-hash version ids sort lexicographically, so the newest
+// frozen version can have an id that sorts *before* an older one. LatestFrozen
+// must select by freeze time (directory mtime), not by sorted-id order.
+func TestLatestFrozen_PicksNewestByMtimeNotLexical(t *testing.T) {
+	s := New(t.TempDir())
+	// "older" sorts lexicographically AFTER "newer" (o > n), matching the bug
+	// where fb8f2724… launched over the newer 0f638793…. If LatestFrozen picked
+	// the sorted max it would (wrongly) return "older".
+	const (
+		olderID = "older"
+		newerID = "newer"
+	)
+	if err := s.WriteFrozen("demo", sampleVersion(olderID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteFrozen("demo", sampleVersion(newerID)); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp deterministic mtimes: newerID is frozen more recently.
+	base := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(s.FrozenDir("demo", olderID), base, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(s.FrozenDir("demo", newerID), base.Add(time.Minute), base.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	id, count, err := s.LatestFrozen("demo")
+	if err != nil {
+		t.Fatalf("LatestFrozen: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("LatestFrozen count = %d, want 2", count)
+	}
+	if id != newerID {
+		t.Errorf("LatestFrozen id = %q, want %q (newest by mtime, not lexical max)", id, newerID)
+	}
+}
+
+// TestLatestFrozen_TieBreaksLexically pins the deterministic tie-break: equal
+// mtimes resolve to the lexicographically-higher id.
+func TestLatestFrozen_TieBreaksLexically(t *testing.T) {
+	s := New(t.TempDir())
+	for _, id := range []string{"aaa", "ccc", "bbb"} {
+		if err := s.WriteFrozen("demo", sampleVersion(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts := time.Now().Add(-time.Hour)
+	for _, id := range []string{"aaa", "bbb", "ccc"} {
+		if err := os.Chtimes(s.FrozenDir("demo", id), ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, count, err := s.LatestFrozen("demo")
+	if err != nil {
+		t.Fatalf("LatestFrozen: %v", err)
+	}
+	if count != 3 || id != "ccc" {
+		t.Errorf("LatestFrozen = (%q, %d), want (\"ccc\", 3) on mtime tie", id, count)
+	}
+}
+
+// TestLatestFrozen_IgnoresNonVersionEntries mirrors FrozenVersions' filtering:
+// stray files and dirs without SKILL.md are not counted or selectable.
+func TestLatestFrozen_IgnoresNonVersionEntries(t *testing.T) {
+	s := New(t.TempDir())
+	if err := s.WriteFrozen("demo", sampleVersion("v1")); err != nil {
+		t.Fatal(err)
+	}
+	versionsDir := filepath.Join(s.Dir("demo"), "versions")
+	if err := os.WriteFile(filepath.Join(versionsDir, "stray.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(versionsDir, "empty-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, count, err := s.LatestFrozen("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || id != "v1" {
+		t.Errorf("LatestFrozen = (%q, %d), want (\"v1\", 1) ignoring non-version entries", id, count)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // Frozen-version artifact file names. A frozen version directory holds the
@@ -165,6 +166,65 @@ func (s *Store) FrozenVersions(name string) ([]string, error) {
 	}
 	sort.Strings(ids)
 	return ids, nil
+}
+
+// LatestFrozen returns the id of the most-recently-frozen version of a skill
+// and the total number of frozen versions. "Most recent" is ordered by the
+// version directory's modification time, which reflects freeze order because
+// WriteFrozen finalizes each new version by os.Rename-ing a staged temp dir
+// into place (a fresh mtime), and an idempotent re-freeze of byte-identical
+// content is a no-op that leaves the existing directory (and its mtime)
+// untouched. Ties on mtime are broken by the lexicographically-highest id so
+// the selection is deterministic. A skill with no frozen versions returns
+// ("", 0, nil), not an error, mirroring FrozenVersions.
+//
+// This exists because version ids are content-hash slugs, so FrozenVersions'
+// sorted-ids order is lexicographic, not chronological: picking the sorted max
+// can launch an older version over a newer one (issue #1880). Callers that want
+// the newest frozen version by freeze time use this instead.
+func (s *Store) LatestFrozen(name string) (string, int, error) {
+	dir := filepath.Join(s.Dir(name), versionsSubdir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", 0, nil
+		}
+		return "", 0, fmt.Errorf("store: read frozen versions: %w", err)
+	}
+	var (
+		latestID  string
+		latestSet bool
+		latestMod time.Time
+		count     int
+	)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id := e.Name()
+		if _, err := os.Stat(filepath.Join(dir, id, frozenSkillFile)); err != nil {
+			// Not a valid frozen version directory (no SKILL.md); skip it, matching
+			// FrozenVersions' filtering.
+			continue
+		}
+		info, err := os.Stat(filepath.Join(dir, id))
+		if err != nil {
+			continue
+		}
+		count++
+		mod := info.ModTime()
+		// Select the newest mtime; on a tie prefer the lexicographically-higher id
+		// so the result is deterministic regardless of ReadDir ordering.
+		if !latestSet || mod.After(latestMod) || (mod.Equal(latestMod) && id > latestID) {
+			latestID = id
+			latestMod = mod
+			latestSet = true
+		}
+	}
+	if !latestSet {
+		return "", 0, nil
+	}
+	return latestID, count, nil
 }
 
 // ReadFrozen returns the artifacts of a named skill's frozen version.

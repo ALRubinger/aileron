@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
+	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/model"
 )
 
@@ -415,6 +417,96 @@ func TestRunSkillLaunch_StoreDirFlagRoutesStore(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Launched \"weekly-metrics-digest\"") {
 		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// writeLaunchVersion writes a minimal frozen version directory for a skill so
+// resolveLaunchVersion can select it, then stamps its mtime so freeze order is
+// deterministic in the test.
+func writeLaunchVersion(t *testing.T, s *store.Store, name, id string, mod time.Time) {
+	t.Helper()
+	if err := s.WriteFrozen(name, store.FrozenVersion{
+		ID:        id,
+		SkillMD:   []byte("---\nname: " + name + "\n---\nbody\n"),
+		Lockfile:  []byte("contentHash: sha256:abc\n"),
+		Signature: []byte("sig"),
+		PublicKey: []byte("pub"),
+	}); err != nil {
+		t.Fatalf("WriteFrozen %q: %v", id, err)
+	}
+	if err := os.Chtimes(s.FrozenDir(name, id), mod, mod); err != nil {
+		t.Fatalf("Chtimes %q: %v", id, err)
+	}
+}
+
+// TestResolveLaunchVersion_SelectsNewestByFreezeTime is the CLI-level
+// regression test for issue #1880: with two frozen versions whose content-hash
+// ids sort lexicographically opposite to their freeze order, a bare launch
+// (no --version) must resolve to the most-recently-frozen id, not the sorted
+// max, and must print a banner naming the auto-selected version and count.
+func TestResolveLaunchVersion_SelectsNewestByFreezeTime(t *testing.T) {
+	s := store.New(t.TempDir())
+	base := time.Now().Add(-time.Hour)
+	// "fb8f2724" sorts lexicographically AFTER "0f638793" but is frozen FIRST
+	// (older). The newer version's id sorts first, exactly the reported symptom.
+	writeLaunchVersion(t, s, "demo", "fb8f2724", base)
+	writeLaunchVersion(t, s, "demo", "0f638793", base.Add(time.Minute))
+
+	var stdout bytes.Buffer
+	id, err := resolveLaunchVersion(s, "demo", "", &stdout)
+	if err != nil {
+		t.Fatalf("resolveLaunchVersion: %v", err)
+	}
+	if id != "0f638793" {
+		t.Errorf("resolved id = %q, want %q (newest by freeze time, not lexical max)", id, "0f638793")
+	}
+	banner := stdout.String()
+	if !strings.Contains(banner, "launching 0f638793") || !strings.Contains(banner, "newest of 2") {
+		t.Errorf("banner = %q, want it to name 0f638793 as newest of 2", banner)
+	}
+	if !strings.Contains(banner, "--version to pin") {
+		t.Errorf("banner = %q, want it to mention --version to pin", banner)
+	}
+}
+
+// TestResolveLaunchVersion_SingleVersionNoBanner proves the banner is suppressed
+// when only one version exists: there is no implicit choice to surface.
+func TestResolveLaunchVersion_SingleVersionNoBanner(t *testing.T) {
+	s := store.New(t.TempDir())
+	writeLaunchVersion(t, s, "demo", "only1", time.Now())
+
+	var stdout bytes.Buffer
+	id, err := resolveLaunchVersion(s, "demo", "", &stdout)
+	if err != nil {
+		t.Fatalf("resolveLaunchVersion: %v", err)
+	}
+	if id != "only1" {
+		t.Errorf("resolved id = %q, want %q", id, "only1")
+	}
+	if stdout.String() != "" {
+		t.Errorf("single-version launch must not print a banner, got %q", stdout.String())
+	}
+}
+
+// TestResolveLaunchVersion_ExplicitVersionBypassesSelection proves an explicit
+// --version is returned verbatim without consulting the store or printing a
+// banner, even when other newer versions exist.
+func TestResolveLaunchVersion_ExplicitVersionBypassesSelection(t *testing.T) {
+	s := store.New(t.TempDir())
+	base := time.Now().Add(-time.Hour)
+	writeLaunchVersion(t, s, "demo", "pinned0", base)
+	writeLaunchVersion(t, s, "demo", "newer00", base.Add(time.Minute))
+
+	var stdout bytes.Buffer
+	id, err := resolveLaunchVersion(s, "demo", "pinned0", &stdout)
+	if err != nil {
+		t.Fatalf("resolveLaunchVersion: %v", err)
+	}
+	if id != "pinned0" {
+		t.Errorf("resolved id = %q, want the pinned %q", id, "pinned0")
+	}
+	if stdout.String() != "" {
+		t.Errorf("explicit --version must not print a banner, got %q", stdout.String())
 	}
 }
 
