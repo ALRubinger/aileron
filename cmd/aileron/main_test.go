@@ -7867,8 +7867,9 @@ func TestRunAudit_FetcherErrorExitsNonZero(t *testing.T) {
 	}
 }
 
-// TestRunAuditShow_HappyPath: `aileron audit show <id>` prints the
-// event as pretty JSON.
+// TestRunAuditShow_HappyPath: `aileron audit show <id> --json` prints the
+// event as pretty JSON. The full-JSON contract now lives behind --json;
+// the bare default renders a human summary (see the *Default*/*Verbose* tests).
 func TestRunAuditShow_HappyPath(t *testing.T) {
 	prev := auditGetFetcher
 	auditGetFetcher = func(id string) (*auditEventWire, int, error) {
@@ -7885,7 +7886,7 @@ func TestRunAuditShow_HappyPath(t *testing.T) {
 	defer func() { auditGetFetcher = prev }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"audit", "show", "audit-xyz"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"audit", "show", "audit-xyz", "--json"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -7899,7 +7900,7 @@ func TestRunAuditShow_HappyPath(t *testing.T) {
 }
 
 // TestRunAuditShow_RendersFullMaterializedRecord locks the acceptance
-// guarantee that `audit show` renders the complete output.materialized
+// guarantee that `audit show --json` renders the complete output.materialized
 // event, including every aileron.output.* provenance key, verbatim.
 func TestRunAuditShow_RendersFullMaterializedRecord(t *testing.T) {
 	prev := auditGetFetcher
@@ -7920,7 +7921,7 @@ func TestRunAuditShow_RendersFullMaterializedRecord(t *testing.T) {
 	defer func() { auditGetFetcher = prev }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"audit", "show", "out-1"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"audit", "show", "out-1", "--json"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -7937,7 +7938,7 @@ func TestRunAuditShow_RendersFullMaterializedRecord(t *testing.T) {
 }
 
 // TestRunAuditShow_RendersToolStepProvenance locks the #1762 acceptance
-// guarantee (retargeted by #1829) that `audit show` renders a tool-step
+// guarantee (retargeted by #1829) that `audit show --json` renders a tool-step
 // output.materialized event verbatim, including aileron.step.kind:"tool" and
 // the executed aileron.step.command argv, through the SAME show surface the
 // connector path uses.
@@ -7959,7 +7960,7 @@ func TestRunAuditShow_RendersToolStepProvenance(t *testing.T) {
 	defer func() { auditGetFetcher = prev }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"audit", "show", "tool-out"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"audit", "show", "tool-out", "--json"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -8015,6 +8016,117 @@ func TestRunAuditShow_RequiresAuditID(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "audit-id") {
 		t.Errorf("stderr should mention audit-id; got: %s", stderr.String())
+	}
+}
+
+// showResolvedInputEvent returns a stub fetcher for an output.materialized
+// event whose resolved_inputs hold an oversized literal, plus a little
+// provenance. Shared by the default/verbose tests below.
+func showResolvedInputEvent(bigValue string) func(string) (*auditEventWire, int, error) {
+	return func(_ string) (*auditEventWire, int, error) {
+		return &auditEventWire{
+			AuditID:   "resolved-1",
+			EventType: "output.materialized",
+			Timestamp: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			Payload: map[string]any{
+				"aileron.step.kind": "transform",
+				"aileron.step.inputs": []any{
+					map[string]any{"binding": "html_doc", "content_hash": "sha256:beef"},
+				},
+				"aileron.resolved_inputs": map[string]any{
+					"html_doc": bigValue,
+					"mode":     "csv",
+				},
+			},
+		}, http.StatusOK, nil
+	}
+}
+
+// TestRunAuditShow_DefaultSummarizesResolvedInputs is the regression test for
+// #1892: the bare `audit show` default must NOT inline a large resolved-input
+// value; it must render a compact descriptor instead, while still surfacing
+// provenance. On base (JSON default) this failed because the raw value was
+// inlined in the JSON dump.
+func TestRunAuditShow_DefaultSummarizesResolvedInputs(t *testing.T) {
+	big := strings.Repeat("x", 50000)
+	prev := auditGetFetcher
+	auditGetFetcher = showResolvedInputEvent(big)
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show", "resolved-1"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, big) {
+		t.Errorf("default output inlined the raw 50k value; it should summarize.\n%s", out)
+	}
+	if !strings.Contains(out, "html_doc") {
+		t.Errorf("output missing the resolved-input name html_doc; got:\n%s", out)
+	}
+	// Compact descriptor: type marker from summarizeInputValue + a size token.
+	if !strings.Contains(out, "<string,") {
+		t.Errorf("output missing the <string, ...> type descriptor; got:\n%s", out)
+	}
+	if !strings.Contains(out, "KB") {
+		t.Errorf("output missing a human size token (KB); got:\n%s", out)
+	}
+	// Provenance survives the summarization.
+	if !strings.Contains(out, "output.materialized") {
+		t.Errorf("output missing event type; got:\n%s", out)
+	}
+	if !strings.Contains(out, "transform") {
+		t.Errorf("output missing the step kind; got:\n%s", out)
+	}
+}
+
+// TestRunAuditShow_VerboseShowsFullValues: --verbose (and -v) restore the full
+// resolved-input value inside the human rendering.
+func TestRunAuditShow_VerboseShowsFullValues(t *testing.T) {
+	big := strings.Repeat("x", 50000)
+	prev := auditGetFetcher
+	auditGetFetcher = showResolvedInputEvent(big)
+	defer func() { auditGetFetcher = prev }()
+
+	for _, flag := range []string{"--verbose", "-v"} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"audit", "show", "resolved-1", flag}, newTestRegistry(), &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("%s: exit = %d, want 0; stderr=%s", flag, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), big) {
+			t.Errorf("%s: output should contain the full raw value", flag)
+		}
+	}
+}
+
+// TestRunAuditShow_JSONEmitsCompleteRecord: --json round-trips the event and
+// keeps the machine-readable provenance keys verbatim.
+func TestRunAuditShow_JSONEmitsCompleteRecord(t *testing.T) {
+	big := strings.Repeat("x", 50000)
+	prev := auditGetFetcher
+	auditGetFetcher = showResolvedInputEvent(big)
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show", "resolved-1", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got auditEventWire
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v; out=%s", err, stdout.String())
+	}
+	if got.AuditID != "resolved-1" || got.EventType != "output.materialized" {
+		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "aileron.resolved_inputs") {
+		t.Errorf("--json should emit the raw resolved_inputs key; got:\n%s", out)
+	}
+	if !strings.Contains(out, big) {
+		t.Error("--json is the machine escape hatch; it should carry the full value")
 	}
 }
 

@@ -4227,7 +4227,7 @@ type auditListWire struct {
 
 const auditUsage = `usage:
   aileron audit list  [--since RFC3339] [--audit-id ID] [--connector FQN] [--class CLASS] [--output NAME] [--content-hash sha256:...] [--limit N] [--json]
-  aileron audit show  <audit-id>`
+  aileron audit show  <audit-id> [--json] [--verbose|-v]`
 
 // auditListFetcher and auditGetFetcher are the HTTP clients for the
 // two audit endpoints. Replaceable in tests so they don't depend on a
@@ -4405,12 +4405,15 @@ func runAuditList(args []string, stdout, stderr io.Writer) int {
 func runAuditShow(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("audit show", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	if err := flags.Parse(args); err != nil {
+	asJSON := flags.Bool("json", false, "Render the complete event record as indented JSON")
+	verbose := flags.Bool("verbose", false, "Print full resolved input values instead of a type+size summary")
+	flags.BoolVar(verbose, "v", false, "Shorthand for --verbose")
+	rest, err := parseInterspersedFlags(flags, args)
+	if err != nil {
 		return 1
 	}
-	rest := flags.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(stderr, "usage: aileron audit show <audit-id>")
+		fmt.Fprintln(stderr, "usage: aileron audit show <audit-id> [--json] [--verbose|-v]")
 		return 1
 	}
 	ev, status, err := auditGetFetcher(rest[0])
@@ -4422,13 +4425,138 @@ func runAuditShow(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "audit event %q not found\n", rest[0])
 		return 1
 	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(ev); err != nil {
-		fmt.Fprintf(stderr, "encode: %v\n", err)
-		return 1
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(ev); err != nil {
+			fmt.Fprintf(stderr, "encode: %v\n", err)
+			return 1
+		}
+		return 0
 	}
+	renderAuditShow(stdout, ev, *verbose)
 	return 0
+}
+
+// renderAuditShow prints a legible, multi-line view of a single audit
+// event. It surfaces the provenance fields an operator reads a record for
+// (actor, plan/skill + signer, step, input hashes) and, by default,
+// summarizes each resolved input as a compact "name · <type, size>"
+// descriptor rather than inlining its full value. A large literal input
+// (e.g. an embedded 50 KB document) would otherwise dominate the record and
+// bury the provenance (issue #1892). --json restores the complete
+// machine-readable record; --verbose restores the full resolved-input
+// values inside this human rendering, reusing the exact summarize/verbose
+// contract shipped for `skill launch` (#1888/#1895).
+//
+// Payload keys follow the OTel-namespaced audit schema (issue #390). Missing
+// keys are omitted; empty values are never printed. The payload comes from
+// arbitrary decoded JSON, so every type assertion is guarded.
+func renderAuditShow(w io.Writer, e *auditEventWire, verbose bool) {
+	printAuditField(w, "Audit ID:", e.AuditID)
+	printAuditField(w, "Event:", e.EventType)
+	if !e.Timestamp.IsZero() {
+		printAuditField(w, "Timestamp:", e.Timestamp.Local().Format("2006-01-02 15:04:05"))
+	}
+	p := e.Payload
+
+	// Actor: struct fields first, then any namespaced payload overrides.
+	actorType := e.Actor.Type
+	if s := payloadString(p, "aileron.actor.type"); s != "" {
+		actorType = s
+	}
+	actorID := e.Actor.ID
+	if s := payloadString(p, "aileron.actor.id"); s != "" {
+		actorID = s
+	}
+	printAuditField(w, "Actor:", strings.TrimSpace(actorType+" "+actorID))
+
+	// Plan / skill + signer.
+	printAuditField(w, "Plan:", payloadString(p, "aileron.plan.name"))
+	printAuditField(w, "Plan version:", payloadString(p, "aileron.plan.version"))
+	printAuditField(w, "Signer:", payloadString(p, "aileron.plan.signer"))
+
+	// Step provenance.
+	printAuditField(w, "Step ID:", payloadString(p, "aileron.step.id"))
+	printAuditField(w, "Step kind:", payloadString(p, "aileron.step.kind"))
+	printAuditField(w, "Transform:", payloadString(p, "aileron.step.transform"))
+	if cmd, ok := p["aileron.step.command"].([]any); ok && len(cmd) > 0 {
+		parts := make([]string, 0, len(cmd))
+		for _, a := range cmd {
+			parts = append(parts, fmt.Sprintf("%v", a))
+		}
+		printAuditField(w, "Command:", strings.Join(parts, " "))
+	}
+
+	// Output provenance.
+	printAuditField(w, "Output:", payloadString(p, "aileron.output.name"))
+	printAuditField(w, "Content hash:", payloadString(p, "aileron.output.content_hash"))
+	printAuditField(w, "Output path:", payloadString(p, "aileron.output.path"))
+
+	// Input hashes: each entry is a map after JSON decode.
+	if inputs, ok := p["aileron.step.inputs"].([]any); ok && len(inputs) > 0 {
+		fmt.Fprintln(w, "Input hashes:")
+		for _, item := range inputs {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			binding, _ := m["binding"].(string)
+			hash, _ := m["content_hash"].(string)
+			label := binding
+			if label == "" {
+				if src, ok := m["source"].(string); ok {
+					label = src
+				}
+			}
+			switch {
+			case label != "" && hash != "":
+				fmt.Fprintf(w, "    %s  %s\n", label, hash)
+			case hash != "":
+				fmt.Fprintf(w, "    %s\n", hash)
+			case label != "":
+				fmt.Fprintf(w, "    %s\n", label)
+			}
+		}
+	}
+
+	// Resolved inputs: a map after JSON decode. Sort keys (mirrors launch
+	// output). Default summarizes each value; --verbose prints it in full.
+	if resolved, ok := p["aileron.resolved_inputs"].(map[string]any); ok && len(resolved) > 0 {
+		fmt.Fprintln(w, "Resolved inputs:")
+		names := make([]string, 0, len(resolved))
+		for k := range resolved {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			v := resolved[name]
+			if verbose {
+				fmt.Fprintf(w, "    %s · %v\n", name, v)
+			} else {
+				fmt.Fprintf(w, "    %s · %s\n", name, summarizeInputValue(v))
+			}
+		}
+	}
+}
+
+// payloadString reads a string-valued payload key, returning "" when the
+// key is absent or not a string.
+func payloadString(p map[string]any, key string) string {
+	s, _ := p[key].(string)
+	return s
+}
+
+// printAuditField writes a "label value" line only when value is non-empty,
+// mirroring auditPayloadSummary's omit-missing discipline. The label is
+// padded to a fixed column and always followed by a separating space, so a
+// label at (or past) the column width still renders "label value", never
+// "labelvalue".
+func printAuditField(w io.Writer, label, value string) {
+	if value == "" {
+		return
+	}
+	fmt.Fprintf(w, "%-13s %s\n", label, value)
 }
 
 // auditPayloadSummary renders a one-line, human-readable hint about
