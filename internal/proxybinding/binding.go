@@ -66,11 +66,31 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 // than swallowed so a malformed descriptor fails construction loudly
 // instead of silently shipping an empty (passthrough) table.
 func LoadHostBindings(opts LoadOptions) (binding.HostBindings, error) {
+	table, _, err := LoadHostBindingsWithWarnings(opts)
+	return table, err
+}
+
+// LoadHostBindingsWithWarnings is LoadHostBindings plus the non-fatal
+// startup warnings aggregated from the merged entries (see [Entry.Warnings]).
+// Warnings never block construction; the caller (the daemon boot path) logs
+// them so an operator sees a suspect-but-well-formed binding before it fails
+// at launch. Warnings are collected from the post-merge entry set, so a
+// warning reflects the entry that actually reaches the table (a user override
+// is warned on, the shadowed built-in is not).
+func LoadHostBindingsWithWarnings(opts LoadOptions) (binding.HostBindings, []string, error) {
 	entries, err := Load(opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ToHostBindings(entries)
+	var warnings []string
+	for i := range entries {
+		warnings = append(warnings, entries[i].Warnings()...)
+	}
+	table, err := ToHostBindings(entries)
+	if err != nil {
+		return nil, nil, err
+	}
+	return table, warnings, nil
 }
 
 // ToHostBindings adapts a slice of validated entries into a

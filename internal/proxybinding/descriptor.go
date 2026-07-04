@@ -39,12 +39,38 @@ package proxybinding
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/credential/inject"
 )
+
+// placeholderPattern matches an angle-bracket span (e.g. "<AccessKeyId>",
+// "<token>", "<your-region>"). A descriptor author who copies a template
+// verbatim and leaves an un-substituted placeholder in a parsed value ships
+// a binding that authenticates nothing: at launch time the credential-sealing
+// path emits the literal placeholder upstream and the request fails with an
+// opaque provider error (the reported case was a sigv4-resign entry with
+// access_key_id "<AccessKeyId>" surfacing as UnrecognizedClientException).
+// Any string field carrying such a span is a load-time error so the daemon
+// fails loudly at boot rather than at launch. Descriptor comments are not
+// parsed values, so a "<...>" in a YAML comment is never scanned; the
+// header-template "{token}" slot uses braces, not angle brackets, so it is
+// unaffected.
+var placeholderPattern = regexp.MustCompile(`<[^>]+>`)
+
+// sigv4AccessKeyIDPattern is the canonical shape of an AWS access key ID used
+// by the sigv4-resign scheme: an "AKIA" (long-term) or "ASIA" (temporary/STS)
+// prefix followed by 16 uppercase-alphanumeric characters. A well-formed
+// descriptor whose access_key_id does not match this shape still loads (the
+// value is non-secret and AWS may evolve the format), but it is surfaced as a
+// non-fatal startup warning so a typo'd or placeholder-shaped key is visible
+// before it fails at launch. This is intentionally warn-only: the repository's
+// own SigV4 test vector uses the documented "AKIDEXAMPLE" key, which must keep
+// loading clean.
+var sigv4AccessKeyIDPattern = regexp.MustCompile(`^(AKIA|ASIA)[A-Z0-9]{16}$`)
 
 // SchemaVersion is the only descriptor schema version this loader
 // understands. The format is versioned so it can evolve under 0.0.x
@@ -259,6 +285,15 @@ func Parse(data []byte) (Descriptor, error) {
 // credential-ref legality: there is exactly one matcher and one name
 // contract, not two.
 func (e *Entry) Validate() error {
+	// Reject un-substituted template placeholders before any other check.
+	// An angle-bracket span in a parsed value (e.g. access_key_id
+	// "<AccessKeyId>") is never legitimate: it means an author left a
+	// copy-paste placeholder in place, so fail closed at boot naming the
+	// field rather than shipping a binding that authenticates nothing.
+	if err := e.rejectPlaceholders(); err != nil {
+		return err
+	}
+
 	if e.Host == "" {
 		return fmt.Errorf("missing required field: host")
 	}
@@ -338,6 +373,72 @@ func (e *Entry) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// rejectPlaceholders scans every string field of the Entry for an
+// angle-bracket span and returns a field-named error on the first match. It
+// is the load-time guard against un-substituted template placeholders. Parse
+// wraps the returned error with the binding index and host, and
+// Load/parseLayerFile wrap it with the user file path, so the operator sees
+// file + entry + field. Slice fields (allowed_hosts) are scanned per element
+// with the index named.
+func (e *Entry) rejectPlaceholders() error {
+	type namedField struct {
+		name  string
+		value string
+	}
+	fields := []namedField{
+		{"host", e.Host},
+		{"credential_ref", e.CredentialRef},
+		{"scheme", e.Scheme},
+		{"emit_mechanism", e.EmitMechanism},
+		{"username", e.Username},
+		{"header", e.Header},
+		{"template", e.Template},
+		{"query_param", e.QueryParam},
+		{"access_key_id", e.AccessKeyID},
+		{"region", e.Region},
+		{"service", e.Service},
+		{"effect", e.Effect},
+	}
+	if e.Sentinel != nil {
+		fields = append(fields,
+			namedField{"sentinel.value", e.Sentinel.Value},
+			namedField{"sentinel.env", e.Sentinel.Env},
+		)
+	}
+	for i, h := range e.AllowedHosts {
+		fields = append(fields, namedField{fmt.Sprintf("allowed_hosts[%d]", i), h})
+	}
+	for _, f := range fields {
+		if match := placeholderPattern.FindString(f.value); match != "" {
+			return fmt.Errorf("field %s contains an un-substituted template placeholder %q; replace it with a real value", f.name, match)
+		}
+	}
+	return nil
+}
+
+// Warnings returns non-fatal advisories about a well-formed Entry that loads
+// successfully but is suspect. Unlike [Entry.Validate], a warning never blocks
+// boot: it is logged at daemon startup so an operator sees a likely mistake
+// before it fails at launch. The strings name the offending field and value so
+// the aggregating caller can prefix them with the file and entry context.
+//
+// Today the only warning is a sigv4-resign access_key_id that does not match
+// the canonical AWS shape ([sigv4AccessKeyIDPattern]). This is warn-only by
+// design: the value is non-secret, the AWS format may evolve, and the
+// documented "AKIDEXAMPLE" test vector must keep loading clean, so a
+// shape mismatch is surfaced without failing construction.
+func (e *Entry) Warnings() []string {
+	var out []string
+	if e.Scheme == string(inject.SchemeSigV4Resign) &&
+		e.AccessKeyID != "" &&
+		!sigv4AccessKeyIDPattern.MatchString(e.AccessKeyID) {
+		out = append(out, fmt.Sprintf(
+			"binding %q: sigv4-resign access_key_id %q does not match the expected AWS access key ID shape (AKIA/ASIA + 16 uppercase alphanumerics); verify it is correct",
+			e.Host, e.AccessKeyID))
+	}
+	return out
 }
 
 // schemeNames returns the closed scheme set as plain strings, for error

@@ -269,16 +269,23 @@ var daemonUnitLayers = func(ctx context.Context) ([]capture.CaptureDescriptor, [
 // and preserves today's defaults-only table. A present-but-malformed unit, or
 // a malformed descriptor in any layer, fails construction loudly rather than
 // silently shipping an empty (passthrough) table.
-func assembleHostBindings(ctx context.Context) (binding.HostBindings, error) {
+func assembleHostBindings(ctx context.Context, log *slog.Logger) (binding.HostBindings, error) {
 	_, sealingLayer, err := daemonUnitLayers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("assemble host bindings: load image unit layer: %w", err)
 	}
 	opts := proxybinding.DefaultLoadOptions()
 	opts.ExtraEntries = sealingLayer
-	table, err := proxybinding.LoadHostBindings(opts)
+	table, warnings, err := proxybinding.LoadHostBindingsWithWarnings(opts)
 	if err != nil {
 		return nil, fmt.Errorf("assemble host bindings: %w", err)
+	}
+	// Warnings are non-fatal: a well-formed-but-suspect binding (e.g. a
+	// sigv4-resign access_key_id that does not match the AWS shape) is logged
+	// at startup so an operator sees the likely mistake before it fails at
+	// launch, without blocking daemon boot.
+	for _, w := range warnings {
+		log.Warn("host binding descriptor warning", "detail", w)
 	}
 	return table, nil
 }
@@ -544,7 +551,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// bindings now that #1323 removed the central github.yaml; its projection
 	// is byte-identical to that former default (pinned by internal/app's
 	// TestGHUnitDriftGuard).
-	server.hostBindings, err = assembleHostBindings(ctx)
+	server.hostBindings, err = assembleHostBindings(ctx, log)
 	if err != nil {
 		return nil, err
 	}
