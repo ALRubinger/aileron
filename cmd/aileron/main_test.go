@@ -7801,6 +7801,7 @@ func TestRunAudit_FlagsForwardedToFetcher(t *testing.T) {
 		"--class", "binding_required",
 		"--output", "report.pdf",
 		"--content-hash", "sha256:cafe",
+		"--invocation-id", "11111111-1111-1111-1111-111111111111",
 		"--limit", "50",
 	}
 	code := run(args, newTestRegistry(), &stdout, &stderr)
@@ -7813,6 +7814,7 @@ func TestRunAudit_FlagsForwardedToFetcher(t *testing.T) {
 		seen.class != "binding_required" ||
 		seen.output != "report.pdf" ||
 		seen.contentHash != "sha256:cafe" ||
+		seen.invocationID != "11111111-1111-1111-1111-111111111111" ||
 		seen.limit != 50 {
 		t.Errorf("query = %+v; some flags didn't reach fetcher", seen)
 	}
@@ -8242,13 +8244,14 @@ func TestFetchAuditList_BuildsURL(t *testing.T) {
 	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
 
 	_, err := fetchAuditList(auditListQuery{
-		since:       "2026-05-01T00:00:00Z",
-		auditID:     "audit-x",
-		connector:   "github://aileron/slack",
-		class:       "binding_required",
-		output:      "report.pdf",
-		contentHash: "sha256:cafe",
-		limit:       25,
+		since:        "2026-05-01T00:00:00Z",
+		auditID:      "audit-x",
+		connector:    "github://aileron/slack",
+		class:        "binding_required",
+		output:       "report.pdf",
+		contentHash:  "sha256:cafe",
+		invocationID: "11111111-1111-1111-1111-111111111111",
+		limit:        25,
 	})
 	if err != nil {
 		t.Fatalf("fetchAuditList: %v", err)
@@ -8260,6 +8263,7 @@ func TestFetchAuditList_BuildsURL(t *testing.T) {
 		"class":         "binding_required",
 		"output_name":   "report.pdf",
 		"content_hash":  "sha256:cafe",
+		"invocation_id": "11111111-1111-1111-1111-111111111111",
 		"limit":         "25",
 	} {
 		if got := sawQuery.Get(k); got != want {

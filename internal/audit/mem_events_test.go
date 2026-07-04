@@ -335,6 +335,111 @@ func TestListEvents_OutputFiltersCompose(t *testing.T) {
 	}
 }
 
+// TestListEvents_FilterByInvocationIDIsExact locks the InvocationID
+// filter: it returns exactly the events carrying that launch-scoped id
+// under `aileron.invocation.id`, excludes events from a different
+// invocation, and matches by exact string equality (no prefix match,
+// unknown id returns empty).
+func TestListEvents_FilterByInvocationIDIsExact(t *testing.T) {
+	const inv = "11111111-1111-1111-1111-111111111111"
+	store := seedEvents(t,
+		audit.Event{
+			EventID:   "a-in-inv",
+			EventType: model.EventType("output.materialized"),
+			Payload:   map[string]any{"aileron.invocation.id": inv},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			EventID:   "b-in-inv",
+			EventType: model.EventTypeActionInstalled,
+			Payload:   map[string]any{"aileron.invocation.id": inv},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			EventID:   "other-inv",
+			EventType: model.EventType("output.materialized"),
+			Payload:   map[string]any{"aileron.invocation.id": "22222222-2222-2222-2222-222222222222"},
+			Timestamp: time.Now(),
+		},
+		audit.Event{
+			EventID:   "no-inv",
+			EventType: model.EventTypeActionInstalled,
+			Payload:   map[string]any{"aileron.action.name": "ship"},
+			Timestamp: time.Now(),
+		},
+	)
+
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{InvocationID: inv})
+	if len(got) != 2 {
+		t.Fatalf("want 2 events for the invocation, got %d: %+v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, e := range got {
+		seen[e.EventID] = true
+	}
+	if !seen["a-in-inv"] || !seen["b-in-inv"] {
+		t.Errorf("want both events of the invocation, got %+v", got)
+	}
+
+	// A prefix of the id must not match — equality is exact.
+	partial, _ := store.ListEvents(context.Background(), audit.EventFilter{InvocationID: "11111111"})
+	if len(partial) != 0 {
+		t.Errorf("partial invocation id should not match, got %+v", partial)
+	}
+
+	// An unknown id returns empty.
+	none, _ := store.ListEvents(context.Background(), audit.EventFilter{InvocationID: "deadbeef-0000-0000-0000-000000000000"})
+	if len(none) != 0 {
+		t.Errorf("unknown invocation id should return empty, got %+v", none)
+	}
+}
+
+// TestListEvents_InvocationIDComposesWithOtherFilters proves the
+// InvocationID filter AND-composes with Since and ContentHash: only the
+// event matching all three is returned.
+func TestListEvents_InvocationIDComposesWithOtherFilters(t *testing.T) {
+	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	const inv = "11111111-1111-1111-1111-111111111111"
+	const digest = "sha256:cafe"
+	store := seedEvents(t,
+		// Match: right invocation, right hash, after Since.
+		audit.Event{
+			EventID: "want",
+			Payload: map[string]any{
+				"aileron.invocation.id":       inv,
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: t0.Add(time.Hour),
+		},
+		// Right invocation + hash, but BEFORE Since.
+		audit.Event{
+			EventID: "too-old",
+			Payload: map[string]any{
+				"aileron.invocation.id":       inv,
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: t0.Add(-time.Hour),
+		},
+		// Right hash + Since, but a different invocation.
+		audit.Event{
+			EventID: "other-inv",
+			Payload: map[string]any{
+				"aileron.invocation.id":       "22222222-2222-2222-2222-222222222222",
+				"aileron.output.content_hash": digest,
+			},
+			Timestamp: t0.Add(time.Hour),
+		},
+	)
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{
+		Since:        t0,
+		InvocationID: inv,
+		ContentHash:  digest,
+	})
+	if len(got) != 1 || got[0].EventID != "want" {
+		t.Errorf("got = %+v; want one event 'want'", got)
+	}
+}
+
 func TestListEvents_LimitTruncatesAfterFiltering(t *testing.T) {
 	now := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	var seed []audit.Event

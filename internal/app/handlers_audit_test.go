@@ -198,6 +198,85 @@ func TestListAudit_ContentHashComposesWithSince(t *testing.T) {
 	}
 }
 
+func invocationEvent(id, invocationID string, ts time.Time) audit.Event {
+	return audit.Event{
+		EventID:   id,
+		EventType: model.EventType("output.materialized"),
+		Payload:   map[string]any{"aileron.invocation.id": invocationID},
+		Timestamp: ts,
+	}
+}
+
+func TestListAudit_InvocationIDFilterForwarded(t *testing.T) {
+	const inv = "11111111-1111-1111-1111-111111111111"
+	now := time.Now()
+	srv, _ := newAuditTestServer(t,
+		invocationEvent("a", inv, now),
+		invocationEvent("b", inv, now.Add(time.Minute)),
+		invocationEvent("other", "22222222-2222-2222-2222-222222222222", now),
+	)
+	rec := httptest.NewRecorder()
+	id := inv
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		InvocationId: &id,
+	})
+	resp := decodeAuditList(t, rec)
+	if len(resp.Events) != 2 {
+		t.Fatalf("events = %+v; want the two events of the invocation", resp.Events)
+	}
+	for _, e := range resp.Events {
+		if e.AuditId == "other" {
+			t.Errorf("event from a different invocation leaked: %+v", resp.Events)
+		}
+	}
+
+	// An unknown invocation id returns empty.
+	rec = httptest.NewRecorder()
+	unknown := "deadbeef-0000-0000-0000-000000000000"
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		InvocationId: &unknown,
+	})
+	if got := decodeAuditList(t, rec); len(got.Events) != 0 {
+		t.Errorf("unknown invocation id should return empty, got %+v", got.Events)
+	}
+}
+
+func TestListAudit_InvocationIDComposesWithContentHash(t *testing.T) {
+	const inv = "11111111-1111-1111-1111-111111111111"
+	const digest = "sha256:cafe"
+	now := time.Now()
+	want := audit.Event{
+		EventID:   "want",
+		EventType: model.EventType("output.materialized"),
+		Payload: map[string]any{
+			"aileron.invocation.id":       inv,
+			"aileron.output.content_hash": digest,
+		},
+		Timestamp: now,
+	}
+	wrongHash := audit.Event{
+		EventID:   "wrong-hash",
+		EventType: model.EventType("output.materialized"),
+		Payload: map[string]any{
+			"aileron.invocation.id":       inv,
+			"aileron.output.content_hash": "sha256:beef",
+		},
+		Timestamp: now,
+	}
+	srv, _ := newAuditTestServer(t, want, wrongHash)
+	rec := httptest.NewRecorder()
+	id := inv
+	hash := digest
+	srv.ListAudit(rec, httptest.NewRequest(http.MethodGet, "/v1/audit", nil), api.ListAuditParams{
+		InvocationId: &id,
+		ContentHash:  &hash,
+	})
+	resp := decodeAuditList(t, rec)
+	if len(resp.Events) != 1 || resp.Events[0].AuditId != "want" {
+		t.Errorf("events = %+v; want only 'want'", resp.Events)
+	}
+}
+
 func TestListAudit_LimitClamps(t *testing.T) {
 	t0 := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	srv, _ := newAuditTestServer(t,

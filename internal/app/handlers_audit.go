@@ -13,7 +13,7 @@ const defaultAuditListLimit = 100
 
 // ListAudit returns events from the audit recorder, newest-first,
 // optionally filtered by `since`, `audit_id`, `connector_fqn`,
-// `class`, `output_name`, and `content_hash`. Per ADR-0010 the
+// `class`, `output_name`, `content_hash`, and `invocation_id`. Per ADR-0010 the
 // recorder is in-memory in v1; events are scoped to the running
 // daemon process.
 func (s *apiServer) ListAudit(w http.ResponseWriter, r *http.Request, params api.ListAuditParams) {
@@ -40,6 +40,9 @@ func (s *apiServer) ListAudit(w http.ResponseWriter, r *http.Request, params api
 	}
 	if params.ContentHash != nil {
 		filter.ContentHash = *params.ContentHash
+	}
+	if params.InvocationId != nil {
+		filter.InvocationID = *params.InvocationId
 	}
 	if params.Limit != nil && *params.Limit > 0 {
 		filter.Limit = *params.Limit

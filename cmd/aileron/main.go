@@ -4226,7 +4226,7 @@ type auditListWire struct {
 }
 
 const auditUsage = `usage:
-  aileron audit list  [--since RFC3339] [--audit-id ID] [--connector FQN] [--class CLASS] [--output NAME] [--content-hash sha256:...] [--limit N] [--json]
+  aileron audit list  [--since RFC3339] [--audit-id ID] [--connector FQN] [--class CLASS] [--output NAME] [--content-hash sha256:...] [--invocation-id ID] [--limit N] [--json]
   aileron audit show  <audit-id> [--json] [--verbose|-v]`
 
 // auditListFetcher and auditGetFetcher are the HTTP clients for the
@@ -4238,13 +4238,14 @@ var (
 )
 
 type auditListQuery struct {
-	since       string
-	auditID     string
-	connector   string
-	class       string
-	output      string
-	contentHash string
-	limit       int
+	since        string
+	auditID      string
+	connector    string
+	class        string
+	output       string
+	contentHash  string
+	invocationID string
+	limit        int
 }
 
 func fetchAuditList(q auditListQuery) (*auditListWire, error) {
@@ -4274,6 +4275,9 @@ func fetchAuditList(q auditListQuery) (*auditListWire, error) {
 	}
 	if q.contentHash != "" {
 		qs.Set("content_hash", q.contentHash)
+	}
+	if q.invocationID != "" {
+		qs.Set("invocation_id", q.invocationID)
 	}
 	if q.limit > 0 {
 		qs.Set("limit", strconv.Itoa(q.limit))
@@ -4358,6 +4362,7 @@ func runAuditList(args []string, stdout, stderr io.Writer) int {
 	class := flags.String("class", "", "Match failure events with this class (e.g. binding_required)")
 	output := flags.String("output", "", "Match output.materialized events for this output name")
 	contentHash := flags.String("content-hash", "", "Match the output.materialized event with this content hash (sha256:<hex>)")
+	invocationID := flags.String("invocation-id", "", "Match events with this aileron.invocation.id (one launch's records)")
 	limit := flags.Int("limit", 0, "Maximum events to return (default: server default of 100)")
 	asJSON := flags.Bool("json", false, "Render full event records as JSON, one per line")
 	if err := flags.Parse(args); err != nil {
@@ -4365,13 +4370,14 @@ func runAuditList(args []string, stdout, stderr io.Writer) int {
 	}
 
 	resp, err := auditListFetcher(auditListQuery{
-		since:       *since,
-		auditID:     *auditID,
-		connector:   *connector,
-		class:       *class,
-		output:      *output,
-		contentHash: *contentHash,
-		limit:       *limit,
+		since:        *since,
+		auditID:      *auditID,
+		connector:    *connector,
+		class:        *class,
+		output:       *output,
+		contentHash:  *contentHash,
+		invocationID: *invocationID,
+		limit:        *limit,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
