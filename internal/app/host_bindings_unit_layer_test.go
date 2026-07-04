@@ -1,14 +1,24 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/auth/capture"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/proxybinding"
 )
+
+// discardLogger is a no-op slog.Logger for tests that do not assert on log
+// output but must satisfy assembleHostBindings's logger parameter.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // swapDaemonUnitLayers substitutes the image-derived unit-layer seam for the
 // duration of a test, restoring the production resolver afterward.
@@ -28,7 +38,7 @@ func TestAssembleHostBindings_NoUnitLayerEqualsDefaults(t *testing.T) {
 		return nil, nil, nil
 	})
 
-	table, err := assembleHostBindings(context.Background())
+	table, err := assembleHostBindings(context.Background(), discardLogger())
 	if err != nil {
 		t.Fatalf("assembleHostBindings: %v", err)
 	}
@@ -53,7 +63,7 @@ func TestAssembleHostBindings_UnitLayerIsAdditive(t *testing.T) {
 		return nil, sealing, nil
 	})
 
-	table, err := assembleHostBindings(context.Background())
+	table, err := assembleHostBindings(context.Background(), discardLogger())
 	if err != nil {
 		t.Fatalf("assembleHostBindings: %v", err)
 	}
@@ -69,6 +79,39 @@ func TestAssembleHostBindings_UnitLayerIsAdditive(t *testing.T) {
 	}
 }
 
+// TestAssembleHostBindings_SuspectSigV4KeyWarnsButLoads proves a well-formed
+// sigv4-resign entry whose access_key_id does not match the AWS shape loads
+// successfully (does not block boot) and is surfaced as a startup warning
+// naming the field, per the warn-only contract.
+func TestAssembleHostBindings_SuspectSigV4KeyWarnsButLoads(t *testing.T) {
+	swapDaemonUnitLayers(t, func(context.Context) ([]capture.CaptureDescriptor, []proxybinding.Entry, error) {
+		sealing := []proxybinding.Entry{{
+			Host:          "example.execute-api.us-east-1.amazonaws.com",
+			CredentialRef: "user/aws",
+			Scheme:        binding.SchemeSigV4Resign,
+			AccessKeyID:   "not-a-valid-shape",
+			Region:        "us-east-1",
+			Service:       "execute-api",
+		}}
+		return nil, sealing, nil
+	})
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	table, err := assembleHostBindings(context.Background(), log)
+	if err != nil {
+		t.Fatalf("assembleHostBindings: suspect key must not block boot: %v", err)
+	}
+	if _, ok := table.Match("example.execute-api.us-east-1.amazonaws.com"); !ok {
+		t.Error("suspect-key binding must still be present in the table")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "access_key_id") || !strings.Contains(out, "not-a-valid-shape") {
+		t.Errorf("expected a startup warning naming access_key_id and the value; got: %q", out)
+	}
+}
+
 // TestAssembleHostBindings_MalformedUnitFailsLoudly proves a present-but-broken
 // unit (a seam error) fails table construction loudly rather than degrading to
 // a defaults-only or empty table.
@@ -78,7 +121,7 @@ func TestAssembleHostBindings_MalformedUnitFailsLoudly(t *testing.T) {
 		return nil, nil, wantErr
 	})
 
-	_, err := assembleHostBindings(context.Background())
+	_, err := assembleHostBindings(context.Background(), discardLogger())
 	if err == nil {
 		t.Fatal("assembleHostBindings = nil error, want the unit-layer error surfaced")
 	}
