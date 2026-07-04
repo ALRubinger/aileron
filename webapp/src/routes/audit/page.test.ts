@@ -221,6 +221,9 @@ describe('Audit page — deep link (#1894 affordance)', () => {
 		// Header shows the verified signature badge and skill from the root event.
 		expect(screen.getByTestId('header-signature-badge')).toHaveTextContent(/verified/i);
 		expect(screen.getByTestId('header-skill')).toHaveTextContent('pipeline');
+		// The chain-of-custody rollup reads clean and per-node trust badges render.
+		expect(screen.getByTestId('header-chain-badge')).toHaveTextContent('Chain verified');
+		expect(screen.getAllByTestId('node-signature-badge').length).toBeGreaterThanOrEqual(1);
 	});
 
 	it('shows a friendly message when the trace resolves to null (unknown hash 404)', async () => {
@@ -296,6 +299,47 @@ describe('Audit page — graph + side panel', () => {
 			return node!;
 		});
 		expect(dangling).toHaveTextContent(/unresolved upstream/i);
+	});
+
+	it('surfaces the header gap count and a per-node provenance-gap affordance for a dangling upstream', async () => {
+		setLocationSearch('?content_hash=sha256:root');
+		const root = materialized({
+			hash: 'sha256:root',
+			name: 'out.csv',
+			skill: 'etl',
+			sigStatus: 'verified',
+			signedBy: 'sha256:key',
+			inputs: [{ binding: 'data', content_hash: 'sha256:missing' }]
+		});
+		vi.mocked(getAuditTrace).mockResolvedValue(traceFor(root));
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('provenance-graph')).toBeInTheDocument();
+		});
+		// Header rollup reports the gap; a node carries the first-class gap marker.
+		expect(screen.getByTestId('header-chain-badge')).toHaveTextContent(/provenance gap/i);
+		expect(screen.getAllByTestId('node-provenance-gap').length).toBeGreaterThanOrEqual(1);
+	});
+
+	it('surfaces the header unverified count and a per-node warning for an unsigned plan', async () => {
+		setLocationSearch('?content_hash=sha256:root');
+		const root = materialized({
+			hash: 'sha256:root',
+			name: 'out.csv',
+			skill: 'etl',
+			sigStatus: 'unverified'
+		});
+		vi.mocked(getAuditTrace).mockResolvedValue(traceFor(root));
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('provenance-graph')).toBeInTheDocument();
+		});
+		expect(screen.getByTestId('header-chain-badge')).toHaveTextContent(/unverified/i);
+		expect(screen.getAllByTestId('node-unverified-warning').length).toBeGreaterThanOrEqual(1);
 	});
 });
 

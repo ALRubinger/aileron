@@ -94,6 +94,20 @@ export function planContentHash(e: AuditEvent): string | undefined {
 	return str(e.payload, 'aileron.plan.content_hash');
 }
 
+/** The single `aileron.plan.signature_status` value the daemon writes for a
+ *  plan whose signature actually verified. Mirrors the daemon constant
+ *  `signatureStatusVerified` (internal/flightplan/runtime/audit.go) verbatim,
+ *  so the webapp's notion of "verified" cannot drift from the runtime's. */
+export const SIGNATURE_STATUS_VERIFIED = 'verified';
+
+/** True only when an event's plan signature verified. This is the one
+ *  truthiness test for "verified" on the client; the header, node cards, and
+ *  chain rollup all route through it rather than inlining a string compare, so
+ *  there is a single source of truth mirroring the daemon. */
+export function signatureVerified(e: AuditEvent): boolean {
+	return planSignatureStatus(e) === SIGNATURE_STATUS_VERIFIED;
+}
+
 /** Actor identity label: prefers the normalized `actor.identity_label`,
  *  falling back to the flat payload key. */
 export function actorIdentityLabel(e: AuditEvent): string | undefined {
