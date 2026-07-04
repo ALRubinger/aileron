@@ -92,9 +92,10 @@ const envSkillImageBooted = "AILERON_SKILL_IMAGE_BOOTED"
 // reserved boot key, failing closed with a loud, variable-naming error rather
 // than booting with a poisoned token/URL or a lost re-entry sentinel.
 var reservedBootEnvKeys = map[string]struct{}{
-	"AILERON_TOKEN":     {},
-	"AILERON_API_URL":   {},
-	envSkillImageBooted: {},
+	"AILERON_TOKEN":       {},
+	"AILERON_API_URL":     {},
+	"AILERON_OPERATOR_ID": {},
+	envSkillImageBooted:   {},
 }
 
 // containerRunFlightPlan boots the pinned image and runs the plan inside it. It
@@ -221,7 +222,21 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		// the booted pin: it must run the plan in-process rather than boot
 		// the pin again (which would recurse; the image carries no nested
 		// container runtime, and with one it would never terminate).
-		Env: map[string]string{envSkillImageBooted: "1"},
+		//
+		// AILERON_OPERATOR_ID carries the HOST-resolved operator identity
+		// into the boot so the in-container CLI stamps the real human on its
+		// launch audit records (#1881). Resolved once here on the host,
+		// where user.Current()@os.Hostname() names the actual operator; the
+		// inner CLI would otherwise resolve the image's fixed non-root user
+		// and the ephemeral container id (agent@<container-id>) — identical
+		// for every operator — defeating attribution. This mirrors the
+		// daemon-coords injection below. AILERON_OPERATOR_ID is a
+		// reservedBootEnvKey so a placeholder/proxy-bootstrap key cannot
+		// clobber it.
+		Env: map[string]string{
+			envSkillImageBooted:   "1",
+			"AILERON_OPERATOR_ID": operatorActorID(),
+		},
 	}
 
 	// Daemon-audit reachability (#1759): inject the host daemon coordinates so the

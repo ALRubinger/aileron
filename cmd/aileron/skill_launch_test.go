@@ -780,6 +780,38 @@ func TestOperatorActorID_ComposesUserAtHost(t *testing.T) {
 	}
 }
 
+// TestOperatorActorID_PrefersEnvOverride is the #1881 regression: on the
+// composed-environment model the CLI that emits audit records runs INSIDE the
+// sealed container, where user.Current()@os.Hostname() resolves to the image's
+// fixed non-root user + the ephemeral container id (identical for every
+// operator). The host resolves the real operator identity once and carries it
+// into the boot via AILERON_OPERATOR_ID; the inner CLI must stamp that value
+// VERBATIM. A host-run launch leaves the env unset and keeps the user@host
+// floor. Fails before the env-preference seam (the override would be ignored
+// and the floor stamped instead).
+func TestOperatorActorID_PrefersEnvOverride(t *testing.T) {
+	t.Run("env set stamps the host-resolved id verbatim", func(t *testing.T) {
+		t.Setenv("AILERON_OPERATOR_ID", "alice@laptop-42")
+		if got := operatorActorID(); got != "alice@laptop-42" {
+			t.Errorf("operatorActorID() = %q, want %q (host-resolved override verbatim)", got, "alice@laptop-42")
+		}
+	})
+
+	t.Run("blank env falls back to user@host floor", func(t *testing.T) {
+		// A whitespace-only value must not shadow the floor: it carries no
+		// identity, so trimming to empty keeps the user@host resolution.
+		t.Setenv("AILERON_OPERATOR_ID", "   ")
+		got := operatorActorID()
+		user, host, ok := strings.Cut(got, "@")
+		if !ok || user == "" || host == "" {
+			t.Fatalf("operatorActorID() = %q, want user@host floor when env is blank", got)
+		}
+		if got == "   " {
+			t.Errorf("operatorActorID() = %q, blank env must not shadow the floor", got)
+		}
+	})
+}
+
 // TestNewLaunchAuditSink_StampsOperatorHumanActor is the #1875 regression: the
 // production sink seam must stamp the operator identity as a {type: human,
 // id: "<user>@<host>"} Actor on every record kind it emits — the launch

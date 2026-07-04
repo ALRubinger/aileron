@@ -38,7 +38,21 @@ var newLaunchAuditSink = func(stderr io.Writer) runtime.AuditSink {
 // still more useful than mislabeling the operator as the runtime service. This
 // is the cheap operator-identity floor; a vault-anchored configured identity is
 // a deliberate follow-up (#1875).
+//
+// A non-empty AILERON_OPERATOR_ID env var takes precedence over the
+// user@host floor. On the composed-environment model the CLI that emits
+// audit records runs INSIDE the sealed container, where user.Current() and
+// os.Hostname() resolve to the image's fixed non-root user and the ephemeral
+// container id (agent@<container-id>) — identical for every operator, which
+// defeats attribution. The host resolves the real operator identity once and
+// carries it into the boot via AILERON_OPERATOR_ID (see
+// containerImageRunner.Run), mirroring the existing daemon-coords injection.
+// A host-run launch leaves the env unset and keeps the user@host floor
+// (#1881).
 var operatorActorID = func() string {
+	if id := strings.TrimSpace(os.Getenv("AILERON_OPERATOR_ID")); id != "" {
+		return id
+	}
 	name := "unknown"
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		name = u.Username

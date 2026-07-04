@@ -14,14 +14,24 @@ import (
 	"github.com/ALRubinger/aileron/internal/version"
 )
 
+// stubHostOperatorID is the deterministic host-resolved operator identity the
+// container Run tests stamp via the operatorActorID seam, so the injected
+// AILERON_OPERATOR_ID env is a fixed value independent of the host user/host.
+const stubHostOperatorID = "carol@host-workstation"
+
 // stubContainerBoot swaps the single real-Docker call site for a recorder so the
 // container image runner's spec-construction is testable with no live runtime.
 // It also stubs the CLI-version-skew preflight to "" so every Run test stays
-// Docker-free and warning-silent by default; skew tests override it via
-// stubBakedCLIVersion.
+// Docker-free and warning-silent by default (skew tests override it via
+// stubBakedCLIVersion), and stubs operatorActorID to stubHostOperatorID so the
+// host-resolved AILERON_OPERATOR_ID injected into the boot env (#1881) is
+// deterministic.
 func stubContainerBoot(t *testing.T, capture *sandboxcontainer.RunOptions, err error) {
 	t.Helper()
 	stubBakedCLIVersion(t, "")
+	origActor := operatorActorID
+	operatorActorID = func() string { return stubHostOperatorID }
+	t.Cleanup(func() { operatorActorID = origActor })
 	orig := containerRunFlightPlan
 	containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
 		*capture = opts
@@ -307,6 +317,12 @@ func TestContainerImageRunner_InjectsDaemonEnv(t *testing.T) {
 	if got.Env[envSkillImageBooted] != "1" {
 		t.Errorf("%s = %q, want the boot sentinel alongside the daemon env", envSkillImageBooted, got.Env[envSkillImageBooted])
 	}
+	// #1881: the host-resolved operator identity is injected into the boot env
+	// so the in-container CLI stamps the real human on its audit records rather
+	// than the image's fixed non-root user + ephemeral container id.
+	if got.Env["AILERON_OPERATOR_ID"] != stubHostOperatorID {
+		t.Errorf("AILERON_OPERATOR_ID = %q, want the host-resolved operator id %q", got.Env["AILERON_OPERATOR_ID"], stubHostOperatorID)
+	}
 }
 
 // TestContainerImageRunner_PassthroughWhenNoDaemonConfig proves that when the
@@ -329,9 +345,10 @@ func TestContainerImageRunner_PassthroughWhenNoDaemonConfig(t *testing.T) {
 	if _, err := (containerImageRunner{daemonEnv: fake}).Run(context.Background(), spec); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// Only the boot sentinel: no daemon coordinates on the passthrough boot.
-	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
-		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the passthrough (ok=false) boot", got.Env)
+	// The boot sentinel and the host-resolved operator id (#1881), but no daemon
+	// coordinates, on the passthrough boot.
+	if len(got.Env) != 2 || got.Env[envSkillImageBooted] != "1" || got.Env["AILERON_OPERATOR_ID"] != stubHostOperatorID {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel + operator id on the passthrough (ok=false) boot", got.Env)
 	}
 }
 
@@ -355,8 +372,8 @@ func TestContainerImageRunner_ZeroValueInjectsNoEnv(t *testing.T) {
 	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
-		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the zero-value runner", got.Env)
+	if len(got.Env) != 2 || got.Env[envSkillImageBooted] != "1" || got.Env["AILERON_OPERATOR_ID"] != stubHostOperatorID {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel + operator id on the zero-value runner", got.Env)
 	}
 }
 
@@ -500,6 +517,9 @@ func TestContainerImageRunner_ProxyEnrichesBoot(t *testing.T) {
 	if got.Env["AWS_ACCESS_KEY_ID"] != "AKIAIOSFODNN7PLACEHLDR" || got.Env["GH_TOKEN"] != "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA" {
 		t.Errorf("placeholder creds missing from the merged boot env: %+v", got.Env)
 	}
+	if got.Env["AILERON_OPERATOR_ID"] != stubHostOperatorID {
+		t.Errorf("AILERON_OPERATOR_ID = %q, want the host-resolved operator id preserved through the proxy merge", got.Env["AILERON_OPERATOR_ID"])
+	}
 }
 
 // TestContainerImageRunner_ProxyPassthroughWhenNotOK proves a bootstrapper
@@ -527,8 +547,8 @@ func TestContainerImageRunner_ProxyPassthroughWhenNotOK(t *testing.T) {
 			t.Errorf("passthrough boot must not mount a CA, got %+v", got.Volumes)
 		}
 	}
-	if len(got.Env) != 1 || got.Env[envSkillImageBooted] != "1" {
-		t.Errorf("RunOptions.Env = %v, want only the boot sentinel on the passthrough (ok=false) boot", got.Env)
+	if len(got.Env) != 2 || got.Env[envSkillImageBooted] != "1" || got.Env["AILERON_OPERATOR_ID"] != stubHostOperatorID {
+		t.Errorf("RunOptions.Env = %v, want only the boot sentinel + operator id on the passthrough (ok=false) boot", got.Env)
 	}
 }
 
@@ -567,15 +587,16 @@ func TestContainerImageRunner_ProxyPrepareErrorFailsClosed(t *testing.T) {
 
 // TestContainerImageRunner_RejectsReservedBootKeyFromBootstrap proves that a
 // bootstrap/placeholder env declaring one of the reserved boot keys (the daemon
-// coordinates AILERON_TOKEN / AILERON_API_URL or the AILERON_SKILL_IMAGE_BOOTED
-// sentinel) fails the boot closed with an error naming the offending variable,
-// rather than letting the merge clobber the authoritative daemon token/URL or
-// the re-entry sentinel (#1828). An image-declared credential placeholder is
+// coordinates AILERON_TOKEN / AILERON_API_URL, the host-resolved
+// AILERON_OPERATOR_ID (#1881), or the AILERON_SKILL_IMAGE_BOOTED sentinel) fails
+// the boot closed with an error naming the offending variable, rather than
+// letting the merge clobber the authoritative daemon token/URL, the operator
+// identity, or the re-entry sentinel (#1828). An image-declared credential placeholder is
 // the realistic source of such a key: PlaceholderEnv only rejects
 // convention-vs-convention collisions, so a placeholder that mis-declares a
 // reserved key would otherwise reach the merge site. The boot must NOT run.
 func TestContainerImageRunner_RejectsReservedBootKeyFromBootstrap(t *testing.T) {
-	for _, reserved := range []string{"AILERON_TOKEN", "AILERON_API_URL", envSkillImageBooted} {
+	for _, reserved := range []string{"AILERON_TOKEN", "AILERON_API_URL", "AILERON_OPERATOR_ID", envSkillImageBooted} {
 		reserved := reserved
 		t.Run(reserved, func(t *testing.T) {
 			storeDir := t.TempDir()
