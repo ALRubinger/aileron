@@ -29,7 +29,21 @@ async function ensureDaemonHandshake(): Promise<void> {
 	return daemonHandshake;
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+/** Cross-cutting options for {@link apiFetch} that are not part of the
+ *  wire request. `allow404` makes a 404 resolve to `null` instead of
+ *  throwing, so callers whose "not found" is a normal, non-error result
+ *  (e.g. the audit trace endpoint's unknown-hash empty state) keep the
+ *  centralized handshake + 423 vault-lock retry without special-casing
+ *  the status themselves. All other non-ok statuses still throw. */
+type ApiFetchOptions = {
+	allow404?: boolean;
+};
+
+async function apiFetch<T>(
+	path: string,
+	init?: RequestInit,
+	opts?: ApiFetchOptions
+): Promise<T> {
 	await ensureDaemonHandshake();
 	const res = await fetch(`${API_BASE}${path}`, {
 		...init,
@@ -42,9 +56,10 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 		// Vault locked. Open the passphrase modal; on unlock, retry
 		// the original request once. The modal is responsible for
 		// resolving the promise we hand it via onVaultLocked.
-		return onVaultLocked(() => apiFetch<T>(path, init));
+		return onVaultLocked(() => apiFetch<T>(path, init, opts));
 	}
 	if (res.status === 204) return null as T;
+	if (res.status === 404 && opts?.allow404) return null as T;
 	if (!res.ok) {
 		const body = await res
 			.json()
@@ -168,6 +183,70 @@ export async function getAuditByInvocation(id: string): Promise<AuditEvent[]> {
 		`/v1/audit?invocation_id=${encodeURIComponent(id)}`
 	);
 	return resp.events ?? [];
+}
+
+// --- Server-assembled provenance trace (#1913/#1930) ---
+//
+// `GET /v1/audit/trace` assembles the provenance graph server-side: the
+// same walk-back the webapp used to do client-side (N+1 fan-out over
+// `content_hash`) collapsed into one round-trip. The `/audit` graph view
+// maps this response into the render model (`$lib/audit/provenance`); the
+// timeline stays a flat list via `getAuditByInvocation`. Field names and
+// node kinds mirror the client model, so this is a thin snake→camel map.
+
+/** One directed edge in a server-assembled provenance graph, running
+ *  parent → child (downstream consumer → upstream producer). Identical
+ *  in shape to `ProvenanceEdge`. Mirrors `AuditTraceEdge` in the spec. */
+export type AuditTraceEdge = {
+	from: string;
+	to: string;
+};
+
+/** One node in a server-assembled provenance graph. Mirrors
+ *  `AuditTraceNode` in the spec — the wire shape differs from the render
+ *  model (`ProvenanceNode`) only by `content_hash` being snake_case. */
+export type AuditTraceNode = {
+	id: string;
+	kind: 'artifact' | 'step' | 'literal' | 'launch';
+	title: string;
+	subtitle?: string;
+	depth: number;
+	/** For an artifact node, the content hash it materialized. */
+	content_hash?: string;
+	/** True when an artifact node's hash resolved to no producing record. */
+	dangling?: boolean;
+	/** The backing audit event, when the node was derived from one. */
+	event?: AuditEvent;
+	/** For a literal node, the input binding/source it stands for. */
+	literal?: { binding: string; source?: string };
+};
+
+/** Server-assembled provenance graph. Mirrors `AuditTraceResponse`.
+ *  `root_id` is the id of the node the walk started at. */
+export type AuditTraceResponse = {
+	root_id: string;
+	nodes: AuditTraceNode[];
+	edges: AuditTraceEdge[];
+};
+
+/** Fetches the server-assembled provenance trace rooted at a content
+ *  hash (precedence) or a launch invocation id. Returns `null` when the
+ *  daemon reports 404 (unknown hash / invocation) so the caller renders
+ *  the friendly empty state (#1894 contract) rather than treating a
+ *  not-found as an error. Every other non-2xx still throws. */
+export async function getAuditTrace(opts: {
+	contentHash?: string;
+	invocationId?: string;
+}): Promise<AuditTraceResponse | null> {
+	if (!opts.contentHash && !opts.invocationId) {
+		throw new Error('getAuditTrace requires contentHash or invocationId');
+	}
+	const query = opts.contentHash
+		? `content_hash=${encodeURIComponent(opts.contentHash)}`
+		: `invocation_id=${encodeURIComponent(opts.invocationId ?? '')}`;
+	return apiFetch<AuditTraceResponse>(`/v1/audit/trace?${query}`, undefined, {
+		allow404: true
+	});
 }
 
 // --- Action-level approvals (#418) ---

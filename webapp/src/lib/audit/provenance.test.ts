@@ -1,162 +1,138 @@
 import { describe, it, expect } from 'vitest';
-import { assembleProvenance, type ResolveByHash } from './provenance';
-import type { AuditEvent } from '$lib/api';
+import { mapTraceResponse } from './provenance';
+import type { AuditEvent, AuditTraceNode, AuditTraceResponse } from '$lib/api';
 
-// Fixture builder for a materialized-output audit event. Only the flat
-// `aileron.*` payload keys the walk-back reads are set.
-function output(opts: {
-	hash: string;
-	name?: string;
-	mime?: string;
-	bytes?: number;
-	stepId?: string;
-	kind?: string;
-	transform?: string;
-	command?: string;
-	skill?: string;
-	actor?: string;
-	inputs?: Array<{ binding: string; source?: string; content_hash?: string; query_execution_id?: string }>;
-}): AuditEvent {
-	const payload: Record<string, unknown> = {
-		'aileron.output.name': opts.name ?? 'artifact',
-		'aileron.output.content_hash': opts.hash,
-		'aileron.output.mime': opts.mime ?? 'text/csv',
-		'aileron.output.bytes': opts.bytes ?? 1024,
-		'aileron.step.id': opts.stepId ?? 'step-x',
-		'aileron.step.kind': opts.kind ?? 'action_call'
-	};
-	if (opts.transform) payload['aileron.step.transform'] = opts.transform;
-	if (opts.command) payload['aileron.step.command'] = opts.command;
-	if (opts.skill) payload['aileron.plan.skill'] = opts.skill;
-	if (opts.actor) payload['aileron.actor.identity_label'] = opts.actor;
-	if (opts.inputs) payload['aileron.step.inputs'] = opts.inputs;
+// The provenance render model is now assembled server-side and mapped
+// here (#1930). These tests pin the pure snake→camel projection:
+// `content_hash` → `contentHash`, `root_id` → `rootId`, with every other
+// field (kind, title, subtitle, depth, embedded event, literal, dangling)
+// and every edge passing through verbatim. This is the shape `GraphView`
+// consumes, so the mapping is the whole contract.
+
+function eventFor(hash: string): AuditEvent {
 	return {
-		audit_id: `evt-${opts.hash}`,
+		audit_id: `evt-${hash}`,
 		event_type: 'output.materialized',
 		timestamp: '2026-07-04T00:00:00Z',
-		payload
+		payload: { 'aileron.output.content_hash': hash }
 	};
 }
 
-function mapResolver(events: AuditEvent[]): ResolveByHash {
-	const byHash = new Map<string, AuditEvent>();
-	for (const e of events) {
-		const h = e.payload['aileron.output.content_hash'];
-		if (typeof h === 'string') byHash.set(h, e);
-	}
-	return async (hash) => byHash.get(hash) ?? null;
+function traceResponse(overrides?: Partial<AuditTraceResponse>): AuditTraceResponse {
+	const artifactEvent = eventFor('sha256:root');
+	const nodes: AuditTraceNode[] = [
+		{
+			id: 'artifact:sha256:root',
+			kind: 'artifact',
+			title: 'report.csv',
+			subtitle: 'text/csv · 1 KB',
+			depth: 0,
+			content_hash: 'sha256:root',
+			event: artifactEvent
+		},
+		{
+			id: 'step:artifact:sha256:root',
+			kind: 'step',
+			title: 'Step step-1',
+			depth: 1,
+			event: artifactEvent
+		},
+		{
+			id: 'literal:0',
+			kind: 'literal',
+			title: 'threshold',
+			subtitle: 'inputs.threshold',
+			depth: 2,
+			literal: { binding: 'threshold', source: 'inputs.threshold' }
+		},
+		{
+			id: 'artifact:sha256:missing',
+			kind: 'artifact',
+			title: '(unresolved artifact)',
+			subtitle: 'sha256:missing',
+			depth: 2,
+			content_hash: 'sha256:missing',
+			dangling: true
+		},
+		{
+			id: 'launch',
+			kind: 'launch',
+			title: 'Launch: ingest',
+			depth: 3,
+			event: artifactEvent
+		}
+	];
+	return {
+		root_id: 'artifact:sha256:root',
+		nodes,
+		edges: [
+			{ from: 'artifact:sha256:root', to: 'step:artifact:sha256:root' },
+			{ from: 'step:artifact:sha256:root', to: 'literal:0' },
+			{ from: 'step:artifact:sha256:root', to: 'artifact:sha256:missing' },
+			{ from: 'step:artifact:sha256:root', to: 'launch' }
+		],
+		...overrides
+	};
 }
 
-const kinds = (g: { nodes: Array<{ kind: string }> }) => g.nodes.map((n) => n.kind).sort();
-
-describe('assembleProvenance — linear chain', () => {
-	it('walks artifact → step → upstream artifact → step → launch', async () => {
-		const upstream = output({ hash: 'sha256:up', name: 'raw.json', skill: 'ingest' });
-		const root = output({
-			hash: 'sha256:root',
-			name: 'report.csv',
-			skill: 'ingest',
-			actor: 'analyst',
-			inputs: [{ binding: 'data', source: 'steps.q1.rows', content_hash: 'sha256:up' }]
-		});
-
-		const g = await assembleProvenance(root, mapResolver([upstream, root]));
-
+describe('mapTraceResponse — snake→camel projection', () => {
+	it('maps root_id to rootId', () => {
+		const g = mapTraceResponse(traceResponse());
 		expect(g.rootId).toBe('artifact:sha256:root');
-		// two artifacts, two steps, one launch
-		const artifactNodes = g.nodes.filter((n) => n.kind === 'artifact');
-		expect(artifactNodes.map((n) => n.contentHash)).toEqual(
-			expect.arrayContaining(['sha256:root', 'sha256:up'])
-		);
-		expect(g.nodes.filter((n) => n.kind === 'step')).toHaveLength(2);
-		expect(g.nodes.filter((n) => n.kind === 'launch')).toHaveLength(1);
-
-		// The root artifact's step is wired to the upstream artifact.
-		expect(g.edges).toContainEqual({ from: 'artifact:sha256:root', to: 'step:artifact:sha256:root' });
-		expect(g.edges).toContainEqual({ from: 'step:artifact:sha256:root', to: 'artifact:sha256:up' });
-		// terminal launch node hangs off the root step
-		expect(g.edges).toContainEqual({ from: 'step:artifact:sha256:root', to: 'launch' });
-		expect(g.nodes.find((n) => n.kind === 'launch')?.title).toContain('ingest');
+		// The mapped rootId resolves to a node in the graph.
+		expect(g.nodes.find((n) => n.id === g.rootId)).toBeTruthy();
 	});
-});
 
-describe('assembleProvenance — branching', () => {
-	it('walks both hashed upstreams of a two-input step', async () => {
-		const a = output({ hash: 'sha256:a', name: 'a.json' });
-		const b = output({ hash: 'sha256:b', name: 'b.json' });
-		const root = output({
-			hash: 'sha256:merged',
-			name: 'merged.csv',
-			kind: 'transform',
-			transform: 'join',
-			inputs: [
-				{ binding: 'left', content_hash: 'sha256:a' },
-				{ binding: 'right', content_hash: 'sha256:b' }
-			]
-		});
-
-		const g = await assembleProvenance(root, mapResolver([a, b, root]));
-
-		const hashes = g.nodes.filter((n) => n.kind === 'artifact').map((n) => n.contentHash);
-		expect(hashes).toEqual(expect.arrayContaining(['sha256:merged', 'sha256:a', 'sha256:b']));
-		expect(g.edges).toContainEqual({ from: 'step:artifact:sha256:merged', to: 'artifact:sha256:a' });
-		expect(g.edges).toContainEqual({ from: 'step:artifact:sha256:merged', to: 'artifact:sha256:b' });
+	it('maps an artifact node content_hash to contentHash and drops the snake key', () => {
+		const g = mapTraceResponse(traceResponse());
+		const root = g.nodes.find((n) => n.id === 'artifact:sha256:root')!;
+		expect(root.contentHash).toBe('sha256:root');
+		expect((root as Record<string, unknown>).content_hash).toBeUndefined();
 	});
-});
 
-describe('assembleProvenance — literal input', () => {
-	it('emits a literal node and does not recurse', async () => {
-		const root = output({
-			hash: 'sha256:root',
-			inputs: [{ binding: 'threshold', source: 'inputs.threshold' }]
-		});
-
-		const g = await assembleProvenance(root, mapResolver([root]));
-
-		const literals = g.nodes.filter((n) => n.kind === 'literal');
-		expect(literals).toHaveLength(1);
-		expect(literals[0].literal).toEqual({ binding: 'threshold', source: 'inputs.threshold' });
-		// only the one root artifact — no upstream artifact was fetched
-		expect(g.nodes.filter((n) => n.kind === 'artifact')).toHaveLength(1);
+	it('carries the embedded event through unchanged', () => {
+		const g = mapTraceResponse(traceResponse());
+		const root = g.nodes.find((n) => n.id === 'artifact:sha256:root')!;
+		expect(root.event?.audit_id).toBe('evt-sha256:root');
+		expect(root.event?.payload['aileron.output.content_hash']).toBe('sha256:root');
 	});
-});
 
-describe('assembleProvenance — dangling upstream', () => {
-	it('marks an unresolvable hash and does not throw', async () => {
-		const root = output({
-			hash: 'sha256:root',
-			inputs: [{ binding: 'data', content_hash: 'sha256:missing' }]
-		});
-		// resolver knows only the root, returns null for the upstream
-		const g = await assembleProvenance(root, mapResolver([root]));
+	it('preserves a literal node binding/source', () => {
+		const g = mapTraceResponse(traceResponse());
+		const lit = g.nodes.find((n) => n.kind === 'literal')!;
+		expect(lit.literal).toEqual({ binding: 'threshold', source: 'inputs.threshold' });
+	});
 
+	it('preserves the dangling flag on an unresolved upstream', () => {
+		const g = mapTraceResponse(traceResponse());
 		const dangling = g.nodes.find((n) => n.dangling);
-		expect(dangling).toBeTruthy();
 		expect(dangling?.contentHash).toBe('sha256:missing');
-		expect(g.edges).toContainEqual({
-			from: 'step:artifact:sha256:root',
-			to: 'artifact:sha256:missing'
-		});
+		expect(dangling?.kind).toBe('artifact');
 	});
-});
 
-describe('assembleProvenance — cycle safety', () => {
-	it('terminates when an upstream points back to an already-seen artifact', async () => {
-		// root -> back references root's own hash as an input (degenerate cycle)
-		const root = output({
-			hash: 'sha256:cyc',
-			inputs: [{ binding: 'self', content_hash: 'sha256:cyc' }]
-		});
+	it('passes title, subtitle, depth, and kind through verbatim', () => {
+		const g = mapTraceResponse(traceResponse());
+		const step = g.nodes.find((n) => n.kind === 'step')!;
+		expect(step.title).toBe('Step step-1');
+		expect(step.depth).toBe(1);
+		const launch = g.nodes.find((n) => n.kind === 'launch')!;
+		expect(launch.title).toBe('Launch: ingest');
+	});
 
-		const g = await assembleProvenance(root, mapResolver([root]));
+	it('preserves edges verbatim', () => {
+		const resp = traceResponse();
+		const g = mapTraceResponse(resp);
+		expect(g.edges).toEqual(resp.edges);
+	});
 
-		// Exactly one artifact node for the cyclic hash — never expanded twice.
-		expect(g.nodes.filter((n) => n.contentHash === 'sha256:cyc')).toHaveLength(1);
-		// The self-edge is still recorded so the cycle is visible.
-		expect(g.edges).toContainEqual({
-			from: 'step:artifact:sha256:cyc',
-			to: 'artifact:sha256:cyc'
-		});
-		expect(kinds(g)).toEqual(['artifact', 'launch', 'step']);
+	it('produces the kinds GraphView renders (artifact, step, literal, launch)', () => {
+		const g = mapTraceResponse(traceResponse());
+		const kinds = new Set(g.nodes.map((n) => n.kind));
+		expect(kinds).toEqual(new Set(['artifact', 'step', 'literal', 'launch']));
+	});
+
+	it('maps an empty graph (no nodes/edges) without throwing', () => {
+		const g = mapTraceResponse({ root_id: '', nodes: [], edges: [] });
+		expect(g).toEqual({ rootId: '', nodes: [], edges: [] });
 	});
 });
