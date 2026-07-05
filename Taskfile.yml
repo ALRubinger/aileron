@@ -416,7 +416,10 @@ tasks:
     desc: Run the skill-publish e2e against a real OCI registry (needs AILERON_TEST_REGISTRY + docker)
     dir: internal
     cmds:
-      - go test -tags=integration_publish -run TestPublishE2E ./flightplan/publish/...
+      # -coverprofile + -coverpkg so the docker-CLI boundary (imagesource.go,
+      # registry.go) the e2e exercises is uploaded to codecov under the
+      # integration flag — it is genuinely tested here, not unit-testable.
+      - go test -tags=integration_publish -run TestPublishE2E -coverprofile=coverage-publish-e2e.txt -coverpkg=./flightplan/publish/... ./flightplan/publish/...
 
   vet:go:
     desc: Run go vet over all Go packages

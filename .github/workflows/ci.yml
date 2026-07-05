@@ -884,6 +884,15 @@ jobs:
         env:
           AILERON_TEST_REGISTRY: localhost:5000
 
+      - name: Upload e2e coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: internal/coverage-publish-e2e.txt
+          flags: integration
+
       - name: Registry logs on failure
         if: failure()
         run: docker logs registry || true
