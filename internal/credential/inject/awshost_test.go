@@ -21,6 +21,9 @@ func TestParseAWSEndpointHostVectors(t *testing.T) {
 		{"test-tld", "athena.us-east-1.amazonaws.test", "athena", "us-east-1"},
 		{"with-port", "athena.us-east-1.amazonaws.com:443", "athena", "us-east-1"},
 		{"uppercase", "Athena.US-East-1.amazonaws.com", "athena", "us-east-1"},
+		{"dualstack", "s3.dualstack.us-west-2.amazonaws.com", "s3", "us-west-2"},
+		{"fips", "s3-fips.us-east-1.amazonaws.com", "s3", "us-east-1"},
+		{"fips-dualstack", "s3-fips.dualstack.us-east-1.amazonaws.com", "s3", "us-east-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +53,7 @@ func TestParseAWSEndpointHostErrors(t *testing.T) {
 		{"non-aws", "api.example.com"},
 		{"service-only", "athena.amazonaws.com"},
 		{"region-leading-no-service", "us-east-1.amazonaws.com"},
+		{"modifier-only-no-service", "dualstack.us-west-2.amazonaws.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
