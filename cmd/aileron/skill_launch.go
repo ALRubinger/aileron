@@ -311,20 +311,33 @@ func humanByteSize(n int) string {
 // printed to stdout naming the auto-selected version and the total count, so
 // the implicit choice is visible and the operator knows how to pin it.
 func resolveLaunchVersion(s *store.Store, name, version string, stdout io.Writer) (string, error) {
-	if version != "" {
-		return version, nil
-	}
-	id, count, err := s.LatestFrozen(name)
+	id, count, err := resolveFrozenVersion(s, name, version)
 	if err != nil {
-		return "", fmt.Errorf("list frozen versions for %q: %w", name, err)
+		return "", err
 	}
-	if count == 0 {
-		return "", fmt.Errorf("skill %q has no frozen versions; run `aileron skill freeze %s` first", name, name)
-	}
-	if count > 1 {
+	if version == "" && count > 1 {
 		fmt.Fprintf(stdout, "launching %s (newest of %d; use --version to pin)\n", id, count)
 	}
 	return id, nil
+}
+
+// resolveFrozenVersion resolves the frozen version id to operate on: the
+// explicit version if given, else the most-recently-frozen version. It returns
+// the resolved id and how many frozen versions exist (so a caller can emit its
+// own "newest of N" hint) and is verb-neutral — it prints nothing — so publish
+// reuses it without inheriting launch's "launching ..." banner.
+func resolveFrozenVersion(s *store.Store, name, version string) (id string, count int, err error) {
+	if version != "" {
+		return version, 1, nil
+	}
+	id, count, err = s.LatestFrozen(name)
+	if err != nil {
+		return "", 0, fmt.Errorf("list frozen versions for %q: %w", name, err)
+	}
+	if count == 0 {
+		return "", 0, fmt.Errorf("skill %q has no frozen versions; run `aileron skill freeze %s` first", name, name)
+	}
+	return id, count, nil
 }
 
 // daemonDispatcher dispatches an action through the daemon's
