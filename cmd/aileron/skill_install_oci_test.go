@@ -160,6 +160,53 @@ func TestRunSkillInstallOCIUntrustedPublisherExits1(t *testing.T) {
 	}
 }
 
+func TestRunSkillInstallOCINotAnArtifactExits1(t *testing.T) {
+	withTempStore(t)
+	withSilentInstallVerifier(t)
+	withFakePull(t, func(_ context.Context, _ pull.Options) (pull.Result, error) {
+		return pull.Result{}, pull.ErrNotAnArtifact
+	})
+	var out, errb bytes.Buffer
+	if code := runSkillInstall([]string{"ghcr.io/acme/plan:v1"}, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "does not resolve to a Flight Plan signed artifact") {
+		t.Errorf("stderr = %q, want the not-an-artifact message", errb.String())
+	}
+}
+
+func TestRunSkillInstallOCINoNameExits1(t *testing.T) {
+	withTempStore(t)
+	withSilentInstallVerifier(t)
+	withFakePull(t, func(_ context.Context, _ pull.Options) (pull.Result, error) {
+		return pull.Result{}, pull.ErrNoName
+	})
+	var out, errb bytes.Buffer
+	if code := runSkillInstall([]string{"ghcr.io/acme/plan:v1"}, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "declares no skill name") {
+		t.Errorf("stderr = %q, want the no-name message", errb.String())
+	}
+}
+
+func TestRunSkillInstallOCIWriteErrorExits1(t *testing.T) {
+	withTempStore(t)
+	withSilentInstallVerifier(t)
+	// An empty ID fails store.WriteFrozen after a successful pull+verify, so the
+	// CLI's write-error branch fires.
+	withFakePull(t, func(_ context.Context, _ pull.Options) (pull.Result, error) {
+		return pull.Result{Frozen: installFrozen(""), Name: "rubber-duck"}, nil
+	})
+	var out, errb bytes.Buffer
+	if code := runSkillInstall([]string{"ghcr.io/acme/plan:v1"}, &out, &errb); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "write frozen version") {
+		t.Errorf("stderr = %q, want the write-frozen error", errb.String())
+	}
+}
+
 func TestRunSkillInstallLocalPathStillWorks(t *testing.T) {
 	// A local path source must NOT route to the OCI branch: the fake pull would
 	// fail the test if consulted.

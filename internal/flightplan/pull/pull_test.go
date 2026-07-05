@@ -241,6 +241,36 @@ func TestRunManifestFetchErrorSurfaces(t *testing.T) {
 	}
 }
 
+// layerFetchFailTarget serves the manifest but fails to fetch any layer of
+// failType, standing in for a registry that loses a layer mid-pull.
+type layerFetchFailTarget struct {
+	*memory.Store
+	failType string
+	err      error
+}
+
+func (l layerFetchFailTarget) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	if desc.MediaType == l.failType {
+		return nil, l.err
+	}
+	return l.Store.Fetch(ctx, desc)
+}
+
+func TestRunLayerFetchErrorSurfaces(t *testing.T) {
+	res, tag := mintArtifact(t, "")
+	inner := memory.New()
+	seedArtifact(t, inner, tag, freeze.ArtifactType, allLayers(res))
+	fetchErr := errors.New("layer read reset")
+	src := layerFetchFailTarget{Store: inner, failType: freeze.MediaTypeSignature, err: fetchErr}
+	_, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:" + tag, Source: src})
+	if err == nil || !errors.Is(err, fetchErr) {
+		t.Fatalf("err = %v, want the underlying layer fetch error", err)
+	}
+	if !strings.Contains(err.Error(), "fetch artifact layer") {
+		t.Errorf("err = %v, want a fetch-artifact-layer message", err)
+	}
+}
+
 func TestRunCorruptManifestErrors(t *testing.T) {
 	// Tag a blob whose bytes are not a valid manifest JSON, so decode fails.
 	st := memory.New()
