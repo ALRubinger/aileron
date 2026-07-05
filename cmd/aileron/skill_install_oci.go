@@ -32,7 +32,7 @@ var skillPullRun = pull.Run
 // re-entry), so it always wires the real verifier; the pull path still skips
 // the gate for a plan that declares no publisher.
 var newInstallPublisherVerifier = func(diag io.Writer) pull.PublisherVerifier {
-	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), diag: diag}
+	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), op: "install", diag: diag}
 }
 
 // runSkillInstallOCI installs a published Flight Plan by OCI reference: it pulls
