@@ -74,7 +74,7 @@ func (inContainerToolStepRunner) Run(ctx context.Context, spec runtime.ToolStepS
 	// mint before exec, release after (best-effort; the daemon TTL is the
 	// backstop). Fail closed: a sealed step never runs unscoped.
 	if len(spec.Hosts) > 0 {
-		scopedURL, release, err := mintToolStepScope(ctx, spec.StepID, spec.Hosts)
+		scopedURL, release, err := mintToolStepScope(ctx, spec.StepID, spec.Hosts, spec.CredentialKind, spec.IdentityLabel)
 		if err != nil {
 			return runtime.ToolStepResult{}, fmt.Errorf("skill launch: tool step %q has a sealed reach but no step scope could be obtained (refusing to run unscoped): %w", spec.StepID, err)
 		}
@@ -133,9 +133,21 @@ func (inContainerToolStepRunner) Run(ctx context.Context, spec runtime.ToolStepS
 // Kept local to the CLI so the launch path does not import the generated
 // server types, matching auditIngestRequest's discipline.
 type stepScopeRequest struct {
-	SessionID string   `json:"session_id"`
-	StepID    string   `json:"step_id"`
-	Hosts     []string `json:"hosts"`
+	SessionID  string               `json:"session_id"`
+	StepID     string               `json:"step_id"`
+	Hosts      []string             `json:"hosts"`
+	Credential *stepScopeCredential `json:"credential,omitempty"`
+}
+
+// stepScopeCredential is the optional non-secret credential identity block the
+// mint carries so the daemon learns which credential identity the step's
+// egress belongs to (#1980). It mirrors the manifest trust-contract
+// vocabulary (kind + identityLabel) and never carries credential material.
+// omitempty on the request field means a step with no credential identity
+// sends the exact bytes it sent before this field existed.
+type stepScopeCredential struct {
+	Kind          string `json:"kind"`
+	IdentityLabel string `json:"identityLabel"`
 }
 
 type stepScopeResponse struct {
@@ -155,7 +167,7 @@ type stepScopeResponse struct {
 // env (AILERON_API_URL/AILERON_TOKEN via bindingAPIBaseURL +
 // setDaemonAuthorization, the same helpers the dispatcher and audit sink
 // use).
-func mintToolStepScope(ctx context.Context, stepID string, hosts []string) (string, func(), error) {
+func mintToolStepScope(ctx context.Context, stepID string, hosts []string, credentialKind, identityLabel string) (string, func(), error) {
 	bootProxy := strings.TrimSpace(os.Getenv("HTTPS_PROXY"))
 	if bootProxy == "" {
 		bootProxy = strings.TrimSpace(os.Getenv("https_proxy"))
@@ -173,7 +185,15 @@ func mintToolStepScope(ctx context.Context, stepID string, hosts []string) (stri
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve daemon URL: %w", err)
 	}
-	body, err := json.Marshal(stepScopeRequest{SessionID: sessionID, StepID: stepID, Hosts: hosts})
+	reqBody := stepScopeRequest{SessionID: sessionID, StepID: stepID, Hosts: hosts}
+	// Attach the credential identity only when the step declares a full one
+	// (#1980): both kind and label non-empty. A step with no credential
+	// identity leaves Credential nil, so omitempty drops the field and the
+	// wire bytes are exactly what they were before this field existed.
+	if credentialKind != "" && identityLabel != "" {
+		reqBody.Credential = &stepScopeCredential{Kind: credentialKind, IdentityLabel: identityLabel}
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", nil, fmt.Errorf("encode step-scope request: %w", err)
 	}

@@ -239,6 +239,18 @@ type ToolStepSpec struct {
 	// unscoped) when it cannot obtain one. Empty means the step declared no
 	// reach and runs under the plan-boot proxy environment unchanged.
 	Hosts []string
+	// CredentialKind and IdentityLabel carry the step's declared credential
+	// identity (its kind and non-secret identity label from the trust
+	// contract), threaded to the runner so the step-scope mint tells the
+	// daemon which credential identity the step's outbound requests belong
+	// to (#1980). They are the declared identity, never credential material
+	// (credentials are injected host-side at the network boundary). Both are
+	// "" when the step declares no trust contract or no credential identity;
+	// the mint then sends no credential block and the scope stays
+	// unconstrained, exactly as before. Carried, not yet consumed for egress
+	// selection (the umbrella's next sub-issue).
+	CredentialKind string
+	IdentityLabel  string
 }
 
 // ToolStepResult is the outcome of one tool-step execution: the value

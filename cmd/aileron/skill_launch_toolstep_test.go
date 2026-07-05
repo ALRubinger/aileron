@@ -208,6 +208,12 @@ func TestInContainerToolStepRunner_ScopedStepMintsAndReleases(t *testing.T) {
 	if len(hosts) != 1 || hosts[0] != "api.sealed.example.com" {
 		t.Errorf("mint hosts = %v, want the sealed reach", mint["hosts"])
 	}
+	// A step with no declared credential identity sends no credential block:
+	// omitempty drops the field, so the wire bytes are exactly today's
+	// (#1980 optionality — regression guard).
+	if _, ok := mint["credential"]; ok {
+		t.Errorf("mint carried a credential block %v, want none for a step with no credential identity", mint["credential"])
+	}
 
 	// The subprocess env: HTTPS_PROXY/https_proxy (and HTTP_PROXY, originally
 	// set) carry the scoped URL; AILERON_TOKEN is gone.
@@ -230,6 +236,41 @@ func TestInContainerToolStepRunner_ScopedStepMintsAndReleases(t *testing.T) {
 	// Released after the step.
 	if len(daemon.releases) != 1 || daemon.releases[0] != "scope-1" {
 		t.Errorf("releases = %v, want [scope-1]", daemon.releases)
+	}
+}
+
+// TestInContainerToolStepRunner_ScopedStepCarriesCredentialIdentity proves a
+// sealed step whose spec declares a credential identity puts it on the mint
+// wire (#1980): the mint body's credential block carries the matching kind +
+// identityLabel, letting the daemon learn which credential identity the step's
+// egress belongs to. The block carries only the non-secret identity, never
+// credential material.
+func TestInContainerToolStepRunner_ScopedStepCarriesCredentialIdentity(t *testing.T) {
+	inContainerEnv(t)
+	daemon := newStepScopeDaemon(t)
+
+	var argv, env []string
+	stubToolStepExec(t, &argv, &env, nil)
+
+	_, err := inContainerToolStepRunner{}.Run(context.Background(), runtime.ToolStepSpec{
+		StepID:         "extract",
+		Command:        []string{"extract-tool"},
+		Hosts:          []string{"api.sealed.example.com"},
+		CredentialKind: "aws_sigv4",
+		IdentityLabel:  "prod-reader",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(daemon.mints) != 1 {
+		t.Fatalf("mints = %d, want 1", len(daemon.mints))
+	}
+	cred, ok := daemon.mints[0]["credential"].(map[string]any)
+	if !ok {
+		t.Fatalf("mint carried no credential block, want one: %v", daemon.mints[0])
+	}
+	if cred["kind"] != "aws_sigv4" || cred["identityLabel"] != "prod-reader" {
+		t.Errorf("credential block = %v, want kind=aws_sigv4 identityLabel=prod-reader", cred)
 	}
 }
 
