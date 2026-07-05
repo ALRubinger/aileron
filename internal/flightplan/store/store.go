@@ -68,10 +68,17 @@ func (s *Store) List() ([]string, error) {
 		if !e.IsDir() {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(s.root, e.Name(), "SKILL.md")); err != nil {
+		// A skill is listed when it has a pre-freeze installed SKILL.md at its
+		// name root (local/git install) OR at least one frozen version under
+		// versions/ (an OCI install writes only a frozen version, no root
+		// SKILL.md, so it would otherwise be invisible; #1902).
+		if _, err := os.Stat(filepath.Join(s.root, e.Name(), "SKILL.md")); err == nil {
+			names = append(names, e.Name())
 			continue
 		}
-		names = append(names, e.Name())
+		if ids, err := s.FrozenVersions(e.Name()); err == nil && len(ids) > 0 {
+			names = append(names, e.Name())
+		}
 	}
 	sort.Strings(names)
 	return names, nil

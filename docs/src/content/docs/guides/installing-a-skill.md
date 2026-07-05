@@ -1,9 +1,9 @@
 ---
 title: "Installing a Skill"
-description: "Install a SKILL.md-format skill from a local path or git URL into the canonical store, see its action requirements resolve, and have it projected into every agent you launch."
+description: "Install a SKILL.md-format skill from a local path, a git URL, or a published OCI reference into the canonical store, see its action requirements resolve, and have it projected into every agent you launch."
 ---
 
-This guide is for users adding skills to their local Aileron install. It covers `aileron skill install` for a local path or a git URL, `aileron skill list` to see what is installed, how a skill's `requires:` action references are resolved at install time, and how an installed skill becomes visible to every agent you launch through Aileron. By the end you will have one or more skills installed under `~/.aileron/skills/` and understand the install-once, launch-anywhere projection.
+This guide is for users adding skills to their local Aileron install. It covers `aileron skill install` for a local path, a git URL, or an OCI reference to a published Flight Plan, `aileron skill list` to see what is installed, how a skill's `requires:` action references are resolved at install time, and how an installed skill becomes visible to every agent you launch through Aileron. By the end you will have one or more skills installed under `~/.aileron/skills/` and understand the install-once, launch-anywhere projection.
 
 A skill is a [SKILL.md-format](https://agentskills.io) document: YAML frontmatter plus a Markdown body. The surrounding skill keys (`name`, `description`, `license`, and so on) follow the agentskills.io format. Aileron adds one optional, namespaced `aileron` frontmatter block that declares the skill's action requirements and trust contract. A skill with no `aileron` block is an instruction-only skill and installs cleanly with nothing to resolve.
 
@@ -35,7 +35,25 @@ Aileron shallow-clones the repository, reads the `SKILL.md` at its root, and ins
 
 A git-URL install requires the `git` binary on your `PATH`. `aileron skill install` runs host-side, so it is unrestricted by the sandbox egress boundary. If `git` is missing the install fails with the underlying clone error.
 
-> Installing by an [agentskills.io](https://agentskills.io) registry slug is not supported. agentskills.io is a format spec, not a registry, so a slug has no canonical location to resolve against. Install from a local path or a git URL instead.
+## Installing from an OCI reference
+
+```sh
+aileron skill install ghcr.io/acme/weekly-digest:v1a2b3c4d5e6f
+```
+
+An OCI reference installs a Flight Plan that someone published with `aileron skill publish`. The reference has a registry host, a repository path, and a version tag. Aileron pulls the signed artifact (the frozen SKILL.md, its lockfile, the signature, and the author public key) from the registry over your existing Docker credentials.
+
+The install verifies the artifact before anything lands on disk. It checks the author signature and the content hash, then the publisher-trust gate against your keyring, the same checks `aileron skill launch` runs. A tampered artifact fails the signature check. A plan from a publisher you have not trusted fails the trust gate. Either failure aborts the install and writes nothing to the store. A plan that declares no publisher installs on a valid signature alone.
+
+An OCI install writes a frozen version, so it appears under `~/.aileron/skills/<name>/versions/<id>/` and prints the version it installed:
+
+```
+Installed frozen version v1a2b3c4d5e6f of skill "weekly-metrics-digest" to /Users/you/.aileron/skills/weekly-metrics-digest/versions/v1a2b3c4d5e6f
+```
+
+The version id is the frozen content-hash slug, so a re-install of the same published plan is a no-op that reuses the same directory. Install does not pull the plan's container image. The image pin recorded in the lockfile is resolved at `aileron skill launch`, not at install.
+
+> Installing by an [agentskills.io](https://agentskills.io) registry slug is not supported. agentskills.io is a format spec, not a registry, so a slug has no canonical location to resolve against. Install from a local path, a git URL, or an OCI reference instead.
 
 ## Action requirements and graceful degrade
 

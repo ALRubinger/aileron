@@ -19,10 +19,41 @@ func TestClassifySource(t *testing.T) {
 		{"git@github.com:acme/skill.git", SourceGitURL},
 		{"ssh://git@host/acme/skill", SourceGitURL},
 		{"acme/weekly-digest", SourceSlug},
+		// OCI references: a registry host (domain / :port / localhost) plus a tag.
+		{"ghcr.io/acme/plan:v1", SourceOCIRef},
+		{"localhost:5000/p:v1abc", SourceOCIRef},
+		{"registry.example.com:5000/team/plan:v2", SourceOCIRef},
+		// A bare owner/name slug has no host and no tag: still a slug (won't-do).
+		{"owner/name", SourceSlug},
+		// A tagged slug with no registry host is still not an OCI ref.
+		{"owner/name:v1", SourceSlug},
+		// A digest reference has no version tag the store can key on.
+		{"ghcr.io/acme/plan@sha256:" + strings.Repeat("a", 64), SourceSlug},
 	}
 	for _, tt := range tests {
 		if got := classifySource(tt.src); got != tt.want {
 			t.Errorf("classifySource(%q) = %v, want %v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestIsOCIReference(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]bool{
+		"ghcr.io/acme/plan:v1":                true,
+		"localhost:5000/p:v1abc":              true,
+		"registry.example.com:5000/t/plan:v2": true,
+		"owner/name":                          false,
+		"owner/name:v1":                       false,
+		"acme/weekly-digest":                  false,
+		"https://github.com/acme/skill.git":   false,
+		"git@github.com:acme/skill.git":       false,
+		"ghcr.io/acme/plan@sha256:" + strings.Repeat("a", 64): false,
+		dir: false, // an existing local path is never an OCI ref
+	}
+	for src, want := range cases {
+		if got := IsOCIReference(src); got != want {
+			t.Errorf("IsOCIReference(%q) = %v, want %v", src, got, want)
 		}
 	}
 }

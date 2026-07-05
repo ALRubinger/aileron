@@ -17,6 +17,22 @@ func sampleVersion(id string) FrozenVersion {
 	}
 }
 
+func TestListIncludesFrozenOnlySkill(t *testing.T) {
+	// An OCI install (#1902) writes only a frozen version, no pre-freeze root
+	// SKILL.md. List must still surface such a skill so `skill list` shows it.
+	s := New(t.TempDir())
+	if err := s.WriteFrozen("published-only", sampleVersion("v1abc")); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	names, err := s.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(names) != 1 || names[0] != "published-only" {
+		t.Errorf("List = %v, want [published-only]", names)
+	}
+}
+
 func TestWriteFrozen_ProducesExpectedFiles(t *testing.T) {
 	s := New(t.TempDir())
 	v := sampleVersion("abc123")
