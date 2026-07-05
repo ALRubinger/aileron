@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/resolver"
@@ -292,5 +293,19 @@ func TestInstallSkillWithoutNameRejected(t *testing.T) {
 	src := writeSkill(t, "---\ndescription: no name here\n---\nbody\n")
 	if _, err := s.Install(context.Background(), src, InstallOptions{}); err == nil {
 		t.Error("expected error for a skill with no name")
+	}
+}
+
+// TestInstallOCIRefRejected drives Install with a source that classifies as an
+// OCI reference and asserts the fetchToDir SourceOCIRef guard fires with a clear
+// message. OCI refs must go through the frozen-version pull path, never Install.
+func TestInstallOCIRefRejected(t *testing.T) {
+	s := New(t.TempDir())
+	_, err := s.Install(context.Background(), "ghcr.io/acme/plan:v1", InstallOptions{})
+	if err == nil {
+		t.Fatal("expected an error installing an OCI reference, got nil")
+	}
+	if !strings.Contains(err.Error(), "is an OCI reference") {
+		t.Errorf("expected error to explain the OCI reference, got %v", err)
 	}
 }
