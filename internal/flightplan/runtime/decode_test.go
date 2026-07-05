@@ -392,6 +392,30 @@ func TestDecode_ConstraintPatternCompiled(t *testing.T) {
 	}
 }
 
+// A YAML block scalar can append a trailing newline to a pattern. The decoder
+// must normalize it so the enforced regexp is the author's anchored pattern,
+// not one that also requires a literal trailing newline.
+func TestDecode_ConstraintPatternWhitespaceNormalized(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("region", map[string]any{"pattern": "^us-east-1$\n"})},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	c := p.Inputs[0].Constraint
+	if c == nil || c.Pattern == nil {
+		t.Fatal("pattern constraint must compile a regexp")
+	}
+	if !c.Pattern.MatchString("us-east-1") {
+		t.Error("a trailing newline in the pattern must be normalized away, so the anchored value still matches")
+	}
+	if c.Pattern.String() != "^us-east-1$" {
+		t.Errorf("stored pattern = %q, want the trimmed ^us-east-1$", c.Pattern.String())
+	}
+}
+
 func TestDecode_ConstraintUncompilablePatternRefused(t *testing.T) {
 	// A pattern the schema cannot catch (ECMA-valid shape, RE2-invalid): an
 	// unclosed group. This is the fail-closed case only decode enforces.

@@ -180,7 +180,14 @@ func (d inputDTO) toConstraint() (*Constraint, error) {
 		return nil, nil
 	}
 	hasEnum := len(d.Constraint.Enum) > 0
-	hasPattern := strings.TrimSpace(d.Constraint.Pattern) != ""
+	// Surrounding whitespace on a pattern is not significant: a YAML block
+	// scalar can append a trailing newline that would otherwise silently change
+	// the enforced regexp (an anchored "^x$" would become "^x$\n"). Trim once
+	// and use the trimmed text for both the presence check and the compile, so
+	// detection and enforcement never disagree and a whitespace-only pattern is
+	// refused as the plan requires.
+	pattern := strings.TrimSpace(d.Constraint.Pattern)
+	hasPattern := pattern != ""
 	switch {
 	case hasEnum && hasPattern:
 		return nil, decodeErrf("input %q: constraint declares both enum and pattern (exactly one is allowed)", d.Name)
@@ -192,9 +199,9 @@ func (d inputDTO) toConstraint() (*Constraint, error) {
 		}
 		return &Constraint{Enum: d.Constraint.Enum}, nil
 	case hasPattern:
-		re, err := regexp.Compile(d.Constraint.Pattern)
+		re, err := regexp.Compile(pattern)
 		if err != nil {
-			return nil, decodeErrf("input %q: constraint pattern %q does not compile as a Go RE2 regexp: %v", d.Name, d.Constraint.Pattern, err)
+			return nil, decodeErrf("input %q: constraint pattern %q does not compile as a Go RE2 regexp: %v", d.Name, pattern, err)
 		}
 		return &Constraint{Pattern: re}, nil
 	default:
