@@ -57,6 +57,19 @@ type Options struct {
 	// attested image is absent). Nil (the zero value) skips the guard and boots as
 	// before (backward-compatible), mirroring the ImageRunner nil-guard discipline.
 	ImageDigestResolver LocalImageDigestResolver
+	// RegistryImageResolver pulls and verifies the published image for a plan
+	// installed by OCI reference (#1903). It is consulted ONLY when the loaded
+	// plan carries a registry origin (LoadedPlan.ImageOrigin.Present): such a
+	// plan has no local build, so runInImage pulls the published image from the
+	// recorded registry, verifies it against the signed lock pin per the pin's
+	// binding kind, and boots the returned reference. When the plan needs this
+	// seam (a registry origin) but it is nil, the boot is a fail-closed error,
+	// never a silent fall-through to the local-tag path (a plan installed from a
+	// registry has no local tag to boot). A locally-frozen plan (no origin)
+	// never touches this seam and boots by its local tag as before. The CLI
+	// wires the production impl over pull.PullImage and nils it on the image-boot
+	// re-entry (the sentinel routes in-process before any boot).
+	RegistryImageResolver RegistryImageResolver
 	// ToolRunner executes a `kind: tool` step as a deterministic subprocess in
 	// the current pinned environment (#1829). Unlike ImageRunner, the plan
 	// orchestration stays in-process (runPlan); the tool step never dispatches

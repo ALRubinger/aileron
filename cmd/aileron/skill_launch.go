@@ -10,10 +10,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"os/user"
 	"sort"
 	"strings"
+	"syscall"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/pull"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -92,6 +96,55 @@ var newLaunchImageRunner = func() runtime.ImageRunner {
 // path and fails closed on a digest mismatch or a resolve error.
 var newLaunchImageDigestResolver = func() runtime.LocalImageDigestResolver {
 	return containerImageDigestResolver{}
+}
+
+// newLaunchRegistryImageResolver returns the production
+// runtime.RegistryImageResolver that pulls a published composed (or foreign-base)
+// image from a plan's recorded install origin and verifies it against the signed
+// lock pin per the pin's binding kind (#1903). It is consulted only when the
+// loaded plan carries a registry origin (an OCI install), so a plan installed by
+// OCI reference on a machine that never froze it can still boot. It is a
+// package-level seam so CLI tests inject a fake that returns a canned bootRef and
+// never touches the network, mirroring newLaunchImageRunner/skillPullRun. All
+// oras/registry code stays in internal/flightplan/pull, so cmd/aileron stays
+// oras-free.
+var newLaunchRegistryImageResolver = func() runtime.RegistryImageResolver {
+	return launchRegistryImageResolver{}
+}
+
+// launchRegistryImageResolver adapts pull.PullImage to the runtime seam. The
+// pull is bounded by a timeout and honors Ctrl-C so a hung or unreachable
+// registry fails the launch instead of blocking indefinitely, mirroring the OCI
+// install path (installPullTimeout + signal.NotifyContext).
+type launchRegistryImageResolver struct{}
+
+func (launchRegistryImageResolver) Resolve(ctx context.Context, origin runtime.RegistryImageOrigin, pin freeze.ImagePin) (string, error) {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, installPullTimeout)
+	defer cancel()
+	res, err := pull.PullImage(ctx, pull.ImagePullOptions{
+		Registry:   origin.Registry,
+		VersionTag: origin.VersionTag,
+		Pin:        pin,
+	})
+	if err != nil {
+		return "", err
+	}
+	return res.BootRef, nil
+}
+
+// launchRegistryResolver returns the host-side registry-image resolver wired
+// into the runtime, or nil on the image-boot re-entry. The nil-skip mirrors the
+// InPinnedImage / publisher-verifier guards: when AILERON_SKILL_IMAGE_BOOTED is
+// set this launch is the re-entry INSIDE the sealed pin, which the sentinel
+// already routes in-process before any boot, so the registry path is never
+// entered and no resolver is needed.
+func launchRegistryResolver() runtime.RegistryImageResolver {
+	if os.Getenv(envSkillImageBooted) != "" {
+		return nil
+	}
+	return newLaunchRegistryImageResolver()
 }
 
 // newLaunchToolStepRunner returns the production tool-step runner that
@@ -212,6 +265,15 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// and fails closed on a mismatch or resolve error; a non-composed
 		// (ref@digest) pin never touches it.
 		ImageDigestResolver: newLaunchImageDigestResolver(),
+		// RegistryImageResolver pulls and verifies the published image for a plan
+		// installed by OCI reference (#1903), so a machine that never froze the
+		// plan can still boot it. The runtime consults it only when the loaded
+		// plan carries a registry origin (an OCI install); a locally-frozen plan
+		// boots by its local tag and never touches this seam. It is nil on the
+		// image-boot re-entry (the same sentinel that sets InPinnedImage): the
+		// sentinel routes in-process before any boot, so the registry path is
+		// never re-entered inside the container.
+		RegistryImageResolver: launchRegistryResolver(),
 		// InPinnedImage: the image-boot re-entry runs with the sentinel its
 		// booting runner injected; it is already inside the certified
 		// environment and must run the plan in-process, not boot the pin

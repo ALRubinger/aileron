@@ -50,6 +50,16 @@ const (
 	BindingManifestDigest = "manifest-digest"
 )
 
+// ComposedImageTag is the tag a composed-tools image is published under in the
+// destination repository, distinct from the signed-artifact tag (the version
+// id). Publish (#1901) pushes the composed image under this tag and points the
+// signed-artifact referrer's subject at it by digest; launch (#1903) resolves
+// the published composed image back through this same tag. It lives here so the
+// write and read halves cannot drift on the naming convention. versionID is the
+// store version id (the freeze slug), already validated as a single path
+// segment by the store, so the derived tag is a single path segment too.
+func ComposedImageTag(versionID string) string { return versionID + "-image" }
+
 // BindingKind reports how a resolved image pin's signed-lock Digest binds to
 // the published/pulled image, derived purely from the signature-covered pin:
 //

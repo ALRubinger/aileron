@@ -53,7 +53,7 @@ func mustPush(t *testing.T, st content.Storage, desc ocispec.Descriptor, data []
 
 // fakeImageSource stands in for the docker CLI: ConfigDigest returns a
 // controllable local config digest, and Push is a no-op (composed tests
-// pre-seed the target with the "pushed" image tagged as composedImageTag).
+// pre-seed the target with the "pushed" image tagged as freeze.ComposedImageTag).
 type fakeImageSource struct {
 	configDigest string
 	configErr    error
@@ -73,7 +73,7 @@ func (f fakeImageSource) Push(ctx context.Context, localTag, registry, imageTag 
 func seedComposedTarget(t *testing.T, target *memory.Store, versionID, configBody string) (manifest, config ocispec.Descriptor) {
 	t.Helper()
 	manifest, config = seedImage(t, target, configBody)
-	if err := target.Tag(context.Background(), manifest, composedImageTag(versionID)); err != nil {
+	if err := target.Tag(context.Background(), manifest, freeze.ComposedImageTag(versionID)); err != nil {
 		t.Fatalf("tag composed image: %v", err)
 	}
 	return manifest, config

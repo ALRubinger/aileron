@@ -1,6 +1,10 @@
 package runtime
 
-import "context"
+import (
+	"context"
+
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+)
 
 // The SPIs in this file are the thin seams the runtime core depends on so it
 // stays unit-testable with fakes. The CLI (cmd/aileron) wires each one to the
@@ -273,6 +277,44 @@ type ToolStepResult struct {
 // is not present, so the boot must refuse rather than boot an unverified tag.
 type LocalImageDigestResolver interface {
 	Resolve(ctx context.Context, image string) (string, error)
+}
+
+// RegistryImageOrigin is the recorded install source of a plan installed by OCI
+// reference (#1902/#1903): the registry+repository the signed artifact was
+// pulled from and the version tag it was published under. Present is false for a
+// locally-frozen plan, which has no origin sidecar and boots by its local tag.
+// It answers only WHERE to pull the published image; the signed lock pin answers
+// WHAT to verify, so this carries no trust anchor.
+type RegistryImageOrigin struct {
+	// Registry is the registry+repository the published image lives in (e.g.
+	// "ghcr.io/acme/plan"), without tag or digest.
+	Registry string
+	// VersionTag is the store version id (freeze slug) the artifact was published
+	// under; the composed image was published under a tag derived from it.
+	VersionTag string
+	// Present reports whether the loaded plan carries a registry origin. When
+	// false, the runtime stays on the local-tag boot path; when true, the runtime
+	// pulls and verifies the published image via RegistryImageResolver.
+	Present bool
+}
+
+// RegistryImageResolver pulls a published composed (or foreign-base) image from
+// the recorded registry origin and verifies it against the signed lock pin under
+// the pin's binding kind (freeze.BindingKind), returning a bootable reference
+// (#1903). The runtime core depends only on this seam; the CLI (cmd/aileron)
+// wires the production implementation over pull.PullImage, so the runtime never
+// imports oras/registry code (mirroring the ImageRunner discipline).
+//
+// Its contract, consumed ONLY when a loaded plan carries a registry origin
+// (RegistryImageOrigin.Present): pull the published image the origin points at,
+// verify it equals the signature-covered pin.Digest per the pin's binding, and
+// return a content-addressed bootable "ref@manifest-digest" (both binding kinds
+// anchor the boot to a manifest digest so a mutable tag is never booted after
+// verification). Any mismatch, missing image, or pull failure is a fail-closed
+// error and no reference: a registry-origin plan must never boot an unverified
+// image.
+type RegistryImageResolver interface {
+	Resolve(ctx context.Context, origin RegistryImageOrigin, pin freeze.ImagePin) (bootRef string, err error)
 }
 
 // ToolStepRunner executes a single `kind: tool` step as a subprocess in the

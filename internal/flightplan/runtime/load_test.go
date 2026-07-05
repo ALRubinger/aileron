@@ -278,3 +278,46 @@ func TestLoadVerified_UnknownVersionRefuses(t *testing.T) {
 		t.Fatal("an unknown version must refuse to load")
 	}
 }
+
+func TestLoadVerified_LocallyFrozenHasNoImageOrigin(t *testing.T) {
+	// A version written without an origin sidecar (a local freeze) loads with a
+	// zero ImageOrigin, the signal runInImage uses to stay on the local-tag path.
+	fv := frozenExample(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	lp, err := LoadVerified(s, "weekly-metrics-digest", "test")
+	if err != nil {
+		t.Fatalf("LoadVerified: %v", err)
+	}
+	if lp.ImageOrigin.Present {
+		t.Errorf("locally-frozen plan has ImageOrigin.Present = true; want false")
+	}
+}
+
+func TestLoadVerified_OCIInstalledCarriesImageOrigin(t *testing.T) {
+	// A version with an origin sidecar (an OCI install) loads with the recorded
+	// registry origin, so runInImage takes the registry-pull boot path.
+	fv := frozenExample(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("weekly-metrics-digest", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	if err := s.WriteOrigin("weekly-metrics-digest", "test", store.Origin{
+		Registry:   "ghcr.io/acme/plan",
+		VersionTag: "test",
+	}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
+	lp, err := LoadVerified(s, "weekly-metrics-digest", "test")
+	if err != nil {
+		t.Fatalf("LoadVerified: %v", err)
+	}
+	if !lp.ImageOrigin.Present {
+		t.Fatal("OCI-installed plan has ImageOrigin.Present = false; want true")
+	}
+	if lp.ImageOrigin.Registry != "ghcr.io/acme/plan" || lp.ImageOrigin.VersionTag != "test" {
+		t.Errorf("ImageOrigin = %+v, want the recorded origin", lp.ImageOrigin)
+	}
+}

@@ -53,7 +53,12 @@ func TestRunSkillInstallOCIWritesFrozenAndLists(t *testing.T) {
 		if opts.Verifier != nil {
 			t.Error("verifier should be the silenced nil for this test")
 		}
-		return pull.Result{Frozen: installFrozen("v1abc"), Name: "rubber-duck"}, nil
+		return pull.Result{
+			Frozen:         installFrozen("v1abc"),
+			Name:           "rubber-duck",
+			SourceRegistry: "ghcr.io/acme/plan",
+			SourceTag:      "v1abc",
+		}, nil
 	})
 
 	var out, errb bytes.Buffer
@@ -72,12 +77,26 @@ func TestRunSkillInstallOCIWritesFrozenAndLists(t *testing.T) {
 	if !strings.Contains(listOut.String(), "rubber-duck") {
 		t.Errorf("list = %q, want rubber-duck", listOut.String())
 	}
-	ids, err := store.New(skillStoreDir).FrozenVersions("rubber-duck")
+	s := store.New(skillStoreDir)
+	ids, err := s.FrozenVersions("rubber-duck")
 	if err != nil {
 		t.Fatalf("FrozenVersions: %v", err)
 	}
 	if len(ids) != 1 || ids[0] != "v1abc" {
 		t.Errorf("frozen ids = %v, want [v1abc]", ids)
+	}
+
+	// The install records the origin sidecar so launch (#1903) can find the
+	// published image on this machine that never froze the plan.
+	origin, ok, err := s.ReadOrigin("rubber-duck", "v1abc")
+	if err != nil {
+		t.Fatalf("ReadOrigin: %v", err)
+	}
+	if !ok {
+		t.Fatal("install did not record an origin sidecar")
+	}
+	if origin.Registry != "ghcr.io/acme/plan" || origin.VersionTag != "v1abc" {
+		t.Errorf("origin = %+v, want registry=ghcr.io/acme/plan tag=v1abc", origin)
 	}
 }
 

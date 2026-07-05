@@ -214,11 +214,6 @@ func publishImage(ctx context.Context, opts Options, pin freeze.ImagePin, target
 	}
 }
 
-// composedImageTag is the tag the composed image is pushed under in the
-// destination repository (distinct from the signed-artifact tag, which is the
-// version id). The artifact referrer's subject points at this image by digest.
-func composedImageTag(versionID string) string { return versionID + "-image" }
-
 // publishComposed verifies the local composed image's config digest against the
 // signed lock, pushes it into the destination repository, and returns the
 // pushed image descriptor. The config digest is checked BEFORE the push, so a
@@ -236,7 +231,7 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigDigestMismatch, localConfig, pin.Digest)
 	}
 
-	imageTag := composedImageTag(opts.VersionID)
+	imageTag := freeze.ComposedImageTag(opts.VersionID)
 	if err := src.Push(ctx, pin.LocalTag, opts.Registry, imageTag); err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: push composed image: %w", err)
 	}
