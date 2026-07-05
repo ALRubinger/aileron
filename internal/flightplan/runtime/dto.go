@@ -435,6 +435,20 @@ func (d stepDTO) populateToolStep(step *Step) error {
 		if err != nil {
 			return err
 		}
+		// Defense-in-depth over the launch load path (#1959): a tool step's
+		// trustContract host may embed a `{{ inputs.<name> }}` template that the
+		// runtime instantiates before the step-scope mint. Reject a malformed
+		// token here so a tampered manifest never reaches instantiation with an
+		// unbalanced or non-inputs token. The constraint-presence guard stays
+		// freeze-only; decode checks only the grammar (here) and the
+		// declared-input reference (validateReferences), mirroring commands.
+		// Host templates are instantiated only on tool steps, so this check is
+		// tool-step-scoped (a per-action contract's hosts are never substituted).
+		for i, host := range tc.Hosts {
+			if _, err := commandInputRefs(host); err != nil {
+				return decodeErrf("step %q: tool trustContract host %d: %v", d.ID, i, err)
+			}
+		}
 		step.TrustContract = &tc
 	}
 	return nil

@@ -68,6 +68,79 @@ func lintCommandInterpolation(m *manifest.Manifest) error {
 	return nil
 }
 
+// lintHostInterpolation is the freeze-time guard over `{{ inputs.<name> }}`
+// tokens embedded in a tool step's `trustContract.hosts` entries (#1959). It is
+// the exact mirror of lintCommandInterpolation for the host axis: freeze seals
+// the TEMPLATE host into lock.stepTrust (covered by the content hash + detached
+// signature) and launch instantiates the CONCRETE host before minting the
+// step-scope proxy credential, so a token in a sealed host position is an
+// injection surface unless the input it names is CONSTRAINED (an enum allow-set
+// or a pattern). This guard fails the freeze closed on:
+//
+//   - a malformed token grammar (unbalanced braces, a non-inputs body): the
+//     same rejection the launch-time scanner makes, so freeze never deems a
+//     host token inert that launch would interpolate;
+//   - a token naming an input UNKNOWN at freeze (mirrors the launch-time
+//     undeclared-input refusal in runtime/decode.go);
+//   - a token naming a KNOWN but UNCONSTRAINED input: the injection-surface
+//     guard, freeze-only per the plan. An unconstrained value flowing into a
+//     signed host could steer the step's egress to an attacker-chosen host.
+//
+// Scope: only `kind: tool` steps are walked. A per-action (connector
+// action-ref) trustContract is never instantiated (no plan-input substitution
+// path reaches it), so its hosts are not guarded here; the shared-def schema
+// relaxation admits a token there syntactically, but nothing substitutes it.
+// It reads the RAW manifest maps and shares the exact token grammar the runtime
+// uses via the leaf manifest package.
+func lintHostInterpolation(m *manifest.Manifest) error {
+	declared, constrained := inputConstraintSets(m)
+	for i, raw := range m.Aileron.Steps {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			// Lint's earlier pass already rejects a non-mapping step; keep the
+			// backstop rather than panic on a direct construct.
+			return &LintError{StepID: stepIDOf(raw), Reason: fmt.Sprintf("step %d is not a mapping", i)}
+		}
+		if scalarString(step["kind"]) != "tool" {
+			continue
+		}
+		id := scalarString(step["id"])
+		tc, ok := step["trustContract"].(map[string]any)
+		if !ok {
+			// A tool step with no trustContract (or a malformed one) declares no
+			// host reach for this guard; the schema and steptrust sealing reject
+			// a malformed contract shape, so a non-mapping here is not this
+			// guard's concern.
+			continue
+		}
+		hosts, ok := tc["hosts"].([]any)
+		if !ok {
+			// Missing/non-array hosts are a schema and steptrust-seal error,
+			// caught there; this guard only inspects present host strings.
+			continue
+		}
+		for _, h := range hosts {
+			host, ok := h.(string)
+			if !ok {
+				continue
+			}
+			refs, err := manifest.CommandInputRefs(host)
+			if err != nil {
+				return &LintError{StepID: id, Reason: fmt.Sprintf("trustContract host %q: %v", host, err)}
+			}
+			for _, ref := range refs {
+				if !declared[ref] {
+					return &LintError{StepID: id, Reason: fmt.Sprintf("trustContract host references undeclared input %q", ref)}
+				}
+				if !constrained[ref] {
+					return &LintError{StepID: id, Reason: fmt.Sprintf("trustContract host references input %q which declares no constraint; an unconstrained input in a sealed host position is an injection surface (add an enum or pattern constraint)", ref)}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // inputConstraintSets walks the raw manifest inputs into the set of declared
 // input names and the subset that materially declare a constraint (a non-empty
 // enum or a non-whitespace pattern). It reads untyped maps because freeze runs

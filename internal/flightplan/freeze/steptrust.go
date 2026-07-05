@@ -90,6 +90,14 @@ func toolStepHosts(step map[string]any, index int) (hosts []string, declared boo
 		if !ok || strings.TrimSpace(s) == "" {
 			return nil, false, fmt.Errorf("freeze: tool step %d declares a trustContract host that is empty or not a string", index)
 		}
+		// The trimmed host string is sealed VERBATIM: a host TEMPLATE carrying
+		// `{{ inputs.<name> }}` tokens (#1959) rides into lock.stepTrust exactly
+		// as authored, covered by the content hash and detached signature. No
+		// host-shape validation happens here on purpose — the token grammar and
+		// its constraint-presence guard live in lintHostInterpolation, and the
+		// runtime instantiates the sealed template into a concrete host before
+		// the step-scope mint. Sealing the template (not a pre-instantiated
+		// host) is what makes the token bytes part of the attestation.
 		hosts = append(hosts, strings.TrimSpace(s))
 	}
 	return hosts, true, nil
