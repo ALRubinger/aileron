@@ -44,6 +44,16 @@ type sandboxProxyStepScope struct {
 	Token string
 	// ExpiresAt is the TTL boundary; an expired scope authenticates as 407.
 	ExpiresAt time.Time
+	// CredentialKind and IdentityLabel carry the step's declared credential
+	// identity from the manifest trust contract (#1980). They are the
+	// non-secret identity (a kind and a label), never credential material.
+	// Carried, not yet consumed: nothing in this codepath reads them to
+	// select a credential for egress — that is the umbrella's next sub-issue
+	// (#1978 step 3). Both are "" when the mint carried no credential block
+	// (a step that declares no trust contract or no credential identity),
+	// preserving today's unconstrained-scope behavior by construction.
+	CredentialKind string
+	IdentityLabel  string
 }
 
 // sandboxProxyStepScopeReasonHostDenied is the stable reject reason carried
@@ -108,6 +118,23 @@ func (s *apiServer) CreateSandboxProxyStepScope(w http.ResponseWriter, r *http.R
 		hosts = append(hosts, h)
 	}
 
+	// The optional credential identity (#1980). Absent block: the scope is
+	// minted unconstrained, exactly as before (both fields stay ""). Present
+	// block: both kind and identityLabel must be non-empty — a present-but-
+	// empty identity is a client bug, rejected 400 rather than stored as a
+	// half-identity. Validation stays minimal (non-empty only), mirroring the
+	// unconstrained-string trust-contract credential vocabulary; the daemon
+	// does not re-litigate identity grammar it does not own.
+	var credentialKind, identityLabel string
+	if req.Credential != nil {
+		credentialKind = strings.TrimSpace(req.Credential.Kind)
+		identityLabel = strings.TrimSpace(req.Credential.IdentityLabel)
+		if credentialKind == "" || identityLabel == "" {
+			writeError(w, http.StatusBadRequest, "invalid_body", "credential.kind and credential.identityLabel must both be non-empty when a credential block is present")
+			return
+		}
+	}
+
 	scopeID, err := sandboxProxyStepScopeRandomHex(16)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "could not mint scope id")
@@ -125,11 +152,13 @@ func (s *apiServer) CreateSandboxProxyStepScope(w http.ResponseWriter, r *http.R
 		s.stepScopes = map[string]sandboxProxyStepScope{}
 	}
 	s.stepScopes[scopeID] = sandboxProxyStepScope{
-		SessionID: sessionID,
-		StepID:    stepID,
-		Hosts:     hosts,
-		Token:     token,
-		ExpiresAt: expires,
+		SessionID:      sessionID,
+		StepID:         stepID,
+		Hosts:          hosts,
+		Token:          token,
+		ExpiresAt:      expires,
+		CredentialKind: credentialKind,
+		IdentityLabel:  identityLabel,
 	}
 	s.stepScopesMu.Unlock()
 

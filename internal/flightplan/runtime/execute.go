@@ -426,6 +426,18 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 		CollectPath: step.CollectPath,
 		Hosts:       instSealedHosts,
 	}
+	// Thread the step's declared credential identity to the runner's mint
+	// (#1980): the non-secret kind + identity label from the trust contract,
+	// so the daemon learns which credential identity the step's egress
+	// belongs to. A step with no trust contract, or one that declares no
+	// credential identity, leaves both empty — the mint then sends no
+	// credential block and the scope stays unconstrained, exactly as before.
+	// This does not alter host instantiation, the reach record, or the
+	// sealed-vs-frontmatter logic above.
+	if step.TrustContract != nil {
+		spec.CredentialKind = step.TrustContract.CredentialKind
+		spec.IdentityLabel = step.TrustContract.IdentityLabel
+	}
 	res, err := x.toolRunner.Run(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("flightplan: step %q tool execution: %w", step.ID, err)

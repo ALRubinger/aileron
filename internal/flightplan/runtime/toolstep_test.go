@@ -315,6 +315,53 @@ func TestExecute_ToolStepThreadsSealedHosts(t *testing.T) {
 	}
 }
 
+// TestExecute_ToolStepThreadsCredentialIdentity proves the executor threads
+// the step's declared credential identity (kind + identity label from the
+// trust contract) into the runner spec (#1980), so the runner's mint tells the
+// daemon which credential identity the step's egress belongs to.
+func TestExecute_ToolStepThreadsCredentialIdentity(t *testing.T) {
+	p := toolStepPlan()
+	setExtractContract(p, &TrustContract{
+		Effect:         EffectRead,
+		Hosts:          []string{"api.example.com"},
+		CredentialKind: "aws_sigv4",
+		IdentityLabel:  "prod-reader",
+	})
+	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{
+		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
+		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com"}}},
+	}
+	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	spec := runner.specs[0]
+	if spec.CredentialKind != "aws_sigv4" || spec.IdentityLabel != "prod-reader" {
+		t.Errorf("spec identity = (%q, %q), want (aws_sigv4, prod-reader)", spec.CredentialKind, spec.IdentityLabel)
+	}
+}
+
+// TestExecute_ToolStepNoCredentialIdentityLeavesEmpty proves a step whose
+// trust contract declares no credential identity threads empty strings, so the
+// runner's mint sends no credential block and the scope stays unconstrained —
+// today's behavior preserved by construction.
+func TestExecute_ToolStepNoCredentialIdentityLeavesEmpty(t *testing.T) {
+	p := toolStepPlan()
+	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: []string{"api.example.com"}})
+	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{
+		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
+		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com"}}},
+	}
+	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	spec := runner.specs[0]
+	if spec.CredentialKind != "" || spec.IdentityLabel != "" {
+		t.Errorf("spec identity = (%q, %q), want empty with no declared credential identity", spec.CredentialKind, spec.IdentityLabel)
+	}
+}
+
 // TestExecute_CollectedOutputFlowsDownstream proves the collected output
 // flows into a downstream step's dataflow through the existing binding path,
 // with no new dataflow mechanism.

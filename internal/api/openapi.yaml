@@ -7278,7 +7278,12 @@ components:
         proxy session the scoped CONNECTs ride on; step_id names the
         tool step; hosts is the step's sealed network reach from the
         verified lock's stepTrust section. Carries no credential
-        material.
+        material. The optional `credential` block carries only the
+        step's non-secret declared credential identity (its kind and
+        identity label from the manifest trust contract), never
+        credential material; it lets the daemon learn which credential
+        identity an outbound request belongs to (#1980). It is not yet
+        consumed for egress selection.
       required: [session_id, step_id, hosts]
       properties:
         session_id:
@@ -7299,6 +7304,23 @@ components:
           items:
             type: string
             pattern: "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+        credential:
+          type: object
+          description: |
+            The step's declared credential identity from the manifest
+            trust contract (#1980). Optional and additive: when omitted
+            the scope is minted with no identity recorded, exactly as
+            before. Carries only the non-secret identity (kind + label),
+            never credential material. Stored but not yet consumed for
+            egress selection.
+          required: [kind, identityLabel]
+          properties:
+            kind:
+              type: string
+              description: The credential kind the step declares (mirrors the manifest trust-contract credential kind).
+            identityLabel:
+              type: string
+              description: The non-secret identity label the step declares (mirrors the manifest trust-contract identity label).
 
     SandboxProxyStepScopeResponse:
       type: object

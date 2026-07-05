@@ -93,6 +93,91 @@ func TestCreateSandboxProxyStepScope_ValidatesShapes(t *testing.T) {
 	}
 }
 
+// TestCreateSandboxProxyStepScope_StoresCredentialIdentity proves the #1980
+// plumbing: a mint carrying a credential block round-trips kind + identityLabel
+// into the stored scope, while a mint without one stores an unconstrained scope
+// (both identity fields empty — today's behavior preserved by construction).
+func TestCreateSandboxProxyStepScope_StoresCredentialIdentity(t *testing.T) {
+	t.Run("with credential block", func(t *testing.T) {
+		srv := &apiServer{}
+		body, _ := json.Marshal(api.SandboxProxyStepScopeRequest{
+			SessionId: "session-123",
+			StepId:    "extract",
+			Hosts:     []string{"api.example.com"},
+			Credential: &struct {
+				IdentityLabel string `json:"identityLabel"`
+				Kind          string `json:"kind"`
+			}{IdentityLabel: "prod-reader", Kind: "aws_sigv4"},
+		})
+		rec := httptest.NewRecorder()
+		srv.CreateSandboxProxyStepScope(rec, httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/step-scopes", bytes.NewReader(body)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+		}
+		var out api.SandboxProxyStepScopeResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		scope, ok := srv.stepScopes[out.ScopeId]
+		if !ok {
+			t.Fatalf("minted scope %q not in registry", out.ScopeId)
+		}
+		if scope.CredentialKind != "aws_sigv4" || scope.IdentityLabel != "prod-reader" {
+			t.Errorf("stored identity = (%q, %q), want (aws_sigv4, prod-reader)", scope.CredentialKind, scope.IdentityLabel)
+		}
+	})
+
+	t.Run("without credential block stores unconstrained", func(t *testing.T) {
+		srv := &apiServer{}
+		minted := mintStepScope(t, srv, "session-123", "extract", []string{"api.example.com"})
+		scope, ok := srv.stepScopes[minted.ScopeId]
+		if !ok {
+			t.Fatalf("minted scope %q not in registry", minted.ScopeId)
+		}
+		if scope.CredentialKind != "" || scope.IdentityLabel != "" {
+			t.Errorf("a mint with no credential block must store empty identity, got (%q, %q)", scope.CredentialKind, scope.IdentityLabel)
+		}
+	})
+}
+
+// TestCreateSandboxProxyStepScope_RejectsHalfCredentialIdentity proves a
+// present-but-incomplete credential block is a client bug rejected 400: a
+// present block must carry both kind and identityLabel non-empty, and a
+// refusal registers nothing.
+func TestCreateSandboxProxyStepScope_RejectsHalfCredentialIdentity(t *testing.T) {
+	cases := []struct {
+		name        string
+		kind, label string
+	}{
+		{"empty kind", "", "prod-reader"},
+		{"empty label", "aws_sigv4", ""},
+		{"both empty", "", ""},
+		{"whitespace only", "  ", "  "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &apiServer{}
+			body, _ := json.Marshal(api.SandboxProxyStepScopeRequest{
+				SessionId: "session-123",
+				StepId:    "extract",
+				Hosts:     []string{"api.example.com"},
+				Credential: &struct {
+					IdentityLabel string `json:"identityLabel"`
+					Kind          string `json:"kind"`
+				}{IdentityLabel: tc.label, Kind: tc.kind},
+			})
+			rec := httptest.NewRecorder()
+			srv.CreateSandboxProxyStepScope(rec, httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/step-scopes", bytes.NewReader(body)))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if len(srv.stepScopes) != 0 {
+				t.Errorf("a refused mint must register nothing, got %d scopes", len(srv.stepScopes))
+			}
+		})
+	}
+}
+
 // TestDeleteSandboxProxyStepScope_IdempotentRelease proves DELETE removes a
 // live scope and stays 204 for an unknown/already-released scope id.
 func TestDeleteSandboxProxyStepScope_IdempotentRelease(t *testing.T) {
