@@ -82,6 +82,14 @@ func TestParse_EachSchemeValidates(t *testing.T) {
 			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n    service: s3\n",
 			want: binding.SchemeSigV4Resign,
 		},
+		{
+			// region and service are optional: the egress injector derives the
+			// SigV4 scope from the resolved upstream host, so a descriptor may
+			// omit them and still load.
+			name: "sigv4-resign no region or service",
+			yaml: "version: v1\nbindings:\n  - host: athena.us-east-1.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n",
+			want: binding.SchemeSigV4Resign,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -187,14 +195,6 @@ func TestParse_Errors(t *testing.T) {
 		{
 			name: "sigv4-resign missing access_key_id",
 			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    region: us-east-1\n    service: s3\n",
-		},
-		{
-			name: "sigv4-resign missing region",
-			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    service: s3\n",
-		},
-		{
-			name: "sigv4-resign missing service",
-			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n",
 		},
 		{
 			name: "invalid credential_ref",

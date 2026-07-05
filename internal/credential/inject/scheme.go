@@ -54,6 +54,13 @@ var (
 	// not supplied (e.g. basic auth without a username). Returned by
 	// [Inject].
 	ErrMissingParam = errors.New("inject: required parameter missing")
+
+	// ErrUnparseableAWSHost means an outbound host could not be parsed into
+	// an AWS SigV4 (service, region) credential scope: it carries no
+	// region-shaped label, or the region-shaped label has no preceding
+	// service label. Returned by [ParseAWSEndpointHost]. The host string it
+	// names is non-secret (a hostname, never credential bytes).
+	ErrUnparseableAWSHost = errors.New("inject: host is not a parseable AWS endpoint")
 )
 
 // allSchemes is the canonical closed set, in ADR order. Exposed via

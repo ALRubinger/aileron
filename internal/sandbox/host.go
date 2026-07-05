@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -522,7 +521,7 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 			// signing-time runtime failure. Neither path echoes cred.Value.
 			if errors.Is(injErr, inject.ErrMissingParam) {
 				return newCapabilityDenied(
-					"http_request: aws_sigv4 signing inputs incomplete (region, service, and access_key_id are required)",
+					"http_request: aws_sigv4 signing inputs incomplete (access_key_id is required; region and service are derived from the request host and required only as a fallback when the host is unparseable)",
 					map[string]any{
 						"connector":       s.connectorFQN,
 						"capability_kind": cred.Kind,
@@ -560,26 +559,22 @@ func apiKeyInjection(header, format string) (string, string) {
 	return header, format
 }
 
-// awsRegionRe matches an AWS region token (e.g. us-east-1, eu-west-2,
-// ap-southeast-1). Region selection is best-effort: a host segment that
-// matches this shape is treated as the request's target region. The
-// pattern is deliberately conservative (two-letter area, an alphabetic
-// direction, a numeric suffix) so a service label like "athena" or a
-// bucket name is never mistaken for a region.
-var awsRegionRe = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]+$`)
-
 // regionFromHost extracts the AWS region from an outbound host such as
-// `athena.us-east-1.amazonaws.com` -> `us-east-1`. Returns "" when no
-// segment looks like a region (e.g. the legacy global `s3.amazonaws.com`),
-// in which case the caller falls back to the single bound region. The
-// secret access key never participates in this parsing.
+// `athena.us-east-1.amazonaws.com` -> `us-east-1`, used to select the
+// region-scoped binding for a multi-region connector install. It delegates
+// to the shared [inject.ParseAWSEndpointHost] parser so the WASM path and
+// the SigV4 injector recognize the same region shapes (including GovCloud
+// partitions like `us-gov-west-1`, which the earlier two-word regex missed).
+// Returns "" when the host carries no region-shaped label (e.g. the legacy
+// global `s3.amazonaws.com`), in which case the caller falls back to the
+// single bound region. The secret access key never participates in this
+// parsing.
 func regionFromHost(host string) string {
-	for _, seg := range strings.Split(host, ".") {
-		if awsRegionRe.MatchString(seg) {
-			return seg
-		}
+	_, region, err := inject.ParseAWSEndpointHost(host)
+	if err != nil {
+		return ""
 	}
-	return ""
+	return region
 }
 
 // hostFromURL extracts the host:port portion of a URL using the same

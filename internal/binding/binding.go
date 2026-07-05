@@ -85,12 +85,16 @@ type Binding struct {
 	Account      string
 
 	// Region and AccessKeyID are the non-secret AWS Signature Version 4
-	// signing inputs carried on an `aws_sigv4` binding. Both are empty for
-	// every other kind. Region is also the disambiguator that lets one
-	// connector install hold several region-scoped bindings: Resolve keys
-	// aws_sigv4 bindings by (connectorFQN, kind, region) and the runtime
-	// selects the matching one at request time. When set, they win over
-	// the connector manifest's `region` / `access_key_id` at signing time.
+	// inputs carried on an `aws_sigv4` binding. Both are empty for every
+	// other kind. AccessKeyID appears verbatim in the signed Credential=
+	// field. Region is primarily the disambiguator that lets one connector
+	// install hold several region-scoped bindings: Resolve keys aws_sigv4
+	// bindings by (connectorFQN, kind, region) and the runtime selects the
+	// matching one at request time. Region is no longer the authoritative
+	// signing scope: the egress signer derives the SigV4 (service, region)
+	// scope from the resolved upstream host and consults this field only as
+	// a fallback for an unparseable host, so a binding may carry an empty
+	// Region and still sign correctly against a parseable AWS endpoint.
 	Region      string
 	AccessKeyID string
 
