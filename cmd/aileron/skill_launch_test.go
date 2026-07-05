@@ -990,8 +990,10 @@ func TestDaemonAuditSink_PostsPerActionRecord(t *testing.T) {
 	}
 }
 
-// TestDaemonAuditSink_PostsLaunchSummary proves a record with no ActionRef
-// posts the per-launch summary event type.
+// TestDaemonAuditSink_PostsLaunchSummary proves a RecordKindLaunch record maps
+// to the flightplan.launch event type and surfaces its flat aileron.* map as the
+// top-level payload (no "fields" nesting), so the launch record carries
+// aileron.invocation.id where the invocation filter and Timeline read it (#1928).
 func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
 	var gotBody auditIngestRequest
 	withDaemon(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1001,8 +1003,12 @@ func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
 	})
 
 	id := daemonAuditSink{stderr: io.Discard}.Record(context.Background(), runtime.AuditRecord{
-		Kind:   runtime.RecordKindLaunch,
-		Fields: map[string]any{"artifacts": 1},
+		Kind: runtime.RecordKindLaunch,
+		Fields: map[string]any{
+			"sourceInputBindings":   map[string]any{},
+			"aileron.invocation.id": "inv-123",
+			"aileron.plan.skill":    "digest",
+		},
 	})
 	if id != "audit-summary" {
 		t.Errorf("Record returned %q, want audit-summary", id)
@@ -1012,6 +1018,18 @@ func TestDaemonAuditSink_PostsLaunchSummary(t *testing.T) {
 	}
 	if _, ok := gotBody.Payload["actionRef"]; ok {
 		t.Errorf("summary payload must omit actionRef: %+v", gotBody.Payload)
+	}
+	// The flat aileron.* keys are top-level payload attributes, not nested under
+	// "fields"; this is what makes the launch record visible under an
+	// invocation-filtered query (#1928).
+	if _, nested := gotBody.Payload["fields"]; nested {
+		t.Errorf("launch payload must be flat, not nested under fields: %+v", gotBody.Payload)
+	}
+	if gotBody.Payload["aileron.invocation.id"] != "inv-123" {
+		t.Errorf("payload.aileron.invocation.id = %v, want it at top level", gotBody.Payload["aileron.invocation.id"])
+	}
+	if gotBody.Payload["aileron.plan.skill"] != "digest" {
+		t.Errorf("payload.aileron.plan.skill = %v", gotBody.Payload["aileron.plan.skill"])
 	}
 }
 

@@ -394,6 +394,55 @@ func TestListEvents_FilterByInvocationIDIsExact(t *testing.T) {
 	}
 }
 
+// TestListEvents_ReturnsLaunchAndReachAlongsideOutputs is the #1928 regression
+// crossing the runtime→daemon-flatten→filter seam. The flightplan.launch and
+// flightplan.launch.reach records now carry the launch-scoped
+// aileron.invocation.id at the top level of their payload (the same place the
+// daemon sink surfaces the runtime's flat Fields), so an invocation-filtered
+// query returns them alongside the materialized outputs. Before the fix only the
+// output.materialized record carried the id, so the launch and reach records were
+// dropped from GET /v1/audit?invocation_id=<id> and invisible in the /audit
+// Timeline. This asserts the filter contract those flat payloads rely on.
+func TestListEvents_ReturnsLaunchAndReachAlongsideOutputs(t *testing.T) {
+	const inv = "11111111-1111-1111-1111-111111111111"
+	store := seedEvents(t,
+		// output.materialized already carried the id before the fix.
+		audit.Event{
+			EventID:   "output",
+			EventType: model.EventTypeOutputMaterialized,
+			Payload:   map[string]any{"aileron.invocation.id": inv, "aileron.output.name": "digest.csv"},
+			Timestamp: time.Now(),
+		},
+		// flightplan.launch.reach now carries the id at the top level (#1928).
+		audit.Event{
+			EventID:   "reach",
+			EventType: model.EventTypeFlightPlanLaunchReach,
+			Payload:   map[string]any{"aileron.invocation.id": inv, "aileron.step.id": "extract"},
+			Timestamp: time.Now(),
+		},
+		// flightplan.launch (per-launch summary) now carries the id at the top
+		// level, flat (no "fields" nesting) so the filter reads it (#1928).
+		audit.Event{
+			EventID:   "launch",
+			EventType: model.EventTypeFlightPlanLaunch,
+			Payload:   map[string]any{"aileron.invocation.id": inv, "sourceInputBindings": map[string]any{}},
+			Timestamp: time.Now(),
+		},
+	)
+
+	got, _ := store.ListEvents(context.Background(), audit.EventFilter{InvocationID: inv})
+	if len(got) != 3 {
+		t.Fatalf("want 3 events for the invocation (output+reach+launch), got %d: %+v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, e := range got {
+		seen[e.EventID] = true
+	}
+	if !seen["output"] || !seen["reach"] || !seen["launch"] {
+		t.Errorf("invocation filter dropped a record: got %+v, want output+reach+launch", seen)
+	}
+}
+
 // TestListEvents_InvocationIDComposesWithOtherFilters proves the
 // InvocationID filter AND-composes with Since and ContentHash: only the
 // event matching all three is returned.

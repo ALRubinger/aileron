@@ -96,7 +96,11 @@ func TestBuildLaunchRecord_KeepsSourcesDropsOutputsArray(t *testing.T) {
 			{Name: "chains.json", Path: "chains.json", Content: []byte(`{"a":1}`), Digest: "sha256:deadbeef", Written: true},
 		},
 	}
-	rec := buildLaunchRecord(st)
+	prov := launchProvenance{
+		Skill: "weekly-metrics-digest", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		SignatureStatus: "verified", InvocationID: "inv-123",
+	}
+	rec := buildLaunchRecord(st, prov)
 	if rec.Kind != RecordKindLaunch {
 		t.Errorf("launch record Kind = %v, want RecordKindLaunch", rec.Kind)
 	}
@@ -110,6 +114,24 @@ func TestBuildLaunchRecord_KeepsSourcesDropsOutputsArray(t *testing.T) {
 	sb, ok := sources["series"].(map[string]any)
 	if !ok || sb["actionRef"] != "aileron:metrics.query_series" || sb["select"] != "series" {
 		t.Errorf("sourceInputBindings[series] = %v", sources["series"])
+	}
+	// The launch record now carries the flat plan/invocation provenance so it is
+	// visible under an invocation-filtered query and in the /audit Timeline
+	// (#1928).
+	if rec.Fields["aileron.invocation.id"] != "inv-123" {
+		t.Errorf("aileron.invocation.id = %v, want inv-123", rec.Fields["aileron.invocation.id"])
+	}
+	if rec.Fields["aileron.plan.skill"] != "weekly-metrics-digest" {
+		t.Errorf("aileron.plan.skill = %v", rec.Fields["aileron.plan.skill"])
+	}
+	if rec.Fields["aileron.plan.content_hash"] != "sha256:plan" {
+		t.Errorf("aileron.plan.content_hash = %v", rec.Fields["aileron.plan.content_hash"])
+	}
+	if rec.Fields["aileron.plan.signed_by"] != "sha256:key" {
+		t.Errorf("aileron.plan.signed_by = %v", rec.Fields["aileron.plan.signed_by"])
+	}
+	if rec.Fields["aileron.plan.signature_status"] != "verified" {
+		t.Errorf("aileron.plan.signature_status = %v", rec.Fields["aileron.plan.signature_status"])
 	}
 }
 
@@ -590,12 +612,16 @@ func containsValue(v any, want string) bool {
 // step id, effect, hosts, and the truthful `aileron.reach.enforced` marker:
 // true when the hosts are the sealed step-scoped reach, false otherwise.
 func TestBuildReachRecord_CarriesReachAndEnforcedMarker(t *testing.T) {
+	prov := launchProvenance{
+		Skill: "weekly-metrics-digest", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		SignatureStatus: "verified", InvocationID: "inv-123",
+	}
 	rec := buildReachRecord(reachRecord{
 		StepID:   "extract",
 		Effect:   EffectExternalSend,
 		Hosts:    []string{"api.example.com", "cdn.example.com"},
 		Enforced: true,
-	})
+	}, prov)
 	if rec.Kind != RecordKindReach {
 		t.Fatalf("kind = %v, want RecordKindReach", rec.Kind)
 	}
@@ -613,13 +639,31 @@ func TestBuildReachRecord_CarriesReachAndEnforcedMarker(t *testing.T) {
 	if !ok || !enforced {
 		t.Errorf("enforced = %v, want true for a sealed, step-scoped reach", rec.Fields["aileron.reach.enforced"])
 	}
+	// The reach record now carries the flat plan/invocation provenance so it is
+	// visible under an invocation-filtered query and in the /audit Timeline
+	// (#1928).
+	if rec.Fields["aileron.invocation.id"] != "inv-123" {
+		t.Errorf("aileron.invocation.id = %v, want inv-123", rec.Fields["aileron.invocation.id"])
+	}
+	if rec.Fields["aileron.plan.skill"] != "weekly-metrics-digest" {
+		t.Errorf("aileron.plan.skill = %v", rec.Fields["aileron.plan.skill"])
+	}
+	if rec.Fields["aileron.plan.content_hash"] != "sha256:plan" {
+		t.Errorf("aileron.plan.content_hash = %v", rec.Fields["aileron.plan.content_hash"])
+	}
+	if rec.Fields["aileron.plan.signed_by"] != "sha256:key" {
+		t.Errorf("aileron.plan.signed_by = %v", rec.Fields["aileron.plan.signed_by"])
+	}
+	if rec.Fields["aileron.plan.signature_status"] != "verified" {
+		t.Errorf("aileron.plan.signature_status = %v", rec.Fields["aileron.plan.signature_status"])
+	}
 }
 
 // TestBuildReachRecord_UnsealedReachEnforcedFalse proves the enforced marker
 // is truthful: a contracted step with no sealed reach records enforced:false,
 // never an overclaim.
 func TestBuildReachRecord_UnsealedReachEnforcedFalse(t *testing.T) {
-	rec := buildReachRecord(reachRecord{StepID: "s", Effect: EffectRead, Hosts: nil, Enforced: false})
+	rec := buildReachRecord(reachRecord{StepID: "s", Effect: EffectRead, Hosts: nil, Enforced: false}, launchProvenance{})
 	if v, ok := rec.Fields["aileron.reach.enforced"].(bool); !ok || v {
 		t.Errorf("enforced = %v, want false", rec.Fields["aileron.reach.enforced"])
 	}
@@ -675,6 +719,66 @@ func TestEmitAudit_OneReachRecordPerReachEntry(t *testing.T) {
 	}
 	if len(ids) != len(sink.records) {
 		t.Errorf("emitAudit returned %d ids for %d records", len(ids), len(sink.records))
+	}
+}
+
+// TestEmitAudit_AllRecordsCarryInvocationID is the #1928 regression: every
+// record emitted for one launch — the per-action, per-reach, per-output, and
+// per-launch-summary records — carries the launch-scoped aileron.invocation.id
+// (and the flat aileron.plan.* provenance) in its flat Fields map. Because the
+// daemon sink surfaces those flat fields as the top-level event payload, and the
+// invocation filter (internal/audit/mem.go) matches on the top-level
+// aileron.invocation.id, an invocation-filtered query returns the launch and
+// reach records alongside the materialized outputs. Before the fix the reach and
+// launch records never stamped the id, so they were dropped from
+// GET /v1/audit?invocation_id=<id> and invisible in the /audit Timeline.
+func TestEmitAudit_AllRecordsCarryInvocationID(t *testing.T) {
+	const inv = "inv-1928"
+	prov := launchProvenance{
+		Skill: "weekly-metrics-digest", ContentHash: "sha256:plan", SignedBy: "sha256:key",
+		SignatureStatus: "verified", InvocationID: inv,
+	}
+	st := execState{
+		inputs: ResolvedInputs{SourceBindings: map[string]SourceBinding{}},
+		dispatches: []actionDispatch{
+			{StepID: "call", ActionRef: "aileron:m.read", Effect: EffectRead},
+		},
+		reaches: []reachRecord{
+			{StepID: "extract", Effect: EffectExternalSend, Hosts: []string{"a.example.com"}},
+		},
+		outputs: []materializedOutput{
+			{StepID: "render", StepKind: KindTransform, Transform: "html-render",
+				Artifact: Artifact{Name: "d.csv", Content: []byte("x"), Digest: "sha256:1"}},
+		},
+	}
+	sink := &recordingSink{}
+	emitAudit(context.Background(), sink, st, prov)
+
+	var reach, output, launch bool
+	for _, r := range sink.records {
+		switch r.Kind {
+		case RecordKindReach:
+			reach = true
+		case RecordKindOutput:
+			output = true
+		case RecordKindLaunch:
+			launch = true
+		}
+		// The per-action record keeps its nested shape (invocation id is not
+		// stamped on it, matching the pre-fix behavior the issue leaves alone).
+		if r.Kind == RecordKindAction {
+			continue
+		}
+		if r.Fields["aileron.invocation.id"] != inv {
+			t.Errorf("%v record missing aileron.invocation.id: got %v, want %q",
+				r.Kind, r.Fields["aileron.invocation.id"], inv)
+		}
+		if r.Fields["aileron.plan.skill"] != "weekly-metrics-digest" {
+			t.Errorf("%v record missing aileron.plan.skill: got %v", r.Kind, r.Fields["aileron.plan.skill"])
+		}
+	}
+	if !reach || !output || !launch {
+		t.Fatalf("missing a record kind: reach=%v output=%v launch=%v", reach, output, launch)
 	}
 }
 

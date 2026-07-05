@@ -73,16 +73,48 @@ func buildActionRecord(d actionDispatch) AuditRecord {
 // proxy credential restricted to its sealed reach, not that a non-cooperative
 // subprocess ignoring HTTPS_PROXY (dialing a raw socket) was blocked — that is
 // out of scope for this marker.
-func buildReachRecord(r reachRecord) AuditRecord {
-	return AuditRecord{
-		Kind: RecordKindReach,
-		Fields: map[string]any{
-			"aileron.step.id":        r.StepID,
-			"aileron.reach.effect":   string(r.Effect),
-			"aileron.reach.hosts":    r.Hosts,
-			"aileron.reach.enforced": r.Enforced,
-		},
+func buildReachRecord(r reachRecord, prov launchProvenance) AuditRecord {
+	fields := map[string]any{
+		"aileron.step.id":        r.StepID,
+		"aileron.reach.effect":   string(r.Effect),
+		"aileron.reach.hosts":    r.Hosts,
+		"aileron.reach.enforced": r.Enforced,
 	}
+	for k, v := range provenanceFields(prov) {
+		fields[k] = v
+	}
+	return AuditRecord{Kind: RecordKindReach, Fields: fields}
+}
+
+// provenanceFields returns the flat plan/invocation provenance keys carried on
+// every record from one launch: the launch-scoped invocation id that correlates
+// the launch's records and the frozen plan's verified identity (skill name,
+// content hash, signer fingerprint, signature status). These are the keys the
+// invocation filter (internal/audit/mem.go) and the webapp Timeline accessor
+// (webapp/src/lib/audit/payload.ts) read at the top level, so stamping them on
+// the reach and launch records (not only the output records) keeps
+// flightplan.launch and flightplan.launch.reach visible under
+// GET /v1/audit?invocation_id=<id> (#1928). Each key is emitted only when its
+// source value is non-empty, mirroring the omit-rather-than-guess discipline the
+// actor fields use.
+func provenanceFields(prov launchProvenance) map[string]any {
+	out := map[string]any{}
+	if prov.Skill != "" {
+		out["aileron.plan.skill"] = prov.Skill
+	}
+	if prov.ContentHash != "" {
+		out["aileron.plan.content_hash"] = prov.ContentHash
+	}
+	if prov.SignedBy != "" {
+		out["aileron.plan.signed_by"] = prov.SignedBy
+	}
+	if prov.SignatureStatus != "" {
+		out["aileron.plan.signature_status"] = prov.SignatureStatus
+	}
+	if prov.InvocationID != "" {
+		out["aileron.invocation.id"] = prov.InvocationID
+	}
+	return out
 }
 
 // signatureStatusVerified is the single `aileron.plan.signature_status` value
@@ -126,7 +158,7 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchPro
 	// One reach record per tool step that carried a trust contract
 	// (#1784/#1829), marked enforced truthfully per record.
 	for _, r := range st.reaches {
-		ids = append(ids, sink.Record(ctx, buildReachRecord(r)))
+		ids = append(ids, sink.Record(ctx, buildReachRecord(r, prov)))
 	}
 	// Index the dispatches by producing step id so an output record can resolve
 	// the actor for its materializing step (an action-call attributes its own
@@ -148,7 +180,7 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchPro
 	}
 	// Per-launch summary: resolved input source bindings, by reference. Data
 	// inputs are recorded by their source binding, never the dataset inline.
-	ids = append(ids, sink.Record(ctx, buildLaunchRecord(st)))
+	ids = append(ids, sink.Record(ctx, buildLaunchRecord(st, prov)))
 	return ids
 }
 
@@ -180,17 +212,19 @@ func buildOutputRecord(o materializedOutput, prov launchProvenance, dispatchBySt
 		// Path is the artifact's declared on-disk path (empty for a retained
 		// target:none output). It carries the write-location provenance the old
 		// launch-summary array used to hold, so removing that array loses nothing.
-		"aileron.output.path":           o.Artifact.Path,
-		"aileron.output.mime":           o.Artifact.MimeType,
-		"aileron.output.content_hash":   o.Artifact.Digest,
-		"aileron.output.bytes":          len(o.Artifact.Content),
-		"aileron.step.id":               o.StepID,
-		"aileron.step.kind":             string(o.StepKind),
-		"aileron.plan.skill":            prov.Skill,
-		"aileron.plan.content_hash":     prov.ContentHash,
-		"aileron.plan.signed_by":        prov.SignedBy,
-		"aileron.plan.signature_status": prov.SignatureStatus,
-		"aileron.invocation.id":         prov.InvocationID,
+		"aileron.output.path":         o.Artifact.Path,
+		"aileron.output.mime":         o.Artifact.MimeType,
+		"aileron.output.content_hash": o.Artifact.Digest,
+		"aileron.output.bytes":        len(o.Artifact.Content),
+		"aileron.step.id":             o.StepID,
+		"aileron.step.kind":           string(o.StepKind),
+	}
+	// The plan/invocation provenance keys (skill, content hash, signer,
+	// signature status, invocation id) are shared with the reach and launch
+	// records; single-sourced through provenanceFields so all three carry the
+	// same flat keys the invocation filter reads (#1928).
+	for k, v := range provenanceFields(prov) {
+		fields[k] = v
 	}
 	// A tool-materialized output (#1829) records the executed argv: `kind:
 	// tool` is a first-class step kind, so aileron.step.kind is already the
@@ -403,17 +437,21 @@ func launchConfigInputs(ri ResolvedInputs) map[string]any {
 // individual output.materialized records (#1752), so the summary no longer
 // lumps the outputs into an array; it keeps the input source bindings the
 // per-output records do not carry.
-func buildLaunchRecord(st execState) AuditRecord {
+func buildLaunchRecord(st execState, prov launchProvenance) AuditRecord {
 	sources := map[string]any{}
 	for name, sb := range st.inputs.SourceBindings {
 		sources[name] = map[string]any{"actionRef": sb.ActionRef, "select": sb.Select}
 	}
-	return AuditRecord{
-		Kind: RecordKindLaunch,
-		Fields: map[string]any{
-			"sourceInputBindings": sources,
-		},
+	fields := map[string]any{
+		"sourceInputBindings": sources,
 	}
+	// Stamp the same flat plan/invocation provenance the output and reach
+	// records carry, so the per-launch summary is visible under an
+	// invocation-filtered query and in the /audit Timeline (#1928).
+	for k, v := range provenanceFields(prov) {
+		fields[k] = v
+	}
+	return AuditRecord{Kind: RecordKindLaunch, Fields: fields}
 }
 
 // sortStrings sorts in place without importing sort at every call site.

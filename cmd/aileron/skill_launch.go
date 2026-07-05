@@ -470,11 +470,11 @@ type daemonAuditSink struct {
 }
 
 func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) string {
-	// The record kind is the explicit discriminator (#1752): an output record
-	// carries a flat `aileron.*` payload (top-level attributes, matching the
-	// vault.user.credential.* convention), while action/launch records keep
-	// their existing nested pay["fields"]/actionRef/sink shape so those event
-	// shapes don't churn.
+	// The record kind is the explicit discriminator (#1752): output, reach, and
+	// launch records carry a flat `aileron.*` payload (top-level attributes,
+	// matching the vault.user.credential.* convention) so the invocation filter
+	// and Timeline read aileron.invocation.id at the top level (#1928); only the
+	// per-action record keeps the nested pay["fields"]/actionRef/sink shape.
 	var eventType string
 	var payload map[string]any
 	switch rec.Kind {
@@ -502,11 +502,24 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 			// empty record posts an object payload rather than a JSON null.
 			payload = map[string]any{}
 		}
-	case runtime.RecordKindAction:
-		eventType = string(model.EventTypeFlightPlanLaunchAction)
-		payload = actionOrLaunchPayload(rec)
-	default: // runtime.RecordKindLaunch
+	case runtime.RecordKindLaunch:
+		// A launch record (#1928) carries the same flat `aileron.*` payload
+		// treatment as an output/reach record: the per-launch summary fields
+		// (sourceInputBindings plus the flat aileron.plan.* / aileron.invocation.id
+		// provenance) surface as top-level keys, so the invocation filter
+		// (internal/audit/mem.go) and the webapp Timeline accessor
+		// (webapp/src/lib/audit/payload.ts) find aileron.invocation.id where they
+		// read it. Previously nested under `fields`, which hid the launch record
+		// from GET /v1/audit?invocation_id=<id>.
 		eventType = string(model.EventTypeFlightPlanLaunch)
+		payload = rec.Fields
+		if payload == nil {
+			// A well-formed launch record always carries fields, but guard so an
+			// empty record posts an object payload rather than a JSON null.
+			payload = map[string]any{}
+		}
+	default: // runtime.RecordKindAction
+		eventType = string(model.EventTypeFlightPlanLaunchAction)
 		payload = actionOrLaunchPayload(rec)
 	}
 
@@ -551,10 +564,11 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 	return out.AuditID
 }
 
-// actionOrLaunchPayload builds the nested payload shape shared by the
-// per-action and per-launch summary records: actionRef and sink when present,
-// and the declared audit fields under a "fields" key. The output.materialized
-// record does NOT use this shape; it surfaces its flat aileron.* map directly.
+// actionOrLaunchPayload builds the nested payload shape for the per-action
+// record: actionRef and sink when present, and the declared audit fields under a
+// "fields" key. The output.materialized, reach, and launch records do NOT use
+// this shape; they surface their flat aileron.* map directly so the invocation
+// filter and Timeline read aileron.invocation.id at the top level (#1928).
 func actionOrLaunchPayload(rec runtime.AuditRecord) map[string]any {
 	payload := map[string]any{}
 	if rec.ActionRef != "" {
