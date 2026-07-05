@@ -89,6 +89,50 @@ func TestKeyringPublisherVerifier_UntrustedFailsClosed(t *testing.T) {
 	}
 }
 
+// TestKeyringPublisherVerifier_RefusalPrefixByOp proves the fail-closed refusal
+// prefix and the trust-remediation tail read for the operation the verifier
+// gates: a launch verifier (or a zero-value op, the historical default) says
+// "skill launch:" and "... or launch a plan you trust", while an install
+// verifier says "skill install:" and "... or install a plan you trust". The
+// shared keyringPublisherVerifier is wired on both paths (#1900), so an install
+// refusal must not read with launch wording.
+func TestKeyringPublisherVerifier_RefusalPrefixByOp(t *testing.T) {
+	trusted, _ := genKeyPair(t)
+	planKey, _ := genKeyPair(t)
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	writeOwnerKeyring(t, path, "github://acme", trusted)
+
+	cases := []struct {
+		name       string
+		op         string
+		wantPrefix string
+		wantTail   string
+	}{
+		{name: "default op is launch", op: "", wantPrefix: "skill launch:", wantTail: "or launch a plan you trust"},
+		{name: "explicit launch", op: "launch", wantPrefix: "skill launch:", wantTail: "or launch a plan you trust"},
+		{name: "install", op: "install", wantPrefix: "skill install:", wantTail: "or install a plan you trust"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := keyringPublisherVerifier{path: path, op: tc.op}
+			err := v.VerifyPublisher("github://acme/plans", planKey)
+			if err == nil {
+				t.Fatal("an untrusted signing key must fail closed")
+			}
+			if !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+				t.Errorf("error = %q, want prefix %q", err.Error(), tc.wantPrefix)
+			}
+			if !strings.Contains(err.Error(), tc.wantTail) {
+				t.Errorf("error = %q, want tail %q", err.Error(), tc.wantTail)
+			}
+			// The remediation hint is op-agnostic and must always be present.
+			if !strings.Contains(err.Error(), "aileron keyring trust github://acme/plans") {
+				t.Errorf("error = %q, want the keyring-trust remediation hint", err.Error())
+			}
+		})
+	}
+}
+
 // TestKeyringPublisherVerifier_RevokedFailsClosed proves that after the
 // trusted key is revoked (removed from the keyring on disk), a subsequent
 // verify fails closed because the verifier re-reads the keyring each call.

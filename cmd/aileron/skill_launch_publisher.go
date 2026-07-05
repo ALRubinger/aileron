@@ -25,8 +25,24 @@ type keyringPublisherVerifier struct {
 	// as a missing file (empty keyring), so an unresolvable path fails closed
 	// for a publisher-declaring plan rather than skipping the gate.
 	path string
+	// op labels the operation this verifier gates ("launch" or "install") so
+	// the fail-closed refusals read for the command the operator actually ran.
+	// The same keyringPublisherVerifier is wired on both the launch and install
+	// paths (#1900); only the message prefix and the trust-remediation tail
+	// differ by op. Empty defaults to "launch" so a zero-value struct (as some
+	// tests construct) keeps the historical launch wording.
+	op string
 	// diag receives the one-line trust/conflict diagnostic. Nil suppresses it.
 	diag io.Writer
+}
+
+// opLabel returns the operation label for the refusal prefix, defaulting an
+// empty op to "launch" so a zero-value verifier keeps the historical wording.
+func (v keyringPublisherVerifier) opLabel() string {
+	if v.op == "" {
+		return "launch"
+	}
+	return v.op
 }
 
 // VerifyPublisher implements runtime.PublisherVerifier. It loads the keyring,
@@ -40,16 +56,16 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 		// A malformed keyring is surfaced rather than silently failing closed,
 		// so the operator sees the parse error instead of a misleading
 		// "publisher not trusted" for an authority they believe they trusted.
-		return fmt.Errorf("skill launch: load keyring %q: %w", v.path, err)
+		return fmt.Errorf("skill %s: load keyring %q: %w", v.opLabel(), v.path, err)
 	}
 	res, err := keyring.PublisherTrust(publisher, signingKey)
 	if err != nil {
-		return fmt.Errorf("skill launch: resolve publisher trust for %s: %w", publisher, err)
+		return fmt.Errorf("skill %s: resolve publisher trust for %s: %w", v.opLabel(), publisher, err)
 	}
 	if !res.Trusted {
 		return fmt.Errorf(
-			"skill launch: publisher %s is not trusted for this plan's signing key (%s); trust it with `aileron keyring trust %s` or launch a plan you trust",
-			publisher, fingerprint(signingKey), publisher)
+			"skill %s: publisher %s is not trusted for this plan's signing key (%s); trust it with `aileron keyring trust %s` or %s a plan you trust",
+			v.opLabel(), publisher, fingerprint(signingKey), publisher, v.opLabel())
 	}
 	if v.diag != nil {
 		if res.Conflict {
@@ -68,5 +84,5 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 // plan that declares no publisher, so a publisher-less plan launches whether or
 // not this verifier is wired.
 var newLaunchPublisherVerifier = func(diag io.Writer) runtime.PublisherVerifier {
-	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), diag: diag}
+	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), op: "launch", diag: diag}
 }
