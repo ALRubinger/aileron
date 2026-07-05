@@ -5,11 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/pull"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 )
+
+// installPullTimeout bounds the registry pull so an unreachable or hung
+// registry fails the install rather than blocking the CLI indefinitely.
+const installPullTimeout = 5 * time.Minute
 
 // skillPullRun is a seam so tests exercise the OCI install flow (flag parsing,
 // error mapping, store write, list) with an in-memory oras target and no
@@ -37,7 +44,14 @@ var newInstallPublisherVerifier = func(diag io.Writer) pull.PublisherVerifier {
 func runSkillInstallOCI(ref string, stdout, stderr io.Writer) int {
 	s := store.New(skillStoreDir)
 
-	res, err := skillPullRun(context.Background(), pull.Options{
+	// Bound the network pull and honor Ctrl-C so a hung or unreachable registry
+	// fails fast instead of blocking the CLI indefinitely.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, installPullTimeout)
+	defer cancel()
+
+	res, err := skillPullRun(ctx, pull.Options{
 		Ref:      ref,
 		Verifier: newInstallPublisherVerifier(stderr),
 		Stdout:   stdout,

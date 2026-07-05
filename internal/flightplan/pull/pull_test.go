@@ -187,6 +187,33 @@ func TestRunMissingReferrerIsMissingArtifact(t *testing.T) {
 	}
 }
 
+// resolveFailTarget wraps a memory store but fails every Resolve with a
+// non-not-found error, standing in for an unreachable / unauthenticated
+// registry (where the failure is NOT a missing artifact).
+type resolveFailTarget struct {
+	*memory.Store
+	err error
+}
+
+func (r resolveFailTarget) Resolve(context.Context, string) (ocispec.Descriptor, error) {
+	return ocispec.Descriptor{}, r.err
+}
+
+func TestRunUnreachableRegistryNotMissingArtifact(t *testing.T) {
+	unreachable := errors.New("dial tcp: connection refused")
+	src := resolveFailTarget{Store: memory.New(), err: unreachable}
+	_, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:v1abc", Source: src})
+	if err == nil {
+		t.Fatal("want an error for an unreachable registry")
+	}
+	if errors.Is(err, ErrMissingArtifact) {
+		t.Errorf("err = %v, must NOT be classified as ErrMissingArtifact", err)
+	}
+	if !errors.Is(err, unreachable) {
+		t.Errorf("err = %v, want the underlying resolve error to remain inspectable", err)
+	}
+}
+
 func TestRunWrongArtifactType(t *testing.T) {
 	res, tag := mintArtifact(t, "")
 	st := memory.New()

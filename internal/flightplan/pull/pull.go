@@ -34,6 +34,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
+	"oras.land/oras-go/v2/errdef"
 	"oras.land/oras-go/v2/registry"
 )
 
@@ -167,10 +168,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 func fetchArtifact(ctx context.Context, src oras.ReadOnlyTarget, tag string) (store.FrozenVersion, freeze.Lockfile, error) {
 	desc, err := src.Resolve(ctx, tag)
 	if err != nil {
-		// An unreachable/anonymous registry or an absent tag surfaces here; the
-		// CLI maps the wrapped error to a precise message. A missing referrer at
-		// the version tag reads as "no such artifact".
-		return store.FrozenVersion{}, freeze.Lockfile{}, fmt.Errorf("%w: resolve %q: %v", ErrMissingArtifact, tag, err)
+		// Distinguish a genuinely absent referrer from a registry that is
+		// unreachable or refuses the request. Only a not-found resolve means
+		// "no published artifact at this tag" (ErrMissingArtifact); every other
+		// failure (network, auth, TLS) is surfaced verbatim so the CLI reports
+		// the real cause rather than a misleading "missing artifact". Both keep
+		// the original error inspectable via errors.Unwrap.
+		if errors.Is(err, errdef.ErrNotFound) {
+			return store.FrozenVersion{}, freeze.Lockfile{}, fmt.Errorf("%w: resolve %q: %w", ErrMissingArtifact, tag, err)
+		}
+		return store.FrozenVersion{}, freeze.Lockfile{}, fmt.Errorf("pull: resolve artifact %q: %w", tag, err)
 	}
 	raw, err := content.FetchAll(ctx, src, desc)
 	if err != nil {

@@ -8,6 +8,7 @@ package ociremote
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"oras.land/oras-go/v2/registry"
@@ -50,11 +51,16 @@ func NewRepository(ref string) (*remote.Repository, error) {
 }
 
 // isLoopbackRegistry reports whether host addresses a loopback registry, which
-// is served over plain HTTP rather than HTTPS.
+// is served over plain HTTP rather than HTTPS. It handles a bare host, a
+// host:port, and bracketed IPv6 (`[::1]` / `[::1]:5000`): net.SplitHostPort
+// strips a port when present, and the surviving brackets are removed before
+// comparing, so `localhost`, `127.0.0.1`, and `::1` all resolve correctly with
+// or without a port.
 func isLoopbackRegistry(host string) bool {
 	h := host
-	if i := strings.LastIndex(h, ":"); i >= 0 {
-		h = h[:i]
+	if hostOnly, _, err := net.SplitHostPort(h); err == nil {
+		h = hostOnly
 	}
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
 	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
