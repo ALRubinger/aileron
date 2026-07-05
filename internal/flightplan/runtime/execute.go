@@ -344,14 +344,38 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 	// runner fails closed rather than run a sealed step unscoped).
 	sealed, hasSealed := x.stepTrust[step.ID]
 
+	// Instantiate the sealed reach TEMPLATE into the concrete hosts the
+	// step-scope mint enforces (#1959), BEFORE building the reach record or the
+	// ToolStepSpec: each `{{ inputs.<name> }}` host token becomes the
+	// constrained input's string form (resolved from the plan inputs,
+	// st.inputs.Values), and the result is re-checked to the host[:port] shape
+	// so a bad instantiation fails the step closed rather than reaching the
+	// mint. Freeze sealed the TEMPLATE (covered by the signature); the runtime
+	// resolves it here, so the proxy only ever sees the concrete host and the
+	// exact-match stays exact-match. A token-free host instantiates to itself,
+	// so existing non-templated plans are unchanged; a step with no sealed
+	// reach yields nil (no hosts minted), exactly as before.
+	instSealedHosts, err := instantiateHosts(sealed.Hosts, st.inputs.Values)
+	if err != nil {
+		return nil, fmt.Errorf("flightplan: step %q trust-contract host interpolation: %w", step.ID, err)
+	}
+
 	// Record the step's network reach before the execution, so the record is
 	// captured regardless of the run outcome (a nil runner, a subprocess
 	// error). A step that declared no trust contract records nothing (never a
-	// synthesized empty contract).
+	// synthesized empty contract). The recorded hosts are the INSTANTIATED
+	// hosts, so the audit reach record shows the concrete host the step ran
+	// under, not the sealed template.
 	if step.TrustContract != nil {
-		hosts := step.TrustContract.Hosts
-		if hasSealed {
-			hosts = sealed.Hosts
+		hosts := instSealedHosts
+		if !hasSealed {
+			// Unenforced fallback (frontmatter reach, enforced:false — only
+			// reachable outside the verified load path): instantiate the
+			// frontmatter template so the audit still shows the concrete host.
+			hosts, err = instantiateHosts(step.TrustContract.Hosts, st.inputs.Values)
+			if err != nil {
+				return nil, fmt.Errorf("flightplan: step %q trust-contract host interpolation: %w", step.ID, err)
+			}
 		}
 		st.reaches = append(st.reaches, reachRecord{
 			StepID:   step.ID,
@@ -400,7 +424,7 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 		MountPath:   step.MountPath,
 		Input:       resolved,
 		CollectPath: step.CollectPath,
-		Hosts:       sealed.Hosts,
+		Hosts:       instSealedHosts,
 	}
 	res, err := x.toolRunner.Run(ctx, spec)
 	if err != nil {

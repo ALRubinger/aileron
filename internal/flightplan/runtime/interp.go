@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 )
@@ -60,4 +61,56 @@ func instantiateCommand(cmd []string, values map[string]any) (resolved []string,
 		derivedIdx = append(derivedIdx, i)
 	}
 	return resolved, derivedIdx, nil
+}
+
+// hostShapePattern re-validates an INSTANTIATED host to the host[:port] shape
+// (no scheme, no path). It mirrors the daemon-side step-scope registry pattern
+// (sandboxProxyStepScopeHostPattern in
+// internal/app/handlers_sandbox_proxy_step_scopes.go): the runtime package
+// cannot import the app package, so the shape is defined locally and the two
+// must stay in sync. It is the FAIL-CLOSED re-check after substitution, so a
+// constraint that admitted a value carrying a scheme, path, or other non-host
+// byte can never reach the step-scope mint.
+var hostShapePattern = regexp.MustCompile(`^[a-zA-Z0-9.-]+(:[0-9]+)?$`)
+
+// instantiateHosts resolves a tool step's sealed host TEMPLATES into the
+// concrete hosts the step-scope mint enforces (#1959), substituting each
+// `{{ inputs.<name> }}` token with the string form of the resolved plan input
+// (fmt.Sprintf("%v", v), matching instantiateCommand and the constraint
+// enforcement in enforceConstraint). Host tokens reference PLAN inputs, so the
+// lookup is against values (ResolvedInputs.Values), the same source
+// instantiateCommand uses.
+//
+// After substitution each host is re-validated to the host[:port] shape; a
+// violation is a hard error so a bad instantiation never reaches the mint:
+// instantiate first, then exact-match, never wildcard. A token naming an input
+// with no resolved value is a hard error (decode rejects an undeclared input
+// and every declared input is resolved at the launch boundary, so this only
+// fires on a directly-constructed plan and fails closed).
+//
+// A token-free host instantiates to itself and still passes the shape re-check,
+// so existing non-templated plans are unchanged. A nil/empty input yields nil,
+// so a step with no sealed reach mints no hosts exactly as before.
+func instantiateHosts(hosts []string, values map[string]any) ([]string, error) {
+	if len(hosts) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(hosts))
+	for i, h := range hosts {
+		inst, err := manifest.SubstituteInputs(h, func(name string) (string, bool) {
+			v, ok := values[name]
+			if !ok {
+				return "", false
+			}
+			return fmt.Sprintf("%v", v), true
+		})
+		if err != nil {
+			return nil, err
+		}
+		if !hostShapePattern.MatchString(inst) {
+			return nil, fmt.Errorf("instantiated host %q (from template %q) is not a valid host[:port] (no scheme, no path)", inst, h)
+		}
+		out[i] = inst
+	}
+	return out, nil
 }

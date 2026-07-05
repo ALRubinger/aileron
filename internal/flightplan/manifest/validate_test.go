@@ -800,3 +800,144 @@ func TestToolStepValidity(t *testing.T) {
 		})
 	}
 }
+
+// TestTrustContractTemplatedHost locks the relaxed host pattern at the schema
+// boundary (#1959): a tool step's trustContract host may embed
+// `{{ inputs.<name> }}` interpolation tokens so freeze can seal a host
+// TEMPLATE, but the template still admits no URL scheme and no path — the
+// relaxation adds the token grammar only, it does not widen the host
+// vocabulary. Both the authoring surface (a tool step's trustContract) and the
+// sealed surface (lock.stepTrust) share the shared trustContract host item, so
+// both must accept a template.
+func TestTrustContractTemplatedHost(t *testing.T) {
+	toolStepValid := map[string]string{
+		"single-token host": `    - id: fetch
+      kind: tool
+      command:
+        - aws
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - athena.{{ inputs.aws_region }}.amazonaws.com
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result`,
+		"templated host with explicit port": `    - id: fetch
+      kind: tool
+      command:
+        - aws
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - athena.{{ inputs.aws_region }}.amazonaws.com:443
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result`,
+		"tight-brace token": `    - id: fetch
+      kind: tool
+      command:
+        - aws
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - athena.{{inputs.aws_region}}.amazonaws.com
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result`,
+	}
+	for name, steps := range toolStepValid {
+		t.Run("valid/tool-step/"+name, func(t *testing.T) {
+			if err := validateFrontmatter(toolStepFrontmatter(steps)); err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+		})
+	}
+
+	toolStepInvalid := map[string]string{
+		"scheme-prefixed template still rejected": `    - id: fetch
+      kind: tool
+      command:
+        - aws
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - https://athena.{{ inputs.aws_region }}.amazonaws.com
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result`,
+		"path-suffixed template still rejected": `    - id: fetch
+      kind: tool
+      command:
+        - aws
+      outputs:
+        - listing
+      trustContract:
+        credential:
+          kind: none
+        hosts:
+          - athena.{{ inputs.aws_region }}.amazonaws.com/v1
+        effect: read
+        idempotency:
+          safeToRetry: true
+        audit:
+          fields:
+            - result`,
+	}
+	for name, steps := range toolStepInvalid {
+		t.Run("invalid/tool-step/"+name, func(t *testing.T) {
+			err := validateFrontmatter(toolStepFrontmatter(steps))
+			if err == nil {
+				t.Fatalf("expected validation error for %q, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "schema validation") {
+				t.Errorf("error should cite schema validation, got: %v", err)
+			}
+		})
+	}
+
+	// The sealed surface (lock.stepTrust) shares the same host item, so a
+	// sealed TEMPLATE host must validate too (freeze writes it verbatim) while
+	// a sealed scheme-prefixed host stays rejected.
+	t.Run("valid/lock/templated sealed host", func(t *testing.T) {
+		lock := `    stepTrust:
+      fetch:
+        hosts:
+          - athena.{{ inputs.aws_region }}.amazonaws.com`
+		if err := validateFrontmatter(lockFrontmatter(lock)); err != nil {
+			t.Fatalf("a sealed templated host must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/lock/scheme-prefixed sealed template", func(t *testing.T) {
+		lock := `    stepTrust:
+      fetch:
+        hosts:
+          - https://athena.{{ inputs.aws_region }}.amazonaws.com`
+		if err := validateFrontmatter(lockFrontmatter(lock)); err == nil {
+			t.Fatal("a sealed scheme-prefixed host must stay rejected even with a token")
+		}
+	})
+}

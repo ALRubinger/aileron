@@ -127,8 +127,8 @@
           "minItems": 1,
           "items": {
             "type": "string",
-            "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
-            "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+            "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443). An entry may embed one or more `{{ inputs.<name> }}` interpolation tokens (for example athena.{{ inputs.aws_region }}.amazonaws.com), substituted with a resolved input's string form at launch; the token form is instantiated only on a tool step's trust contract, where freeze seals the TEMPLATE host and the runtime enforces the INSTANTIATED host. The referenced input must declare a constraint (an enum or pattern); an unconstrained input in a sealed host position is an injection surface and freeze rejects it. The template still admits no scheme and no path.",
+            "pattern": "^(\\{\\{\\s*inputs\\.[a-zA-Z0-9_-]+\\s*\\}\\}|[a-zA-Z0-9.-])+(?::[0-9]+)?$"
           }
         },
         "paths": {
@@ -607,7 +607,7 @@
         },
         "trustContract": {
           "$ref": "#/$defs/trustContract",
-          "description": "The optional per-step trust contract for this tool step. It reuses the per-action trust-contract shape: its `hosts` declare the step's network reach, the access-scope declaration that IS the security boundary, and `effect` records the operation effect. Freeze seals the declared reach so it is covered by the signature and not re-suppliable at launch. Optional: a tool step with no trust contract declares no reach; a declared contract must be non-empty (hosts minItems:1)."
+          "description": "The optional per-step trust contract for this tool step. It reuses the per-action trust-contract shape: its `hosts` declare the step's network reach, the access-scope declaration that IS the security boundary, and `effect` records the operation effect. A host entry may embed `{{ inputs.<name> }}` interpolation tokens (for example athena.{{ inputs.aws_region }}.amazonaws.com); freeze seals the TEMPLATE host verbatim (covered by the signature, not re-suppliable at launch) and the runtime instantiates it from the resolved inputs before minting the step scope, so the proxy only ever sees the concrete host. A token must reference an input that declares a constraint (an enum or pattern); an unconstrained input in a sealed host position is an injection surface and freeze rejects it. Freeze seals the declared reach so it is covered by the signature and not re-suppliable at launch. Optional: a tool step with no trust contract declares no reach; a declared contract must be non-empty (hosts minItems:1)."
         },
         "outputs": { "$ref": "#/$defs/stepOutputs" },
         "materializesOutput": { "$ref": "#/$defs/materializesOutput" }
@@ -682,12 +682,12 @@
             "properties": {
               "hosts": {
                 "type": "array",
-                "description": "The sealed network reach from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary.",
+                "description": "The sealed network reach from the step's declared trust contract. Each entry is a host with an optional port, no scheme, no path, reusing the trustContract `hosts` vocabulary. Freeze seals a host TEMPLATE verbatim, so an entry may carry `{{ inputs.<name> }}` interpolation tokens (for example athena.{{ inputs.aws_region }}.amazonaws.com); the runtime instantiates the template from the resolved inputs before minting the step scope, and the daemon-side step-scope registry only ever validates the concrete instantiated host.",
                 "minItems": 1,
                 "items": {
                   "type": "string",
-                  "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443).",
-                  "pattern": "^[a-zA-Z0-9.-]+(?::[0-9]+)?$"
+                  "description": "An allowed upstream host with an optional port, no scheme, no path (for example api.example.com or api.example.com:443). It may be a sealed TEMPLATE carrying `{{ inputs.<name> }}` tokens, instantiated at launch before the step-scope mint. The template still admits no scheme and no path.",
+                  "pattern": "^(\\{\\{\\s*inputs\\.[a-zA-Z0-9_-]+\\s*\\}\\}|[a-zA-Z0-9.-])+(?::[0-9]+)?$"
                 }
               }
             }

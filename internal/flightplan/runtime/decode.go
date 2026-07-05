@@ -243,6 +243,27 @@ func validateReferences(p *Plan, inputNames map[string]bool, stepIndex map[strin
 				}
 			}
 		}
+		// Each `{{ inputs.<name> }}` token in a tool step's trustContract host
+		// must name a declared input (#1959), mirroring the command check above.
+		// The grammar was validated at populateToolStep; here the resolved refs
+		// are checked against the declared set so an unknown input is refused at
+		// launch load, not only at freeze. Host templates are instantiated only
+		// on tool steps (a per-action contract's hosts are never substituted),
+		// so this is scoped to a tool step's own contract. The constraint-
+		// presence guard stays freeze-only per the plan.
+		if s.TrustContract != nil {
+			for _, host := range s.TrustContract.Hosts {
+				refs, err := commandInputRefs(host)
+				if err != nil {
+					return decodeErrf("step %q trustContract host %q: %v", s.ID, host, err)
+				}
+				for _, ref := range refs {
+					if !inputNames[ref] {
+						return decodeErrf("step %q trustContract host references undeclared input %q", s.ID, ref)
+					}
+				}
+			}
+		}
 	}
 	return nil
 }

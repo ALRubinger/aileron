@@ -110,6 +110,13 @@ func Lint(m *manifest.Manifest) error {
 	if err := lintCommandInterpolation(m); err != nil {
 		return err
 	}
+	// Guard the embedded host-interpolation grammar (#1959): a
+	// `{{ inputs.<name> }}` token in a tool step's sealed trustContract host
+	// must name a declared, CONSTRAINED input, or it is an injection surface on
+	// the step's egress. Same freeze-only constraint-presence rule as commands.
+	if err := lintHostInterpolation(m); err != nil {
+		return err
+	}
 	return nil
 }
 

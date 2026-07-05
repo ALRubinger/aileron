@@ -426,3 +426,66 @@ func TestSandboxForwardProxy_ReleasedScopeNoLongerConnects(t *testing.T) {
 		t.Errorf("error = %v, want a 407 Proxy Authentication Required refusal", err)
 	}
 }
+
+// TestSandboxProxyStepScopeAllowsHost_ExactMatchNoWildcard locks the proxy
+// boundary contract for templated trust-contract hosts (#1959): the runtime
+// instantiates a host TEMPLATE (for example athena.{{ inputs.aws_region }}.
+// amazonaws.com) into a CONCRETE host before minting the step scope, and the
+// daemon-side registry admits ONLY that exact instantiated host. A sibling of
+// the instantiated host (a different region's Athena endpoint) is denied — the
+// match is exact string, never a wildcard or suffix over the template. Also
+// covers the host:443 form both the bare and ported reach entries admit.
+func TestSandboxProxyStepScopeAllowsHost_ExactMatchNoWildcard(t *testing.T) {
+	// The scope carries only the INSTANTIATED host; the template never reaches
+	// the daemon (its strict host[:port] pattern would reject a `{{`).
+	scope := sandboxProxyStepScope{
+		SessionID: "s",
+		StepID:    "fetch",
+		Hosts:     []string{"athena.us-east-1.amazonaws.com"},
+	}
+	cases := map[string]struct {
+		target string
+		want   bool
+	}{
+		"exact instantiated host admitted":           {"athena.us-east-1.amazonaws.com", true},
+		"exact instantiated host with :443 admitted": {"athena.us-east-1.amazonaws.com:443", true},
+		"sibling region denied (no wildcard)":        {"athena.us-west-2.amazonaws.com", false},
+		"different service on same domain denied":    {"s3.us-east-1.amazonaws.com", false},
+		"parent domain denied (no suffix match)":     {"amazonaws.com", false},
+		"prefix-extended host denied":                {"evil-athena.us-east-1.amazonaws.com", false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := sandboxProxyStepScopeAllowsHost(scope, c.target); got != c.want {
+				t.Errorf("AllowsHost(%q) = %v, want %v (exact match, no wildcard over the instantiated host)", c.target, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSandboxProxyStepScopeRejectsTemplateHostShape proves the daemon's
+// step-scope host pattern rejects a raw TEMPLATE host outright (#1959): only
+// the runtime instantiates a template, and the daemon must only ever receive
+// concrete hosts, so the mint refuses a `{{ inputs.<name> }}` entry with 400.
+//
+// The pattern is anchored (`^...$`), so MatchString admits a value ONLY when the
+// WHOLE string matches, never a substring. The template deliberately embeds
+// valid host substrings (`athena.`, `.amazonaws.com`) around the token to prove
+// the full-string rejection is not fooled by an inner concrete run.
+func TestSandboxProxyStepScopeRejectsTemplateHostShape(t *testing.T) {
+	rejectedTemplates := []string{
+		"athena.{{ inputs.aws_region }}.amazonaws.com", // token between valid host runs
+		"{{ inputs.aws_region }}",                      // whole-host token
+		"athena.{{ inputs.aws_region }}.amazonaws.com:443",
+	}
+	for _, tmpl := range rejectedTemplates {
+		if loc := sandboxProxyStepScopeHostPattern.FindStringIndex(tmpl); loc != nil {
+			t.Errorf("the daemon step-scope host pattern must reject the raw template %q (matched %q); only instantiated hosts reach the daemon", tmpl, tmpl[loc[0]:loc[1]])
+		}
+	}
+	for _, concrete := range []string{"athena.us-east-1.amazonaws.com", "athena.us-east-1.amazonaws.com:443"} {
+		if !sandboxProxyStepScopeHostPattern.MatchString(concrete) {
+			t.Errorf("the daemon step-scope host pattern must admit a concrete instantiated host %q", concrete)
+		}
+	}
+}
