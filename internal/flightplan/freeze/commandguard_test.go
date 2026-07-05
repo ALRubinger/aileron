@@ -132,6 +132,31 @@ func TestLint_CommandPatternConstraintAccepted(t *testing.T) {
 	}
 }
 
+// TestLint_CommandEmptyConstraintRejected proves a present-but-empty constraint
+// block (constraint: {}) never counts as constrained: it carries neither an
+// enum nor a pattern, so an input declaring it in a sealed command position is
+// still an injection surface and the freeze must fail closed. This pins the
+// guard's own presence test so it does not silently depend on schema-time
+// validation rejecting an empty constraint upstream.
+func TestLint_CommandEmptyConstraintRejected(t *testing.T) {
+	in := map[string]any{
+		"name": "region", "type": "string",
+		"resolution": map[string]any{"rule": "literal", "default": "us-east-1"},
+		"constraint": map[string]any{},
+	}
+	m := manifestWithInputsAndSteps(
+		[]any{in},
+		[]any{toolStepWithCommand("q", "query", "--region={{ inputs.region }}")},
+	)
+	err := Lint(m)
+	if err == nil {
+		t.Fatal("a command referencing an input with an empty constraint block must be rejected")
+	}
+	if !strings.Contains(err.Error(), "declares no constraint") {
+		t.Errorf("error should explain the input declares no constraint, got: %v", err)
+	}
+}
+
 // interpToolStepMD is a full valid SKILL.md whose tool command interpolates a
 // constrained input, used to prove freeze seals the TEMPLATE argv verbatim.
 const interpToolStepMD = `---
