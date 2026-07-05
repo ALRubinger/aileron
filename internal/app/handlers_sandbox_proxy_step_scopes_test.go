@@ -467,11 +467,25 @@ func TestSandboxProxyStepScopeAllowsHost_ExactMatchNoWildcard(t *testing.T) {
 // step-scope host pattern rejects a raw TEMPLATE host outright (#1959): only
 // the runtime instantiates a template, and the daemon must only ever receive
 // concrete hosts, so the mint refuses a `{{ inputs.<name> }}` entry with 400.
+//
+// The pattern is anchored (`^...$`), so MatchString admits a value ONLY when the
+// WHOLE string matches, never a substring. The template deliberately embeds
+// valid host substrings (`athena.`, `.amazonaws.com`) around the token to prove
+// the full-string rejection is not fooled by an inner concrete run.
 func TestSandboxProxyStepScopeRejectsTemplateHostShape(t *testing.T) {
-	if sandboxProxyStepScopeHostPattern.MatchString("athena.{{ inputs.aws_region }}.amazonaws.com") {
-		t.Fatal("the daemon step-scope host pattern must reject a raw template host; only instantiated hosts reach the daemon")
+	rejectedTemplates := []string{
+		"athena.{{ inputs.aws_region }}.amazonaws.com", // token between valid host runs
+		"{{ inputs.aws_region }}",                      // whole-host token
+		"athena.{{ inputs.aws_region }}.amazonaws.com:443",
 	}
-	if !sandboxProxyStepScopeHostPattern.MatchString("athena.us-east-1.amazonaws.com") {
-		t.Error("the daemon step-scope host pattern must admit a concrete instantiated host")
+	for _, tmpl := range rejectedTemplates {
+		if loc := sandboxProxyStepScopeHostPattern.FindStringIndex(tmpl); loc != nil {
+			t.Errorf("the daemon step-scope host pattern must reject the raw template %q (matched %q); only instantiated hosts reach the daemon", tmpl, tmpl[loc[0]:loc[1]])
+		}
+	}
+	for _, concrete := range []string{"athena.us-east-1.amazonaws.com", "athena.us-east-1.amazonaws.com:443"} {
+		if !sandboxProxyStepScopeHostPattern.MatchString(concrete) {
+			t.Errorf("the daemon step-scope host pattern must admit a concrete instantiated host %q", concrete)
+		}
 	}
 }
