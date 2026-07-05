@@ -24,6 +24,7 @@ func TestParseAWSEndpointHostVectors(t *testing.T) {
 		{"dualstack", "s3.dualstack.us-west-2.amazonaws.com", "s3", "us-west-2"},
 		{"fips", "s3-fips.us-east-1.amazonaws.com", "s3", "us-east-1"},
 		{"fips-dualstack", "s3-fips.dualstack.us-east-1.amazonaws.com", "s3", "us-east-1"},
+		{"api-ecr", "api.ecr.us-east-1.amazonaws.com", "ecr", "us-east-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
