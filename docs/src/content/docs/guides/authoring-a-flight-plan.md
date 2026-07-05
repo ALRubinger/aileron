@@ -123,6 +123,7 @@ Every input the plan depends on is declared in `inputs[]`, each with a resolutio
 - `type` is one of `string`, `number`, `boolean`, `timestamp`, `object`, `array`.
 - `description` is optional human-readable semantics.
 - `resolution` is the resolution rule, discriminated by its `rule` field.
+- `constraint` is an optional bound on the resolved value.
 
 There are three resolution rules.
 
@@ -131,6 +132,26 @@ There are three resolution rules.
 - `source` reads from a live source. Its `source.actionRef` names the action whose result resolves the input, with an optional `source.select`.
 
 Inputs resolve once, at the launch boundary, into a concrete resolved-input set. Two steps that read the same dynamic input see one value. A `source` read happens in the resolution phase, before the step graph walks, so it is not a graph edge.
+
+An input can carry an optional `constraint` that bounds its resolved value. A constraint holds exactly one of two forms. An `enum` is a non-empty array of allowed string values, and the resolved value's string form must equal one entry. A `pattern` is a non-empty author-anchored Go RE2 regexp, and the resolved value's string form must match it. Declaring both forms at once, an empty `enum`, an empty `pattern`, or a pattern that does not compile is a bad shape rejected at freeze and at decode. A resolved value that falls outside its constraint is rejected at launch and the launch fails closed. The constraint applies to any resolution rule, and the check is over the value's string form, so a number or timestamp input stays bounded.
+
+```yaml
+  inputs:
+    - name: environment
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        enum:
+          - prod
+          - staging
+    - name: aws_region
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        pattern: "^[a-z]{2}-[a-z]+-[0-9]$"
+```
 
 ## Outputs
 

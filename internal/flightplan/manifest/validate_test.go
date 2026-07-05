@@ -86,6 +86,117 @@ body
 	}
 }
 
+// inputConstraintFrontmatter wraps a single input's YAML into a complete,
+// otherwise-valid aileron frontmatter so a test exercises only the input
+// constraint validity rules. inputBlock is the YAML for one inputs array item,
+// indented to sit under `inputs:`.
+func inputConstraintFrontmatter(inputBlock string) []byte {
+	return []byte(`name: s
+description: d
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+          audit:
+            fields:
+              - result
+  inputs:
+` + inputBlock + `
+  outputs: []
+`)
+}
+
+// TestInputConstraintValidity locks the input constraint at the schema
+// boundary (#1957). A declared constraint holds exactly one of a non-empty
+// enum (string array) or a non-empty pattern. Both present matches neither
+// oneOf branch and is rejected; an empty enum fails minItems; an empty pattern
+// fails minLength. A constraint is optional, so an input with none validates.
+func TestInputConstraintValidity(t *testing.T) {
+	valid := map[string]string{
+		"enum": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        enum:
+          - prod
+          - staging`,
+		"pattern": `    - name: region
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        pattern: "^us-[a-z]+-[0-9]$"`,
+		"no constraint": `    - name: window
+      type: number
+      resolution:
+        rule: literal`,
+	}
+	for name, in := range valid {
+		t.Run("valid/"+name, func(t *testing.T) {
+			if err := validateFrontmatter(inputConstraintFrontmatter(in)); err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+		})
+	}
+
+	invalid := map[string]string{
+		"both enum and pattern": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        enum:
+          - prod
+        pattern: "^prod$"`,
+		"empty enum": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        enum: []`,
+		"empty pattern": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        pattern: ""`,
+		"non-string enum entry": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        enum:
+          - 7`,
+		"unknown constraint key": `    - name: env
+      type: string
+      resolution:
+        rule: literal
+      constraint:
+        regex: "^prod$"`,
+	}
+	for name, in := range invalid {
+		t.Run("invalid/"+name, func(t *testing.T) {
+			err := validateFrontmatter(inputConstraintFrontmatter(in))
+			if err == nil {
+				t.Fatalf("expected validation error for %q, got nil", name)
+			}
+			if !strings.Contains(err.Error(), "schema validation") {
+				t.Errorf("error should cite schema validation, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestParseToolOnlyPlanNeedsNoActions is the #1932 regression: a tool-only
 // plan whose every effectful step is an in-container tool step dispatches no
 // connector action, so it must not be forced to declare a dummy

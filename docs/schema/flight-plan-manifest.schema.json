@@ -328,8 +328,38 @@
           "type": "string",
           "description": "Human-readable semantics of the input."
         },
-        "resolution": { "$ref": "#/$defs/resolution" }
+        "resolution": { "$ref": "#/$defs/resolution" },
+        "constraint": { "$ref": "#/$defs/inputConstraint" }
       }
+    },
+    "inputConstraint": {
+      "type": "object",
+      "description": "OPTIONAL resolution constraint bounding the resolved value. Exactly one of enum or pattern. A bad shape (both present, an empty enum, an empty pattern) fails closed at freeze/decode; an out-of-constraint resolved value is rejected at the launch/resolution boundary. JSON Schema validates only the shape; RE2 compilability of a pattern is checked at decode.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["enum"],
+          "properties": {
+            "enum": {
+              "type": "array",
+              "description": "The closed set of allowed values. The resolved value's string form must equal one entry.",
+              "minItems": 1,
+              "items": { "type": "string" }
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["pattern"],
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "An author-anchored Go RE2 regexp the resolved value's string form must match.",
+              "minLength": 1
+            }
+          }
+        }
+      ]
     },
     "resolution": {
       "type": "object",

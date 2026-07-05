@@ -1,5 +1,10 @@
 package runtime
 
+import (
+	"regexp"
+	"strings"
+)
+
 // The DTOs in this file mirror the manifest schema wire shapes. They are the
 // strict-decode boundary: the loosely-typed manifest `[]any`/`map[string]any`
 // elements round-trip through these structs (via remarshal) and the toX
@@ -109,6 +114,15 @@ type inputDTO struct {
 			Select    string `yaml:"select"`
 		} `yaml:"source"`
 	} `yaml:"resolution"`
+	// Constraint is the optional resolution constraint. A pointer distinguishes
+	// an absent constraint from an empty one; the strict KnownFields decoder
+	// requires the field to exist on the DTO or a manifest carrying it is
+	// refused. Exactly one of Enum/Pattern is populated; toInput enforces that
+	// as defense-in-depth over the schema oneOf.
+	Constraint *struct {
+		Enum    []string `yaml:"enum"`
+		Pattern string   `yaml:"pattern"`
+	} `yaml:"constraint"`
 }
 
 var validInputTypes = map[string]InputType{
@@ -148,7 +162,53 @@ func (d inputDTO) toInput() (Input, error) {
 	default:
 		return Input{}, decodeErrf("input %q: unknown resolution rule %q", d.Name, d.Resolution.Rule)
 	}
-	return Input{Name: d.Name, Type: it, Description: d.Description, Resolution: res}, nil
+	con, err := d.toConstraint()
+	if err != nil {
+		return Input{}, err
+	}
+	return Input{Name: d.Name, Type: it, Description: d.Description, Resolution: res, Constraint: con}, nil
+}
+
+// toConstraint validates the optional input constraint and compiles a pattern
+// once. It is the fail-closed gate for the one thing the schema cannot check
+// (RE2 compilability) and re-checks the exactly-one-of-enum-or-pattern shape so
+// the typed path refuses a bad constraint even when a caller bypasses schema
+// validation. An absent constraint returns (nil, nil): unconstrained is the
+// default and today's behavior.
+func (d inputDTO) toConstraint() (*Constraint, error) {
+	if d.Constraint == nil {
+		return nil, nil
+	}
+	hasEnum := len(d.Constraint.Enum) > 0
+	// Surrounding whitespace on a pattern is not significant: a YAML block
+	// scalar can append a trailing newline that would otherwise silently change
+	// the enforced regexp (an anchored "^x$" would become "^x$\n"). Trim once
+	// and use the trimmed text for both the presence check and the compile, so
+	// detection and enforcement never disagree and a whitespace-only pattern is
+	// refused as the plan requires.
+	pattern := strings.TrimSpace(d.Constraint.Pattern)
+	hasPattern := pattern != ""
+	switch {
+	case hasEnum && hasPattern:
+		return nil, decodeErrf("input %q: constraint declares both enum and pattern (exactly one is allowed)", d.Name)
+	case hasEnum:
+		for _, e := range d.Constraint.Enum {
+			if e == "" {
+				return nil, decodeErrf("input %q: constraint enum has an empty value", d.Name)
+			}
+		}
+		return &Constraint{Enum: d.Constraint.Enum}, nil
+	case hasPattern:
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, decodeErrf("input %q: constraint pattern %q does not compile as a Go RE2 regexp: %v", d.Name, pattern, err)
+		}
+		return &Constraint{Pattern: re}, nil
+	default:
+		// The constraint block is present but names neither enum nor pattern
+		// (or an empty enum with an absent pattern): a bad shape, refused.
+		return nil, decodeErrf("input %q: constraint declares neither a non-empty enum nor a pattern (exactly one is required)", d.Name)
+	}
 }
 
 // ---- output ----

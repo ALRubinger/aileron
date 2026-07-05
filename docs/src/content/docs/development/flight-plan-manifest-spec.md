@@ -137,6 +137,14 @@ The closed `audit.fields` set is `connector-hash`, `action-manifest-version`, `c
 | `type` | string | Yes | One of `string`, `number`, `boolean`, `timestamp`, `object`, `array`. |
 | `description` | string | No | Human-readable semantics. |
 | `resolution` | object | Yes | The resolution rule. One of `literal`, `dynamic`, or `source`. |
+| `constraint` | object | No | An optional bound on the resolved value. Exactly one of `enum` or `pattern`. |
+
+The optional `constraint` block:
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `enum` | array | Exactly one of `enum`/`pattern` | The closed set of allowed string values. The resolved value's string form must equal one entry. Non-empty. |
+| `pattern` | string | Exactly one of `enum`/`pattern` | An author-anchored Go RE2 regexp the resolved value's string form must match. Non-empty. |
 
 ### `outputs[]`
 
@@ -232,6 +240,8 @@ There are three resolution rules, discriminated by the `rule` field.
 | `literal` | none beyond `rule` | A value passed at launch. An optional `default` applies when no value is passed. |
 | `dynamic` | `value` | A launch-relative value resolved once at launch. `value` is `now` (the launch timestamp) or `today` (the launch date). |
 | `source` | `source` | A read from a live source. `source.actionRef` names the action whose result resolves the input, with an optional `source.select`. |
+
+An input may declare an optional `constraint` that bounds its resolved value. A constraint holds exactly one of two forms. An `enum` is a non-empty array of allowed string values, and the resolved value's string form must equal one entry. A `pattern` is a non-empty author-anchored Go RE2 regexp, and the resolved value's string form must match it. Declaring both forms, an empty `enum`, or an empty `pattern` is a bad shape that fails closed at freeze and at decode. A pattern that does not compile as a Go RE2 regexp is refused at decode, the one check the schema cannot express. The constraint applies regardless of the resolution rule, so a literal, a dynamic, or a source input can all be bounded. Enforcement happens once at the launch boundary. A resolved value that falls outside its constraint is rejected there and the launch fails closed. The comparison is over the value's string form, so a number or timestamp input stays checkable.
 
 ## Outputs contract versus file-map transport
 

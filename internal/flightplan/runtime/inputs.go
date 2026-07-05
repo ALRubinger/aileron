@@ -78,7 +78,42 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 			return ResolvedInputs{}, fmt.Errorf("input %q: unhandled resolution rule %q", in.Name, in.Resolution.Rule)
 		}
 	}
+
+	// Enforce declared constraints against the resolved values as a final pass,
+	// once every input has a value. This is the single launch/resolution
+	// boundary where a resolved value exists: an out-of-constraint value fails
+	// the launch closed here, with no permissive fallback. An input with no
+	// declared constraint is unchecked (today's behavior).
+	for _, in := range p.Inputs {
+		if in.Constraint == nil {
+			continue
+		}
+		if err := enforceConstraint(in.Name, ri.Values[in.Name], in.Constraint); err != nil {
+			return ResolvedInputs{}, err
+		}
+	}
 	return ri, nil
+}
+
+// enforceConstraint checks a resolved value against its declared constraint.
+// The comparison is over the value's string form (fmt.Sprintf("%v", v)), so a
+// number or timestamp input stays checkable: enum requires equality with one
+// allowed string, pattern requires the compiled regexp to match. A violation
+// names the input, the value, and the constraint so the failure is actionable.
+func enforceConstraint(name string, v any, c *Constraint) error {
+	s := fmt.Sprintf("%v", v)
+	if c.Pattern != nil {
+		if !c.Pattern.MatchString(s) {
+			return fmt.Errorf("input %q resolved to %q, which does not match the required pattern %q", name, s, c.Pattern.String())
+		}
+		return nil
+	}
+	for _, allowed := range c.Enum {
+		if s == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("input %q resolved to %q, which is not one of the allowed values %v", name, s, c.Enum)
 }
 
 // resolveLiteral resolves a literal input: the launch override wins, then the

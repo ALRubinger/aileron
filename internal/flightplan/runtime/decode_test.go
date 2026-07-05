@@ -333,6 +333,135 @@ func TestDecode_SourceInputIsNotAStepEdge(t *testing.T) {
 	}
 }
 
+// constrainedInput builds a raw literal input map carrying a constraint block,
+// the shape the manifest carries (map[string]any), so the runtime decoder's own
+// constraint guards run on inputs the schema would otherwise reject upstream.
+func constrainedInput(name string, constraint map[string]any) any {
+	return map[string]any{
+		"name": name, "type": "string",
+		"resolution": map[string]any{"rule": "literal"},
+		"constraint": constraint,
+	}
+}
+
+// oneStep is a trivial valid step so Decode reaches the input decode and, on
+// valid inputs, completes with a non-empty step graph.
+func oneStep() []any {
+	return []any{step(map[string]any{"id": "s1", "kind": "transform", "outputs": []any{"x"}})}
+}
+
+func TestDecode_ConstraintEnumPopulated(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("env", map[string]any{"enum": []any{"prod", "staging"}})},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	c := p.Inputs[0].Constraint
+	if c == nil {
+		t.Fatal("constraint must be populated")
+	}
+	if c.Pattern != nil {
+		t.Error("an enum constraint must not compile a pattern")
+	}
+	if len(c.Enum) != 2 || c.Enum[0] != "prod" || c.Enum[1] != "staging" {
+		t.Errorf("enum = %v", c.Enum)
+	}
+}
+
+func TestDecode_ConstraintPatternCompiled(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("region", map[string]any{"pattern": "^us-[a-z]+-[0-9]$"})},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	c := p.Inputs[0].Constraint
+	if c == nil || c.Pattern == nil {
+		t.Fatal("pattern constraint must compile a regexp")
+	}
+	if len(c.Enum) != 0 {
+		t.Error("a pattern constraint must carry no enum")
+	}
+	if !c.Pattern.MatchString("us-east-1") {
+		t.Error("compiled pattern must match a valid region")
+	}
+}
+
+// A YAML block scalar can append a trailing newline to a pattern. The decoder
+// must normalize it so the enforced regexp is the author's anchored pattern,
+// not one that also requires a literal trailing newline.
+func TestDecode_ConstraintPatternWhitespaceNormalized(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("region", map[string]any{"pattern": "^us-east-1$\n"})},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	c := p.Inputs[0].Constraint
+	if c == nil || c.Pattern == nil {
+		t.Fatal("pattern constraint must compile a regexp")
+	}
+	if !c.Pattern.MatchString("us-east-1") {
+		t.Error("a trailing newline in the pattern must be normalized away, so the anchored value still matches")
+	}
+	if c.Pattern.String() != "^us-east-1$" {
+		t.Errorf("stored pattern = %q, want the trimmed ^us-east-1$", c.Pattern.String())
+	}
+}
+
+func TestDecode_ConstraintUncompilablePatternRefused(t *testing.T) {
+	// A pattern the schema cannot catch (ECMA-valid shape, RE2-invalid): an
+	// unclosed group. This is the fail-closed case only decode enforces.
+	m := rawManifest(
+		[]any{constrainedInput("bad", map[string]any{"pattern": "([a-z"})},
+		nil, oneStep(),
+	)
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an uncompilable RE2 pattern must be refused at decode")
+	} else if !strings.Contains(err.Error(), "compile") {
+		t.Errorf("error = %v, want a compile rejection", err)
+	}
+}
+
+func TestDecode_ConstraintBothEnumAndPatternRefused(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("env", map[string]any{"enum": []any{"prod"}, "pattern": "^prod$"})},
+		nil, oneStep(),
+	)
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a constraint declaring both enum and pattern must be refused")
+	} else if !strings.Contains(err.Error(), "both") {
+		t.Errorf("error = %v, want a both-present rejection", err)
+	}
+}
+
+func TestDecode_ConstraintEmptyEnumRefused(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("env", map[string]any{"enum": []any{}})},
+		nil, oneStep(),
+	)
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a constraint with neither a non-empty enum nor a pattern must be refused")
+	}
+}
+
+func TestDecode_ConstraintEmptyEnumEntryRefused(t *testing.T) {
+	m := rawManifest(
+		[]any{constrainedInput("env", map[string]any{"enum": []any{"prod", ""}})},
+		nil, oneStep(),
+	)
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a constraint enum carrying an empty value must be refused")
+	}
+}
+
 func TestDecode_DuplicateStepID(t *testing.T) {
 	m := rawManifest(nil, nil, []any{
 		step(map[string]any{"id": "dup", "kind": "transform", "outputs": []any{"x"}}),
