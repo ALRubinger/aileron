@@ -8,7 +8,7 @@ order: 27
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-06-23</td></tr>
-  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/1506">#1506</a>, <a href="https://github.com/ALRubinger/aileron/issues/1514">#1514</a>, <a href="https://github.com/ALRubinger/aileron/issues/1898">#1898</a></td></tr>
+  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/1506">#1506</a>, <a href="https://github.com/ALRubinger/aileron/issues/1514">#1514</a>, <a href="https://github.com/ALRubinger/aileron/issues/1898">#1898</a>, <a href="https://github.com/ALRubinger/aileron/issues/1956">#1956</a></td></tr>
 </table>
 </div>
 
@@ -67,6 +67,20 @@ Freeze resolves the declared environment to one content-addressed digest and rec
 A `tool` step runs a declared environment tool as a deterministic subprocess inside that one booted container. It carries an argv `command` (no shell interpretation), optional `mount` and `collect` file-I/O boundaries, and an optional per-step trust contract whose `hosts` declare that step's network reach. Freeze seals the declared reach into a lock `stepTrust` section keyed by the tool-step id, so the reach is covered by the content hash and the signature and cannot be re-supplied at launch. Launch enforces it. Before a tool step runs, the daemon mints a step-scoped, TTL-bounded proxy credential restricted to exactly the sealed hosts. A scoped CONNECT to an undeclared host is refused with a 403 and a `sandbox.proxy.trust_denied` audit record (reason `step_scope_host_denied`), before the TLS interception handshake, so no credential bytes ever enter the container. A contracted tool step in a plan with no verified sealed entry, and a tool-step plan launched with no pinned environment, both fail closed. This enforcement is a proxy-credential guarantee, not a network-layer egress guarantee. An `enforced: true` reach record means the step ran under a step-scoped proxy credential restricted to its sealed reach; it does not attest that the subprocess was physically unable to reach any other host. A non-cooperative subprocess that ignores `HTTPS_PROXY` and dials a raw socket directly is out of scope for this layer.
 
 The execution container is agent-free. The image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
+
+### Parameterized sealed reach
+
+A sealed reach may be a template rather than a fixed literal. A sealed command argv element may embed a `{{ inputs.<name> }}` token, and a sealed `trustContract.hosts` entry may embed the same token. The token names a declared input, so `athena.{{ inputs.aws_region }}.amazonaws.com` is one host entry rather than one entry per region.
+
+An input referenced from a sealed position must carry a constraint. A constraint holds exactly one of an `enum` allow-set or a `pattern` author-anchored regexp. Freeze rejects a token that references an unconstrained input, and it fails closed at freeze rather than at launch. An unbounded value in a signed command or host position is an injection surface, so the constraint bounds the resolved value to the shape the author signed.
+
+Freeze seals the template, not a resolved value. The command template rides the signed frontmatter, and the host template rides the lock `stepTrust` section. The content hash and the detached signature cover the template and the constraint that bounds it. Neither the template nor the constraint is re-suppliable at launch.
+
+Launch instantiates the template from the resolved inputs. The runtime substitutes each token with its input's resolved value, and the audited identity is the resolved value. The audit records the resolved argv in `aileron.step.command`, the substituted argv indices in `aileron.step.command_derived`, and the concrete instantiated host in `aileron.reach.hosts`. A reader sees the endpoint the run actually reached, not the template.
+
+The daemon proxy matches the instantiated host by exact string with no wildcards. A sibling endpoint in a different region is denied, because the proxy only ever sees the one concrete host the run instantiated. After substitution the runtime re-checks each host against the `host[:port]` shape and fails the step closed on a violation, so a bad instantiation never reaches the credential mint.
+
+The security property is that the human signed a reach template plus the constraint that bounds it. One frozen and published plan retargets to any endpoint the signer admits, and no re-freeze is needed to point it at a new admitted endpoint. This closes the retargetable-published-plan gap left after publish, install, and cross-machine launch shipped in v0.0.18 under the [#1898](https://github.com/ALRubinger/aileron/issues/1898) umbrella. The field mechanics live in the [Command parameterization](/development/flight-plan-manifest-spec#command-parameterization) and [Host parameterization](/development/flight-plan-manifest-spec#host-parameterization) sections of the manifest specification.
 
 ### Multi-identity
 
@@ -156,6 +170,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 - The layer composes existing primitives. It reuses the action model, the sandbox, the approval channel, and the data plane rather than redefining them.
 - A Flight Plan is multi-identity. The sealed artifact carries no credential binding, so one frozen version launches under different vault-bound identities with different authorizations, and the audit trail records who ran it. The image and the booted container never hold a secret, because the daemon forward proxy injects or re-signs with the vault credential at the egress boundary.
 - A Flight Plan is portable across machines. A frozen plan is published once to an OCI registry with a separate `skill publish` verb, and a second operator installs it by reference and launches it under their own identity without re-freezing. The composed image is pinned by a verifiable registry digest, so install-by-reference pulls and verifies the exact image the publisher sealed, and an untrusted publisher or a tampered image fails closed.
+- A published Flight Plan is retargetable without a re-freeze. A sealed command element or a sealed host may be a `{{ inputs.<name> }}` template bounded by a constrained input, so the signature covers the reach template and the constraint together. One frozen and published plan points at any endpoint the signer admits, and the daemon proxy still matches the instantiated host by exact string so a sibling endpoint is denied.
 
 ### Negative
 
@@ -181,6 +196,7 @@ The following are out of scope for this ADR and this layer's MVP.
 - [The Flight Plan manifest specification](/development/flight-plan-manifest-spec). The `outputs:` contract shape and the file-map transport
 - [The Launch-a-Flight Surfaces Spec](/development/launch-surfaces-spec). The distribution surfaces over a frozen Flight Plan
 - [Issue #1898](https://github.com/ALRubinger/aileron/issues/1898). The shareable-frozen-plan umbrella that records the OCI-unified distribution model
+- [Issue #1956](https://github.com/ALRubinger/aileron/issues/1956). The parameterized-sealed-reach umbrella that adds constrained-input templating to sealed commands and hosts
 - [ADR-0003](/adr/0003-action-model). The action model the per-action trust contract attaches to
 - [ADR-0005](/adr/0005-sandbox-choice). The sandbox and credential mediation a Flight Plan runs inside
 - [ADR-0013](/adr/0013-connector-hub-and-trust-distribution). The connector Hub and keyring-v2 trust model the Flight Plan distribution model mirrors

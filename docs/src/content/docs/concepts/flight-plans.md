@@ -62,6 +62,12 @@ A Flight Plan runs inside one container. The `environment` block declares it, an
 
 The block declares `tools`, an `image`, or both. `tools` names curated-catalog tools, each as `<name>@<version>`, that freeze resolves to devcontainer Features and composes onto the Aileron-provided runner base. `image` names a custom base image, the escape hatch for tooling the catalog does not carry, and declared tools compose onto it when both are present. Freeze resolves the declared environment to a single content-addressed digest, and launch boots that one image and runs the whole plan inside it. A tool step runs a declared tool as a deterministic subprocess in that container, and its declared network reach is sealed at freeze and enforced at launch. The execution container is agent-free. The image carries no coding agent. The Flight Plan runs composed steps, not an interactive agent session.
 
+## Parameterized reach
+
+A sealed reach can be a template rather than a fixed literal. A sealed tool command or a sealed host may embed a token that names a declared input, and that input carries a constraint that bounds what the token can resolve to. The signer attests the template together with its constraint, so the signature covers the shape the reach can take rather than one frozen endpoint.
+
+This lets one frozen and published plan retarget across the endpoints the signer admits without re-freezing. A region-parameterized plan points at a new region the constraint allows, and launch instantiates the concrete endpoint from the resolved input. The proxy still matches the instantiated endpoint by exact string, so the plan reaches only an endpoint the signer's constraint admits. The field mechanics live in the [Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) and the [Authoring a Flight Plan](/guides/authoring-a-flight-plan/) guide.
+
 ## Multi-identity
 
 The credential binding lives on the operator's machine, not in the plan. The identical sealed artifact launches under different identities with different authorizations, and the audit trail records who. The image and the booted container never contain a secret in any form. The daemon forward proxy injects or re-signs with the vault credential at the egress boundary, so one frozen version serves many operators without ever carrying one operator's identity.
