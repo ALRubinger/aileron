@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -198,6 +199,81 @@ func TestResolveInputs_PatternConstraintOutOfBoundFailsClosed(t *testing.T) {
 	}, nil)
 	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "moon-base-7"}, FixedClock{}, &enforcer{}); err == nil {
 		t.Fatal("an out-of-constraint pattern value must fail the launch closed")
+	}
+}
+
+// A resolved value longer than the 256-char cap must not be echoed in full in
+// the pattern-mismatch error. The message embeds only the capped value plus the
+// truncation marker, so an arbitrarily large resolved value cannot bloat the
+// operator-facing error.
+func TestResolveInputs_PatternErrorCapsLongResolvedValue(t *testing.T) {
+	long := strings.Repeat("a", 1000)
+	p := planWithInputs([]Input{
+		{Name: "blob", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Pattern: regexp.MustCompile("^short$")}},
+	}, nil)
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{})
+	if err == nil {
+		t.Fatal("an out-of-constraint pattern value must fail the launch closed")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, long) {
+		t.Errorf("error embeds the full %d-char resolved value; it must be capped: %q", len(long), msg)
+	}
+	if !strings.Contains(msg, "...(truncated)") {
+		t.Errorf("capped error must carry the truncation marker: %q", msg)
+	}
+	// The capped value is 256 chars of the original plus the marker; the full
+	// 1000-char run must not survive.
+	if strings.Contains(msg, strings.Repeat("a", 257)) {
+		t.Errorf("error embeds more than the 256-char cap of the resolved value: %q", msg)
+	}
+}
+
+// The same cap applies to the enum-mismatch error, proving the truncation is
+// uniform across resolution rules rather than pattern-only.
+func TestResolveInputs_EnumErrorCapsLongResolvedValue(t *testing.T) {
+	long := strings.Repeat("z", 1000)
+	p := planWithInputs([]Input{
+		{Name: "blob", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
+	}, nil)
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{})
+	if err == nil {
+		t.Fatal("an out-of-constraint enum value must fail the launch closed")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, long) {
+		t.Errorf("error embeds the full %d-char resolved value; it must be capped: %q", len(long), msg)
+	}
+	if !strings.Contains(msg, "...(truncated)") {
+		t.Errorf("capped error must carry the truncation marker: %q", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("z", 257)) {
+		t.Errorf("error embeds more than the 256-char cap of the resolved value: %q", msg)
+	}
+}
+
+// A resolved value at or under the cap is embedded verbatim with no marker, so
+// the truncation never triggers on ordinary short values.
+func TestResolveInputs_ShortResolvedValueNotTruncated(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "env", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
+	}, nil)
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{})
+	if err == nil {
+		t.Fatal("an out-of-constraint enum value must fail the launch closed")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"dev"`) {
+		t.Errorf("a short resolved value must be embedded verbatim: %q", msg)
+	}
+	if strings.Contains(msg, "...(truncated)") {
+		t.Errorf("a short resolved value must not carry the truncation marker: %q", msg)
 	}
 }
 

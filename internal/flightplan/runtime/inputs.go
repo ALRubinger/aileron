@@ -95,16 +95,35 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 	return ri, nil
 }
 
+// maxResolvedValueInError caps how much of a resolved value's string form is
+// embedded in an enforcement error. A resolved source or literal value can be
+// arbitrarily large (a fetched dataset, a long string), so the error message is
+// bounded here rather than echoing the whole value back to the operator.
+const maxResolvedValueInError = 256
+
+// capResolvedValue truncates s to maxResolvedValueInError characters, appending
+// a marker when it was longer so the truncation is visible. The comparison
+// against the constraint still uses the full string form; only the message is
+// capped.
+func capResolvedValue(s string) string {
+	if len(s) <= maxResolvedValueInError {
+		return s
+	}
+	return s[:maxResolvedValueInError] + "...(truncated)"
+}
+
 // enforceConstraint checks a resolved value against its declared constraint.
 // The comparison is over the value's string form (fmt.Sprintf("%v", v)), so a
 // number or timestamp input stays checkable: enum requires equality with one
 // allowed string, pattern requires the compiled regexp to match. A violation
-// names the input, the value, and the constraint so the failure is actionable.
+// names the input, the (capped) value, and the constraint so the failure is
+// actionable without echoing an unbounded resolved value back to the operator.
 func enforceConstraint(name string, v any, c *Constraint) error {
 	s := fmt.Sprintf("%v", v)
+	capped := capResolvedValue(s)
 	if c.Pattern != nil {
 		if !c.Pattern.MatchString(s) {
-			return fmt.Errorf("input %q resolved to %q, which does not match the required pattern %q", name, s, c.Pattern.String())
+			return fmt.Errorf("input %q resolved to %q, which does not match the required pattern %q", name, capped, c.Pattern.String())
 		}
 		return nil
 	}
@@ -113,7 +132,7 @@ func enforceConstraint(name string, v any, c *Constraint) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("input %q resolved to %q, which is not one of the allowed values %v", name, s, c.Enum)
+	return fmt.Errorf("input %q resolved to %q, which is not one of the allowed values %v", name, capped, c.Enum)
 }
 
 // resolveLiteral resolves a literal input: the launch override wins, then the
