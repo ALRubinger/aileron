@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -102,5 +103,58 @@ func TestRunSkillPublishMismatchMapped(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "config digest") {
 		t.Errorf("stderr = %q, want config-digest message", errBuf.String())
+	}
+}
+
+func TestRunSkillPublishNoImageMapped(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{}) // instruction-only
+	withStubPublish(t, func(context.Context, publish.Options) (publish.Result, error) {
+		return publish.Result{}, publish.ErrNoImage
+	})
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "instruction-only") {
+		t.Errorf("stderr = %q, want instruction-only note", errBuf.String())
+	}
+}
+
+func TestRunSkillPublishGenericErrorMapped(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{{Ref: "r", Digest: "sha256:abc"}}})
+	withStubPublish(t, func(context.Context, publish.Options) (publish.Result, error) {
+		return publish.Result{}, errors.New("registry unreachable")
+	})
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errBuf.String(), "publish \"demo\"") || !strings.Contains(errBuf.String(), "registry unreachable") {
+		t.Errorf("stderr = %q, want wrapped publish error", errBuf.String())
+	}
+}
+
+func TestRunSkillPublishNewestBanner(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	pin := freeze.ImagePin{Ref: "r", Digest: "sha256:abc"}
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}})
+	writeFrozenFixture(t, dir, "demo", "v2", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}})
+	withStubPublish(t, func(context.Context, publish.Options) (publish.Result, error) {
+		return publish.Result{}, nil
+	})
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "publishing") || !strings.Contains(out.String(), "newest of 2") {
+		t.Errorf("stdout = %q, want a 'publishing ... newest of 2' banner", out.String())
 	}
 }

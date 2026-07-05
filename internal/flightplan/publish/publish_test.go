@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -326,5 +327,58 @@ func TestRunForeignBaseNoDigest(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no digest") {
 		t.Fatalf("err = %v, want a no-digest error", err)
+	}
+}
+
+// pushFailTarget wraps a memory store but rejects every Push, standing in for a
+// registry that refuses a write (unauthenticated / quota / transient).
+type pushFailTarget struct{ *memory.Store }
+
+func (pushFailTarget) Push(context.Context, ocispec.Descriptor, io.Reader) error {
+	return errors.New("registry rejected write")
+}
+
+func TestRunPushBlobError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	_, cfg := seedComposedTarget(t, inner, "v1", "composed-config") // image pre-seeded, no push needed
+	opts := composedOptions(inner, cfg)
+	opts.Target = pushFailTarget{inner}
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push artifact blob") {
+		t.Fatalf("err = %v, want a push-artifact-blob error", err)
+	}
+}
+
+func TestRunComposedResolveError(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New() // NOT seeded: the "pushed" image is absent, so resolve fails
+	opts := Options{
+		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
+		Frozen: testFrozen(),
+		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
+			{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"},
+		}},
+		ImageSource: fakeImageSource{configDigest: "sha256:" + strings.Repeat("a", 64)},
+		Target:      target,
+	}
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "resolve pushed composed image") {
+		t.Fatalf("err = %v, want a resolve-pushed-image error", err)
+	}
+}
+
+func TestRunForeignBaseCopyError(t *testing.T) {
+	ctx := context.Background()
+	empty := memory.New() // source cannot resolve the pin digest
+	_, err := Run(ctx, Options{
+		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
+		Frozen: testFrozen(),
+		Lock:   freeze.Lockfile{ResolvedImages: []freeze.ImagePin{{Ref: "docker.io/library/python", Digest: "sha256:" + strings.Repeat("b", 64)}}},
+		Target: memory.New(),
+		SourceRepo: func(context.Context, string) (oras.ReadOnlyTarget, error) {
+			return empty, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "copy base image") {
+		t.Fatalf("err = %v, want a copy-base-image error", err)
 	}
 }

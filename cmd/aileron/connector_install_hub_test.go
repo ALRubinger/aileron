@@ -193,9 +193,9 @@ func TestRunConnectorInstall_HubFlowDetailsExpandsThenInstalls(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"github://acme/y", "github://acme/z", // publisher footprint shown only in details
-		"Second risk line",                    // additional risk shown only in details
-		"Other connectors by this publisher",  // details header
-		"Installed:",                          // install proceeded after details + y
+		"Second risk line",                   // additional risk shown only in details
+		"Other connectors by this publisher", // details header
+		"Installed:",                         // install proceeded after details + y
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout missing %q:\n%s", want, out)

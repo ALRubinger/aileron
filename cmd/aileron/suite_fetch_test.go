@@ -216,16 +216,16 @@ func TestFetchSuiteTOML_404IsClearError(t *testing.T) {
 
 func TestSuiteVersionFromRef(t *testing.T) {
 	tests := []struct {
-		ref     string
-		want    string
-		wantOK  bool
+		ref    string
+		want   string
+		wantOK bool
 	}{
 		{"v0.0.6", "0.0.6", true},
 		{"v1.2.3-rc.1", "1.2.3-rc.1", true},
-		{"0.0.6", "", false},                                          // missing v prefix
-		{"v0.0", "", false},                                           // not strict semver (3 segments)
-		{"a1b2c3d4e5f6789012345678901234567890abcd", "", false},       // sha, not semver
-		{"main", "", false},                                           // branch name
+		{"0.0.6", "", false},                                    // missing v prefix
+		{"v0.0", "", false},                                     // not strict semver (3 segments)
+		{"a1b2c3d4e5f6789012345678901234567890abcd", "", false}, // sha, not semver
+		{"main", "", false},                                     // branch name
 	}
 	for _, tc := range tests {
 		t.Run(tc.ref, func(t *testing.T) {
