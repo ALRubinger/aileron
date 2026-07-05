@@ -178,9 +178,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}, nil
 }
 
-// fetchArtifact resolves the referrers manifest at tag, asserts it is a Flight
-// Plan signed artifact with all four layers, and pulls each layer by media type
-// into a store.FrozenVersion (ID = tag). It does not touch the image subject.
+// fetchArtifact resolves the artifact manifest directly at the version tag,
+// asserts it is a Flight Plan signed artifact with all four layers, and pulls
+// each layer by media type into a store.FrozenVersion (ID = tag). The artifact
+// is a first-class tagged manifest, so this is a plain Resolve + FetchAll of the
+// tag; it does not walk the OCI Referrers API or touch any image subject.
 func fetchArtifact(ctx context.Context, src oras.ReadOnlyTarget, tag string) (store.FrozenVersion, freeze.Lockfile, error) {
 	desc, err := src.Resolve(ctx, tag)
 	if err != nil {
