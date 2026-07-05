@@ -32,6 +32,25 @@ type execState struct {
 	// materializing steps, since the materialize block keys off
 	// step.MaterializesOutput (kind-agnostic).
 	outputs []materializedOutput
+	// toolCommands records, per tool step id, the INSTANTIATED argv the runner
+	// exec'd and the argv indices that were derived from `{{ inputs.<name> }}`
+	// interpolation (#1958). runToolStep populates it before the exec; the
+	// materialize block reads it so a tool-materialized output audits the
+	// resolved command (not the template) plus the input-derived marker. A
+	// token-free tool step records the literal argv with no derived indices, so
+	// existing behavior is unchanged.
+	toolCommands map[string]toolCommandResult
+}
+
+// toolCommandResult is one tool step's instantiated argv and the argv indices
+// that were derived from input interpolation (#1958).
+type toolCommandResult struct {
+	// resolved is the argv the runner exec'd, with every `{{ inputs.<name> }}`
+	// token substituted.
+	resolved []string
+	// derivedIdx are the argv indices whose element carried a token, sorted by
+	// appearance. Empty for a token-free command.
+	derivedIdx []int
 }
 
 // materializedOutput pairs one materialized artifact with the provenance of the
@@ -64,8 +83,15 @@ type materializedOutput struct {
 	// is the executed-command identity the per-output audit record emits as
 	// `aileron.step.command`; the environment identity is the plan's single
 	// composed pin, already on the launch record, so no per-step image is
-	// recorded here.
+	// recorded here. For a tool step with command interpolation (#1958) this is
+	// the INSTANTIATED argv (tokens resolved), not the sealed template.
 	Command []string
+	// CommandDerived are the argv indices instantiated from `{{ inputs.<name> }}`
+	// interpolation (#1958), sorted by appearance. Set only for a tool step
+	// whose command carried at least one token; nil for a token-free tool step
+	// and every non-tool step. The per-output audit record emits it as
+	// `aileron.step.command_derived`.
+	CommandDerived []int
 }
 
 // reachRecord captures one tool step's network reach for the audit: the step
@@ -138,8 +164,9 @@ type executor struct {
 // later step runs) and is returned to the caller.
 func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execState, error) {
 	st := execState{
-		inputs:     inputs,
-		stepOutput: map[string]stepResult{},
+		inputs:       inputs,
+		stepOutput:   map[string]stepResult{},
+		toolCommands: map[string]toolCommandResult{},
 	}
 	for _, idx := range x.plan.Order {
 		step := x.plan.Steps[idx]
@@ -204,25 +231,46 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 				Resolved: resolved,
 				// Carry the executed argv ONLY when this step is a tool step
 				// (#1829): the command is the executed identity the per-output
-				// audit record emits as aileron.step.command. Nil for every
-				// non-tool step. The environment identity is the plan's single
-				// composed pin, already on the launch record.
-				Command: toolCommand(step),
+				// audit record emits as aileron.step.command. For an
+				// interpolated command (#1958) this is the INSTANTIATED argv
+				// runToolStep stashed, plus the input-derived index marker. Nil
+				// for every non-tool step. The environment identity is the
+				// plan's single composed pin, already on the launch record.
+				Command:        toolCommandArgv(step, &st),
+				CommandDerived: toolCommandDerived(step, &st),
 			})
 		}
 	}
 	return st, nil
 }
 
-// toolCommand returns the step's executed argv when the step is a tool step,
-// or nil for any other kind. It is the tool-materialized discriminator the
-// audit layer reads to distinguish a tool-produced output from a
-// connector/transform one.
-func toolCommand(step Step) []string {
+// toolCommandArgv returns the INSTANTIATED argv a tool step exec'd (the
+// command runToolStep stashed after interpolation), or nil for any other kind.
+// It is the tool-materialized discriminator the audit layer reads to
+// distinguish a tool-produced output from a connector/transform one. A tool
+// step with no stashed command (a directly-constructed plan that bypassed
+// runToolStep) falls back to the template argv so the record is never empty.
+func toolCommandArgv(step Step, st *execState) []string {
 	if step.Kind != KindTool {
 		return nil
 	}
+	if tc, ok := st.toolCommands[step.ID]; ok {
+		return tc.resolved
+	}
 	return step.Command
+}
+
+// toolCommandDerived returns the argv indices a tool step instantiated from
+// `{{ inputs.<name> }}` interpolation (#1958), or nil for a token-free tool
+// step and every non-tool step.
+func toolCommandDerived(step Step, st *execState) []int {
+	if step.Kind != KindTool {
+		return nil
+	}
+	if tc, ok := st.toolCommands[step.ID]; ok {
+		return tc.derivedIdx
+	}
+	return nil
 }
 
 // runActionCall dispatches an action-call through the enforced boundary and
@@ -327,11 +375,28 @@ func (x *executor) runToolStep(ctx context.Context, step Step, resolved map[stri
 	if len(step.Outputs) != 1 {
 		return nil, fmt.Errorf("flightplan: step %q is a tool step and declares %d outputs; a tool step produces exactly one collected output", step.ID, len(step.Outputs))
 	}
+	// Instantiate the TEMPLATE argv against the resolved PLAN inputs (#1958):
+	// each `{{ inputs.<name> }}` token becomes the constrained input's string
+	// form. Command tokens reference plan inputs, not the step's resolved
+	// bindings, so the lookup is st.inputs.Values. The result is still an
+	// argv array exec'd with no shell. Stash it (with the input-derived index
+	// marker) so the materialize block audits the resolved command. A
+	// token-free command instantiates to itself with no derived indices, so
+	// existing behavior is unchanged.
+	resolvedCmd, derivedIdx, err := instantiateCommand(step.Command, st.inputs.Values)
+	if err != nil {
+		return nil, fmt.Errorf("flightplan: step %q command interpolation: %w", step.ID, err)
+	}
+	if st.toolCommands == nil {
+		st.toolCommands = map[string]toolCommandResult{}
+	}
+	st.toolCommands[step.ID] = toolCommandResult{resolved: resolvedCmd, derivedIdx: derivedIdx}
+
 	// The mounted input is the step's resolved bindings. It is a
 	// binding-resolved value only, never a credential.
 	spec := ToolStepSpec{
 		StepID:      step.ID,
-		Command:     step.Command,
+		Command:     resolvedCmd,
 		MountPath:   step.MountPath,
 		Input:       resolved,
 		CollectPath: step.CollectPath,

@@ -224,6 +224,25 @@ func validateReferences(p *Plan, inputNames map[string]bool, stepIndex map[strin
 				return decodeErrf("step %q materializes undeclared output %q", s.ID, s.MaterializesOutput)
 			}
 		}
+		// Each `{{ inputs.<name> }}` command token must name a declared input
+		// (#1958), mirroring the BindInput undeclared-input check above. The
+		// grammar itself was validated at populateToolStep; here the resolved
+		// refs are checked against the declared set so an unknown input is
+		// refused at launch load, not only at freeze. The constraint-presence
+		// guard stays freeze-only per the plan.
+		for _, elem := range s.Command {
+			refs, err := commandInputRefs(elem)
+			if err != nil {
+				// The grammar was already validated at decode of the step; a
+				// re-scan error here is defensive and reported the same way.
+				return decodeErrf("step %q command element %q: %v", s.ID, elem, err)
+			}
+			for _, ref := range refs {
+				if !inputNames[ref] {
+					return decodeErrf("step %q command references undeclared input %q", s.ID, ref)
+				}
+			}
+		}
 	}
 	return nil
 }
