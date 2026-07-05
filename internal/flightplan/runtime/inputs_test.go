@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"regexp"
 	"testing"
 	"time"
 )
@@ -145,6 +146,88 @@ func TestResolveInputs_FrozenFromLaunchArgMutation(t *testing.T) {
 	got := ri.Values["obj"].(map[string]any)
 	if got["k"] != "v" {
 		t.Error("resolved inputs must be frozen against later launch-arg mutation")
+	}
+}
+
+func TestResolveInputs_EnumConstraintInBoundPasses(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "env", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
+	}, nil)
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "prod"}, FixedClock{}, &enforcer{})
+	if err != nil {
+		t.Fatalf("an in-constraint enum value must resolve: %v", err)
+	}
+	if ri.Values["env"] != "prod" {
+		t.Errorf("env = %v", ri.Values["env"])
+	}
+}
+
+func TestResolveInputs_EnumConstraintOutOfBoundFailsClosed(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "env", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
+	}, nil)
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{}); err == nil {
+		t.Fatal("an out-of-constraint enum value must fail the launch closed")
+	}
+}
+
+func TestResolveInputs_PatternConstraintInBoundPasses(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "region", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")}},
+	}, nil)
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "us-east-1"}, FixedClock{}, &enforcer{})
+	if err != nil {
+		t.Fatalf("an in-constraint pattern value must resolve: %v", err)
+	}
+	if ri.Values["region"] != "us-east-1" {
+		t.Errorf("region = %v", ri.Values["region"])
+	}
+}
+
+func TestResolveInputs_PatternConstraintOutOfBoundFailsClosed(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "region", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")}},
+	}, nil)
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "moon-base-7"}, FixedClock{}, &enforcer{}); err == nil {
+		t.Fatal("an out-of-constraint pattern value must fail the launch closed")
+	}
+}
+
+// A number input's resolved value is checked by its string form, so a numeric
+// default can be enum-constrained. This locks the stringify-then-check contract.
+func TestResolveInputs_ConstraintChecksStringForm(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "days", Type: "number",
+			Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: 7},
+			Constraint: &Constraint{Enum: []string{"7", "30"}}},
+	}, nil)
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}); err != nil {
+		t.Fatalf("a number whose string form is allowed must resolve: %v", err)
+	}
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"days": 90}, FixedClock{}, &enforcer{}); err == nil {
+		t.Fatal("a number whose string form is not allowed must fail closed")
+	}
+}
+
+// An input with no declared constraint is never checked (today's behavior).
+func TestResolveInputs_NoConstraintUnchecked(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "free", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"free": "anything"}, FixedClock{}, &enforcer{})
+	if err != nil {
+		t.Fatalf("an unconstrained input must resolve any value: %v", err)
+	}
+	if ri.Values["free"] != "anything" {
+		t.Errorf("free = %v", ri.Values["free"])
 	}
 }
 

@@ -27,6 +27,8 @@
 // runtime.
 package runtime
 
+import "regexp"
+
 // Plan is the typed, validated model of a frozen plan's `aileron` block that
 // the executor walks. It is produced by Decode from a manifest.Manifest and
 // is the single in-memory shape the runtime reads; the loosely-typed `[]any`
@@ -132,6 +134,21 @@ type Input struct {
 	Type        InputType
 	Description string
 	Resolution  Resolution
+	// Constraint bounds the resolved value. Nil means unconstrained (today's
+	// behavior). When non-nil it holds exactly one of an Enum allow-set or a
+	// compiled Pattern; the launch/resolution boundary rejects a resolved
+	// value that falls outside it.
+	Constraint *Constraint
+}
+
+// Constraint bounds an input's resolved value. Exactly one field is set: Enum
+// is the closed set of allowed string forms, or Pattern is the compiled
+// author-anchored RE2 regexp the resolved value's string form must match. The
+// pattern is compiled once at decode and stored here so enforcement never
+// recompiles.
+type Constraint struct {
+	Enum    []string
+	Pattern *regexp.Regexp
 }
 
 // Resolution is a decoded input resolution rule. Exactly one of the three
