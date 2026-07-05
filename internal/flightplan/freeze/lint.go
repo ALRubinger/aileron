@@ -117,6 +117,14 @@ func Lint(m *manifest.Manifest) error {
 	if err := lintHostInterpolation(m); err != nil {
 		return err
 	}
+	// Guard per-action (requires.actions[]) trustContract hosts (#1965): host
+	// interpolation is tool-step-only, so an input token in a per-action host is
+	// never substituted and would ride in inert as the literal `{{ ... }}`
+	// string. Reject it at freeze rather than seal a syntactically valid but
+	// inert host; per-action hosts must be literal.
+	if err := lintActionHostLiterals(m); err != nil {
+		return err
+	}
 	return nil
 }
 

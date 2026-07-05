@@ -88,10 +88,11 @@ func lintCommandInterpolation(m *manifest.Manifest) error {
 //
 // Scope: only `kind: tool` steps are walked. A per-action (connector
 // action-ref) trustContract is never instantiated (no plan-input substitution
-// path reaches it), so its hosts are not guarded here; the shared-def schema
-// relaxation admits a token there syntactically, but nothing substitutes it.
-// It reads the RAW manifest maps and shares the exact token grammar the runtime
-// uses via the leaf manifest package.
+// path reaches it), so an input token in one of its hosts would ride in inert
+// as the literal `{{ ... }}` string: a footgun, not a constrained-input axis.
+// lintActionHostLiterals guards that separately by hard-rejecting any token in
+// a per-action host. It reads the RAW manifest maps and shares the exact token
+// grammar the runtime uses via the leaf manifest package.
 func lintHostInterpolation(m *manifest.Manifest) error {
 	declared, constrained := inputConstraintSets(m)
 	for i, raw := range m.Aileron.Steps {
@@ -135,6 +136,47 @@ func lintHostInterpolation(m *manifest.Manifest) error {
 				if !constrained[ref] {
 					return &LintError{StepID: id, Reason: fmt.Sprintf("trustContract host references input %q which declares no constraint; an unconstrained input in a sealed host position is an injection surface (add an enum or pattern constraint)", ref)}
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// lintActionHostLiterals is the freeze-time guard over `{{ inputs.<name> }}`
+// tokens embedded in a PER-ACTION (requires.actions[]) trustContract host
+// (#1965). Unlike a tool step's hosts, a per-action host is never instantiated:
+// no plan-input substitution path reaches it, so a token there rides in inert
+// as the literal `{{ ... }}` string and the declared reach it appears to grant
+// is silently wrong. The shared-def schema relaxation that lets tool-step hosts
+// carry a token also makes the token syntactically valid here, so freeze must
+// reject it explicitly rather than seal a footgun. Per-action hosts must be
+// literal.
+//
+// It reads the typed manifest.ActionRequirement.TrustContract map (freeze runs
+// on manifest.Manifest, not the runtime's typed Plan) and shares the exact
+// token grammar the runtime uses via the leaf manifest package.
+func lintActionHostLiterals(m *manifest.Manifest) error {
+	for _, a := range m.Aileron.Requires.Actions {
+		if a.TrustContract == nil {
+			continue
+		}
+		hosts, ok := a.TrustContract["hosts"].([]any)
+		if !ok {
+			// Missing/non-array hosts are a schema error caught at parse; this
+			// guard only inspects present host strings.
+			continue
+		}
+		for _, h := range hosts {
+			host, ok := h.(string)
+			if !ok {
+				continue
+			}
+			refs, err := manifest.CommandInputRefs(host)
+			if err != nil {
+				return &LintError{Reason: fmt.Sprintf("requires.actions[%q] trustContract host %q: %v", a.Ref, host, err)}
+			}
+			if len(refs) > 0 {
+				return &LintError{Reason: fmt.Sprintf("trustContract host references input token %q, but host interpolation is tool-step-only (per-action requires.actions[] trustContract hosts must be literal)", host)}
 			}
 		}
 	}

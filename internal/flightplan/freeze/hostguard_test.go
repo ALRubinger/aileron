@@ -231,3 +231,76 @@ func TestRun_SealsTemplateHostNotResolved(t *testing.T) {
 		t.Errorf("lock.stepTrust must seal the TEMPLATE host verbatim:\n%s", lock)
 	}
 }
+
+// manifestWithActions builds a manifest whose requires.actions carries the given
+// ActionRequirements directly (bypassing schema validation) so the per-action
+// host guard's own rule is exercised as the freeze-time backstop.
+func manifestWithActions(actions ...manifest.ActionRequirement) *manifest.Manifest {
+	return &manifest.Manifest{
+		Name: "actionhostguard",
+		Aileron: manifest.AileronBlock{
+			Requires: manifest.Requires{Actions: actions},
+		},
+	}
+}
+
+// actionWithHosts builds a per-action requirement whose trustContract declares
+// the given host entries (which may be templates).
+func actionWithHosts(ref string, hosts ...string) manifest.ActionRequirement {
+	hs := make([]any, len(hosts))
+	for i, h := range hosts {
+		hs[i] = h
+	}
+	return manifest.ActionRequirement{
+		Ref: ref,
+		TrustContract: map[string]any{
+			"credential":  map[string]any{"kind": "none"},
+			"hosts":       hs,
+			"effect":      "read",
+			"idempotency": map[string]any{"safeToRetry": true},
+			"audit":       map[string]any{"fields": []any{"result"}},
+		},
+	}
+}
+
+// TestLint_ActionHostInputTokenRejected proves an input token in a PER-ACTION
+// (requires.actions[]) trustContract host fails the freeze closed (#1965). Host
+// interpolation is tool-step-only, so such a token is never substituted and
+// would ride in inert as the literal `{{ ... }}` string, silently granting a
+// reach that is syntactically valid but wrong. Per-action hosts must be literal.
+func TestLint_ActionHostInputTokenRejected(t *testing.T) {
+	m := manifestWithActions(
+		actionWithHosts("aws/athena@1.0.0", "athena.{{ inputs.aws_region }}.amazonaws.com"),
+	)
+	err := Lint(m)
+	if err == nil {
+		t.Fatal("a per-action host referencing an input token must be rejected")
+	}
+	if !strings.Contains(err.Error(), "tool-step-only") {
+		t.Errorf("error should explain host interpolation is tool-step-only, got: %v", err)
+	}
+}
+
+// TestLint_ActionHostLiteralAccepted proves a per-action trustContract host that
+// is a literal (no input token) lints clean — existing action-ref plans with
+// literal reach are unaffected.
+func TestLint_ActionHostLiteralAccepted(t *testing.T) {
+	m := manifestWithActions(
+		actionWithHosts("aws/athena@1.0.0", "athena.us-east-1.amazonaws.com"),
+	)
+	if err := Lint(m); err != nil {
+		t.Errorf("a literal per-action host must lint clean: %v", err)
+	}
+}
+
+// TestLint_ActionHostMalformedTokenRejected proves a malformed brace shape in a
+// per-action host is rejected by the shared token grammar, not silently sealed.
+func TestLint_ActionHostMalformedTokenRejected(t *testing.T) {
+	m := manifestWithActions(
+		actionWithHosts("aws/athena@1.0.0", "athena.{{ inputs.aws_region }.amazonaws.com"),
+	)
+	err := Lint(m)
+	if err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("a malformed per-action host token must be rejected, got: %v", err)
+	}
+}
