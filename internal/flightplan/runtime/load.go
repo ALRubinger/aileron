@@ -52,6 +52,14 @@ type LoadedPlan struct {
 	// membership in the keyring for the declared Publisher. Populated only on
 	// the verified path.
 	SignerKey ed25519.PublicKey
+	// ImageOrigin is the recorded install source for a plan installed by OCI
+	// reference (#1902/#1903), read from the store's non-signed origin sidecar.
+	// Present is true only when the version directory carries the sidecar (an
+	// OCI install); a locally-frozen plan leaves it zero, which is exactly the
+	// signal runInImage uses to stay on the local-tag boot path. The origin is
+	// a fetch coordinate, NOT a verification trust anchor: the pulled image is
+	// still verified against the signature-covered ResolvedImages pin.
+	ImageOrigin RegistryImageOrigin
 }
 
 // LoadVerified loads a frozen skill version from the store, verifies it
@@ -71,7 +79,28 @@ func LoadVerified(s *store.Store, name, id string) (LoadedPlan, error) {
 	if err != nil {
 		return LoadedPlan{}, &LoadError{Reason: fmt.Sprintf("read frozen version %s/%s: %v", name, id, err)}
 	}
-	return verifyAndDecode(fv)
+	lp, err := verifyAndDecode(fv)
+	if err != nil {
+		return LoadedPlan{}, err
+	}
+	// Read the non-signed install-origin sidecar so runInImage can pull and
+	// verify the published image for an OCI-installed plan (#1903). A locally
+	// frozen version has no sidecar (ok=false) and stays on the local-tag boot
+	// path. A malformed sidecar is a hard error rather than a silent local-path
+	// fallback: a version that recorded an origin but cannot report it must not
+	// boot down the wrong path.
+	origin, ok, err := s.ReadOrigin(name, id)
+	if err != nil {
+		return LoadedPlan{}, &LoadError{Reason: fmt.Sprintf("read install origin %s/%s: %v", name, id, err)}
+	}
+	if ok {
+		lp.ImageOrigin = RegistryImageOrigin{
+			Registry:   origin.Registry,
+			VersionTag: origin.VersionTag,
+			Present:    true,
+		}
+	}
+	return lp, nil
 }
 
 // verifyAndDecode is the verify→parse→decode core, factored out so tests can

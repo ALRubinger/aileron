@@ -176,6 +176,145 @@ func TestHasWholePlanImage(t *testing.T) {
 	}
 }
 
+// fakeRegistryImageResolver records the origin+pin it was handed and returns a
+// canned bootRef or error, so the registry-origin boot path is testable with no
+// live registry.
+type fakeRegistryImageResolver struct {
+	bootRef   string
+	err       error
+	called    bool
+	gotOrigin RegistryImageOrigin
+	gotPin    freeze.ImagePin
+}
+
+func (f *fakeRegistryImageResolver) Resolve(_ context.Context, origin RegistryImageOrigin, pin freeze.ImagePin) (string, error) {
+	f.called = true
+	f.gotOrigin = origin
+	f.gotPin = pin
+	return f.bootRef, f.err
+}
+
+// registryOriginPlan builds a composed-tools LoadedPlan carrying a registry
+// origin, the shape LoadVerified produces for an OCI-installed plan.
+func registryOriginPlan() LoadedPlan {
+	return LoadedPlan{
+		ContentHash: "sha256:content",
+		ResolvedImages: []freeze.ImagePin{{
+			Ref:      "aileron/sandbox-tools+tools(gh)",
+			Digest:   "sha256:" + strings.Repeat("c", 64),
+			LocalTag: "aileron/sandbox-tools:abc123",
+		}},
+		ImageOrigin: RegistryImageOrigin{
+			Registry:   "ghcr.io/acme/plan",
+			VersionTag: "v1abc",
+			Present:    true,
+		},
+	}
+}
+
+func TestRunInImage_RegistryOriginBootsResolvedRef(t *testing.T) {
+	// A registry-origin plan pulls+verifies the published image through the
+	// RegistryImageResolver seam and boots the returned reference verbatim. The
+	// local-tag imageRef/#1863 guard path is NOT taken: the resolver already
+	// verified the pulled bytes against the signed pin.
+	lp := registryOriginPlan()
+	bootRef := "ghcr.io/acme/plan:v1abc-image"
+	resolver := &fakeRegistryImageResolver{bootRef: bootRef}
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	// A local resolver is also wired to prove it is NOT consulted on this path.
+	localGuard := &fakeImageDigestResolver{digest: "sha256:" + strings.Repeat("z", 64)}
+
+	res, err := runInImage(context.Background(), lp, Options{
+		Name:                  "tools-plan",
+		Version:               "1.0.0",
+		ImageRunner:           runner,
+		RegistryImageResolver: resolver,
+		ImageDigestResolver:   localGuard,
+	})
+	if err != nil {
+		t.Fatalf("runInImage: %v", err)
+	}
+	if !resolver.called {
+		t.Fatal("the registry resolver was never consulted for a registry-origin plan")
+	}
+	if resolver.gotOrigin.Registry != "ghcr.io/acme/plan" || resolver.gotOrigin.VersionTag != "v1abc" {
+		t.Errorf("resolver origin = %+v, want the recorded install origin", resolver.gotOrigin)
+	}
+	if resolver.gotPin.Digest != lp.ResolvedImages[0].Digest {
+		t.Errorf("resolver pin digest = %q, want the signed lock pin", resolver.gotPin.Digest)
+	}
+	if localGuard.called {
+		t.Error("the local-tag #1863 guard must NOT run on the registry-origin path")
+	}
+	if !runner.called {
+		t.Fatal("a verified registry pull must boot: the image runner was never called")
+	}
+	if runner.spec.Image != bootRef {
+		t.Errorf("booted image = %q, want the resolver's returned ref %q", runner.spec.Image, bootRef)
+	}
+	if res.ContentHash != "sha256:content" {
+		t.Errorf("RunResult not mapped from the boot, got %+v", res)
+	}
+}
+
+func TestRunInImage_RegistryOriginResolverErrorRefusesBoot(t *testing.T) {
+	// A pull/verify failure from the resolver refuses the boot with a precise
+	// message and never calls the runner.
+	lp := registryOriginPlan()
+	boom := errors.New("pull: pulled image does not match the signed lock digest")
+	resolver := &fakeRegistryImageResolver{err: boom}
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+
+	res, err := runInImage(context.Background(), lp, Options{
+		Name:                  "tools-plan",
+		Version:               "1.0.0",
+		ImageRunner:           runner,
+		RegistryImageResolver: resolver,
+	})
+	if err == nil {
+		t.Fatal("a resolver pull/verify failure must refuse the boot")
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %v, want the wrapped resolver error", err)
+	}
+	if !strings.Contains(err.Error(), "ghcr.io/acme/plan") {
+		t.Errorf("error = %q, want the registry named", err.Error())
+	}
+	if runner.called {
+		t.Fatal("a refused registry pull must NOT boot the image runner")
+	}
+	if res.ContentHash != "" {
+		t.Errorf("a refused boot must produce a zero RunResult, got %+v", res)
+	}
+}
+
+func TestRunInImage_RegistryOriginNilResolverFailsClosed(t *testing.T) {
+	// A registry-origin plan with no RegistryImageResolver is a fail-closed
+	// error: there is no local tag to boot instead, so the runtime must refuse
+	// rather than fall through to the local-tag path.
+	lp := registryOriginPlan()
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+
+	res, err := runInImage(context.Background(), lp, Options{
+		Name:        "tools-plan",
+		Version:     "1.0.0",
+		ImageRunner: runner,
+		// RegistryImageResolver intentionally nil.
+	})
+	if err == nil {
+		t.Fatal("a registry-origin plan with no registry resolver must fail closed")
+	}
+	if !strings.Contains(err.Error(), "no registry image resolver is configured") {
+		t.Errorf("error = %q, want a no-resolver-configured message", err.Error())
+	}
+	if runner.called {
+		t.Fatal("a fail-closed registry-origin boot must NOT call the image runner")
+	}
+	if res.ContentHash != "" {
+		t.Errorf("a refused boot must produce a zero RunResult, got %+v", res)
+	}
+}
+
 func TestImageRef_JoinsRefAndDigest(t *testing.T) {
 	got := imageRef("registry.example.com/runner:1.4", "sha256:abc", "")
 	if got != "registry.example.com/runner:1.4@sha256:abc" {

@@ -14,6 +14,7 @@ package pull
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,5 +190,90 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	}
 	if _, err := repo.Resolve(ctx, versionID); err != nil {
 		t.Fatalf("resolve published artifact tag: %v", err)
+	}
+
+	// Cross-machine launch (#1903): pull and verify the PUBLISHED composed image
+	// against the signed lock pin and confirm PullImage returns a bootable ref.
+	// This is the read side the clean-machine launch takes after WriteOrigin.
+	imgRes, err := PullImage(ctx, ImagePullOptions{
+		Registry:   registry,
+		VersionTag: versionID,
+		Pin:        pin,
+	})
+	if err != nil {
+		t.Fatalf("PullImage (composed): %v", err)
+	}
+	if imgRes.BindingKind != freeze.BindingConfigDigest {
+		t.Errorf("binding = %q, want %q", imgRes.BindingKind, freeze.BindingConfigDigest)
+	}
+	// The boot ref is content-addressed to the composed image's MANIFEST digest
+	// (TOCTOU-closing), not the mutable tag. Resolve the published tag to learn
+	// the manifest digest and assert the boot ref matches.
+	composedDesc, err := repo.Resolve(ctx, freeze.ComposedImageTag(versionID))
+	if err != nil {
+		t.Fatalf("resolve published composed image tag: %v", err)
+	}
+	wantRef := registry + "@" + composedDesc.Digest.String()
+	if imgRes.BootRef != wantRef {
+		t.Errorf("boot ref = %q, want the content-addressed manifest ref %q", imgRes.BootRef, wantRef)
+	}
+	if imgRes.ImageDigest != pin.Digest {
+		t.Errorf("verified image digest = %q, want the config digest %q", imgRes.ImageDigest, pin.Digest)
+	}
+	// The daemon must be able to boot the returned reference: pull it and confirm
+	// the local config digest still equals the attested pin (the same identity
+	// launch's runner relies on).
+	docker(t, "pull", imgRes.BootRef)
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", imgRes.BootRef).Run() })
+	pulledID := docker(t, "image", "inspect", "--format", "{{.Id}}", imgRes.BootRef)
+	if pulledID != pin.Digest {
+		t.Errorf("pulled image Id = %q, want the attested config digest %q", pulledID, pin.Digest)
+	}
+}
+
+// TestPullImageE2ERefusesTamperedImage proves the fail-closed property against a
+// real registry: publishing a mismatched image under the composed tag and then
+// pulling with a pin that attests a different config digest is refused, never
+// booted. Here the "tamper" is a lock pin that attests a config digest the
+// published image does not carry; PullImage must return ErrImageDigestMismatch.
+func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
+	ctx := e2eContext(t)
+	host := registryHost(t)
+
+	// Publish a real composed image + artifact honestly, then pull with a pin
+	// whose Digest is a config digest the pushed image does NOT carry: the
+	// registry served the honest image, but the signed lock attests a different
+	// identity, so the binding check must refuse.
+	tag, configID := buildLocalImage(t, "aileron/sandbox-tools:e2e-tamper")
+	res, versionID := e2eFrozen(t)
+	registry := host + "/e2e/tamper-plan"
+	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configID, LocalTag: tag}
+
+	if _, err := publish.Run(ctx, publish.Options{
+		Name: "e2e-plan", VersionID: versionID, Registry: registry,
+		Frozen: store.FrozenVersion{
+			ID:        versionID,
+			SkillMD:   res.FrozenManifest,
+			Lockfile:  res.Lockfile,
+			Signature: res.Signature,
+			PublicKey: res.PublicKey,
+		},
+		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{honestPin}},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	tamperedPin := honestPin
+	tamperedPin.Digest = "sha256:" + strings.Repeat("f", 64)
+	_, err := PullImage(ctx, ImagePullOptions{
+		Registry:   registry,
+		VersionTag: versionID,
+		Pin:        tamperedPin,
+	})
+	if err == nil {
+		t.Fatal("a pin attesting a different config digest must be refused")
+	}
+	if !errors.Is(err, ErrImageDigestMismatch) {
+		t.Fatalf("err = %v, want ErrImageDigestMismatch", err)
 	}
 }

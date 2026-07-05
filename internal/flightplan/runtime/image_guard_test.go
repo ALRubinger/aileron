@@ -175,6 +175,72 @@ func TestRunInImage_ComposedPinBootsWhenResolverAbsent(t *testing.T) {
 	}
 }
 
+func TestRunInImage_LocallyFrozenPlanTakesLocalPathNotRegistry(t *testing.T) {
+	// Regression: a locally-frozen composed plan (no origin sidecar, so
+	// ImageOrigin.Present == false) must still take the local-tag #1863 boot
+	// path unchanged and must NEVER consult a wired RegistryImageResolver. This
+	// is the coexistence guarantee: adding the registry-pull branch (#1903) does
+	// not change how a plan frozen on this machine boots.
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	imageID := "sha256:" + strings.Repeat("b", 64)
+	lp := composedPin(localTag, imageID) // composedPin leaves ImageOrigin zero
+	if lp.ImageOrigin.Present {
+		t.Fatal("test precondition: a locally-frozen plan must have no registry origin")
+	}
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	localGuard := &fakeImageDigestResolver{digest: imageID} // matches → boots
+	registryResolver := &fakeRegistryImageResolver{bootRef: "should-never-be-used"}
+
+	if _, err := runInImage(context.Background(), lp, Options{
+		Name:                  "tools-plan",
+		Version:               "1.0.0",
+		ImageRunner:           runner,
+		ImageDigestResolver:   localGuard,
+		RegistryImageResolver: registryResolver,
+	}); err != nil {
+		t.Fatalf("runInImage: %v", err)
+	}
+	if registryResolver.called {
+		t.Fatal("a locally-frozen plan must NOT consult the registry resolver")
+	}
+	if !localGuard.called {
+		t.Fatal("a locally-frozen composed plan must take the local-tag #1863 guard path")
+	}
+	if !runner.called || runner.spec.Image != localTag {
+		t.Errorf("booted image = %q, want the local tag %q", runner.spec.Image, localTag)
+	}
+}
+
+func TestRunInImage_LocallyFrozenPlanGuardMismatchStillFailsClosed(t *testing.T) {
+	// Coexistence + fail-closed: a locally-frozen plan whose local tag resolves
+	// to a different digest still fails closed on the local path even when a
+	// registry resolver is wired (the registry path is never entered).
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	attested := "sha256:" + strings.Repeat("b", 64)
+	observed := "sha256:" + strings.Repeat("c", 64)
+	lp := composedPin(localTag, attested)
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	localGuard := &fakeImageDigestResolver{digest: observed}
+	registryResolver := &fakeRegistryImageResolver{bootRef: "should-never-be-used"}
+
+	_, err := runInImage(context.Background(), lp, Options{
+		Name:                  "tools-plan",
+		Version:               "1.0.0",
+		ImageRunner:           runner,
+		ImageDigestResolver:   localGuard,
+		RegistryImageResolver: registryResolver,
+	})
+	if err == nil {
+		t.Fatal("a locally-frozen plan with a mismatched local tag must fail closed")
+	}
+	if registryResolver.called {
+		t.Fatal("the registry resolver must not be consulted for a locally-frozen plan")
+	}
+	if runner.called {
+		t.Fatal("a mismatched local guard must not boot")
+	}
+}
+
 func TestRunInImage_GuardSkippedForNonComposedPin(t *testing.T) {
 	// The guard is scoped to composed pins: an image-only / custom-base pin
 	// (LocalTag == "") is booted content-addressed as `ref@digest` and the

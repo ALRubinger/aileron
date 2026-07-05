@@ -104,6 +104,15 @@ type Result struct {
 	// signer identity). The trust gate has already passed by the time Run
 	// returns.
 	Verified freeze.VerifiedFrozen
+	// SourceRegistry is the parsed registry+repository the artifact was pulled
+	// from (registry.ParseReference over opts.Ref, e.g. "ghcr.io/acme/plan"),
+	// without tag or digest. The CLI persists it as the install origin so launch
+	// (#1903) knows where to pull the published image; it is a fetch coordinate,
+	// never a verification trust anchor.
+	SourceRegistry string
+	// SourceTag is the version tag the artifact resolved under (the freeze slug
+	// that is also the store version id). Persisted alongside SourceRegistry.
+	SourceTag string
 }
 
 // Run resolves the signed artifact at opts.Ref, pulls its four layers, verifies
@@ -159,7 +168,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	return Result{Frozen: fv, Lock: lock, Name: name, Verified: verified}, nil
+	return Result{
+		Frozen:         fv,
+		Lock:           lock,
+		Name:           name,
+		Verified:       verified,
+		SourceRegistry: ref.Registry + "/" + ref.Repository,
+		SourceTag:      tag,
+	}, nil
 }
 
 // fetchArtifact resolves the referrers manifest at tag, asserts it is a Flight

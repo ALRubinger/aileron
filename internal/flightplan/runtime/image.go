@@ -37,6 +37,39 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 		return RunResult{}, fmt.Errorf(
 			"flightplan: frozen unit pins image %q but no image runner is configured", pin.Ref)
 	}
+
+	// Registry-origin boot path (#1903): a plan installed by OCI reference has no
+	// local build, so its bootable image lives in the recorded registry, not the
+	// local daemon. Pull it and verify it against the signed lock pin per the
+	// pin's binding kind (config digest for a composed pin, manifest digest for a
+	// foreign-base pin) through the RegistryImageResolver seam, then boot the
+	// returned reference. This bypasses the local-tag imageRef/#1863 local-daemon
+	// guard, which does not apply to a registry pull: the resolver already
+	// verified the pulled bytes against the signature-covered pin, which is the
+	// same fail-closed property the local guard provides for a locally-built tag.
+	// A registry-origin plan with no resolver is a fail-closed error (there is no
+	// local tag to boot instead), mirroring the nil-ImageRunner discipline.
+	if lp.ImageOrigin.Present {
+		if opts.RegistryImageResolver == nil {
+			return RunResult{}, fmt.Errorf(
+				"flightplan: plan was installed from registry %q but no registry image resolver is configured; cannot pull the published image to boot",
+				lp.ImageOrigin.Registry)
+		}
+		bootRef, err := opts.RegistryImageResolver.Resolve(ctx, lp.ImageOrigin, pin)
+		if err != nil {
+			return RunResult{}, fmt.Errorf(
+				"flightplan: refusing to boot: cannot pull and verify the published image for plan installed from %q: %w",
+				lp.ImageOrigin.Registry, err)
+		}
+		return runBooted(ctx, opts, ImageRunSpec{
+			Image:   bootRef,
+			Name:    opts.Name,
+			Version: opts.Version,
+			Inputs:  opts.Inputs,
+			OutDir:  opts.OutDir,
+		})
+	}
+
 	spec := ImageRunSpec{
 		Image:   imageRef(pin.Ref, pin.Digest, pin.LocalTag),
 		Name:    opts.Name,
@@ -79,6 +112,14 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 				pin.LocalTag, observed, pin.Digest)
 		}
 	}
+	return runBooted(ctx, opts, spec)
+}
+
+// runBooted hands the resolved boot spec to the ImageRunner and maps its result
+// onto the public RunResult. Both the local-tag path and the registry-origin
+// path funnel through here so the runner contract (boot spec.Image verbatim) and
+// the result mapping live in exactly one place.
+func runBooted(ctx context.Context, opts Options, spec ImageRunSpec) (RunResult, error) {
 	res, err := opts.ImageRunner.Run(ctx, spec)
 	if err != nil {
 		return RunResult{}, err

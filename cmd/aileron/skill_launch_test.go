@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/pull"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -130,6 +132,55 @@ func stubLaunchImageRunner(t *testing.T, runner *fakeLaunchImageRunner) *fakeLau
 	}
 	t.Cleanup(func() { newLaunchImageRunner = orig })
 	return runner
+}
+
+// fakeLaunchRegistryImageResolver records the origin+pin it was handed and
+// returns a canned bootRef or error, standing in for the registry pull+verify so
+// a registry-origin launch never touches the network.
+type fakeLaunchRegistryImageResolver struct {
+	bootRef   string
+	err       error
+	called    bool
+	gotOrigin runtime.RegistryImageOrigin
+	gotPin    freeze.ImagePin
+}
+
+func (f *fakeLaunchRegistryImageResolver) Resolve(_ context.Context, origin runtime.RegistryImageOrigin, pin freeze.ImagePin) (string, error) {
+	f.called = true
+	f.gotOrigin = origin
+	f.gotPin = pin
+	return f.bootRef, f.err
+}
+
+// stubLaunchRegistryImageResolver swaps the production registry-resolver seam
+// for a fake so a registry-origin launch exercises the pull+verify boot path
+// with no network. When resolver is nil the seam yields nil so the runtime's
+// registry-origin-but-no-resolver fail-closed guard fires.
+func stubLaunchRegistryImageResolver(t *testing.T, resolver *fakeLaunchRegistryImageResolver) {
+	t.Helper()
+	orig := newLaunchRegistryImageResolver
+	newLaunchRegistryImageResolver = func() runtime.RegistryImageResolver {
+		if resolver == nil {
+			return nil
+		}
+		return resolver
+	}
+	t.Cleanup(func() { newLaunchRegistryImageResolver = orig })
+}
+
+// writeLaunchOrigin records an install-origin sidecar for the sole frozen
+// version of name in storeDir, so a subsequent launch takes the registry-pull
+// boot path. It resolves the version id the same way launch does (LatestFrozen).
+func writeLaunchOrigin(t *testing.T, storeDir, name, registry string) {
+	t.Helper()
+	s := store.New(storeDir)
+	id, count, err := s.LatestFrozen(name)
+	if err != nil || count == 0 {
+		t.Fatalf("LatestFrozen(%q) = %q,%d,%v; want a frozen version", name, id, count, err)
+	}
+	if err := s.WriteOrigin(name, id, store.Origin{Registry: registry, VersionTag: id}); err != nil {
+		t.Fatalf("WriteOrigin: %v", err)
+	}
 }
 
 // freezeExampleForLaunch installs + freezes the worked example into the temp
@@ -308,6 +359,138 @@ func TestRunSkillLaunch_GuardFailsClosedOnDigestMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), otherDigest) || !strings.Contains(stderr.String(), "refusing to boot") {
 		t.Errorf("stderr must name the mismatch and the refusal, got %q", stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_RegistryOriginPullsVerifiesAndBoots proves the cross-machine
+// launch acceptance property (#1903): a frozen unit installed by OCI reference
+// (an origin sidecar is present) takes the registry pull+verify path. The
+// registry resolver is consulted with the recorded origin and the signed pin,
+// and the image runner boots the verified reference it returns. The local-tag
+// #1863 guard resolver is NOT consulted on this path.
+func TestRunSkillLaunch_RegistryOriginPullsVerifiesAndBoots(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+	writeLaunchOrigin(t, storeDir, "weekly-metrics-digest", "ghcr.io/acme/plan")
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	bootRef := "ghcr.io/acme/plan:v1-image"
+	resolver := &fakeLaunchRegistryImageResolver{bootRef: bootRef}
+	stubLaunchRegistryImageResolver(t, resolver)
+	// Wire a local-tag guard resolver too, to prove it is NOT consulted on the
+	// registry path.
+	localGuard := &stubLaunchDigestResolverFake{digest: "sha256:" + strings.Repeat("9", 64)}
+	stubLaunchImageDigestResolver(t, localGuard)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !resolver.called {
+		t.Fatal("a registry-origin launch must consult the registry resolver")
+	}
+	if resolver.gotOrigin.Registry != "ghcr.io/acme/plan" {
+		t.Errorf("resolver origin registry = %q, want ghcr.io/acme/plan", resolver.gotOrigin.Registry)
+	}
+	if localGuard.gotImage != "" {
+		t.Errorf("the local-tag guard was consulted (%q) on the registry path; it must not be", localGuard.gotImage)
+	}
+	if !runner.called || runner.spec.Image != bootRef {
+		t.Errorf("booted image = %q, want the resolver's verified ref %q", runner.spec.Image, bootRef)
+	}
+}
+
+// TestRunSkillLaunch_RegistryOriginResolverErrorExits1 proves a pull/verify
+// failure on the registry path fails the whole launch closed: the image runner
+// is never booted, the CLI exits non-zero, and stderr surfaces the precise
+// refusal.
+func TestRunSkillLaunch_RegistryOriginResolverErrorExits1(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+	writeLaunchOrigin(t, storeDir, "weekly-metrics-digest", "ghcr.io/acme/plan")
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	stubLaunchRegistryImageResolver(t, &fakeLaunchRegistryImageResolver{
+		err: pull.ErrImageDigestMismatch,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("a registry pull/verify failure must fail the launch closed, exit=%d stdout=%s", code, stdout.String())
+	}
+	if runner.called {
+		t.Fatal("a refused registry pull must NOT boot the image runner")
+	}
+	if !strings.Contains(stderr.String(), "refusing to boot") {
+		t.Errorf("stderr must surface the refusal, got %q", stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_RegistryOriginNilResolverExits1 proves a registry-origin
+// plan with no resolver wired fails closed at the CLI rather than falling
+// through to a local-tag boot the machine cannot satisfy.
+func TestRunSkillLaunch_RegistryOriginNilResolverExits1(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+	writeLaunchOrigin(t, storeDir, "weekly-metrics-digest", "ghcr.io/acme/plan")
+
+	runner := stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	stubLaunchRegistryImageResolver(t, nil) // no resolver
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("a registry-origin plan with no resolver must fail closed")
+	}
+	if runner.called {
+		t.Fatal("a fail-closed registry-origin launch must NOT boot the runner")
+	}
+	if !strings.Contains(stderr.String(), "no registry image resolver is configured") {
+		t.Errorf("stderr = %q, want a no-resolver-configured message", stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_RegistryOriginAttributionStaysLauncher proves the
+// multi-identity property is unchanged on the registry path: the pulled image
+// holds no credential and the audit is stamped with the launching operator's
+// identity (operatorActorID), never the publisher. The daemon proxy injects the
+// launcher's vault credential at egress (unchanged); here we assert the audit
+// actor is the launcher.
+func TestRunSkillLaunch_RegistryOriginAttributionStaysLauncher(t *testing.T) {
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+	writeLaunchOrigin(t, storeDir, "weekly-metrics-digest", "ghcr.io/acme/plan")
+
+	t.Setenv("AILERON_OPERATOR_ID", "launcher@workstation")
+
+	// The image runner echoes an audit id so the runtime surfaces the boot as a
+	// launch; the operator identity is stamped by the CLI's audit sink, which the
+	// container runner re-enters with AILERON_OPERATOR_ID. Assert the resolved
+	// operator identity is the launcher, the value the boot carries in.
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{
+		result: runtime.ImageRunResult{ContentHash: "sha256:booted"},
+	})
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	stubLaunchRegistryImageResolver(t, &fakeLaunchRegistryImageResolver{bootRef: "ghcr.io/acme/plan:v1-image"})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	if got := operatorActorID(); got != "launcher@workstation" {
+		t.Errorf("operator actor = %q, want the launcher identity (never the publisher)", got)
 	}
 }
 

@@ -80,6 +80,21 @@ func runSkillInstallOCI(ref string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Record the install origin so launch (#1903) can pull and verify the
+	// published image on a machine that never froze the plan. The sidecar is
+	// non-signed provenance (where to fetch), never a verification trust anchor;
+	// its presence is also the signal launch uses to take the registry-pull path
+	// instead of the local-tag boot path. A locally-frozen version has no
+	// sidecar. A sidecar write failure fails the install rather than leaving a
+	// version launch cannot boot on this machine.
+	if err := s.WriteOrigin(res.Name, res.Frozen.ID, store.Origin{
+		Registry:   res.SourceRegistry,
+		VersionTag: res.SourceTag,
+	}); err != nil {
+		fmt.Fprintf(stderr, "error: record install origin for %q: %v\n", res.Frozen.ID, err)
+		return 1
+	}
+
 	fmt.Fprintf(stdout, "Installed frozen version %s of skill %q to %s\n",
 		res.Frozen.ID, res.Name, s.FrozenDir(res.Name, res.Frozen.ID))
 	return 0

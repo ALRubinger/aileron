@@ -178,6 +178,14 @@ func TestRunHappyPath(t *testing.T) {
 	if !bytes.Equal(got.Frozen.PublicKey, res.PublicKey) {
 		t.Error("PublicKey bytes differ from published artifact")
 	}
+	// The Result carries the parsed source coordinate so the CLI can persist the
+	// install origin for launch (#1903).
+	if got.SourceRegistry != "localhost:5000/demo" {
+		t.Errorf("source registry = %q, want localhost:5000/demo", got.SourceRegistry)
+	}
+	if got.SourceTag != tag {
+		t.Errorf("source tag = %q, want %q", got.SourceTag, tag)
+	}
 }
 
 func TestRunMissingReferrerIsMissingArtifact(t *testing.T) {
