@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,6 +212,52 @@ func TestRunUnreachableRegistryNotMissingArtifact(t *testing.T) {
 	}
 	if !errors.Is(err, unreachable) {
 		t.Errorf("err = %v, want the underlying resolve error to remain inspectable", err)
+	}
+}
+
+// fetchFailTarget resolves like its embedded store but fails every Fetch,
+// standing in for a registry that resolves a descriptor yet cannot serve its
+// bytes (transient / truncated read).
+type fetchFailTarget struct {
+	*memory.Store
+	err error
+}
+
+func (f fetchFailTarget) Fetch(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
+	return nil, f.err
+}
+
+func TestRunManifestFetchErrorSurfaces(t *testing.T) {
+	res, tag := mintArtifact(t, "")
+	inner := memory.New()
+	seedArtifact(t, inner, tag, freeze.ArtifactType, allLayers(res))
+	fetchErr := errors.New("registry read reset")
+	_, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:" + tag, Source: fetchFailTarget{Store: inner, err: fetchErr}})
+	if err == nil || !errors.Is(err, fetchErr) {
+		t.Fatalf("err = %v, want the underlying fetch error", err)
+	}
+	if errors.Is(err, ErrMissingArtifact) || errors.Is(err, ErrNotAnArtifact) {
+		t.Errorf("a fetch failure must not be classified as missing/not-an-artifact: %v", err)
+	}
+}
+
+func TestRunCorruptManifestErrors(t *testing.T) {
+	// Tag a blob whose bytes are not a valid manifest JSON, so decode fails.
+	st := memory.New()
+	bad := []byte("{ this is not a manifest")
+	// Use a non-manifest media type so the store does not reject the blob on
+	// push; Resolve+FetchAll ignore media type, so the decode still runs on
+	// these bytes and fails.
+	d := content.NewDescriptorFromBytes("application/octet-stream", bad)
+	if err := st.Push(context.Background(), d, bytes.NewReader(bad)); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if err := st.Tag(context.Background(), d, "v1abc"); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	_, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:v1abc", Source: st})
+	if err == nil || !strings.Contains(err.Error(), "decode artifact manifest") {
+		t.Fatalf("err = %v, want a decode-artifact-manifest error", err)
 	}
 }
 
