@@ -71,3 +71,38 @@ describe('ProvenanceHeader — chain-level trust rollup', () => {
 		expect(signedBy).toHaveTextContent('sha256:bob');
 	});
 });
+
+describe('ProvenanceHeader — actor label fallback', () => {
+	it('shows the credential identity label when present', () => {
+		const root = event({ skill: 'etl', actor: 'analytics@corp' });
+		render(ProvenanceHeader, { root, graph: graphOf(root, [step('s1', root)]) });
+		expect(screen.getByTestId('header-actor')).toHaveTextContent('analytics@corp');
+	});
+
+	it('falls back to the actor id for a human-launched artifact (no credential label)', () => {
+		// Regression for the blank-actor defect: ingest populates actor.id/type
+		// only for a human launch, so the header Actor row must render the id
+		// rather than blank.
+		const root: AuditEvent = {
+			audit_id: 'evt',
+			event_type: 'output.materialized',
+			timestamp: 't',
+			payload: { 'aileron.plan.skill': 'etl' },
+			actor: { id: 'alr@host', type: 'human' }
+		};
+		render(ProvenanceHeader, { root, graph: graphOf(root, [step('s1', root)]) });
+		expect(screen.getByTestId('header-actor')).toHaveTextContent('alr@host');
+	});
+
+	it('prefers the display name over the id when there is no identity label', () => {
+		const root: AuditEvent = {
+			audit_id: 'evt',
+			event_type: 'output.materialized',
+			timestamp: 't',
+			payload: { 'aileron.plan.skill': 'etl' },
+			actor: { id: 'runtime', type: 'agent', display_name: 'Analytics Bot' }
+		};
+		render(ProvenanceHeader, { root, graph: graphOf(root, [step('s1', root)]) });
+		expect(screen.getByTestId('header-actor')).toHaveTextContent('Analytics Bot');
+	});
+});

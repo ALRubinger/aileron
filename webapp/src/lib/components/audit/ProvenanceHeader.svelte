@@ -12,7 +12,7 @@
 	let { root, graph }: { root: AuditEvent; graph: ProvenanceGraph } = $props();
 
 	const skill = $derived(p.planSkill(root));
-	const actor = $derived(p.actorIdentityLabel(root));
+	const actor = $derived(p.actorLabel(root));
 	const status = $derived(p.planSignatureStatus(root));
 	const verified = $derived(p.signatureVerified(root));
 

@@ -119,11 +119,31 @@ func planSkill(e Event) string { return payloadStr(e.Payload, "aileron.plan.skil
 
 // actorIdentityLabel prefers the normalized Actor.IdentityLabel (lifted
 // at ingest by handlers_audit.go), falling back to the flat payload key.
+// This is the acting credential's identity label specifically; it is
+// intentionally blank when no credential backs the action (e.g. a
+// human-launched or transform-produced artifact), which the chain-of-
+// custody Actor row treats as truthful.
 func actorIdentityLabel(e Event) string {
 	if e.Actor.IdentityLabel != "" {
 		return e.Actor.IdentityLabel
 	}
 	return payloadStr(e.Payload, "aileron.actor.identity_label")
+}
+
+// actorLabel resolves a non-empty "who launched" label for the header,
+// landing cards, and the graph's launch node. It falls back
+// identity_label -> display_name -> id so a human-launched or
+// transform-produced artifact (which carries no credential identity
+// label) still names its actor instead of rendering blank. The mirror is
+// payload.ts `actorLabel`.
+func actorLabel(e Event) string {
+	if l := actorIdentityLabel(e); l != "" {
+		return l
+	}
+	if e.Actor.DisplayName != "" {
+		return e.Actor.DisplayName
+	}
+	return e.Actor.ID
 }
 
 // --- title/subtitle helpers, mirroring provenance.ts ---

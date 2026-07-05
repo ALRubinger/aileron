@@ -710,3 +710,83 @@ func TestAssembleTrace_JSONRoundTrippedPayload(t *testing.T) {
 		t.Errorf("literal count = %d, want 1 (from []any input)", literals)
 	}
 }
+
+// TestActorLabel_FallbackOrder pins the identity_label -> display_name ->
+// id fallback the "who launched" surfaces resolve through. A credential
+// identity label wins when present; a human-launched or transform-produced
+// artifact (no credential label) falls back to the display name, then to
+// the actor id, so the label is never blank.
+func TestActorLabel_FallbackOrder(t *testing.T) {
+	cases := []struct {
+		name  string
+		actor model.ActorRef
+		want  string
+	}{
+		{
+			name:  "identity label preferred",
+			actor: model.ActorRef{IdentityLabel: "analytics@corp", DisplayName: "Analytics Bot", ID: "runtime"},
+			want:  "analytics@corp",
+		},
+		{
+			name:  "falls back to display name",
+			actor: model.ActorRef{DisplayName: "Analytics Bot", ID: "runtime"},
+			want:  "Analytics Bot",
+		},
+		{
+			name:  "falls back to id",
+			actor: model.ActorRef{ID: "alr@host"},
+			want:  "alr@host",
+		},
+		{
+			name:  "all empty yields empty",
+			actor: model.ActorRef{},
+			want:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := Event{Actor: tc.actor, Payload: map[string]any{}}
+			if got := actorLabel(ev); got != tc.want {
+				t.Errorf("actorLabel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLaunchNode_ActorFallsBackToID is the regression for the blank-actor
+// defect: an artifact whose actor carries only an id (the human-launched
+// case, where ingest populates actor.id/type only) must still render a
+// non-blank "by ..." subtitle on the graph's launch node.
+func TestLaunchNode_ActorFallsBackToID(t *testing.T) {
+	store := NewMemStore()
+	ctx := context.Background()
+	reportBytes := []byte("human-launched")
+	hash := digest(reportBytes)
+	ev := Event{
+		EventID:   "evt-human",
+		EventType: materializedEventType,
+		Actor:     model.ActorRef{Type: model.ActorTypeHuman, ID: "alr@host"},
+		Payload: map[string]any{
+			"aileron.output.name":         "report.csv",
+			"aileron.output.content_hash": hash,
+			"aileron.step.id":             "s1",
+			"aileron.step.kind":           "transform",
+			"aileron.plan.skill":          "athena-report",
+		},
+	}
+	if err := store.Append(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	g, err := AssembleTrace(ctx, store, TraceRoot{ContentHash: hash})
+	if err != nil {
+		t.Fatalf("AssembleTrace: %v", err)
+	}
+	launch, ok := nodeByID(g)["launch"]
+	if !ok {
+		t.Fatal("launch terminal node missing")
+	}
+	want := "skill athena-report · by alr@host"
+	if launch.Subtitle != want {
+		t.Errorf("launch subtitle = %q, want %q", launch.Subtitle, want)
+	}
+}

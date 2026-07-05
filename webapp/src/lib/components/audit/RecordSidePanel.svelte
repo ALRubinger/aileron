@@ -83,6 +83,13 @@
 	const showCustody = $derived(!!node?.dangling || custodyRows.length > 0);
 
 	const inputs = $derived(node?.event ? p.stepInputs(node.event) : []);
+
+	// Launch-config inputs (`aileron.resolved_inputs`) recorded on every
+	// output.materialized record: the literal + dynamic resolved values, each
+	// surfaced as name/type/size only (never the raw value). Rendered wherever
+	// the node's event carries a non-empty map, consistent with how the step
+	// Inputs list renders.
+	const launchInputs = $derived(node?.event ? p.resolvedInputs(node.event) : []);
 </script>
 
 <Dialog.Root bind:open {onOpenChange}>
@@ -175,6 +182,26 @@
 										{#if input.content_hash}<Badge variant="secondary"
 												>{p.shortHash(input.content_hash)}</Badge
 											>{:else}<Badge variant="outline">literal</Badge>{/if}
+									</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
+
+					{#if launchInputs.length > 0}
+						<div class="mt-4" data-testid="launch-inputs-section">
+							<h3 class="mb-1 text-xs font-semibold text-muted-foreground">Launch inputs</h3>
+							<ul class="flex flex-col gap-1 text-xs">
+								{#each launchInputs as input (input.name)}
+									<li
+										class="flex flex-wrap items-center gap-2"
+										data-testid="side-panel-launch-input"
+									>
+										<span class="font-medium">{input.name}</span>
+										<Badge variant="outline">{input.type}</Badge>
+										{#if input.size > LARGE_LITERAL}
+											<Badge variant="secondary">{input.size} chars</Badge>
+										{/if}
 									</li>
 								{/each}
 							</ul>

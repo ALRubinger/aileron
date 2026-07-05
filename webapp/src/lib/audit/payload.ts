@@ -81,6 +81,56 @@ export function stepInputs(e: AuditEvent): StepInput[] {
 	return out;
 }
 
+/** One `aileron.resolved_inputs` entry: the launch-config input's binding
+ *  name, the JS type of its resolved value, and a size measure (character
+ *  length of the value's JSON serialization). Source-resolved dataset
+ *  inputs are excluded upstream (ADR-0027 audit boundary), so every entry
+ *  here is a literal or dynamic launch-config value. */
+export type ResolvedInput = {
+	name: string;
+	type: string;
+	size: number;
+};
+
+/** Reads the `aileron.resolved_inputs` map (name -> resolved value) that
+ *  every `output.materialized` record carries and returns a list of
+ *  name/type/size descriptors, sorted by name for stable rendering. A
+ *  missing or non-object value yields an empty list. The raw values are
+ *  never surfaced directly; only their type and serialized size are, which
+ *  keeps a large or sensitive literal collapsed behind its descriptor. */
+export function resolvedInputs(e: AuditEvent): ResolvedInput[] {
+	const raw = e.payload['aileron.resolved_inputs'];
+	if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+	const obj = raw as Record<string, unknown>;
+	const out: ResolvedInput[] = [];
+	for (const name of Object.keys(obj)) {
+		const v = obj[name];
+		out.push({ name, type: resolvedInputType(v), size: resolvedInputSize(v) });
+	}
+	out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	return out;
+}
+
+/** Classifies a resolved-input value into a compact display type. Arrays
+ *  and null narrow out of the bare `typeof object` bucket so the descriptor
+ *  reads naturally. */
+function resolvedInputType(v: unknown): string {
+	if (v === null) return 'null';
+	if (Array.isArray(v)) return 'array';
+	return typeof v;
+}
+
+/** Size of a resolved-input value as the character length of its JSON
+ *  serialization. A value that cannot be serialized (should not occur for
+ *  JSON-carried payloads) reports 0. */
+function resolvedInputSize(v: unknown): number {
+	try {
+		return JSON.stringify(v)?.length ?? 0;
+	} catch {
+		return 0;
+	}
+}
+
 export function planSkill(e: AuditEvent): string | undefined {
 	return str(e.payload, 'aileron.plan.skill');
 }
@@ -109,9 +159,28 @@ export function signatureVerified(e: AuditEvent): boolean {
 }
 
 /** Actor identity label: prefers the normalized `actor.identity_label`,
- *  falling back to the flat payload key. */
+ *  falling back to the flat payload key. This is the acting credential's
+ *  identity label specifically; it is intentionally blank when no
+ *  credential backs the action, which the chain-of-custody Actor row treats
+ *  as truthful. Use `actorLabel` for the "who launched" surfaces that must
+ *  never render blank. */
 export function actorIdentityLabel(e: AuditEvent): string | undefined {
 	return e.actor?.identity_label ?? str(e.payload, 'aileron.actor.identity_label');
+}
+
+/** "Who launched" label for the header, landing cards, and the graph's
+ *  launch node. Falls back identity_label -> display_name -> id so a
+ *  human-launched or transform-produced artifact (which carries no
+ *  credential identity label) still names its actor instead of rendering
+ *  blank. Mirrors the server-side `actorLabel` (internal/audit/trace_payload.go). */
+export function actorLabel(e: AuditEvent): string | undefined {
+	return (
+		actorIdentityLabel(e) ??
+		(e.actor?.display_name && e.actor.display_name.length > 0
+			? e.actor.display_name
+			: undefined) ??
+		(e.actor?.id && e.actor.id.length > 0 ? e.actor.id : undefined)
+	);
 }
 export function actorCredentialBinding(e: AuditEvent): string | undefined {
 	return e.actor?.credential_binding ?? str(e.payload, 'aileron.actor.credential_binding');
