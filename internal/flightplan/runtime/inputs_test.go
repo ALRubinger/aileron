@@ -217,6 +217,36 @@ func TestResolveInputs_ConstraintChecksStringForm(t *testing.T) {
 	}
 }
 
+// A dynamic input is constraint-checked the same as a literal, proving the
+// enforcement is rule-agnostic rather than limited to literal inputs. The
+// `today` rule resolves to a 2006-01-02 date under FixedClock, so an in-bound
+// date pattern passes and an out-of-bound pattern fails the launch closed.
+func TestResolveInputs_ConstraintEnforcedOnDynamicInput(t *testing.T) {
+	fixed := time.Date(2026, 6, 24, 15, 4, 5, 0, time.UTC)
+
+	inBound := planWithInputs([]Input{
+		{Name: "today", Type: "string",
+			Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"},
+			Constraint: &Constraint{Pattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)}},
+	}, nil)
+	ri, err := resolveInputs(context.Background(), inBound, nil, FixedClock{T: fixed}, &enforcer{})
+	if err != nil {
+		t.Fatalf("a dynamic value inside its constraint must resolve: %v", err)
+	}
+	if ri.Values["today"] != "2026-06-24" {
+		t.Errorf("today = %v", ri.Values["today"])
+	}
+
+	outOfBound := planWithInputs([]Input{
+		{Name: "today", Type: "string",
+			Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"},
+			Constraint: &Constraint{Pattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T`)}},
+	}, nil)
+	if _, err := resolveInputs(context.Background(), outOfBound, nil, FixedClock{T: fixed}, &enforcer{}); err == nil {
+		t.Fatal("a dynamic value outside its constraint must fail the launch closed")
+	}
+}
+
 // An input with no declared constraint is never checked (today's behavior).
 func TestResolveInputs_NoConstraintUnchecked(t *testing.T) {
 	p := planWithInputs([]Input{
