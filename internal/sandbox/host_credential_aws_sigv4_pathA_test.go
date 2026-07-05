@@ -112,6 +112,7 @@ func TestRegionFromHost(t *testing.T) {
 		{"athena.us-east-1.amazonaws.com", "us-east-1"},
 		{"athena.eu-west-1.amazonaws.com", "eu-west-1"},
 		{"s3.ap-southeast-2.amazonaws.com", "ap-southeast-2"},
+		{"athena.us-gov-west-1.amazonaws.com", "us-gov-west-1"}, // GovCloud partition (was missed by the old regex)
 		{"s3.amazonaws.com", ""},     // legacy global endpoint: no region segment
 		{"example.com", ""},          // not an AWS host
 		{"athena.amazonaws.com", ""}, // service-only, no region

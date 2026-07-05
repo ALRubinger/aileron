@@ -47,11 +47,14 @@ const SchemeHeaderTemplate = "header-template"
 const SchemeQueryParam = "query-param"
 
 // SchemeSigV4Resign re-signs the request with an AWS Signature Version 4
-// signature. It carries the non-secret [HostBinding.AccessKeyID],
-// [HostBinding.Region], and [HostBinding.Service], all required for this
-// scheme. The secret access key travels in the resolved credential value
-// (never in the binding), and the egress injector consumes it only as HMAC
-// key material to derive the signing key. Static keys only: session tokens
+// signature. It carries the non-secret [HostBinding.AccessKeyID] (required)
+// and the optional [HostBinding.Region] and [HostBinding.Service]. The
+// SigV4 credential scope is host-authoritative: the egress injector derives
+// (service, region) from the resolved upstream host and consults the stored
+// region/service only as a fallback for an unparseable host. The secret
+// access key travels in the resolved credential value (never in the
+// binding), and the egress injector consumes it only as HMAC key material
+// to derive the signing key. Static keys only: session tokens
 // (X-Amz-Security-Token) are a declared follow-up, not supported here.
 const SchemeSigV4Resign = "sigv4-resign"
 
@@ -190,14 +193,18 @@ type HostBinding struct {
 
 	// Region is the AWS region (e.g. "us-east-1") used for the SigV4
 	// credential scope, used only when Scheme is [SchemeSigV4Resign]. It is
-	// a non-secret param and is never inferred from the request host.
-	// Required for the sigv4-resign scheme, ignored otherwise.
+	// a non-secret param. Optional: the egress injector derives the region
+	// from the resolved upstream host when that host parses as an AWS
+	// endpoint and uses this field only as a fallback for an unparseable
+	// host. Ignored for every other scheme.
 	Region string
 
 	// Service is the AWS service name (e.g. "s3") used for the SigV4
 	// credential scope, used only when Scheme is [SchemeSigV4Resign]. It is
-	// a non-secret param and is never inferred from the request host.
-	// Required for the sigv4-resign scheme, ignored otherwise.
+	// a non-secret param. Optional: the egress injector derives the service
+	// from the resolved upstream host when that host parses as an AWS
+	// endpoint and uses this field only as a fallback for an unparseable
+	// host. Ignored for every other scheme.
 	Service string
 
 	// EmitMechanism declares how the in-container client is made to emit
@@ -299,11 +306,13 @@ func WithQueryParam(name string) HostBindingOption {
 
 // WithSigV4Resign sets the non-secret [HostBinding.AccessKeyID],
 // [HostBinding.Region], and [HostBinding.Service] used by
-// [SchemeSigV4Resign]. All three are required for that scheme: a
-// sigv4-resign binding with no access key id, region, or service could
-// never produce a well-formed signature, so an empty value is a
-// construction error. The secret access key is never set here; it travels
-// in the resolved credential value.
+// [SchemeSigV4Resign]. Only the access key id is required for that scheme
+// (it is non-derivable and appears verbatim in the signed Credential=
+// field). Region and service are optional: the egress injector derives the
+// SigV4 credential scope from the resolved upstream host when that host
+// parses as an AWS endpoint, and consults these fields only as a fallback
+// for an unparseable host (and then only when both are set). The secret
+// access key is never set here; it travels in the resolved credential value.
 func WithSigV4Resign(accessKeyID, region, service string) HostBindingOption {
 	return func(hb *HostBinding) {
 		hb.AccessKeyID = accessKeyID
@@ -432,8 +441,8 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	if scheme == SchemeQueryParam && hb.QueryParamName == "" {
 		return HostBinding{}, fmt.Errorf("host binding: query-param scheme requires a param name (WithQueryParam)")
 	}
-	if scheme == SchemeSigV4Resign && (hb.AccessKeyID == "" || hb.Region == "" || hb.Service == "") {
-		return HostBinding{}, fmt.Errorf("host binding: sigv4-resign scheme requires access key id, region, and service (WithSigV4Resign)")
+	if scheme == SchemeSigV4Resign && hb.AccessKeyID == "" {
+		return HostBinding{}, fmt.Errorf("host binding: sigv4-resign scheme requires an access key id (WithSigV4Resign)")
 	}
 	if hb.EmitMechanism == EmitMechanismSentinelSwap && (hb.SentinelValue == "" || hb.SentinelEnv == "") {
 		return HostBinding{}, fmt.Errorf("host binding: emit-mechanism sentinel-swap requires a sentinel value and env (WithSentinel)")

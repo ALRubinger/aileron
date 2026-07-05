@@ -136,6 +136,85 @@ func TestSandboxForwardProxy_SigV4ResignStripsPlaceholderAtBoundary(t *testing.T
 			},
 		},
 		{
+			// Acceptance (#1979): a sigv4-resign binding with EMPTY stored
+			// region/service still signs, deriving the SigV4 scope from the
+			// resolved upstream host (athena.us-east-1.amazonaws.test ->
+			// athena/us-east-1). This is the incremental win: a descriptor no
+			// longer needs to carry region/service at all.
+			name:          "sigv4-resign derives scope from host when stored region/service are empty",
+			bindingHost:   "athena.us-east-1.amazonaws.test",
+			bindingRef:    "user/aws",
+			bindingScheme: "sigv4-resign",
+			bindingOpts:   []binding.HostBindingOption{binding.WithSigV4Resign(realAccessKeyID, "", "")},
+			vaultName:     "user/aws",
+			vaultKind:     "user",
+			vaultValue:    []byte(secretAccessKey),
+			reqURL:        "https://athena.us-east-1.amazonaws.test/",
+			wantStatus:    http.StatusOK,
+			assertProxy: func(t *testing.T, cap capturedUpstream) {
+				t.Helper()
+				if !strings.Contains(cap.auth, "/us-east-1/athena/aws4_request") {
+					t.Errorf("Authorization scope not host-derived: %q", cap.auth)
+				}
+				ok, scope := boundaryValidateSigV4(cap.req, cap.body, []byte(secretAccessKey), realAccessKeyID, "us-east-1", "athena")
+				if !ok {
+					t.Errorf("host-derived re-sign did not validate (scope=%q, auth=%q)", scope, cap.auth)
+				}
+			},
+		},
+		{
+			// Acceptance (#1979): a GovCloud endpoint (us-gov-west-1) signs
+			// correctly. The earlier two-word region regex could not recognize
+			// the us-gov-west-1 partition; the generalized parser can.
+			name:          "sigv4-resign derives GovCloud region from host",
+			bindingHost:   "athena.us-gov-west-1.amazonaws.test",
+			bindingRef:    "user/aws",
+			bindingScheme: "sigv4-resign",
+			bindingOpts:   []binding.HostBindingOption{binding.WithSigV4Resign(realAccessKeyID, "", "")},
+			vaultName:     "user/aws",
+			vaultKind:     "user",
+			vaultValue:    []byte(secretAccessKey),
+			reqURL:        "https://athena.us-gov-west-1.amazonaws.test/",
+			wantStatus:    http.StatusOK,
+			assertProxy: func(t *testing.T, cap capturedUpstream) {
+				t.Helper()
+				if !strings.Contains(cap.auth, "/us-gov-west-1/athena/aws4_request") {
+					t.Errorf("Authorization scope not GovCloud host-derived: %q", cap.auth)
+				}
+				ok, scope := boundaryValidateSigV4(cap.req, cap.body, []byte(secretAccessKey), realAccessKeyID, "us-gov-west-1", "athena")
+				if !ok {
+					t.Errorf("GovCloud re-sign did not validate (scope=%q, auth=%q)", scope, cap.auth)
+				}
+			},
+		},
+		{
+			// Acceptance (#1979): a stored region/service that DISAGREES with
+			// the resolved host is overridden by the host-derived scope. This
+			// is the UnrecognizedClientException regression: a stale stored
+			// region can no longer sign the wrong scope for the host the proxy
+			// actually dials.
+			name:          "sigv4-resign host scope overrides disagreeing stored region/service",
+			bindingHost:   "athena.us-east-1.amazonaws.test",
+			bindingRef:    "user/aws",
+			bindingScheme: "sigv4-resign",
+			bindingOpts:   []binding.HostBindingOption{binding.WithSigV4Resign(realAccessKeyID, "eu-west-1", "s3")},
+			vaultName:     "user/aws",
+			vaultKind:     "user",
+			vaultValue:    []byte(secretAccessKey),
+			reqURL:        "https://athena.us-east-1.amazonaws.test/",
+			wantStatus:    http.StatusOK,
+			assertProxy: func(t *testing.T, cap capturedUpstream) {
+				t.Helper()
+				if strings.Contains(cap.auth, "eu-west-1") || strings.Contains(cap.auth, "/s3/") {
+					t.Errorf("Authorization signed against stale stored scope, not the host: %q", cap.auth)
+				}
+				ok, scope := boundaryValidateSigV4(cap.req, cap.body, []byte(secretAccessKey), realAccessKeyID, "us-east-1", "athena")
+				if !ok {
+					t.Errorf("host-overrides-stored re-sign did not validate (scope=%q, auth=%q)", scope, cap.auth)
+				}
+			},
+		},
+		{
 			name:              "bearer binding injects unchanged (no regression)",
 			bindingHost:       "api.example.test",
 			bindingRef:        "api_key/github/octocat",

@@ -610,6 +610,11 @@ func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Para
 	case binding.SchemeQueryParam:
 		return inject.SchemeQueryParam, inject.Params{ParamName: hb.QueryParamName}, true
 	case binding.SchemeSigV4Resign:
+		// AccessKeyID is required; Region and Service are a transitional
+		// fallback. The injector derives the SigV4 (service, region) scope
+		// from the resolved upstream host (req carries the launch-resolved
+		// sealed host), so these stored fields are honored only when that
+		// host is unparseable. Host is authoritative.
 		return inject.SchemeSigV4Resign, inject.Params{AccessKeyID: hb.AccessKeyID, Region: hb.Region, Service: hb.Service}, true
 	default:
 		return "", inject.Params{}, false

@@ -265,33 +265,35 @@ func TestNewHostBinding_QueryParamRequiresName(t *testing.T) {
 	}
 }
 
-func TestNewHostBinding_SigV4ResignRequiresAllParams(t *testing.T) {
-	// A sigv4-resign binding needs an access key id, region, and service to
-	// produce a well-formed signature, so each missing individually is a
-	// construction error (the acceptance criterion: no invalid binding
-	// reaches the matcher). The secret access key is never a binding param;
-	// it travels in the resolved credential value.
-	missingCases := []struct {
-		name                         string
-		accessKeyID, region, service string
-	}{
-		{"missing access key id", "", "us-east-1", "s3"},
-		{"missing region", "AKIDEXAMPLE", "", "s3"},
-		{"missing service", "AKIDEXAMPLE", "us-east-1", ""},
+func TestNewHostBinding_SigV4ResignRequiresAccessKeyID(t *testing.T) {
+	// Only the access key id is required for a sigv4-resign binding: it is
+	// non-derivable and appears verbatim in the signed Credential= field.
+	// Region and service are optional because the egress injector derives
+	// the SigV4 scope from the resolved upstream host. The secret access key
+	// is never a binding param; it travels in the resolved credential value.
+	if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithSigV4Resign("", "us-east-1", "s3")); err == nil {
+		t.Fatal("expected error for missing access key id, got nil")
 	}
-	for _, tc := range missingCases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
-				binding.WithSigV4Resign(tc.accessKeyID, tc.region, tc.service)); err == nil {
-				t.Fatalf("expected error for %s, got nil", tc.name)
-			}
-		})
-	}
-	// Bare sigv4-resign with no options is also rejected.
+	// Bare sigv4-resign with no options is also rejected (no access key id).
 	if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign"); err == nil {
-		t.Fatal("expected error for sigv4-resign without params, got nil")
+		t.Fatal("expected error for sigv4-resign without an access key id, got nil")
 	}
 
+	// A binding with an access key id but NO region/service now constructs
+	// successfully: the scope is host-derived at egress.
+	hbNoScope, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", ""))
+	if err != nil {
+		t.Fatalf("unexpected error for sigv4-resign with only an access key id: %v", err)
+	}
+	if hbNoScope.AccessKeyID != "AKIDEXAMPLE" || hbNoScope.Region != "" || hbNoScope.Service != "" {
+		t.Errorf("sigv4 params = (%q,%q,%q), want (AKIDEXAMPLE,,)",
+			hbNoScope.AccessKeyID, hbNoScope.Region, hbNoScope.Service)
+	}
+
+	// A binding that still carries region/service (transitional fallback)
+	// constructs and retains them.
 	hb, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
 		binding.WithSigV4Resign("AKIDEXAMPLE", "us-east-1", "s3"))
 	if err != nil {

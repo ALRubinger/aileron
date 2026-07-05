@@ -180,13 +180,15 @@ type Entry struct {
 	AccessKeyID string `yaml:"access_key_id"`
 
 	// Region is the non-secret AWS region (e.g. "us-east-1") used for the
-	// SigV4 credential scope, required only for the sigv4-resign scheme. It
-	// is never inferred from the host.
+	// SigV4 credential scope. Optional for the sigv4-resign scheme: the
+	// egress injector derives the region from the resolved upstream host
+	// and consults this field only as a fallback for an unparseable host.
 	Region string `yaml:"region"`
 
 	// Service is the non-secret AWS service name (e.g. "s3") used for the
-	// SigV4 credential scope, required only for the sigv4-resign scheme. It
-	// is never inferred from the host.
+	// SigV4 credential scope. Optional for the sigv4-resign scheme: the
+	// egress injector derives the service from the resolved upstream host
+	// and consults this field only as a fallback for an unparseable host.
 	Service string `yaml:"service"`
 
 	// AllowedHosts is the optional per-binding trust-contract host
@@ -353,14 +355,13 @@ func (e *Entry) Validate() error {
 			return fmt.Errorf("query-param scheme requires a query_param name")
 		}
 	case string(inject.SchemeSigV4Resign):
+		// Only access_key_id is required: it is non-derivable and appears
+		// verbatim in the signed Credential= field. region and service are
+		// optional because the egress injector derives the SigV4 scope from
+		// the resolved upstream host, consulting the stored region/service
+		// only as a fallback for an unparseable host.
 		if e.AccessKeyID == "" {
 			return fmt.Errorf("sigv4-resign scheme requires an access_key_id")
-		}
-		if e.Region == "" {
-			return fmt.Errorf("sigv4-resign scheme requires a region")
-		}
-		if e.Service == "" {
-			return fmt.Errorf("sigv4-resign scheme requires a service")
 		}
 	}
 

@@ -80,13 +80,18 @@ type Params struct {
 	AccessKeyID string
 
 	// Region is the AWS region (e.g. "us-east-1"), used only by
-	// [SchemeSigV4Resign] for the credential scope. Required for that
-	// scheme.
+	// [SchemeSigV4Resign] for the credential scope. It is a transitional
+	// fallback: when the request host parses as an AWS endpoint the region
+	// is derived from that host and this field is ignored; it is consulted
+	// only when the host is unparseable, and then only together with a
+	// non-empty Service. See [Inject].
 	Region string
 
 	// Service is the AWS service name (e.g. "s3"), used only by
-	// [SchemeSigV4Resign] for the credential scope. Required for that
-	// scheme.
+	// [SchemeSigV4Resign] for the credential scope. Like Region it is a
+	// transitional fallback: the host-derived service wins when the request
+	// host parses, and this field is consulted only for an unparseable host
+	// together with a non-empty Region. See [Inject].
 	Service string
 }
 
@@ -94,10 +99,20 @@ type Params struct {
 // written only into the request surface the scheme defines (a header
 // value or a query parameter); they never appear in the returned error.
 //
-// For [SchemeSigV4Resign] the required [Params] fields are AccessKeyID,
-// Region, and Service, and the secret argument carries the AWS secret
-// access key; the secret is used only as HMAC key material to derive the
-// signing key and never appears in the resulting Authorization header.
+// For [SchemeSigV4Resign] the only required [Params] field is AccessKeyID
+// (it is non-derivable and appears verbatim in the Credential= scope); the
+// secret argument carries the AWS secret access key, used only as HMAC key
+// material to derive the signing key and never appearing in the resulting
+// Authorization header. The (service, region) credential scope is
+// host-authoritative: it is derived from the request host via
+// [ParseAWSEndpointHost] when that host parses as an AWS endpoint, so a
+// stored [Params.Region]/[Params.Service] that disagrees with the host the
+// proxy actually dials can no longer sign the wrong scope (the
+// UnrecognizedClientException class of bug). When the host does not parse,
+// [Params.Region] and [Params.Service] are used as a fallback but only when
+// both are present; if neither the host nor the params yield a full scope
+// the request is left unmutated and [ErrMissingParam] is returned (fail
+// closed, never a silent default).
 //
 // Returns [ErrMissingParam] if a scheme's required [Params] field is
 // absent and [ErrUnknownScheme] for any value outside the closed set. On
@@ -145,13 +160,11 @@ func Inject(req *http.Request, scheme Scheme, secret []byte, params Params) erro
 		if params.AccessKeyID == "" {
 			return fmt.Errorf("%w: sigv4-resign scheme requires AccessKeyID", ErrMissingParam)
 		}
-		if params.Region == "" {
-			return fmt.Errorf("%w: sigv4-resign scheme requires Region", ErrMissingParam)
+		service, region, err := resolveSigV4Scope(req, params)
+		if err != nil {
+			return err
 		}
-		if params.Service == "" {
-			return fmt.Errorf("%w: sigv4-resign scheme requires Service", ErrMissingParam)
-		}
-		return signSigV4(req, secret, params.AccessKeyID, params.Region, params.Service, now())
+		return signSigV4(req, secret, params.AccessKeyID, region, service, now())
 
 	default:
 		// scheme did not originate from ParseScheme; treat as unknown.

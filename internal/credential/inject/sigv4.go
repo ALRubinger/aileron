@@ -33,6 +33,35 @@ const (
 	hdrAuthorization  = "Authorization"
 )
 
+// resolveSigV4Scope determines the (service, region) SigV4 credential scope
+// for req. The request host is authoritative: when it parses as an AWS
+// endpoint via [ParseAWSEndpointHost], the host-derived scope wins so a
+// stored param that disagrees with the host the proxy actually dials cannot
+// sign the wrong scope. When the host does not parse, params.Service and
+// params.Region are used as a transitional fallback, but only when BOTH are
+// present. If neither the host nor the params yield a full scope it returns
+// a wrapped [ErrMissingParam] naming the (non-secret) host cause, so the
+// caller fails closed rather than signing against a silent default.
+//
+// The host is read as req.Host first, then req.URL.Host, mirroring the host
+// resolution in canonicalAndSignedHeaders so the scope is derived from the
+// same host that is folded into the signature.
+func resolveSigV4Scope(req *http.Request, params Params) (service, region string, err error) {
+	host := req.Host
+	if host == "" && req.URL != nil {
+		host = req.URL.Host
+	}
+	if svc, reg, perr := ParseAWSEndpointHost(host); perr == nil {
+		return svc, reg, nil
+	}
+	if params.Region != "" && params.Service != "" {
+		return params.Service, params.Region, nil
+	}
+	return "", "", fmt.Errorf(
+		"%w: sigv4-resign scope unresolved: host %q is not a parseable AWS endpoint and no complete stored region/service fallback was supplied",
+		ErrMissingParam, host)
+}
+
 // signSigV4 computes an AWS Signature Version 4 over req using the
 // std-library crypto primitives only (no AWS SDK) and mutates req to
 // carry the three SigV4 headers (X-Amz-Date, X-Amz-Content-Sha256,

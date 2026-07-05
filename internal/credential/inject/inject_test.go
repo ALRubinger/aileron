@@ -371,6 +371,11 @@ func TestInjectSigV4MissingAccessKeyID(t *testing.T) {
 	}
 }
 
+// TestInjectSigV4MissingRegion asserts the fail-closed contract: an
+// unparseable host ("example.amazonaws.com") with only a partial stored
+// fallback (Service but no Region) yields ErrMissingParam and leaves the
+// request unmutated. The fallback is honored only when BOTH stored fields
+// are present.
 func TestInjectSigV4MissingRegion(t *testing.T) {
 	req := newReq(t, "https://example.amazonaws.com/")
 	err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
@@ -382,6 +387,86 @@ func TestInjectSigV4MissingRegion(t *testing.T) {
 	}
 	if req.Header.Get("Authorization") != "" || req.Header.Get("X-Amz-Date") != "" {
 		t.Error("request mutated on missing-Region error path")
+	}
+}
+
+// TestInjectSigV4DeriveScopeFromHost is the incremental win: a parseable AWS
+// host with NO stored region/service still signs, deriving both from the
+// host. The emitted credential scope carries the host's region and service.
+func TestInjectSigV4DeriveScopeFromHost(t *testing.T) {
+	pinClock(t)
+	req := newReq(t, "https://athena.us-east-1.amazonaws.com/")
+	if err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
+		AccessKeyID: vectorAccessKeyID,
+	}); err != nil {
+		t.Fatalf("Inject sigv4 (derive from host): %v", err)
+	}
+	auth := req.Header.Get("Authorization")
+	wantScope := "/us-east-1/athena/aws4_request"
+	if !strings.Contains(auth, wantScope) {
+		t.Errorf("Authorization scope = %q, want it to contain %q", auth, wantScope)
+	}
+	if !strings.Contains(auth, "Credential="+vectorAccessKeyID+"/") {
+		t.Errorf("Authorization = %q, want Credential=%s/...", auth, vectorAccessKeyID)
+	}
+}
+
+// TestInjectSigV4GovCloudHost proves the generalized region parser signs a
+// GovCloud endpoint (us-gov-west-1), which the earlier two-word region
+// regex could not recognize.
+func TestInjectSigV4GovCloudHost(t *testing.T) {
+	pinClock(t)
+	req := newReq(t, "https://athena.us-gov-west-1.amazonaws.com/")
+	if err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
+		AccessKeyID: vectorAccessKeyID,
+	}); err != nil {
+		t.Fatalf("Inject sigv4 (govcloud): %v", err)
+	}
+	if want := "/us-gov-west-1/athena/aws4_request"; !strings.Contains(req.Header.Get("Authorization"), want) {
+		t.Errorf("Authorization = %q, want scope %q", req.Header.Get("Authorization"), want)
+	}
+}
+
+// TestInjectSigV4HostOverridesStoredScope is the regression for the
+// UnrecognizedClientException class: a parseable host wins over a stored
+// region/service that disagrees, so the request signs against the host the
+// proxy actually dials, not the stale stored value.
+func TestInjectSigV4HostOverridesStoredScope(t *testing.T) {
+	pinClock(t)
+	req := newReq(t, "https://athena.us-east-1.amazonaws.com/")
+	if err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
+		AccessKeyID: vectorAccessKeyID,
+		Region:      "eu-west-1", // disagrees with the host
+		Service:     "s3",        // disagrees with the host
+	}); err != nil {
+		t.Fatalf("Inject sigv4 (host overrides stored): %v", err)
+	}
+	auth := req.Header.Get("Authorization")
+	if want := "/us-east-1/athena/aws4_request"; !strings.Contains(auth, want) {
+		t.Errorf("Authorization = %q, want host-derived scope %q", auth, want)
+	}
+	if strings.Contains(auth, "eu-west-1") || strings.Contains(auth, "/s3/") {
+		t.Errorf("Authorization = %q leaked the stale stored region/service", auth)
+	}
+}
+
+// TestInjectSigV4UnparseableHostNoFallback is the fail-closed regression: an
+// unparseable host with no stored region/service returns ErrMissingParam and
+// leaves the request unmutated (no silent default that would sign the wrong
+// scope).
+func TestInjectSigV4UnparseableHostNoFallback(t *testing.T) {
+	req := newReq(t, "https://example.amazonaws.com/")
+	err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
+		AccessKeyID: vectorAccessKeyID,
+	})
+	if !errors.Is(err, ErrMissingParam) {
+		t.Fatalf("error = %v, want ErrMissingParam", err)
+	}
+	if req.Header.Get("Authorization") != "" || req.Header.Get("X-Amz-Date") != "" {
+		t.Error("request mutated on fail-closed error path")
+	}
+	if strings.Contains(err.Error(), vectorSecretKey) {
+		t.Errorf("error leaked secret: %q", err.Error())
 	}
 }
 
@@ -422,6 +507,9 @@ func TestInjectSigV4BodyReadError(t *testing.T) {
 	}
 }
 
+// TestInjectSigV4MissingService is the mirror of TestInjectSigV4MissingRegion:
+// an unparseable host with only a partial stored fallback (Region but no
+// Service) fails closed with ErrMissingParam and leaves the request unmutated.
 func TestInjectSigV4MissingService(t *testing.T) {
 	req := newReq(t, "https://example.amazonaws.com/")
 	err := Inject(req, SchemeSigV4Resign, []byte(vectorSecretKey), Params{
