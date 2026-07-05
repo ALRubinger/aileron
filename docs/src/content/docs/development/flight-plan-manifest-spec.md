@@ -164,7 +164,7 @@ Every step carries an `id` unique within the graph and a `kind`. The remaining f
 | `id` | string | Yes | The step id, unique within the step graph. Later steps reference this step's outputs as `steps.<id>.<outputName>`. |
 | `kind` | string | Yes | One of `action-call`, `transform`, `tool`, `llm-seam`. A closed enum. |
 | `actionRef` | string | Yes for `action-call` | The action this step invokes, in the form `aileron:<connector>.<action>`. Must match a declared `requires.actions[].ref`. |
-| `command` | array | Yes for `tool` | The argv array a `tool` step executes. The first element is the program, the rest its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion. |
+| `command` | array | Yes for `tool` | The argv array a `tool` step executes. The first element is the program, the rest its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion. An element may embed a `{{ inputs.<name> }}` token substituted from a resolved input at launch. See [Command parameterization](#command-parameterization). |
 | `args` | object | No (`action-call` only) | The action arguments. Each value is a binding reference, never a value. |
 | `bindings` | object | No (`transform`, `tool`, `llm-seam`) | The named inputs to the step. Each value is a binding reference. |
 | `mount` | object | No (`tool` only) | The step's input-I/O boundary. `mount.path` is the path inside the environment where the step's input files are placed. |
@@ -199,6 +199,16 @@ A step result wires to a declared output artifact through `materializesOutput`. 
 No step field may hold a secret. This extends the credential-sealing invariant. A step binds references, never values. Every step kind is a closed object, so an `additionalProperties` key carrying a value is rejected. The `args` and `bindings` values are binding references whose grammar is closed to `inputs.<name>` and `steps.<id>.<output>`, so a literal secret cannot be embedded in the wiring.
 
 The composition lives under the `aileron` block, so it is lossless if stripped. Removing the block removes the `steps` graph with it and leaves a valid instruction-only skill.
+
+## Command parameterization
+
+A `tool` step's `command` element may embed a `{{ inputs.<name> }}` interpolation token. The token references a declared input by name. At launch the runtime substitutes the token with the string form of that input's resolved value. The substitution replaces the token text within the element. It never splits the element into more arguments and it never introduces a shell, so the argv-array shape and the no-shell guarantee are preserved. Literal text around a token is copied verbatim, so `--region={{ inputs.region }}` resolves to `--region=us-east-1`.
+
+The referenced input must declare a constraint. An input carries a constraint when it declares an `enum` allow-set or a `pattern`. Freeze rejects a command token that references an unconstrained input. An unconstrained input flowing into a signed command position is an injection surface, because the resolved value could smuggle arbitrary arguments into the sealed exec. The constraint bounds the value to the author's allow-set or pattern, so the sealed command stays within the shape the author signed.
+
+Freeze seals the template argv. The `{{ inputs.<name> }}` token bytes ride the signed frontmatter, so the signature covers the template, not a resolved value. The runtime execs the instantiated argv. The audit record's `aileron.step.command` is the resolved argv, and `aileron.step.command_derived` lists the argv indices that were substituted from an input, so a reader sees which positions came from a resolved input.
+
+A token that references an input the plan does not declare is rejected at freeze and again at launch load. A malformed token (unbalanced braces, or a body that is not `inputs.<name>`) is rejected the same way. A command with no token is unaffected and execs exactly the argv the author declared.
 
 ## Lossless if stripped
 

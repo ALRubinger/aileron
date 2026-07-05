@@ -103,6 +103,13 @@ func Lint(m *manifest.Manifest) error {
 			}
 		}
 	}
+	// Guard the embedded command-interpolation grammar: a `{{ inputs.<name> }}`
+	// token in a tool step's sealed argv must name a declared, CONSTRAINED
+	// input, or it is an injection surface. This runs after the whole-graph
+	// kind/id pass so it only sees structurally valid steps.
+	if err := lintCommandInterpolation(m); err != nil {
+		return err
+	}
 	return nil
 }
 

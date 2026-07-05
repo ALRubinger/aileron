@@ -408,6 +408,14 @@ func (d stepDTO) populateToolStep(step *Step) error {
 		if arg == "" {
 			return decodeErrf("step %q: tool command element %d is empty", d.ID, i)
 		}
+		// Defense-in-depth over the launch load path (#1958): reject a malformed
+		// `{{ inputs.<name> }}` token here so a tampered manifest never reaches
+		// instantiation with an unbalanced or non-inputs token. The
+		// constraint-presence guard stays freeze-only; decode checks only the
+		// grammar (here) and the declared-input reference (validateReferences).
+		if _, err := commandInputRefs(arg); err != nil {
+			return decodeErrf("step %q: tool command element %d: %v", d.ID, i, err)
+		}
 	}
 	step.Command = d.Command
 	if d.Mount != nil {

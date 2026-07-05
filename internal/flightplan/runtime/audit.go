@@ -235,6 +235,13 @@ func buildOutputRecord(o materializedOutput, prov launchProvenance, dispatchBySt
 	// (per-egress attribution, Half B) is out of scope and omitted entirely.
 	if o.StepKind == KindTool {
 		fields["aileron.step.command"] = o.Command
+		// The input-derived index marker (#1958): which argv positions were
+		// instantiated from `{{ inputs.<name> }}` interpolation. Present only
+		// when non-empty, so a token-free tool command records no marker and its
+		// record is byte-identical to the pre-interpolation shape.
+		if len(o.CommandDerived) > 0 {
+			fields["aileron.step.command_derived"] = o.CommandDerived
+		}
 	}
 	// The transform name is meaningful only for a transform step; omit it for
 	// an action-call or tool step so the record does not carry an empty value.

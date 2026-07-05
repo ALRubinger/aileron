@@ -566,11 +566,11 @@
         },
         "command": {
           "type": "array",
-          "description": "The argv array the step executes. The first element is the program; the rest are its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion.",
+          "description": "The argv array the step executes. The first element is the program; the rest are its arguments. An argv array, never a shell string: no shell interpretation, no word splitting, no expansion. An element may embed a `{{ inputs.<name> }}` interpolation token that is substituted with a resolved input's string form at launch; the substitution replaces the token text within the element and never splits the argv, so the no-shell guarantee holds. Freeze seals the TEMPLATE argv (the token bytes are signed) and the runtime execs the INSTANTIATED argv. A token must reference an input that declares a constraint (an enum or pattern); an unconstrained input in a sealed command position is an injection surface and freeze rejects it.",
           "minItems": 1,
           "items": {
             "type": "string",
-            "description": "One argv element.",
+            "description": "One argv element. It may embed one or more `{{ inputs.<name> }}` tokens, each substituted at launch with the string form of the named resolved input. The referenced input must declare a constraint (enum or pattern). Literal text around a token is preserved verbatim; substitution never introduces a shell or word-splits the element.",
             "minLength": 1
           }
         },
