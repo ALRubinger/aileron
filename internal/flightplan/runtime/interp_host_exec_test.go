@@ -140,6 +140,34 @@ func TestExecute_InstantiatedHostShapeViolationFailsClosed(t *testing.T) {
 	}
 }
 
+// TestExecute_ToolStepMissingHostInputFailsClosed proves a sealed host token
+// naming an input with no resolved value fails the step closed BEFORE the
+// step-scope mint, mirroring the command missing-input guard. Decode rejects an
+// undeclared input and every declared input is resolved at the launch boundary,
+// so this only fires on a directly-constructed plan and fails closed rather
+// than minting a half-built host.
+func TestExecute_ToolStepMissingHostInputFailsClosed(t *testing.T) {
+	p := toolStepPlan()
+	p.Inputs = append(p.Inputs, enumRegionInput())
+	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: []string{templatedHost}})
+	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
+	x := &executor{
+		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
+		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{templatedHost}}},
+	}
+	// Resolve payload but leave aws_region unresolved.
+	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	if err == nil {
+		t.Fatal("a host token with no resolved input must fail the step closed")
+	}
+	if !strings.Contains(err.Error(), "host interpolation") {
+		t.Errorf("error should name the host interpolation failure, got: %v", err)
+	}
+	if len(runner.specs) != 0 {
+		t.Error("the interpolation failure must fire before the step-scope mint / subprocess runs")
+	}
+}
+
 // TestRunPlan_OutOfConstraintRegionFailsBeforeStep proves an out-of-constraint
 // input value fails the launch closed at input resolution (#1957), before the
 // tool step (and its host instantiation) ever runs — the constraint gate, not

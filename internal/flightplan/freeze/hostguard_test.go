@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 )
 
 // toolStepWithHosts builds a raw tool step whose trustContract declares the
@@ -93,6 +95,45 @@ func TestLint_HostTokenFreeClean(t *testing.T) {
 	)
 	if err := Lint(m); err != nil {
 		t.Errorf("a token-free host must lint clean: %v", err)
+	}
+}
+
+// TestLint_HostNoTrustContractClean proves a tool step that declares NO
+// trustContract is skipped by the host guard (it declares no host reach) and
+// lints clean — the guard never synthesizes a reach for a contract-less step.
+func TestLint_HostNoTrustContractClean(t *testing.T) {
+	m := manifestWithInputsAndSteps(
+		[]any{constrainedInput("aws_region")},
+		[]any{map[string]any{"id": "q", "kind": "tool", "command": []any{"aws"}, "outputs": []any{"out"}}},
+	)
+	if err := Lint(m); err != nil {
+		t.Errorf("a tool step with no trustContract must lint clean: %v", err)
+	}
+}
+
+// TestLint_HostMalformedContractSkipped proves the host guard tolerates a
+// trustContract whose hosts are missing, non-array, or carry a non-string
+// entry: those shapes are schema and steptrust-seal errors caught elsewhere, so
+// the host guard skips them (a present host STRING is all it inspects) rather
+// than double-reporting a shape the sealing path already refuses.
+func TestLint_HostMalformedContractSkipped(t *testing.T) {
+	base := func(tc map[string]any) *manifest.Manifest {
+		return manifestWithInputsAndSteps(
+			[]any{constrainedInput("aws_region")},
+			[]any{map[string]any{"id": "q", "kind": "tool", "command": []any{"aws"}, "outputs": []any{"out"}, "trustContract": tc}},
+		)
+	}
+	cases := map[string]map[string]any{
+		"hosts key absent":      {"credential": map[string]any{"kind": "none"}, "effect": "read"},
+		"hosts not an array":    {"hosts": "s3.amazonaws.com"},
+		"non-string host entry": {"hosts": []any{42}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := Lint(base(tc)); err != nil {
+				t.Errorf("the host guard must skip a malformed contract shape, got: %v", err)
+			}
+		})
 	}
 }
 
