@@ -218,7 +218,7 @@
 						<Card.Content>
 							<p class="text-xs text-muted-foreground">
 								{[
-									p.actorIdentityLabel(event) && `by ${p.actorIdentityLabel(event)}`,
+									p.actorLabel(event) && `by ${p.actorLabel(event)}`,
 									p.planSkill(event) && `skill ${p.planSkill(event)}`,
 									hash && p.shortHash(hash)
 								]

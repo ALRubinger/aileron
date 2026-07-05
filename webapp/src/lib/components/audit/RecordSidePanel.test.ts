@@ -72,3 +72,54 @@ describe('RecordSidePanel — chain-of-custody section', () => {
 		expect(screen.queryByTestId('custody-section')).not.toBeInTheDocument();
 	});
 });
+
+describe('RecordSidePanel — launch inputs section', () => {
+	it('renders a name/type descriptor row per resolved input', () => {
+		const node: ProvenanceNode = {
+			id: 'artifact:h',
+			kind: 'artifact',
+			title: 'report.csv',
+			depth: 0,
+			event: event({
+				'aileron.output.name': 'report.csv',
+				'aileron.resolved_inputs': { region: 'us-east-1', limit: 10 }
+			})
+		};
+		render(RecordSidePanel, { node });
+		expect(screen.getByTestId('launch-inputs-section')).toBeInTheDocument();
+		const rows = screen.getAllByTestId('side-panel-launch-input');
+		expect(rows).toHaveLength(2);
+		// Sorted by name: limit before region.
+		expect(rows[0]).toHaveTextContent('limit');
+		expect(rows[0]).toHaveTextContent('number');
+		expect(rows[1]).toHaveTextContent('region');
+		expect(rows[1]).toHaveTextContent('string');
+	});
+
+	it('badges the character size of a large literal input', () => {
+		const big = 'x'.repeat(200);
+		const node: ProvenanceNode = {
+			id: 'artifact:h',
+			kind: 'artifact',
+			title: 'report.csv',
+			depth: 0,
+			event: event({ 'aileron.resolved_inputs': { blob: big } })
+		};
+		render(RecordSidePanel, { node });
+		const row = screen.getByTestId('side-panel-launch-input');
+		// JSON.stringify adds the surrounding quotes: 202 chars.
+		expect(row).toHaveTextContent('202 chars');
+	});
+
+	it('does not render the section when the event carries no resolved inputs', () => {
+		const node: ProvenanceNode = {
+			id: 'artifact:h',
+			kind: 'artifact',
+			title: 'report.csv',
+			depth: 0,
+			event: event({ 'aileron.output.name': 'report.csv' })
+		};
+		render(RecordSidePanel, { node });
+		expect(screen.queryByTestId('launch-inputs-section')).not.toBeInTheDocument();
+	});
+});

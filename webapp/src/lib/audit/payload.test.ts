@@ -4,6 +4,8 @@ import {
 	formatBytes,
 	stepInputs,
 	signatureVerified,
+	actorLabel,
+	resolvedInputs,
 	SIGNATURE_STATUS_VERIFIED
 } from './payload';
 import type { AuditEvent } from '$lib/api';
@@ -87,5 +89,71 @@ describe('stepInputs', () => {
 		expect(
 			stepInputs(ev({ 'aileron.step.inputs': [null, 42, {}, { binding: '' }, { binding: 'ok' }] }))
 		).toEqual([{ binding: 'ok' }]);
+	});
+});
+
+describe('actorLabel', () => {
+	function evActor(
+		actor: AuditEvent['actor'],
+		payload: Record<string, unknown> = {}
+	): AuditEvent {
+		return { audit_id: 'x', event_type: 'output.materialized', timestamp: 't', payload, actor };
+	}
+	it('prefers the credential identity label', () => {
+		expect(
+			actorLabel(
+				evActor({ id: 'runtime', type: 'agent', display_name: 'Bot', identity_label: 'analytics@corp' })
+			)
+		).toBe('analytics@corp');
+	});
+	it('falls back to display name when no identity label', () => {
+		expect(actorLabel(evActor({ id: 'runtime', type: 'agent', display_name: 'Analytics Bot' }))).toBe(
+			'Analytics Bot'
+		);
+	});
+	it('falls back to id when no identity label or display name (human-launched)', () => {
+		expect(actorLabel(evActor({ id: 'alr@host', type: 'human' }))).toBe('alr@host');
+	});
+	it('is undefined when the actor carries nothing usable', () => {
+		expect(actorLabel(evActor(undefined))).toBeUndefined();
+		expect(actorLabel(evActor({ id: '', type: 'human', display_name: '' }))).toBeUndefined();
+	});
+	it('still reads the flat payload identity label when the normalized field is absent', () => {
+		expect(
+			actorLabel(evActor(undefined, { 'aileron.actor.identity_label': 'flat@corp' }))
+		).toBe('flat@corp');
+	});
+});
+
+describe('resolvedInputs', () => {
+	function ev(payload: Record<string, unknown>): AuditEvent {
+		return { audit_id: 'x', event_type: 'output.materialized', timestamp: 't', payload };
+	}
+	it('returns name/type/size descriptors sorted by name', () => {
+		expect(
+			resolvedInputs(
+				ev({
+					'aileron.resolved_inputs': { region: 'us-east-1', limit: 10, flags: ['a', 'b'] }
+				})
+			)
+		).toEqual([
+			{ name: 'flags', type: 'array', size: JSON.stringify(['a', 'b']).length },
+			{ name: 'limit', type: 'number', size: 2 },
+			{ name: 'region', type: 'string', size: JSON.stringify('us-east-1').length }
+		]);
+	});
+	it('classifies null and object values distinctly from bare typeof', () => {
+		expect(
+			resolvedInputs(ev({ 'aileron.resolved_inputs': { a: null, b: { k: 1 } } }))
+		).toEqual([
+			{ name: 'a', type: 'null', size: 4 },
+			{ name: 'b', type: 'object', size: JSON.stringify({ k: 1 }).length }
+		]);
+	});
+	it('returns [] for a missing, non-object, or array value', () => {
+		expect(resolvedInputs(ev({}))).toEqual([]);
+		expect(resolvedInputs(ev({ 'aileron.resolved_inputs': 'nope' }))).toEqual([]);
+		expect(resolvedInputs(ev({ 'aileron.resolved_inputs': ['a', 'b'] }))).toEqual([]);
+		expect(resolvedInputs(ev({ 'aileron.resolved_inputs': null }))).toEqual([]);
 	});
 });

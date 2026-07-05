@@ -397,7 +397,7 @@ func (w *traceWalker) resolve(hash string) (Event, bool) {
 // artifact's plan/actor provenance, mirroring provenance.ts's launchNode.
 func launchNode(root Event, depth int) TraceNode {
 	skill := planSkill(root)
-	actor := actorIdentityLabel(root)
+	actor := actorLabel(root)
 	var parts []string
 	if skill != "" {
 		parts = append(parts, "skill "+skill)

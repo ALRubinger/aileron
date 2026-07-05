@@ -176,6 +176,27 @@ describe('Audit page — landing', () => {
 		expect(vi.mocked(listRecentMaterialized)).toHaveBeenCalled();
 	});
 
+	it('labels a landing card by the credential identity when present', async () => {
+		vi.mocked(listRecentMaterialized).mockResolvedValue([
+			materialized({ hash: 'sha256:a', name: 'sales.csv', actor: 'analyst@corp' })
+		]);
+		render(Page);
+		const card = await screen.findByTestId('recent-artifact');
+		expect(card).toHaveTextContent('by analyst@corp');
+	});
+
+	it('falls back to the actor id on a landing card for a human-launched artifact', async () => {
+		// Regression for the blank-actor defect: a human launch carries only
+		// actor.id/type, so the "by ..." line must render the id rather than
+		// dropping out.
+		const event = materialized({ hash: 'sha256:a', name: 'sales.csv' });
+		event.actor = { id: 'alr@host', type: 'human' };
+		vi.mocked(listRecentMaterialized).mockResolvedValue([event]);
+		render(Page);
+		const card = await screen.findByTestId('recent-artifact');
+		expect(card).toHaveTextContent('by alr@host');
+	});
+
 	it('shows the empty state when nothing is materialized', async () => {
 		vi.mocked(listRecentMaterialized).mockResolvedValue([]);
 		render(Page);
