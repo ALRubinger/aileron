@@ -1141,4 +1141,3 @@ func TestReadVaultPassphrase_FileReadError(t *testing.T) {
 		t.Errorf("err = %v, want 'reading passphrase file' wrap", err)
 	}
 }
-

@@ -297,11 +297,11 @@ func fetchKeyFromURL(keyURL string) (ed25519.PublicKey, error) {
 // Both maps key on FQN authority strings (`<scheme>://<owner>/<repo>`).
 //
 //   - trusted:  authorities that have been (or already were) trusted
-//               this run. A second prompt is suppressed.
+//     this run. A second prompt is suppressed.
 //   - declined: authorities the user said "no" to (or fetch failed
-//               for) this run. Subsequent actions whose authority is
-//               in declined skip silently with a one-line summary
-//               line. A re-run of the command clears the state.
+//     for) this run. Subsequent actions whose authority is
+//     in declined skip silently with a one-line summary
+//     line. A re-run of the command clears the state.
 type trustState struct {
 	trusted  map[string]bool
 	declined map[string]bool

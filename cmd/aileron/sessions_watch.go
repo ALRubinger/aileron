@@ -168,4 +168,3 @@ func openSessionLogPolling(ctx context.Context, path string) (*os.File, error) {
 		}
 	}
 }
-

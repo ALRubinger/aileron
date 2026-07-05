@@ -406,6 +406,21 @@ tasks:
       - grep -v -E '/(api/gen|sessions/sessionstest|tools)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
 
+  test:go:publish-e2e:
+    # Build-tagged e2e for `skill publish` against a REAL registry + docker
+    # daemon (umbrella #1898). Not part of GO_TEST_PACKAGES: the tag keeps it
+    # out of the unit shards, and it needs AILERON_TEST_REGISTRY (e.g.
+    # localhost:5000) plus a working docker daemon (the composed path pushes via
+    # docker tag/push). The integration-publish CI job provisions the registry.
+    # Fails fast (no t.Skip) when the registry env is unset.
+    desc: Run the skill-publish e2e against a real OCI registry (needs AILERON_TEST_REGISTRY + docker)
+    dir: internal
+    cmds:
+      # -coverprofile + -coverpkg so the docker-CLI boundary (imagesource.go,
+      # registry.go) the e2e exercises is uploaded to codecov under the
+      # integration flag — it is genuinely tested here, not unit-testable.
+      - go test -tags=integration_publish -run TestPublishE2E -coverprofile=coverage-publish-e2e.txt -coverpkg=./flightplan/publish/... ./flightplan/publish/...
+
   vet:go:
     desc: Run go vet over all Go packages
     cmds:

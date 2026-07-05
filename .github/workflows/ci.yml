@@ -852,6 +852,51 @@ jobs:
         if: always()
         run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml down -v
 
+  integration-publish:
+    name: Integration Tests (Skill Publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start a local OCI registry
+        run: |
+          docker run -d -p 5000:5000 --restart=always --name registry registry:2
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5000/v2/; then echo "registry up"; exit 0; fi
+            sleep 1
+          done
+          echo "registry did not come up"; exit 1
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run the skill-publish e2e (composed + foreign-base, real registry)
+        run: task test:go:publish-e2e
+        env:
+          AILERON_TEST_REGISTRY: localhost:5000
+
+      - name: Upload e2e coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: internal/coverage-publish-e2e.txt
+          flags: integration
+
+      - name: Registry logs on failure
+        if: failure()
+        run: docker logs registry || true
+
   integration-sandbox-features:
     name: Integration Tests (Sandbox Features)
     runs-on: ubuntu-latest
