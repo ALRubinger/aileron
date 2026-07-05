@@ -30,6 +30,9 @@ const (
 	SourceLocalPath SourceKind = iota
 	// SourceGitURL is a remote git repository URL to clone.
 	SourceGitURL
+	// SourceOCIRef is an OCI reference to a published Flight Plan artifact
+	// (`<registry-host>/<repo>:<version>`), installed by pull + verify + write.
+	SourceOCIRef
 	// SourceSlug is an agentskills.io registry slug (owner/name).
 	SourceSlug
 )
@@ -39,7 +42,14 @@ const (
 //   - A string with a git URL shape (scheme://… or git@host:…, or a .git
 //     suffix) is a git URL.
 //   - A string that resolves to an existing filesystem path is a local path.
+//   - A string shaped like an OCI reference (a registry host with a dot,
+//     `:port`, or `localhost`, plus a `:version` tag) is an OCI reference to a
+//     published Flight Plan.
 //   - Anything else with an `owner/name` shape is treated as a registry slug.
+//
+// Order matters: a bare `owner/name` slug carries no registry host and no tag,
+// so it still classifies as SourceSlug (→ ErrSlugNotWired, the won't-do #1583
+// boundary), while `ghcr.io/owner/name:v1` classifies as an OCI reference.
 func classifySource(src string) SourceKind {
 	if isGitURL(src) {
 		return SourceGitURL
@@ -47,7 +57,87 @@ func classifySource(src string) SourceKind {
 	if _, err := os.Stat(src); err == nil {
 		return SourceLocalPath
 	}
+	if isOCIRef(src) {
+		return SourceOCIRef
+	}
 	return SourceSlug
+}
+
+// IsOCIReference reports whether src is shaped like an OCI reference to a
+// published Flight Plan artifact (see isOCIRef). The CLI uses it to route an
+// install to the pull path (verify + WriteFrozen) instead of the local/git
+// copyTree install. It is a string-only heuristic; the pull package does the
+// authoritative registry.ParseReference.
+func IsOCIReference(src string) bool {
+	// Git URLs and existing local paths take precedence, matching
+	// classifySource's ordering, so a `.git` URL or a real file/dir is never
+	// mistaken for an OCI ref.
+	if isGitURL(src) {
+		return false
+	}
+	if _, err := os.Stat(src); err == nil {
+		return false
+	}
+	return isOCIRef(src)
+}
+
+// isOCIRef reports whether src is shaped like an OCI reference to a published
+// Flight Plan: a `<registry-host>/<repo>:<tag>` where the registry host looks
+// like a network host (contains a dot, carries a `:port`, or is `localhost`)
+// and a non-empty tag follows the repository path.
+//
+// This is a string-only heuristic so the store stays free of the oras
+// dependency; the pull package does the authoritative registry.ParseReference.
+// The host-shape requirement is the disambiguator against a bare `owner/name`
+// slug: a slug has no host segment and no tag, so it never matches here.
+func isOCIRef(src string) bool {
+	slash := strings.IndexByte(src, '/')
+	if slash <= 0 {
+		// No repository path: not a `<host>/<repo>` shape.
+		return false
+	}
+	host := src[:slash]
+	rest := src[slash+1:]
+	if rest == "" {
+		return false
+	}
+	// A digest reference (@sha256:…) has no version tag the store can key on, so
+	// it is not recognized here (pull requires a tag).
+	if strings.ContainsRune(rest, '@') {
+		return false
+	}
+	// The tag is the final `:tag` segment of the repository path.
+	tagSep := strings.LastIndexByte(rest, ':')
+	if tagSep < 0 || tagSep == len(rest)-1 {
+		return false
+	}
+	if strings.ContainsAny(rest[tagSep+1:], "/@") {
+		// A colon that precedes a further path or digest is not a tag.
+		return false
+	}
+	return isRegistryHost(host)
+}
+
+// isRegistryHost reports whether host looks like an OCI registry host: it is
+// `localhost` (optionally with a port), or contains a dot (a domain) or a
+// `:port`. A bare single label like `owner` is not a registry host, so a slug's
+// first segment never matches.
+func isRegistryHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	bare := host
+	if i := strings.LastIndexByte(bare, ':'); i >= 0 {
+		if i == 0 {
+			return false
+		}
+		bare = bare[:i]
+	}
+	if bare == "localhost" {
+		return true
+	}
+	// A dot (domain) or a port on the original host qualifies.
+	return strings.ContainsRune(bare, '.') || strings.ContainsRune(host, ':')
 }
 
 // isGitURL reports whether src looks like a git remote URL rather than a
@@ -105,6 +195,12 @@ func fetchToDir(ctx context.Context, src string, workDir string, git gitRunner, 
 			return "", err
 		}
 		return skillDirWithin(clone)
+	case SourceOCIRef:
+		// An OCI reference installs a published FROZEN version through the pull
+		// path (verify + WriteFrozen), not the pre-freeze copyTree install this
+		// function drives. The CLI branches to pull before calling Install, so
+		// Install must never receive an OCI ref; surface a clear error if it does.
+		return "", fmt.Errorf("store: %q is an OCI reference; install it through the frozen-version pull path, not Install", src)
 	case SourceSlug:
 		return slug(ctx, src, workDir)
 	default:

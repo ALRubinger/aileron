@@ -12,7 +12,7 @@ import (
 )
 
 const skillUsage = `usage:
-  aileron skill install <source>   Install a skill from a local path or git URL into ~/.aileron/skills
+  aileron skill install <source>   Install a skill from a local path, a git URL, or an OCI reference to a published Flight Plan into ~/.aileron/skills
   aileron skill list               List installed skills
   aileron skill freeze <name>      Seal an installed skill into a signed, digest-pinned Flight Plan version
   aileron skill launch <name>      Run a frozen Flight Plan deterministically (no-LLM step graph)
@@ -73,6 +73,14 @@ func runSkillInstall(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	src := positionals[0]
+
+	// An OCI reference to a published Flight Plan installs through the pull path
+	// (pull + verify signature/publisher-trust + WriteFrozen), which writes a
+	// FROZEN version, not the pre-freeze installed SKILL.md the local/git path
+	// copies. Local paths and git URLs fall through to the unchanged install.
+	if store.IsOCIReference(src) {
+		return runSkillInstallOCI(src, stdout, stderr)
+	}
 
 	s := store.New(skillStoreDir)
 
