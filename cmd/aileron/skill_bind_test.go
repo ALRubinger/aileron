@@ -23,9 +23,14 @@ import (
 type fakeBindVault struct {
 	services map[string][]byte
 	puts     int
+	listErr  error
+	putErr   error
 }
 
 func (f *fakeBindVault) ListUserServices() ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	out := make([]string, 0, len(f.services))
 	for k := range f.services {
 		out = append(out, k)
@@ -34,6 +39,9 @@ func (f *fakeBindVault) ListUserServices() ([]string, error) {
 }
 
 func (f *fakeBindVault) PutUser(service string, value []byte) error {
+	if f.putErr != nil {
+		return f.putErr
+	}
 	if f.services == nil {
 		f.services = map[string][]byte{}
 	}
@@ -523,6 +531,105 @@ func TestDiffRequirements(t *testing.T) {
 	}
 }
 
+// TestRunSkillBindErrorPaths covers the verb's fail-closed error branches: a
+// wrong positional count, a deriver error (an unmapped credential kind), a
+// vault list failure, a malformed descriptor file, a vault write failure, and
+// the interactive-input rejections (empty secret, empty access key ID).
+func TestRunSkillBindErrorPaths(t *testing.T) {
+	t.Run("wrong positional count", func(t *testing.T) {
+		withTempStore(t)
+		var out, errb bytes.Buffer
+		if code := runSkillBind(nil, strings.NewReader(""), &out, &errb); code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+	})
+
+	t.Run("deriver error fails closed", func(t *testing.T) {
+		withTempStore(t)
+		origDesc := skillBindDescriptorPath
+		skillBindDescriptorPath = filepath.Join(t.TempDir(), "d.yaml")
+		t.Cleanup(func() { skillBindDescriptorPath = origDesc })
+		origDerive := deriveRequirements
+		deriveRequirements = func(_ *store.Store, _, _ string) ([]credreq.RequiredBinding, error) {
+			return nil, errTest("unmapped credential kind \"mystery\"")
+		}
+		t.Cleanup(func() { deriveRequirements = origDerive })
+		seedFrozen(t, "rubber-duck", "v1")
+		var out, errb bytes.Buffer
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+		if code != 1 || !strings.Contains(errb.String(), "unmapped credential kind") {
+			t.Fatalf("exit = %d stderr=%q, want 1 with the deriver error", code, errb.String())
+		}
+	})
+
+	t.Run("vault list failure", func(t *testing.T) {
+		vault := &fakeBindVault{listErr: errTest("daemon unreachable")}
+		withBindSeams(t, []credreq.RequiredBinding{bearerReq("workspace-a", "api.example.com")}, vault)
+		seedFrozen(t, "rubber-duck", "v1")
+		var out, errb bytes.Buffer
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+		if code != 1 || !strings.Contains(errb.String(), "daemon unreachable") {
+			t.Fatalf("exit = %d stderr=%q, want 1 with the list error", code, errb.String())
+		}
+	})
+
+	t.Run("malformed descriptor file", func(t *testing.T) {
+		vault := &fakeBindVault{}
+		descPath := withBindSeams(t, []credreq.RequiredBinding{bearerReq("workspace-a", "api.example.com")}, vault)
+		seedFrozen(t, "rubber-duck", "v1")
+		if err := os.WriteFile(descPath, []byte("version: v1\nbindings: [ this is: not valid"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, errb bytes.Buffer
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 on a malformed descriptor", code)
+		}
+	})
+
+	t.Run("vault write failure", func(t *testing.T) {
+		vault := &fakeBindVault{putErr: errTest("vault is locked")}
+		withBindSeams(t, []credreq.RequiredBinding{bearerReq("workspace-a", "api.example.com")}, vault)
+		seedFrozen(t, "rubber-duck", "v1")
+		withSecret(t, "tok")
+		var out, errb bytes.Buffer
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+		if code != 1 || !strings.Contains(errb.String(), "vault is locked") {
+			t.Fatalf("exit = %d stderr=%q, want 1 with the put error", code, errb.String())
+		}
+	})
+
+	t.Run("empty secret rejected", func(t *testing.T) {
+		vault := &fakeBindVault{}
+		withBindSeams(t, []credreq.RequiredBinding{bearerReq("workspace-a", "api.example.com")}, vault)
+		seedFrozen(t, "rubber-duck", "v1")
+		withSecret(t, "")
+		var out, errb bytes.Buffer
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+		if code != 1 || !strings.Contains(errb.String(), "secret cannot be empty") {
+			t.Fatalf("exit = %d stderr=%q, want 1 with the empty-secret error", code, errb.String())
+		}
+	})
+
+	t.Run("empty access key id rejected", func(t *testing.T) {
+		vault := &fakeBindVault{}
+		withBindSeams(t, []credreq.RequiredBinding{sigv4Req("prod-reader", "athena.us-east-1.amazonaws.com")}, vault)
+		seedFrozen(t, "rubber-duck", "v1")
+		withSecret(t, "s")
+		var out, errb bytes.Buffer
+		// Blank line for the access key ID prompt.
+		code := runSkillBind([]string{"rubber-duck"}, strings.NewReader("\n"), &out, &errb)
+		if code != 1 || !strings.Contains(errb.String(), "access key ID cannot be empty") {
+			t.Fatalf("exit = %d stderr=%q, want 1 with the empty-key error", code, errb.String())
+		}
+	})
+}
+
+// errTest is a tiny error type for injecting seam failures.
+type errTest string
+
+func (e errTest) Error() string { return string(e) }
+
 // TestDaemonBindVaultClientListUserServices proves the daemon-backed client
 // reads the user-service list from GET /vault/user and returns the bare service
 // segments.
@@ -544,6 +651,45 @@ func TestDaemonBindVaultClientListUserServices(t *testing.T) {
 	}
 	if strings.Join(sortedCopy(got), ",") != "prod-reader,workspace-a" {
 		t.Errorf("services = %v, want [prod-reader workspace-a]", got)
+	}
+}
+
+// TestDaemonBindVaultClientListErrors proves the client maps a 503 and an
+// unexpected status to clear errors.
+func TestDaemonBindVaultClientListErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"unavailable", http.StatusServiceUnavailable, "not configured with a vault"},
+		{"unexpected", http.StatusInternalServerError, "server returned 500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(srv.Close)
+			setBindingBase(t, srv.URL)
+			_, err := daemonBindVaultClient{}.ListUserServices()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestDaemonBindVaultClientPutUnavailable proves a 503 on PUT maps to a clear
+// no-vault error.
+func TestDaemonBindVaultClientPutUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	setBindingBase(t, srv.URL)
+	err := (daemonBindVaultClient{}).PutUser("prod-reader", []byte("s"))
+	if err == nil || !strings.Contains(err.Error(), "not configured with a vault") {
+		t.Errorf("err = %v, want a no-vault error", err)
 	}
 }
 
