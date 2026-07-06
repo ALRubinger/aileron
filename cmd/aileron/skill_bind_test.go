@@ -194,6 +194,64 @@ func TestRunSkillBindFullyMissingSigv4(t *testing.T) {
 	}
 }
 
+// TestRunSkillBindSigv4ReusesSecretWarnsRotation proves the rotation-mismatch
+// guard (#2017): when the vault already holds a secret for a sigv4 identity but
+// the descriptor is missing, bind fills only the missing access key ID without an
+// unnecessary secret prompt, and warns that the reused secret must match the
+// entered key. This is the exact rotation footgun — entering a rotated key's new
+// ID while the vault keeps the deleted key's secret would otherwise fail far away
+// at launch with an opaque SignatureDoesNotMatch, with no hint the secret is
+// stale. The advisory names `vault put` so the operator can reconcile at bind
+// time.
+func TestRunSkillBindSigv4ReusesSecretWarnsRotation(t *testing.T) {
+	// Vault already holds the (old key's) secret; descriptor is missing.
+	vault := &fakeBindVault{services: map[string][]byte{"prod-reader": []byte("old-key-secret")}}
+	descPath := withBindSeams(t, []credreq.RequiredBinding{sigv4Req("prod-reader", "athena.us-east-1.amazonaws.com")}, vault)
+	seedFrozen(t, "rubber-duck", "v1")
+	secretCalls := withSecret(t, "unused")
+
+	var out, errb bytes.Buffer
+	// Operator enters the rotated key's new access key ID at the prompt.
+	code := runSkillBind([]string{"rubber-duck"}, strings.NewReader("AKIANEWROTATEDKEY99\n"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, errb.String())
+	}
+	// Acceptance: the no-secret-prompt half is preserved — bind must not
+	// re-prompt for or overwrite the existing secret just to fill the descriptor.
+	if *secretCalls != 0 {
+		t.Errorf("secret prompted %d times, want 0 (secret already present)", *secretCalls)
+	}
+	if vault.puts != 0 {
+		t.Errorf("vault puts = %d, want 0 (existing secret untouched)", vault.puts)
+	}
+	if string(vault.services["prod-reader"]) != "old-key-secret" {
+		t.Errorf("secret = %q, want the untouched existing value", vault.services["prod-reader"])
+	}
+
+	// The descriptor gains the entered (rotated) access key ID.
+	d := parseDescriptor(t, descPath)
+	if len(d.Bindings) != 1 || d.Bindings[0].AccessKeyID != "AKIANEWROTATEDKEY99" {
+		t.Fatalf("descriptor = %+v, want one entry with the entered key", d.Bindings)
+	}
+
+	// Acceptance: a clear advisory to update the secret on rotation, naming the
+	// vault put command so the operator can reconcile before launch.
+	got := out.String()
+	if !strings.Contains(got, "advisory:") {
+		t.Errorf("stdout = %q, want a rotation advisory", got)
+	}
+	if !strings.Contains(got, "aileron vault put user/prod-reader") {
+		t.Errorf("stdout = %q, want the advisory to name `vault put`", got)
+	}
+	if !strings.Contains(got, "rotated") {
+		t.Errorf("stdout = %q, want the advisory to mention rotation", got)
+	}
+	// No secret material is ever echoed.
+	if strings.Contains(got, "old-key-secret") || strings.Contains(errb.String(), "old-key-secret") {
+		t.Errorf("secret material leaked into output: stdout=%q stderr=%q", got, errb.String())
+	}
+}
+
 // TestRunSkillBindPartiallySatisfied proves only the missing requirement is
 // filled: a pre-satisfied sigv4 entry is left intact while a missing bearer
 // requirement is prompted and written.

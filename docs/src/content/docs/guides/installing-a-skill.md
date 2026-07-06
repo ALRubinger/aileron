@@ -70,6 +70,8 @@ The write is programmatic, so you do not hand-edit any file. A single run stores
 
 The same verb onboards a second operator on their own machine. They install the same frozen plan, run `aileron skill bind <name>`, and supply their own identity and key. The plan is shared once; each operator binds their own credentials against it. A requirement whose host carries an unresolved input template is surfaced as an advisory rather than written automatically, since the concrete host is not known until launch resolves the input.
 
+For an `aws-sigv4` credential the access key ID and the secret are a matched pair. When you re-run bind and the vault already holds the secret, bind fills only the missing access key ID and does not re-prompt for the secret. If you rotated the key (minted a new access key ID and secret, then deleted the old one) and entered the new ID, the vault still holds the old secret, which fails at launch with an opaque `SignatureDoesNotMatch`. To catch this before launch, bind prints an advisory whenever it writes an access key ID while reusing an existing secret, telling you to run `aileron vault put user/<service>` with the new secret if you rotated the key so the stored secret matches the entered access key ID.
+
 ## Action requirements and graceful degrade
 
 When a skill declares `requires:` action references (for example `aileron:metrics.query_series`), the installer asks your running daemon which actions are installed and checks each reference. A reference is satisfied when an installed action matches both the connector and the action name.
