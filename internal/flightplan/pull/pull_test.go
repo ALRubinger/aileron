@@ -91,10 +91,21 @@ func mintArtifact(t *testing.T, publisher string) (freeze.Result, string) {
 }
 
 // seedArtifact pushes the four signed-artifact layers and a referrers manifest
-// tagged at tag into st, mirroring how publish writes the artifact. layers lets
+// tagged at tag into st, mirroring how publish writes the artifact. It records
+// tag as the manifest's content-hash version annotation, so a straightforward
+// content-hash-tag install resolves the same id via the annotation. layers lets
 // a test omit or corrupt a specific media type; artifactType lets a test push a
 // wrong type. It returns the manifest descriptor.
 func seedArtifact(t *testing.T, st *memory.Store, tag, artifactType string, layers map[string][]byte) ocispec.Descriptor {
+	t.Helper()
+	return seedArtifactVersioned(t, st, tag, tag, artifactType, layers)
+}
+
+// seedArtifactVersioned is seedArtifact with an explicit content-hash version
+// annotation distinct from the tag, so a test can seed a MOVING tag (latest, a
+// semver) whose manifest still carries the immutable content-hash slug. An empty
+// version omits the annotation, exercising the literal-tag fallback.
+func seedArtifactVersioned(t *testing.T, st *memory.Store, tag, version, artifactType string, layers map[string][]byte) ocispec.Descriptor {
 	t.Helper()
 	ctx := context.Background()
 	var descs []ocispec.Descriptor
@@ -105,12 +116,17 @@ func seedArtifact(t *testing.T, st *memory.Store, tag, artifactType string, laye
 		}
 		descs = append(descs, d)
 	}
+	var annotations map[string]string
+	if version != "" {
+		annotations = map[string]string{freeze.AnnotationVersion: version}
+	}
 	m := ocispec.Manifest{
 		Versioned:    specs.Versioned{SchemaVersion: 2},
 		MediaType:    ocispec.MediaTypeImageManifest,
 		ArtifactType: artifactType,
 		Config:       ocispec.DescriptorEmptyJSON,
 		Layers:       descs,
+		Annotations:  annotations,
 	}
 	// The empty config blob must be present for FetchAll traversal parity.
 	if err := st.Push(ctx, ocispec.DescriptorEmptyJSON, bytes.NewReader(ocispec.DescriptorEmptyJSON.Data)); err != nil {
@@ -309,10 +325,66 @@ func TestRunWrongArtifactType(t *testing.T) {
 	}
 }
 
-func TestRunNoTagIsMissingVersionTag(t *testing.T) {
-	_, err := Run(context.Background(), Options{Ref: "localhost:5000/demo", Source: memory.New()})
-	if !errors.Is(err, ErrMissingVersionTag) {
-		t.Fatalf("err = %v, want ErrMissingVersionTag", err)
+// TestRunNoTagResolvesLatest is the ergonomics regression (#2027): an install
+// ref with NO tag no longer errors; it defaults to the mutable `latest` tag
+// publish always points at the newest artifact, and the on-disk id resolves to
+// the content-hash slug carried in the manifest's version annotation.
+func TestRunNoTagResolvesLatest(t *testing.T) {
+	res, slug := mintArtifact(t, "")
+	st := memory.New()
+	// Publish points `latest` at the newest artifact; its version annotation is
+	// the immutable content-hash slug.
+	seedArtifactVersioned(t, st, "latest", slug, freeze.ArtifactType, allLayers(res))
+
+	got, err := Run(context.Background(), Options{Ref: "localhost:5000/demo", Source: st})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got.Frozen.ID != slug {
+		t.Errorf("frozen id = %q, want the resolved content-hash slug %q (not the moving tag)", got.Frozen.ID, slug)
+	}
+	if got.SourceTag != slug {
+		t.Errorf("source tag = %q, want the resolved slug %q (launch resolves the image under it)", got.SourceTag, slug)
+	}
+}
+
+// TestRunMovingTagKeysOffAnnotation proves a moving tag (latest or a semver
+// label) whose manifest annotation carries a DISTINCT content-hash slug yields
+// Frozen.ID and SourceTag equal to the annotation value, never the literal tag.
+// Keying the on-disk id and persisted origin off the annotation is what keeps
+// launch's `<slug>-image` resolution and the no-op re-install working.
+func TestRunMovingTagKeysOffAnnotation(t *testing.T) {
+	for _, movingTag := range []string{"latest", "1.4.2"} {
+		res, slug := mintArtifact(t, "")
+		st := memory.New()
+		seedArtifactVersioned(t, st, movingTag, slug, freeze.ArtifactType, allLayers(res))
+
+		got, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:" + movingTag, Source: st})
+		if err != nil {
+			t.Fatalf("Run[%s]: %v", movingTag, err)
+		}
+		if got.Frozen.ID != slug {
+			t.Errorf("[%s] frozen id = %q, want the annotation slug %q, not the moving tag", movingTag, got.Frozen.ID, slug)
+		}
+		if got.SourceTag != slug {
+			t.Errorf("[%s] source tag = %q, want the annotation slug %q, not the moving tag", movingTag, got.SourceTag, slug)
+		}
+	}
+}
+
+// TestRunNoAnnotationFallsBackToTag proves a manifest without a version
+// annotation (a pre-annotation or hand-built artifact) still installs, keying
+// the id off the literal tag.
+func TestRunNoAnnotationFallsBackToTag(t *testing.T) {
+	res, tag := mintArtifact(t, "")
+	st := memory.New()
+	seedArtifactVersioned(t, st, tag, "", freeze.ArtifactType, allLayers(res)) // no annotation
+	got, err := Run(context.Background(), Options{Ref: "localhost:5000/demo:" + tag, Source: st})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got.Frozen.ID != tag {
+		t.Errorf("frozen id = %q, want the literal tag %q via fallback", got.Frozen.ID, tag)
 	}
 }
 

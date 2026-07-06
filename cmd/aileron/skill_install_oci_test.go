@@ -199,6 +199,15 @@ func TestRunSkillInstallOCINotAnArtifactExits1(t *testing.T) {
 	if !strings.Contains(errb.String(), "does not resolve to a Flight Plan signed artifact") {
 		t.Errorf("stderr = %q, want the not-an-artifact message", errb.String())
 	}
+	// The error is actionable: it names the likely cause (an image / referrers
+	// fallback tag) and points at the plan's version coordinate and the
+	// `artifact:` line from publish.
+	msg := errb.String()
+	for _, want := range []string{"referrers fallback tag", "ghcr.io/owner/plan:<16-hex>", ":latest", "artifact:"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr = %q, want the actionable hint to contain %q", msg, want)
+		}
+	}
 }
 
 func TestRunSkillInstallOCINoNameExits1(t *testing.T) {

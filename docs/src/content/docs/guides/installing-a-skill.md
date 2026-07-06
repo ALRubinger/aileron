@@ -43,6 +43,14 @@ aileron skill install ghcr.io/acme/weekly-digest:v1a2b3c4d5e6f
 
 An OCI reference installs a Flight Plan that someone published with `aileron skill publish`. The reference has a registry host, a repository path, and a version tag. Aileron pulls the signed artifact (the frozen SKILL.md, its lockfile, the signature, and the author public key) from the registry over your existing Docker credentials.
 
+The version tag is optional. Omit it and Aileron installs the `latest` tag, which `aileron skill publish` always points at the newest published artifact:
+
+```sh
+aileron skill install ghcr.io/acme/weekly-digest
+```
+
+The 16-hex content-hash slug (for example `v1a2b3c4d5e6f`) is the canonical immutable coordinate. `latest` and any semver label the author froze with `aileron skill freeze --version` are mutable pointers that move as the author republishes. Whichever tag you install by, Aileron reads the content-hash slug from the artifact and keys the on-disk version off it, so an install by `latest` and an install by the matching content-hash tag land in the same directory and later launch identically. Pin the content-hash tag when you need a coordinate that never moves.
+
 The install verifies the artifact before anything lands on disk. It checks the author signature and the content hash, then the publisher-trust gate against your keyring, the same checks `aileron skill launch` runs. A tampered artifact fails the signature check. A plan from a publisher you have not trusted fails the trust gate. Either failure aborts the install and writes nothing to the store. A plan that declares no publisher installs on a valid signature alone.
 
 An OCI install writes a frozen version, so it appears under `~/.aileron/skills/<name>/versions/<id>/` and prints the version it installed:

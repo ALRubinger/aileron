@@ -42,10 +42,11 @@ import (
 // unauthenticated registry access surfaces as the wrapped oras Resolve/Fetch
 // error, which the CLI maps to a precise message.
 var (
-	// ErrMissingVersionTag is returned when the install ref carries no tag (or
-	// only a digest). The store version id must be a single path segment (the
-	// freeze content-hash slug that publish tagged the artifact under), so an
-	// untagged ref cannot yield a version id.
+	// ErrMissingVersionTag is returned when the install ref carries only a digest
+	// (@sha256:…). A digest is not a version tag, and the store version id is
+	// keyed off the artifact's resolved content-hash annotation, not a digest. An
+	// omitted tag is NOT an error: it defaults to `latest` (publish always points
+	// `latest` at the newest artifact).
 	ErrMissingVersionTag = errors.New("pull: OCI reference has no version tag")
 	// ErrNotAnArtifact is returned when the resolved manifest is not a Flight
 	// Plan signed artifact (its artifactType is not freeze.ArtifactType).
@@ -91,8 +92,10 @@ type Options struct {
 // Result reports what a pull run resolved and verified.
 type Result struct {
 	// Frozen is the four artifact bytes as a store.FrozenVersion. Its ID is the
-	// ref's tag (the freeze content-hash slug), so store.WriteFrozen lands it in
-	// the same content-addressed directory a local freeze would.
+	// freeze content-hash slug read from the artifact manifest's version
+	// annotation (falling back to the literal tag only when the annotation is
+	// absent), so a moving tag like `latest` still lands in the same
+	// content-addressed directory a local freeze would.
 	Frozen store.FrozenVersion
 	// Lock is the parsed standalone lockfile (the image pin carried into the
 	// store untouched, resolved lazily at launch).
@@ -110,8 +113,10 @@ type Result struct {
 	// (#1903) knows where to pull the published image; it is a fetch coordinate,
 	// never a verification trust anchor.
 	SourceRegistry string
-	// SourceTag is the version tag the artifact resolved under (the freeze slug
-	// that is also the store version id). Persisted alongside SourceRegistry.
+	// SourceTag is the RESOLVED freeze content-hash slug the artifact carries in
+	// its version annotation (== the store version id), NOT the literal install
+	// tag. Persisted alongside SourceRegistry as the origin launch resolves the
+	// composed image under (ComposedImageTag(SourceTag)).
 	SourceTag string
 }
 
@@ -130,9 +135,15 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("pull: parse reference %q: %w", opts.Ref, err)
 	}
 	tag := ref.Reference
-	// A digest-only reference (@sha256:…) is not a version tag; a valid version
-	// id must be a single path segment (the freeze slug publish tagged under).
-	if tag == "" || isDigestReference(tag) {
+	// An omitted tag defaults to `latest`, the mutable tag publish always points
+	// at the newest artifact. A digest-only reference (@sha256:…) is still not a
+	// version tag: the on-disk version id is keyed off the artifact's resolved
+	// content-hash annotation, and a digest carries no such coordinate to install
+	// or later launch by.
+	if tag == "" {
+		tag = "latest"
+	}
+	if isDigestReference(tag) {
 		return Result{}, fmt.Errorf("%w: %q", ErrMissingVersionTag, opts.Ref)
 	}
 
@@ -174,7 +185,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Name:           name,
 		Verified:       verified,
 		SourceRegistry: ref.Registry + "/" + ref.Repository,
-		SourceTag:      tag,
+		// SourceTag is the RESOLVED content-hash slug (fv.ID), not the literal
+		// install tag. Persisting the resolved slug is load-bearing: launch
+		// resolves the composed image via ComposedImageTag(Origin.VersionTag) =
+		// `<slug>-image`, which publish pushes under the content-hash slug. Keying
+		// the origin off a moving tag like `latest` would make launch look for a
+		// non-existent `latest-image`.
+		SourceTag: fv.ID,
 	}, nil
 }
 
@@ -227,7 +244,18 @@ func fetchArtifact(ctx context.Context, src oras.ReadOnlyTarget, tag string) (st
 		}
 		return b, nil
 	}
-	fv := store.FrozenVersion{ID: tag}
+	// Key the on-disk version id off the manifest's content-hash version
+	// annotation, never the literal (possibly moving) tag. This keeps a `latest`
+	// or semver install landing in the same content-addressed directory a local
+	// freeze would, and keeps the persisted origin's VersionTag pointing at the
+	// slug launch resolves the composed image under. Fall back to the literal tag
+	// only when the annotation is absent (a pre-annotation or hand-built
+	// artifact).
+	resolvedID := tag
+	if v := m.Annotations[freeze.AnnotationVersion]; v != "" {
+		resolvedID = v
+	}
+	fv := store.FrozenVersion{ID: resolvedID}
 	if fv.SkillMD, err = get(freeze.MediaTypeSkillMD); err != nil {
 		return store.FrozenVersion{}, freeze.Lockfile{}, err
 	}
