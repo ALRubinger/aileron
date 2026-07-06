@@ -14,7 +14,7 @@
 // Instead we parse the config and hash a canonical projection of the fields
 // that actually pin execution: the filesystem (rootfs.diff_ids) plus every
 // runtime field (Env, Entrypoint, Cmd, User, WorkingDir, Volumes, ExposedPorts,
-// Labels) and the platform (os/arch). Serialization-only noise
+// Labels, StopSignal) and the platform (os/arch). Serialization-only noise
 // (container/container_config, docker_version, created, history) is dropped
 // before hashing, so the SAME image hashes identically whether the bytes come
 // from a local `docker image inspect`, the classic docker config blob, or the
@@ -51,6 +51,7 @@ type CanonicalConfig struct {
 	Volumes      []string          `json:"volumes"`
 	ExposedPorts []string          `json:"exposedPorts"`
 	Labels       map[string]string `json:"labels"`
+	StopSignal   string            `json:"stopSignal"`
 	OS           string            `json:"os"`
 	Architecture string            `json:"architecture"`
 }
@@ -149,8 +150,11 @@ func FromDockerInspect(raw []byte) (CanonicalConfig, error) {
 		if err := json.Unmarshal(trimmed, &arr); err != nil {
 			return CanonicalConfig{}, fmt.Errorf("imgconfig: decode docker inspect array: %w", err)
 		}
-		if len(arr) == 0 {
-			return CanonicalConfig{}, fmt.Errorf("imgconfig: docker inspect returned no image")
+		// `docker image inspect <ref>` for a single reference returns exactly one
+		// image. Reject a multi-image array rather than silently canonicalizing the
+		// first entry, which could pin the wrong image.
+		if len(arr) != 1 {
+			return CanonicalConfig{}, fmt.Errorf("imgconfig: docker inspect returned %d images, want exactly 1", len(arr))
 		}
 		di := arr[0]
 		return fromParts(di.OS, di.Architecture, di.RootFS.Layers, di.Config), nil
@@ -176,6 +180,7 @@ func fromParts(os, arch string, diffIDs []string, cfg ocispec.ImageConfig) Canon
 		Volumes:      sortedKeys(cfg.Volumes),
 		ExposedPorts: sortedKeys(cfg.ExposedPorts),
 		Labels:       cfg.Labels,
+		StopSignal:   cfg.StopSignal,
 		OS:           os,
 		Architecture: arch,
 	}

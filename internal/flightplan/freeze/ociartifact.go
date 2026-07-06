@@ -41,11 +41,12 @@ const (
 	// Digest is the image's serialization-agnostic config CONTENT digest (see
 	// internal/flightplan/imgconfig): a hash over the parsed config's
 	// execution-relevant fields (rootfs.diff_ids plus Env/Entrypoint/Cmd/User/
-	// WorkingDir/Volumes/ExposedPorts/Labels and os/arch), not the config blob's
-	// own sha256. The image is built at freeze, so its attested identity is this
-	// content digest, which is stable across the config-blob re-serialization the
-	// containerd image store performs on `docker push` (issue #2014). Publish and
-	// launch verify the pushed image's config content digest == lock Digest.
+	// WorkingDir/Volumes/ExposedPorts/Labels/StopSignal and os/arch), not the
+	// config blob's own sha256. The image is built at freeze, so its attested
+	// identity is this content digest, which is stable across the config-blob
+	// re-serialization the containerd image store performs on `docker push`
+	// (issue #2014). Publish and launch verify the pushed image's config content
+	// digest == lock Digest.
 	BindingConfigContentDigest = "config-content-digest"
 	// BindingManifestDigest marks an image-only/custom-base image whose
 	// signed-lock Digest is the base image's registry manifest digest. Publish

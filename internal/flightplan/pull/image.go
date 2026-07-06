@@ -70,9 +70,11 @@ type ImagePullResult struct {
 	// (freeze.BindingConfigContentDigest or freeze.BindingManifestDigest),
 	// surfaced for provenance/logging.
 	BindingKind string
-	// ImageDigest is the verified digest the boot reference is anchored to: the
-	// image config content digest for a composed pin, the manifest digest for an
-	// image-only/foreign-base pin. Both equal Pin.Digest by construction.
+	// ImageDigest is the verified identity digest: the image config content digest
+	// for a composed pin, the manifest digest for an image-only/foreign-base pin.
+	// Both equal Pin.Digest by construction. For a composed pin the identity is
+	// the config content digest while BootRef is anchored to the resolved manifest
+	// digest; for a foreign-base pin the manifest digest is both.
 	ImageDigest string
 }
 

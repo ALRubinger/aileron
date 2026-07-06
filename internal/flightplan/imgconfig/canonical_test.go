@@ -72,7 +72,8 @@ func sampleConfig() (ocispec.ImageConfig, []string) {
 			"8080/tcp": {},
 			"53/udp":   {},
 		},
-		Labels: map[string]string{"org.opencontainers.image.title": "demo", "k": "v"},
+		Labels:     map[string]string{"org.opencontainers.image.title": "demo", "k": "v"},
+		StopSignal: "SIGTERM",
 	}
 	diffIDs := []string{
 		"sha256:" + strings.Repeat("a", 64),
@@ -162,10 +163,11 @@ func TestTamperedFieldRejected(t *testing.T) {
 		"ports": func(c *ocispec.ImageConfig, _ *[]string, _, _ *string) {
 			c.ExposedPorts = map[string]struct{}{"9/tcp": {}}
 		},
-		"labels":  func(c *ocispec.ImageConfig, _ *[]string, _, _ *string) { c.Labels = map[string]string{"k": "tampered"} },
-		"diffids": func(_ *ocispec.ImageConfig, d *[]string, _, _ *string) { (*d)[0] = "sha256:" + strings.Repeat("c", 64) },
-		"os":      func(_ *ocispec.ImageConfig, _ *[]string, os, _ *string) { *os = "windows" },
-		"arch":    func(_ *ocispec.ImageConfig, _ *[]string, _, arch *string) { *arch = "386" },
+		"labels":     func(c *ocispec.ImageConfig, _ *[]string, _, _ *string) { c.Labels = map[string]string{"k": "tampered"} },
+		"stopsignal": func(c *ocispec.ImageConfig, _ *[]string, _, _ *string) { c.StopSignal = "SIGKILL" },
+		"diffids":    func(_ *ocispec.ImageConfig, d *[]string, _, _ *string) { (*d)[0] = "sha256:" + strings.Repeat("c", 64) },
+		"os":         func(_ *ocispec.ImageConfig, _ *[]string, os, _ *string) { *os = "windows" },
+		"arch":       func(_ *ocispec.ImageConfig, _ *[]string, _, arch *string) { *arch = "386" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
