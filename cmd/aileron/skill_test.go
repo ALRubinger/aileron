@@ -112,6 +112,13 @@ func TestRunSkillInstall_InstructionOnly_Clean(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Installed skill \"rubber-duck\"") {
 		t.Errorf("stdout = %q", stdout.String())
 	}
+	// A local install lands a pre-freeze SKILL.md that cannot be bound until it
+	// is frozen, so the operator must be pointed at freeze-then-bind rather than
+	// bind directly (the OCI path's pointer).
+	if !strings.Contains(stdout.String(), "aileron skill freeze \"rubber-duck\"") ||
+		!strings.Contains(stdout.String(), "aileron skill bind \"rubber-duck\"") {
+		t.Errorf("local install must print a freeze-then-bind hint, stdout = %q", stdout.String())
+	}
 	if _, err := os.Stat(filepath.Join(store, "rubber-duck", "SKILL.md")); err != nil {
 		t.Errorf("skill not written: %v", err)
 	}

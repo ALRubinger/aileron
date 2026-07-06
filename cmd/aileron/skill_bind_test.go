@@ -768,3 +768,117 @@ func TestDescriptorSatisfiesTemplatedHostsOnly(t *testing.T) {
 		t.Error("a templated-only host-keyed requirement must not be satisfied")
 	}
 }
+
+// bindIntegrationFixtureMD is a schema-valid, environment-pinned SKILL.md with
+// two credential-bearing tool steps: one aws-sigv4 (host-less identity) and one
+// oauth2 (host-keyed). The real credreq deriver yields one RequiredBinding per
+// step, so the verb-level integration test can prove the declared identities
+// thread through resolveFrozenVersion -> DeriveFromFrozen to the onboarding
+// summary. A `kind: action-call` step (as the worked example uses) would carry
+// its trust contract on the action, not the step, and never reach the deriver.
+const bindIntegrationFixtureMD = `---
+name: bind-integration-fixture
+description: bind verb integration fixture.
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  environment:
+    tools: [aws-cli@2.x]
+  inputs: []
+  outputs: []
+  steps:
+    - id: q1
+      kind: tool
+      command: [athena-query]
+      outputs: [rows]
+      trustContract:
+        credential: { kind: aws-sigv4, placement: signing, identityLabel: prod-reader }
+        hosts: ["athena.us-east-1.amazonaws.com"]
+        effect: read
+        idempotency: { safeToRetry: true }
+        audit: { fields: [result] }
+    - id: q2
+      kind: tool
+      command: [file-issue]
+      outputs: [issue]
+      trustContract:
+        credential: { kind: oauth2, placement: header, identityLabel: digest-bot }
+        oauth:
+          scopes: [issues:write]
+          endpoints:
+            authorization: https://auth.example.com/oauth/authorize
+            token: https://auth.example.com/oauth/token
+          refresh: refresh-token
+        hosts: ["tracker.example.com"]
+        effect: write
+        idempotency: { safeToRetry: false, idempotencyKey: true }
+        audit: { fields: [result] }
+---
+# bind integration fixture
+`
+
+// TestRunSkillBind_RealDeriveFromFrozen is the thin verb-level integration test
+// that exercises the genuine resolveFrozenVersion -> DeriveFromFrozen wiring on a
+// signed frozen fixture. Unlike every other bind test in this file, it does NOT
+// stub deriveRequirements: it freezes a two-credential fixture with a real
+// ed25519 signing key, then runs bind with the real deriver live and asserts the
+// declared identities thread through resolveFrozenVersion ->
+// credreq.DeriveFromFrozen -> deriveCredentialRef to their derived vault refs in
+// the onboarding summary.
+func TestRunSkillBind_RealDeriveFromFrozen(t *testing.T) {
+	storeDir := withTempStore(t)
+	dir := filepath.Join(storeDir, "bind-integration-fixture")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(bindIntegrationFixtureMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var fout, ferr bytes.Buffer
+	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "bind-integration-fixture"}, &fout, &ferr); code != 0 {
+		t.Fatalf("freeze exit = %d, stderr=%s", code, ferr.String())
+	}
+
+	// Point the descriptor + vault seams at test doubles, but leave
+	// deriveRequirements (credreq.DeriveFromFrozen) live so the real deriver runs
+	// against the just-frozen, signature-verified plan.
+	descPath := filepath.Join(t.TempDir(), "binding-descriptors.yaml")
+	origDesc := skillBindDescriptorPath
+	skillBindDescriptorPath = descPath
+	t.Cleanup(func() { skillBindDescriptorPath = origDesc })
+
+	vault := &fakeBindVault{}
+	origClient := newBindVaultClient
+	newBindVaultClient = func() bindVaultClient { return vault }
+	t.Cleanup(func() { newBindVaultClient = origClient })
+
+	secretCalls := withSecret(t, "supersecret")
+
+	// The only stdin consumer is the aws-sigv4 (host-less identity) requirement's
+	// AWS access key ID prompt; the oauth2 (host-keyed) requirement reads none.
+	var out, errb bytes.Buffer
+	code := runSkillBind([]string{"bind-integration-fixture"}, strings.NewReader("AKIAIOSFODNN7EXAMPLE\n"), &out, &errb)
+	if code != 0 {
+		t.Fatalf("bind exit = %d, stderr=%s", code, errb.String())
+	}
+
+	// Both declared identities collapse to their deterministic vault refs and are
+	// reported onboarded, proving the id flowed through the real frozen plan.
+	got := out.String()
+	for _, ref := range []string{
+		"onboarded: user/prod-reader",
+		"onboarded: user/digest-bot",
+	} {
+		if !strings.Contains(got, ref) {
+			t.Errorf("stdout missing %q; got:\n%s", ref, got)
+		}
+	}
+	if *secretCalls != 2 {
+		t.Errorf("secret prompted %d times, want 2 (one per distinct credential ref)", *secretCalls)
+	}
+	if vault.puts != 2 {
+		t.Errorf("vault puts = %d, want 2 (one per distinct credential ref)", vault.puts)
+	}
+}
