@@ -24,9 +24,10 @@ bindings:
 
 Each binding is a quad plus scheme-specific fields.
 
-- `host` is the upstream host matched at the proxy boundary. It is an exact host (`api.linear.app`) or a single leading-wildcard form (`*.example.com`). Ports are not part of the pattern.
+- `host` is the upstream host matched at the proxy boundary. It is an exact host (`api.linear.app`) or a single leading-wildcard form (`*.example.com`). Ports are not part of the pattern. `host` is optional when the entry declares a complete credential identity (`kind` + `identity_label`): such an identity binding is selected at egress by its `(kind, identity_label)` pair rather than by host. An entry with neither a host nor a complete identity is a load-time error.
+- `kind` and `identity_label` are the non-secret credential-identity pair. `kind` is the credential kind (e.g. `aws-sigv4`) and `identity_label` names which credential of that kind to inject. Declare both or neither. When both are set the entry is a host-less identity binding the proxy selects by identity at egress.
 - `credential_ref` is a vault credential reference the daemon resolves at injection time. It is a connector-style binding name (`<kind>/<service>/<identity>`) or a user-level reference (`user/<service>`), the namespace `aileron auth <service>` writes. It is never the credential bytes. The descriptor names where the credential lives, never its value.
-- `scheme` is one of the closed injection-scheme set: `bearer`, `basic`, `header-template`, `query-param`, `sigv4-resign`. An unknown scheme is a load-time error. `sigv4-resign` is enumerated but not yet implemented.
+- `scheme` is one of the closed injection-scheme set: `bearer`, `basic`, `header-template`, `query-param`, `sigv4-resign`. An unknown scheme is a load-time error.
 - `emit_mechanism` declares how the credential reaches egress. `inject` injects the credential unconditionally at the proxy. `sentinel-swap` plants a non-secret sentinel the proxy swaps for the real credential. The field is optional and defaults to `inject`. A value outside the closed set (`inject`, `sentinel-swap`) is a load-time error. A `sentinel-swap` binding must declare a `sentinel` block. An `inject` binding must declare none.
 
 Scheme-specific fields:
@@ -34,6 +35,7 @@ Scheme-specific fields:
 - `username` is required for the `basic` scheme. It is the non-secret HTTP basic-auth username (e.g. `x-access-token` for git-over-HTTPS). The token always rides in the password field.
 - `header` and `template` are required for the `header-template` scheme. `header` is the header name to set. `template` is the verbatim header value with a `{token}` placeholder the daemon substitutes with the credential at injection time.
 - `query_param` is required for the `query-param` scheme. It is the query-parameter name the credential is set on.
+- `access_key_id` is required for the `sigv4-resign` scheme. It is the non-secret AWS access key id that appears verbatim in the signed `Credential=` field. The secret access key rides in the resolved credential value, never here. A `sigv4-resign` entry is identity-only: it declares `kind` + `identity_label` and carries no `host`. The daemon derives the signing region and service from the resolved upstream host at egress, so the binding carries no region or service and no second copy of the region can drift from the host being signed for.
 
 `sentinel-swap` fields:
 

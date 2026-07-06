@@ -70,17 +70,19 @@ func TestToHostBinding_QueryParamCarriesName(t *testing.T) {
 	}
 }
 
-func TestToHostBinding_SigV4ResignCarriesParams(t *testing.T) {
-	// A sigv4-resign entry's access key id, region, and service adapt onto
-	// the binding. The secret access key is never a descriptor field; it
-	// resolves daemon-side from the credential ref.
+func TestToHostBinding_SigV4ResignCarriesAccessKeyID(t *testing.T) {
+	// A sigv4-resign entry is identity-only (#1978): it carries an access key
+	// id and a credential identity, no host/region/service. The access key id
+	// adapts onto the binding; region and service are empty because the egress
+	// signer derives the SigV4 scope from the resolved upstream host. The
+	// secret access key is never a descriptor field; it resolves daemon-side
+	// from the credential ref.
 	e := Entry{
-		Host:          "s3.amazonaws.com",
+		Kind:          "aws-sigv4",
+		IdentityLabel: "metrics-reader",
 		CredentialRef: "user/aws",
 		Scheme:        binding.SchemeSigV4Resign,
 		AccessKeyID:   "AKIDEXAMPLE",
-		Region:        "us-east-1",
-		Service:       "s3",
 	}
 	hb, err := e.ToHostBinding()
 	if err != nil {
@@ -89,8 +91,8 @@ func TestToHostBinding_SigV4ResignCarriesParams(t *testing.T) {
 	if hb.Scheme != binding.SchemeSigV4Resign {
 		t.Errorf("scheme = %q, want sigv4-resign", hb.Scheme)
 	}
-	if hb.AccessKeyID != "AKIDEXAMPLE" || hb.Region != "us-east-1" || hb.Service != "s3" {
-		t.Errorf("sigv4 params = (%q,%q,%q), want (AKIDEXAMPLE,us-east-1,s3)",
+	if hb.AccessKeyID != "AKIDEXAMPLE" || hb.Region != "" || hb.Service != "" {
+		t.Errorf("sigv4 params = (%q,%q,%q), want (AKIDEXAMPLE,,) — region/service are host-derived at egress",
 			hb.AccessKeyID, hb.Region, hb.Service)
 	}
 }
@@ -99,33 +101,14 @@ func TestToHostBinding_SigV4ResignRequiresAccessKeyID(t *testing.T) {
 	// A sigv4-resign entry with no access_key_id is rejected by the
 	// constructor (fail closed, no malformed binding ships).
 	missing := Entry{
-		Host:          "s3.amazonaws.com",
+		Kind:          "aws-sigv4",
+		IdentityLabel: "metrics-reader",
 		CredentialRef: "user/aws",
 		Scheme:        binding.SchemeSigV4Resign,
-		Region:        "us-east-1",
-		Service:       "s3",
 		// AccessKeyID omitted.
 	}
 	if _, err := missing.ToHostBinding(); err == nil {
 		t.Fatal("ToHostBinding for sigv4-resign with no access_key_id = nil error, want error")
-	}
-
-	// Region and service are now optional: an entry with only an access_key_id
-	// adapts successfully because the scope is host-derived at egress.
-	noScope := Entry{
-		Host:          "s3.amazonaws.com",
-		CredentialRef: "user/aws",
-		Scheme:        binding.SchemeSigV4Resign,
-		AccessKeyID:   "AKIDEXAMPLE",
-		// Region and Service omitted.
-	}
-	hb, err := noScope.ToHostBinding()
-	if err != nil {
-		t.Fatalf("ToHostBinding for sigv4-resign with only an access_key_id: %v", err)
-	}
-	if hb.AccessKeyID != "AKIDEXAMPLE" || hb.Region != "" || hb.Service != "" {
-		t.Errorf("sigv4 params = (%q,%q,%q), want (AKIDEXAMPLE,,)",
-			hb.AccessKeyID, hb.Region, hb.Service)
 	}
 }
 

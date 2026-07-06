@@ -1570,16 +1570,12 @@ func TestRunBinding_SetupSendsAPIKeyBody(t *testing.T) {
 
 func TestRunBinding_SetupSendsAWSSigV4Body(t *testing.T) {
 	// An aws_sigv4 connector: the not_oauth2 reply carries declared_kind so
-	// the CLI prompts for the secret access key and POSTs an aws_sigv4
-	// source carrying the --region / --access-key-id overrides.
+	// the CLI prompts for the secret access key and POSTs an aws_sigv4 source
+	// carrying the --access-key-id override. The source carries no region: the
+	// signing region and service are host-derived at egress (#1978).
 	var got struct {
 		Bindings []struct {
-			Source struct {
-				Kind        string `json:"kind"`
-				Value       string `json:"value"`
-				Region      string `json:"region"`
-				AccessKeyID string `json:"access_key_id"`
-			} `json:"source"`
+			Source map[string]any `json:"source"`
 		} `json:"bindings"`
 	}
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1599,7 +1595,7 @@ func TestRunBinding_SetupSendsAWSSigV4Body(t *testing.T) {
 	})
 	stdin := strings.NewReader("prod\nsecret-access-key\n")
 	var stdout, stderr bytes.Buffer
-	code := runBinding([]string{"setup", "--region", "us-east-1", "--access-key-id", "AKIATEST", "github://acme/athena"},
+	code := runBinding([]string{"setup", "--access-key-id", "AKIATEST", "github://acme/athena"},
 		stdin, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
@@ -1608,30 +1604,39 @@ func TestRunBinding_SetupSendsAWSSigV4Body(t *testing.T) {
 		t.Fatalf("len(bindings) = %d", len(got.Bindings))
 	}
 	src := got.Bindings[0].Source
-	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
-		src.Region != "us-east-1" || src.AccessKeyID != "AKIATEST" {
+	if src["kind"] != "aws_sigv4" || src["value"] != "secret-access-key" ||
+		src["access_key_id"] != "AKIATEST" {
 		t.Errorf("source = %+v", src)
+	}
+	if _, ok := src["region"]; ok {
+		t.Errorf("source must not carry a region, got %+v", src)
 	}
 	if !strings.Contains(stdout.String(), "Created: aws_sigv4/athena/prod") {
 		t.Errorf("stdout missing created line: %s", stdout.String())
 	}
 }
 
-func TestRunBinding_SetupAWSSigV4NoFlagsPromptsRegionAndAccessKey(t *testing.T) {
-	// A bare `binding setup <fqn>` (no --region / --access-key-id flags)
-	// against an aws_sigv4 connector must interactively prompt for the
-	// access key id and region in addition to the secret, and the POSTed
-	// source must carry both non-secret fields. Before the fix these were
-	// read only from flags, so they were empty here and the binding signed
-	// nothing.
+// TestRunBinding_SetupRejectsRegionFlag proves the --region flag is gone: it is
+// no longer a valid flag, so passing it fails rather than smuggling a second
+// copy of the region onto the source (#1978).
+func TestRunBinding_SetupRejectsRegionFlag(t *testing.T) {
+	stdin := strings.NewReader("prod\nsecret-access-key\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "--region", "us-east-1", "github://acme/athena"},
+		stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected nonzero exit for removed --region flag; stderr = %s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupAWSSigV4NoFlagsPromptsAccessKey(t *testing.T) {
+	// A bare `binding setup <fqn>` (no --access-key-id flag) against an
+	// aws_sigv4 connector must interactively prompt for the access key id in
+	// addition to the secret, and the POSTed source must carry it. There is no
+	// region prompt: the signing region is host-derived at egress (#1978).
 	var got struct {
 		Bindings []struct {
-			Source struct {
-				Kind        string `json:"kind"`
-				Value       string `json:"value"`
-				Region      string `json:"region"`
-				AccessKeyID string `json:"access_key_id"`
-			} `json:"source"`
+			Source map[string]any `json:"source"`
 		} `json:"bindings"`
 	}
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1649,8 +1654,8 @@ func TestRunBinding_SetupAWSSigV4NoFlagsPromptsRegionAndAccessKey(t *testing.T) 
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 	})
-	// Prompt order: identity, access key id, secret access key, region.
-	stdin := strings.NewReader("prod\nAKIANOFLAG\nsecret-access-key\nus-west-2\n")
+	// Prompt order: identity, access key id, secret access key. No region.
+	stdin := strings.NewReader("prod\nAKIANOFLAG\nsecret-access-key\n")
 	var stdout, stderr bytes.Buffer
 	code := runBinding([]string{"setup", "github://acme/athena"}, stdin, &stdout, &stderr)
 	if code != 0 {
@@ -1660,16 +1665,20 @@ func TestRunBinding_SetupAWSSigV4NoFlagsPromptsRegionAndAccessKey(t *testing.T) 
 		t.Fatalf("len(bindings) = %d", len(got.Bindings))
 	}
 	src := got.Bindings[0].Source
-	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
-		src.Region != "us-west-2" || src.AccessKeyID != "AKIANOFLAG" {
-		t.Errorf("source = %+v; want region=us-west-2 access_key_id=AKIANOFLAG", src)
+	if src["kind"] != "aws_sigv4" || src["value"] != "secret-access-key" ||
+		src["access_key_id"] != "AKIANOFLAG" {
+		t.Errorf("source = %+v; want access_key_id=AKIANOFLAG", src)
+	}
+	if _, ok := src["region"]; ok {
+		t.Errorf("source must not carry a region, got %+v", src)
 	}
 }
 
 func TestRunBinding_SetupAWSSigV4NoFlagsBlankUsesManifestDefault(t *testing.T) {
-	// Blank answers to the access key id / region prompts honor the
-	// binding-wins-over-manifest fallback: the fields are omitted from the
-	// source so the connector manifest's defaults apply at signing time.
+	// A blank answer to the access key id prompt honors the
+	// binding-wins-over-manifest fallback: the field is omitted from the
+	// source so the connector manifest's default applies at signing time.
+	// The source never carries a region (#1978).
 	var got struct {
 		Bindings []struct {
 			Source map[string]any `json:"source"`
@@ -1690,8 +1699,8 @@ func TestRunBinding_SetupAWSSigV4NoFlagsBlankUsesManifestDefault(t *testing.T) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 	})
-	// identity, blank access key id, secret, blank region.
-	stdin := strings.NewReader("prod\n\nsecret-access-key\n\n")
+	// identity, blank access key id, secret. No region prompt.
+	stdin := strings.NewReader("prod\n\nsecret-access-key\n")
 	var stdout, stderr bytes.Buffer
 	code := runBinding([]string{"setup", "github://acme/athena"}, stdin, &stdout, &stderr)
 	if code != 0 {
@@ -1709,20 +1718,15 @@ func TestRunBinding_SetupAWSSigV4NoFlagsBlankUsesManifestDefault(t *testing.T) {
 	}
 }
 
-func TestRunAction_AddAutoBindsAWSSigV4PromptsRegionAndAccessKey(t *testing.T) {
+func TestRunAction_AddAutoBindsAWSSigV4PromptsAccessKey(t *testing.T) {
 	// The add-suite auto-bind loop calls runBindingSetup with no flags. For
-	// an aws_sigv4 unbound capability it must prompt for the access key id
-	// and region so the created source is complete. Before the fix both
-	// fields were empty and the host failed closed at signing time.
+	// an aws_sigv4 unbound capability it must prompt for the access key id so
+	// the created source is complete. There is no region prompt: the signing
+	// region is host-derived at egress (#1978).
 	withSeededKeyring(t, "github://x/y")
 	var got struct {
 		Bindings []struct {
-			Source struct {
-				Kind        string `json:"kind"`
-				Value       string `json:"value"`
-				Region      string `json:"region"`
-				AccessKeyID string `json:"access_key_id"`
-			} `json:"source"`
+			Source map[string]any `json:"source"`
 		} `json:"bindings"`
 	}
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1752,8 +1756,8 @@ func TestRunAction_AddAutoBindsAWSSigV4PromptsRegionAndAccessKey(t *testing.T) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 	})
-	// add consent "y", bind prompt "y", identity, access key id, secret, region.
-	stdin := strings.NewReader("y\ny\nprod\nAKIASUITE\nsecret-access-key\neu-west-1\n")
+	// add consent "y", bind prompt "y", identity, access key id, secret. No region.
+	stdin := strings.NewReader("y\ny\nprod\nAKIASUITE\nsecret-access-key\n")
 	var stdout, stderr bytes.Buffer
 	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
 		stdin, &stdout, &stderr)
@@ -1764,9 +1768,12 @@ func TestRunAction_AddAutoBindsAWSSigV4PromptsRegionAndAccessKey(t *testing.T) {
 		t.Fatalf("len(bindings) = %d", len(got.Bindings))
 	}
 	src := got.Bindings[0].Source
-	if src.Kind != "aws_sigv4" || src.Value != "secret-access-key" ||
-		src.Region != "eu-west-1" || src.AccessKeyID != "AKIASUITE" {
-		t.Errorf("source = %+v; want complete aws_sigv4 with region+access_key_id", src)
+	if src["kind"] != "aws_sigv4" || src["value"] != "secret-access-key" ||
+		src["access_key_id"] != "AKIASUITE" {
+		t.Errorf("source = %+v; want complete aws_sigv4 with access_key_id", src)
+	}
+	if _, ok := src["region"]; ok {
+		t.Errorf("source must not carry a region, got %+v", src)
 	}
 }
 

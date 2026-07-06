@@ -28,7 +28,11 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 	case binding.SchemeQueryParam:
 		opts = append(opts, binding.WithQueryParam(e.QueryParam))
 	case binding.SchemeSigV4Resign:
-		opts = append(opts, binding.WithSigV4Resign(e.AccessKeyID, e.Region, e.Service))
+		// A descriptor entry supplies only the access key id: the egress signer
+		// derives the SigV4 region and service from the resolved upstream host
+		// (#1978), so no operator-supplied region/service is passed here and no
+		// second copy of the region can drift from the host being signed for.
+		opts = append(opts, binding.WithSigV4Resign(e.AccessKeyID, "", ""))
 	}
 
 	// Carry the optional per-binding trust scope (#1735). Empty effect and

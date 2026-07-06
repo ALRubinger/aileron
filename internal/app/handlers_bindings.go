@@ -86,7 +86,7 @@ func (s *apiServer) RevokeBinding(w http.ResponseWriter, r *http.Request, name a
 
 func (s *apiServer) SetupBindings(w http.ResponseWriter, r *http.Request) {
 	var req api.BindingSetupRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := decodeBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -173,13 +173,11 @@ func (s *apiServer) SetupBindings(w http.ResponseWriter, r *http.Request) {
 		if item.Account != nil {
 			b.Account = *item.Account
 		}
-		// aws_sigv4 carries the non-secret region / access key id on the
-		// binding so a single connector install can sign for several
-		// regions (binding-wins over the manifest at request time).
+		// aws_sigv4 carries the non-secret access key id on the binding. The
+		// signing region and service are derived from the resolved upstream
+		// host at egress (#1978), so the operator supplies no region here and
+		// no second copy of the region can drift from the host being signed for.
 		if item.Source.Kind == cstore.CredentialKindAWSSigV4 {
-			if item.Source.Region != nil {
-				b.Region = *item.Source.Region
-			}
 			if item.Source.AccessKeyId != nil {
 				b.AccessKeyID = *item.Source.AccessKeyId
 			}
@@ -216,7 +214,7 @@ func (s *apiServer) SetupBindings(w http.ResponseWriter, r *http.Request) {
 
 func (s *apiServer) RebindBinding(w http.ResponseWriter, r *http.Request, name api.BindingName) {
 	var req api.RebindRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := decodeBodyStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -257,13 +255,12 @@ func (s *apiServer) RebindBinding(w http.ResponseWriter, r *http.Request, name a
 			"source.value is required for "+string(req.Source.Kind))
 		return
 	}
-	// aws_sigv4 rebind may also update the non-secret region / access key
-	// id alongside rotating the secret access key. Omitted fields keep the
-	// existing values so a pure secret rotation need not re-supply them.
+	// aws_sigv4 rebind may also update the non-secret access key id alongside
+	// rotating the secret access key. An omitted access key id keeps the
+	// existing value so a pure secret rotation need not re-supply it. The
+	// signing region and service are derived from the resolved upstream host
+	// at egress (#1978), so there is no region to update here.
 	if req.Source.Kind == cstore.CredentialKindAWSSigV4 {
-		if req.Source.Region != nil {
-			existing.Region = *req.Source.Region
-		}
 		if req.Source.AccessKeyId != nil {
 			existing.AccessKeyID = *req.Source.AccessKeyId
 		}
@@ -345,10 +342,6 @@ func toAPIBinding(b binding.Binding) api.Binding {
 	if b.Account != "" {
 		a := b.Account
 		out.Account = &a
-	}
-	if b.Region != "" {
-		region := b.Region
-		out.Region = &region
 	}
 	if b.AccessKeyID != "" {
 		akid := b.AccessKeyID

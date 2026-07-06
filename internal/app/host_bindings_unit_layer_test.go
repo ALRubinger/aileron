@@ -86,12 +86,11 @@ func TestAssembleHostBindings_UnitLayerIsAdditive(t *testing.T) {
 func TestAssembleHostBindings_SuspectSigV4KeyWarnsButLoads(t *testing.T) {
 	swapDaemonUnitLayers(t, func(context.Context) ([]capture.CaptureDescriptor, []proxybinding.Entry, error) {
 		sealing := []proxybinding.Entry{{
-			Host:          "example.execute-api.us-east-1.amazonaws.com",
+			Kind:          "aws-sigv4",
+			IdentityLabel: "metrics-reader",
 			CredentialRef: "user/aws",
 			Scheme:        binding.SchemeSigV4Resign,
 			AccessKeyID:   "not-a-valid-shape",
-			Region:        "us-east-1",
-			Service:       "execute-api",
 		}}
 		return nil, sealing, nil
 	})
@@ -103,7 +102,7 @@ func TestAssembleHostBindings_SuspectSigV4KeyWarnsButLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assembleHostBindings: suspect key must not block boot: %v", err)
 	}
-	if _, ok := table.Match("example.execute-api.us-east-1.amazonaws.com"); !ok {
+	if _, ok := table.MatchIdentity("aws-sigv4", "metrics-reader"); !ok {
 		t.Error("suspect-key binding must still be present in the table")
 	}
 	out := buf.String()

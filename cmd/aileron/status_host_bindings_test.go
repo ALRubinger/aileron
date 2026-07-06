@@ -35,19 +35,18 @@ func TestShowStatusHostBindings_ListsCleanEntries(t *testing.T) {
 	home := setTestHome(t)
 	writeUserDescriptor(t, home, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: AKIAIOSFODNN7EXAMPLE\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: AKIAIOSFODNN7EXAMPLE\n")
 
 	var out bytes.Buffer
 	showStatusHostBindings(&out)
 	got := out.String()
 
-	if !strings.Contains(got, "s3.amazonaws.com") {
-		t.Errorf("status view = %q; want the configured host listed", got)
+	if !strings.Contains(got, "metrics-reader") {
+		t.Errorf("status view = %q; want the configured identity listed", got)
 	}
 	if !strings.Contains(got, "sigv4-resign") {
 		t.Errorf("status view = %q; want the entry scheme listed", got)
@@ -68,12 +67,11 @@ func TestShowStatusHostBindings_PlaceholderReportsError(t *testing.T) {
 	home := setTestHome(t)
 	writeUserDescriptor(t, home, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: <AccessKeyId>\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: <AccessKeyId>\n")
 
 	var out bytes.Buffer
 	showStatusHostBindings(&out)
@@ -96,12 +94,11 @@ func TestShowStatusHostBindings_SuspectShapeWarns(t *testing.T) {
 	home := setTestHome(t)
 	writeUserDescriptor(t, home, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: totally-wrong-shape\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: totally-wrong-shape\n")
 
 	var out bytes.Buffer
 	showStatusHostBindings(&out)

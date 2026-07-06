@@ -171,6 +171,20 @@ func decodeBody(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
+// decodeBodyStrict decodes the request body like decodeBody but rejects any
+// unknown field with an error instead of silently ignoring it. Binding-write
+// handlers use it so a legacy payload that carries a field the schema no longer
+// defines (for example a `region` on an aws_sigv4 source, removed in #1978 now
+// that the signing region is derived from the resolved upstream host) fails
+// loudly with a structured 400 rather than being accepted with the stray field
+// dropped. Pre-release, there are no backwards-compat shims to preserve.
+func decodeBodyStrict(r *http.Request, v any) error {
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
+}
+
 func isNotFound(err error) bool {
 	var nf *store.ErrNotFound
 	return errors.As(err, &nf)
