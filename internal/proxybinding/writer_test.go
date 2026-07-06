@@ -323,3 +323,131 @@ func TestMergeEntries(t *testing.T) {
 		}
 	})
 }
+
+// Atomic write: a successful Upsert leaves the final descriptor content and
+// 0600 perms with no leftover temp files in the directory (the temp-file +
+// rename must land the exact bytes and clean up after itself).
+func TestUpsert_AtomicWriteContentAndPerms(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binding-descriptors.yaml")
+	e := bearerEntry("api.example.com", "user/example")
+
+	if err := Upsert(path, e); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Final content re-parses to exactly the upserted entry.
+	d := parseFile(t, path)
+	if len(d.Bindings) != 1 {
+		t.Fatalf("bindings = %d, want 1", len(d.Bindings))
+	}
+	if !reflect.DeepEqual(d.Bindings[0], e) {
+		t.Errorf("entry = %+v, want %+v", d.Bindings[0], e)
+	}
+
+	// Perms are 0600.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file perm = %o, want 600", perm)
+	}
+
+	// No temp litter left behind: the descriptor is the only entry in the dir.
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(names) != 1 || names[0].Name() != "binding-descriptors.yaml" {
+		var got []string
+		for _, n := range names {
+			got = append(got, n.Name())
+		}
+		t.Errorf("directory contents = %v, want [binding-descriptors.yaml] (temp file not cleaned up)", got)
+	}
+}
+
+// Overwriting an existing descriptor atomically leaves the fully-written new
+// content and no temp litter (a rename over an existing file, not just a fresh
+// create).
+func TestUpsert_AtomicOverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binding-descriptors.yaml")
+	if err := Upsert(path, bearerEntry("a.example.com", "user/a")); err != nil {
+		t.Fatalf("seed Upsert: %v", err)
+	}
+
+	if err := Upsert(path, bearerEntry("b.example.com", "user/b")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	d := parseFile(t, path)
+	if len(d.Bindings) != 2 {
+		t.Fatalf("bindings = %d, want 2", len(d.Bindings))
+	}
+
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(names) != 1 || names[0].Name() != "binding-descriptors.yaml" {
+		var got []string
+		for _, n := range names {
+			got = append(got, n.Name())
+		}
+		t.Errorf("directory contents = %v, want [binding-descriptors.yaml]", got)
+	}
+}
+
+// Zero-entry Upsert is a no-op: it neither creates an absent file nor rewrites
+// an existing one.
+func TestUpsert_ZeroEntriesIsNoOp(t *testing.T) {
+	t.Run("absent file not created", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "binding-descriptors.yaml")
+
+		if err := Upsert(path); err != nil {
+			t.Fatalf("Upsert with zero entries: %v", err)
+		}
+
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("file exists after zero-entry Upsert; want absent (stat err = %v)", err)
+		}
+		// The parent dir must also be untouched (no MkdirAll, no temp litter).
+		names, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("readdir: %v", err)
+		}
+		if len(names) != 0 {
+			var got []string
+			for _, n := range names {
+				got = append(got, n.Name())
+			}
+			t.Errorf("directory contents = %v, want empty", got)
+		}
+	})
+
+	t.Run("existing file byte-identical", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "binding-descriptors.yaml")
+		if err := Upsert(path, bearerEntry("api.example.com", "user/example")); err != nil {
+			t.Fatalf("seed Upsert: %v", err)
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+
+		if err := Upsert(path); err != nil {
+			t.Fatalf("Upsert with zero entries: %v", err)
+		}
+
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(before) != string(after) {
+			t.Errorf("file mutated on zero-entry Upsert:\nbefore=%q\nafter=%q", before, after)
+		}
+	})
+}
