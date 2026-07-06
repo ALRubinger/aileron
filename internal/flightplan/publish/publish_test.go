@@ -449,6 +449,64 @@ func TestNewRemoteRepository(t *testing.T) {
 	}
 }
 
+func TestAnnotateRegistryAuthErrorGHCR(t *testing.T) {
+	// The exact shape docker push surfaces for ghcr.io: an opaque
+	// permission_denied naming "expected scopes" with no guidance (issue #2011).
+	raw := errors.New("denied: permission_denied: The token provided does not match the expected scopes")
+	got := annotateRegistryAuthError(raw, "ghcr.io/acme/plan")
+	if !errors.Is(got, raw) {
+		t.Fatalf("annotated error must preserve the raw error via errors.Is; got %v", got)
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, "ghcr.io") {
+		t.Errorf("hint must name the registry host ghcr.io; got %q", msg)
+	}
+	if !strings.Contains(msg, "write:packages") {
+		t.Errorf("ghcr.io hint must cite the exact write:packages scope; got %q", msg)
+	}
+	if !strings.Contains(msg, "expected scopes") {
+		t.Errorf("raw registry message must survive in the wrapped error; got %q", msg)
+	}
+}
+
+func TestAnnotateRegistryAuthErrorGenericHostNoGHCRScope(t *testing.T) {
+	// A non-ghcr registry gets the host-named hint but must not have the
+	// GitHub-specific write:packages scope invented for it.
+	raw := errors.New("unexpected status from PUT request: 403 Forbidden")
+	got := annotateRegistryAuthError(raw, "registry.example.com/team/plan")
+	if !errors.Is(got, raw) {
+		t.Fatalf("annotated error must preserve the raw error; got %v", got)
+	}
+	msg := got.Error()
+	if !strings.Contains(msg, "registry.example.com") {
+		t.Errorf("hint must name the registry host; got %q", msg)
+	}
+	if strings.Contains(msg, "write:packages") {
+		t.Errorf("non-ghcr host must not invent the GHCR write:packages scope; got %q", msg)
+	}
+}
+
+func TestAnnotateRegistryAuthErrorNetworkNotAnnotated(t *testing.T) {
+	// A transient network fault carries no auth/scope signal and must pass
+	// through untouched (identical error), not gain a misleading login hint.
+	raw := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
+	got := annotateRegistryAuthError(raw, "ghcr.io/acme/plan")
+	if got != raw {
+		t.Fatalf("network fault must pass through unchanged; got %v", got)
+	}
+}
+
+func TestAnnotateRegistryAuthErrorDigitRunNotAnnotated(t *testing.T) {
+	// A non-auth failure whose message merely contains "403"/"401" as part of a
+	// digest or size must not be misread as an auth rejection: the numeric
+	// signals only count on word boundaries.
+	raw := errors.New("copy manifest sha256:a403b1c0d401e2f3: unexpected EOF")
+	got := annotateRegistryAuthError(raw, "ghcr.io/acme/plan")
+	if got != raw {
+		t.Fatalf("digit run inside a digest must not trigger the auth hint; got %v", got)
+	}
+}
+
 func TestRunInvalidTargetRegistry(t *testing.T) {
 	// Target nil forces production repo construction; an unparsable registry
 	// fails before any network I/O.
