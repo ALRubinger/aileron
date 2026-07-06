@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,7 +43,7 @@ var newInstallPublisherVerifier = func(diag io.Writer) pull.PublisherVerifier {
 // indistinguishable from a local freeze (umbrella #1898, the read half). It
 // never pulls the image subject; the pin in the lock is carried into the store
 // untouched and resolved lazily at launch (#1903).
-func runSkillInstallOCI(ref string, stdout, stderr io.Writer) int {
+func runSkillInstallOCI(ref string, stdin io.Reader, stdout, stderr io.Writer) int {
 	s := store.New(skillStoreDir)
 
 	// Bound the network pull and honor Ctrl-C so a hung or unreachable registry
@@ -97,6 +99,28 @@ func runSkillInstallOCI(ref string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Installed frozen version %s of skill %q to %s\n",
 		res.Frozen.ID, res.Name, s.FrozenDir(res.Name, res.Frozen.ID))
+
+	// A frozen/OCI install carries a signed trust contract, so bind can derive
+	// this plan's credential requirements right now. When attached to a terminal,
+	// offer to chain straight into bind so the operator onboards credentials in
+	// one step instead of remembering a second command. Non-interactive installs
+	// (CI, piped stdin) fall through to the pointer and never block on input.
+	if isTTYFn() {
+		// Wrap stdin once and hand the same *bufio.Reader to both the offer
+		// prompt and bind: promptLine reuses an existing *bufio.Reader instead of
+		// buffering ahead into a throwaway, so the bytes bind reads next (access
+		// key ids, etc.) survive the first ReadString rather than being consumed.
+		br := bufio.NewReader(stdin)
+		answer := promptLine(br, stdout,
+			fmt.Sprintf("Bind %q's declared credentials now? [Y/n]: ", res.Name))
+		if !strings.EqualFold(answer, "n") && !strings.EqualFold(answer, "no") {
+			// Bind exactly the version just written, not merely the most recent,
+			// so a concurrent freeze cannot redirect the onboarding. Bind reuses
+			// the same stdin so its own prompts read from the operator's terminal.
+			return runSkillBind([]string{res.Name, "--version", res.Frozen.ID}, br, stdout, stderr)
+		}
+	}
+
 	fmt.Fprintf(stdout, "Run `aileron skill bind %q` to supply this plan's credentials\n", res.Name)
 	return 0
 }

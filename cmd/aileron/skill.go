@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/resolver"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -40,14 +39,14 @@ var newSkillFetcher = func() (resolver.Fetcher, error) {
 	}, nil
 }
 
-func runSkill(args []string, stdout, stderr io.Writer) int {
+func runSkill(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, skillUsage)
 		return 1
 	}
 	switch args[0] {
 	case "install":
-		return runSkillInstall(args[1:], stdout, stderr)
+		return runSkillInstall(args[1:], stdin, stdout, stderr)
 	case "list":
 		return runSkillList(args[1:], stdout, stderr)
 	case "freeze":
@@ -55,7 +54,7 @@ func runSkill(args []string, stdout, stderr io.Writer) int {
 	case "launch":
 		return runSkillLaunch(args[1:], stdout, stderr)
 	case "bind":
-		return runSkillBind(args[1:], os.Stdin, stdout, stderr)
+		return runSkillBind(args[1:], stdin, stdout, stderr)
 	case "publish":
 		return runSkillPublish(args[1:], stdout, stderr)
 	default:
@@ -65,7 +64,7 @@ func runSkill(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-func runSkillInstall(args []string, stdout, stderr io.Writer) int {
+func runSkillInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("skill install", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	positionals, err := parseInterspersedFlags(flags, args)
@@ -83,7 +82,7 @@ func runSkillInstall(args []string, stdout, stderr io.Writer) int {
 	// FROZEN version, not the pre-freeze installed SKILL.md the local/git path
 	// copies. Local paths and git URLs fall through to the unchanged install.
 	if store.IsOCIReference(src) {
-		return runSkillInstallOCI(src, stdout, stderr)
+		return runSkillInstallOCI(src, stdin, stdout, stderr)
 	}
 
 	s := store.New(skillStoreDir)
