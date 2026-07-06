@@ -2,16 +2,13 @@ package pull
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	oras "oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/errdef"
 )
 
@@ -113,8 +110,13 @@ func PullImage(ctx context.Context, opts ImagePullOptions) (ImagePullResult, err
 }
 
 // pullComposedImage resolves the composed image by its published tag, reads its
-// manifest's config digest (mirroring publish's imageConfigDigest read
-// semantics), and requires it to equal the signed lock pin. The bootable
+// config digest through the shared ociremote.ConfigDigest helper (the same
+// index-aware read publish uses post-push, so the read and write halves compute
+// the same value), and requires it to equal the signed lock pin. When the
+// published ref is an OCI image index (the containerd store behind Docker
+// Desktop), the helper unwraps it to the platform image manifest before reading
+// config; BootRef stays anchored to the resolved (index) manifest digest, which
+// the runner/daemon boot correctly. The bootable
 // reference is content-addressed to the resolved MANIFEST digest
 // ("<registry>@<manifest-digest>"), not the mutable tag: the config-digest check
 // proved this exact manifest carries the attested config, so anchoring the boot
@@ -135,7 +137,7 @@ func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImageP
 		return ImagePullResult{}, fmt.Errorf("%w: composed image %q resolved to an empty manifest digest", ErrImagePullFailed, imageTag)
 	}
 
-	config, err := imageConfigDigest(ctx, src, desc)
+	config, err := ociremote.ConfigDigest(ctx, src, desc)
 	if err != nil {
 		return ImagePullResult{}, fmt.Errorf("%w: read composed image config: %w", ErrImagePullFailed, err)
 	}
@@ -177,22 +179,4 @@ func pullManifestDigestImage(ctx context.Context, src oras.ReadOnlyTarget, opts 
 		BindingKind: freeze.BindingManifestDigest,
 		ImageDigest: opts.Pin.Digest,
 	}, nil
-}
-
-// imageConfigDigest fetches an image manifest and returns its config blob digest
-// (a composed pin's attested identity). It mirrors publish's imageConfigDigest so
-// the read and write halves compute the same value.
-func imageConfigDigest(ctx context.Context, fetcher content.Fetcher, manifest ocispec.Descriptor) (string, error) {
-	raw, err := content.FetchAll(ctx, fetcher, manifest)
-	if err != nil {
-		return "", err
-	}
-	var m ocispec.Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", fmt.Errorf("decode image manifest: %w", err)
-	}
-	if m.Config.Digest == "" {
-		return "", fmt.Errorf("image manifest has no config digest")
-	}
-	return m.Config.Digest.String(), nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -118,6 +119,66 @@ func TestRunComposedConfigDigestBinding(t *testing.T) {
 		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
 	}
 	assertReferrerAttached(t, target, res, manifest.Digest.String(), freeze.BindingConfigDigest)
+}
+
+// seedComposedIndexTarget seeds target with the composed image published as an
+// OCI image index (the shape `docker push` emits on Docker Desktop's containerd
+// image store): the single-platform image manifest plus a buildkit attestation
+// manifest, tagged where publishComposed resolves it. It returns the index and
+// config descriptors. The config-digest read-back must unwrap the index.
+func seedComposedIndexTarget(t *testing.T, target *memory.Store, versionID, configBody string) (index, config ocispec.Descriptor) {
+	t.Helper()
+	ctx := context.Background()
+	image, cfg := seedImage(t, target, configBody)
+	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+
+	// A buildkit attestation entry: unknown/unknown platform + attestation type.
+	// Selection skips it, so its blobs are never fetched and need not be pushed.
+	attManifest := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-"+configBody))
+	attManifest.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
+	attManifest.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
+
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{image, attManifest},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	id := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, ib)
+	mustPush(t, target, id, ib)
+	if err := target.Tag(ctx, id, freeze.ComposedImageTag(versionID)); err != nil {
+		t.Fatalf("tag composed index: %v", err)
+	}
+	return id, cfg
+}
+
+// TestRunComposedConfigDigestBindingOverOCIIndex is the #2012 regression: the
+// containerd image store makes the pushed composed ref an OCI index wrapping the
+// image manifest plus a buildkit attestation. Publish's post-push config-digest
+// read-back must unwrap the index and verify against the signed lock rather than
+// hard-erroring "image manifest has no config digest".
+func TestRunComposedConfigDigestBindingOverOCIIndex(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	index, cfg := seedComposedIndexTarget(t, target, "v1", "composed-config")
+
+	res, err := Run(ctx, composedOptions(target, cfg))
+	if err != nil {
+		t.Fatalf("Run over an OCI-index composed image: %v", err)
+	}
+	if res.BindingKind != freeze.BindingConfigDigest {
+		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigDigest)
+	}
+	// The subject/image digest is the resolved INDEX digest (what Docker/containerd
+	// boot correctly); the config-digest binding was verified from the unwrapped
+	// image manifest.
+	if res.ImageDigest != index.Digest.String() {
+		t.Errorf("image digest = %q, want the resolved index digest %q", res.ImageDigest, index.Digest)
+	}
+	assertReferrerAttached(t, target, res, index.Digest.String(), freeze.BindingConfigDigest)
 }
 
 func TestRunComposedConfigDigestMismatchFailsClosed(t *testing.T) {

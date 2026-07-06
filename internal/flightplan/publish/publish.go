@@ -30,12 +30,12 @@ package publish
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -241,7 +241,11 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 	}
 	// Defense in depth: the pushed manifest's config digest must still equal
 	// the signed lock (a registry must not have altered the config on push).
-	pushedConfig, err := imageConfigDigest(ctx, target, desc)
+	// ociremote.ConfigDigest unwraps an OCI image index (the containerd image
+	// store behind Docker Desktop makes `docker push` emit one wrapping the
+	// single-platform image manifest plus a buildkit attestation) so the read
+	// back succeeds on both the classic and containerd stores.
+	pushedConfig, err := ociremote.ConfigDigest(ctx, target, desc)
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: read pushed image config: %w", err)
 	}
@@ -282,23 +286,6 @@ func publishForeignBase(ctx context.Context, opts Options, pin freeze.ImagePin, 
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: copied manifest digest %s != lock attested %s", root.Digest, pin.Digest)
 	}
 	return root, freeze.BindingManifestDigest, nil
-}
-
-// imageConfigDigest fetches an image manifest and returns its config blob
-// digest (the composed pin's attested identity).
-func imageConfigDigest(ctx context.Context, fetcher content.Fetcher, manifest ocispec.Descriptor) (string, error) {
-	raw, err := content.FetchAll(ctx, fetcher, manifest)
-	if err != nil {
-		return "", err
-	}
-	var m ocispec.Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", fmt.Errorf("decode image manifest: %w", err)
-	}
-	if m.Config.Digest == "" {
-		return "", fmt.Errorf("image manifest has no config digest")
-	}
-	return m.Config.Digest.String(), nil
 }
 
 // pushBlob pushes data under mediaType, treating an already-present blob as
