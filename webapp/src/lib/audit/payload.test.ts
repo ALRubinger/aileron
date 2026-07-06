@@ -129,7 +129,7 @@ describe('resolvedInputs', () => {
 	function ev(payload: Record<string, unknown>): AuditEvent {
 		return { audit_id: 'x', event_type: 'output.materialized', timestamp: 't', payload };
 	}
-	it('returns name/type/size descriptors sorted by name', () => {
+	it('returns name/type/size/value descriptors sorted by name', () => {
 		expect(
 			resolvedInputs(
 				ev({
@@ -137,17 +137,32 @@ describe('resolvedInputs', () => {
 				})
 			)
 		).toEqual([
-			{ name: 'flags', type: 'array', size: JSON.stringify(['a', 'b']).length },
-			{ name: 'limit', type: 'number', size: 2 },
-			{ name: 'region', type: 'string', size: JSON.stringify('us-east-1').length }
+			{ name: 'flags', type: 'array', size: JSON.stringify(['a', 'b']).length, value: '["a","b"]' },
+			{ name: 'limit', type: 'number', size: 2, value: '10' },
+			{
+				name: 'region',
+				type: 'string',
+				size: JSON.stringify('us-east-1').length,
+				value: 'us-east-1'
+			}
 		]);
+	});
+	it('carries a string value verbatim, without JSON quoting', () => {
+		const [region] = resolvedInputs(ev({ 'aileron.resolved_inputs': { region: 'us-east-1' } }));
+		expect(region.value).toBe('us-east-1');
+	});
+	it('carries a large value in full so the render layer can reveal it on demand', () => {
+		const big = 'x'.repeat(200);
+		const [blob] = resolvedInputs(ev({ 'aileron.resolved_inputs': { blob: big } }));
+		expect(blob.value).toBe(big);
+		expect(blob.size).toBe(202);
 	});
 	it('classifies null and object values distinctly from bare typeof', () => {
 		expect(
 			resolvedInputs(ev({ 'aileron.resolved_inputs': { a: null, b: { k: 1 } } }))
 		).toEqual([
-			{ name: 'a', type: 'null', size: 4 },
-			{ name: 'b', type: 'object', size: JSON.stringify({ k: 1 }).length }
+			{ name: 'a', type: 'null', size: 4, value: 'null' },
+			{ name: 'b', type: 'object', size: JSON.stringify({ k: 1 }).length, value: '{"k":1}' }
 		]);
 	});
 	it('returns [] for a missing, non-object, or array value', () => {
