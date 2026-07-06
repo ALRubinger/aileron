@@ -111,6 +111,11 @@ func runSkillInstall(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "Installed skill %q to %s\n", res.Name, res.Dir)
+	// A local/git install writes the pre-freeze SKILL.md, not a frozen version,
+	// so it carries no signed trust contract to derive credentials from and
+	// cannot be bound yet. Point the operator at freeze-then-bind, mirroring the
+	// bind pointer the OCI path prints for an already-frozen version.
+	fmt.Fprintf(stdout, "Run `aileron skill freeze %q` then `aileron skill bind %q` to onboard its credentials\n", res.Name, res.Name)
 	return 0
 }
 
