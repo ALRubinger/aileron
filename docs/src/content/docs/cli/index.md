@@ -95,7 +95,7 @@ The keyring is the v1 source of trust for connector signature verification. Ever
 
 | Command | Purpose |
 |---|---|
-| `aileron keyring trust <authority>` | Authorize a publisher's signing key at owner granularity, so the single grant covers every connector that publisher ships. The key is resolved automatically: `github://owner/connector` reads that repo's `keys/publisher.pub` on its default branch, and a bare `github://owner` resolves the key from the Hub catalog entry's `key_url`. Re-running is a safe no-op. |
+| `aileron keyring trust [--key-file <path>] <authority>` | Authorize a publisher's signing key at owner granularity, so the single grant covers every connector that publisher ships. The key is resolved automatically: `github://owner/connector` reads that repo's `keys/publisher.pub` on its default branch, and a bare `github://owner` resolves the key from the Hub catalog entry's `key_url`. Set `GH_TOKEN` or `GITHUB_TOKEN` to trust a publisher whose repo is private (the key is then fetched over the authenticated GitHub API rather than anonymous raw). Pass `--key-file <path>` to trust a locally-held `publisher.pub` with no network fetch, for air-gapped or private-repo operators. Re-running is a safe no-op. |
 | `aileron keyring list` | List trusted publishers and their key fingerprints. |
 | `aileron keyring revoke <authority>` | Remove a publisher's keys from the trust list. Pass `--key <fingerprint>` instead of an authority to revoke a single key by fingerprint. |
 

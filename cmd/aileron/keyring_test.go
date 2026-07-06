@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -73,6 +74,12 @@ func genTestKey(t *testing.T) (ed25519.PublicKey, []byte) {
 // filesystem and the test does not pollute the user's real ~/.aileron.
 func withTempHome(t *testing.T) string {
 	t.Helper()
+	// Neutralize any ambient GitHub token so the default (token-absent)
+	// keyring test path is the anonymous raw fetch. Tests that exercise the
+	// authenticated Contents API set GH_TOKEN/GITHUB_TOKEN explicitly after
+	// this, overriding the cleared value.
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
 	return setTestHome(t)
 }
 
@@ -84,6 +91,13 @@ func withTempHome(t *testing.T) string {
 // rotation between two `keyring trust` calls).
 func withMockGitHubRaw(t *testing.T, paths map[string][]byte) func(path string, body []byte) {
 	t.Helper()
+
+	// The convention path is anonymous only when no token is set; clear
+	// any ambient token so a developer/CI environment with GH_TOKEN or
+	// GITHUB_TOKEN exported does not silently reroute the fetch to the
+	// (unmocked) Contents API base.
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
 
 	bodies := make(map[string][]byte, len(paths))
 	for k, v := range paths {
@@ -108,6 +122,36 @@ func withMockGitHubRaw(t *testing.T, paths map[string][]byte) func(path string, 
 	return func(path string, body []byte) {
 		bodies[path] = body
 	}
+}
+
+// withMockGitHubAPI stands up an httptest server that mimics the GitHub
+// Contents API (`/repos/{owner}/{repo}/contents/{path}`) and points the
+// CLI's githubAPIBase at it. The server serves body only when the request
+// carries an `Authorization: Bearer <token>` header (private content), and
+// 404s otherwise, so a test can prove the authenticated path is exercised.
+// It records whether it was ever hit for tests that assert no network call.
+func withMockGitHubAPI(t *testing.T, contentsPath string, body []byte) *bool {
+	t.Helper()
+	hit := new(bool)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*hit = true
+		if r.URL.Path != contentsPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") == "" {
+			http.Error(w, "requires authentication", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := githubAPIBase
+	githubAPIBase = srv.URL
+	t.Cleanup(func() { githubAPIBase = prev })
+	return hit
 }
 
 // --- decodePublicKey ---
@@ -313,6 +357,198 @@ func TestKeyringTrust_GarbageBody(t *testing.T) {
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	if rc := runKeyring([]string{"trust", "github://owner/repo"}, stdout, stderr); rc == 0 {
 		t.Fatal("expected non-zero exit for garbage body")
+	}
+}
+
+// TestKeyringTrust_PrivateRepoResolvesViaAuthenticatedAPI is the #2009
+// regression: raw.githubusercontent.com 404s on private content, but with
+// a token present the key resolves through the authenticated Contents API
+// and trust succeeds. Fails before the fix (anonymous raw only) because
+// raw returns 404.
+func TestKeyringTrust_PrivateRepoResolvesViaAuthenticatedAPI(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	// raw returns 404 for every path (mirrors a private repo hidden from
+	// anonymous raw).
+	withMockGitHubRaw(t, map[string][]byte{})
+	// The token flips the fetch onto the Contents API, which serves the key.
+	t.Setenv("GH_TOKEN", "gh-secret")
+	apiHit := withMockGitHubAPI(t, "/repos/acme/private-connector/contents/keys/publisher.pub", pemBytes)
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "github://acme/private-connector"}, stdout, stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d; stderr = %s", rc, stderr.String())
+	}
+	if !*apiHit {
+		t.Error("authenticated Contents API was not called")
+	}
+	if !strings.Contains(stdout.String(), "Trusted publisher github://acme\n") {
+		t.Errorf("expected owner-level success message; got: %s", stdout.String())
+	}
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("owner-level key not pinned after authenticated fetch")
+	}
+}
+
+// TestKeyringTrust_GHTokenPreferredOverGitHubToken verifies GH_TOKEN wins
+// when both are set (gh CLI precedence), matching resolveLatestRef.
+func TestKeyringTrust_GHTokenPreferredOverGitHubToken(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{})
+	t.Setenv("GH_TOKEN", "gh-wins")
+	t.Setenv("GITHUB_TOKEN", "github-loses")
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write(pemBytes)
+	}))
+	t.Cleanup(srv.Close)
+	prev := githubAPIBase
+	githubAPIBase = srv.URL
+	t.Cleanup(func() { githubAPIBase = prev })
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if rc := runKeyring([]string{"trust", "github://acme/repo"}, stdout, stderr); rc != 0 {
+		t.Fatalf("rc = %d; stderr = %s", rc, stderr.String())
+	}
+	if gotAuth != "Bearer gh-wins" {
+		t.Errorf("Authorization = %q, want Bearer gh-wins", gotAuth)
+	}
+}
+
+// TestKeyringTrust_PrivateRepoAPI404GivesGuidance verifies the
+// authenticated-path 404 (e.g. token lacks repo access) names the
+// convention path and hints at token access.
+func TestKeyringTrust_PrivateRepoAPI404GivesGuidance(t *testing.T) {
+	withTempHome(t)
+	withMockGitHubRaw(t, map[string][]byte{})
+	t.Setenv("GITHUB_TOKEN", "no-access")
+	withMockGitHubAPI(t, "/repos/acme/nope/contents/keys/publisher.pub", nil) // 404s: path mismatch below
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "github://acme/other"}, stdout, stderr)
+	if rc == 0 {
+		t.Fatal("expected non-zero exit when the API path is absent")
+	}
+	if !strings.Contains(stderr.String(), "keys/publisher.pub") {
+		t.Errorf("expected error to name the convention path; got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "read access") {
+		t.Errorf("expected token-access hint; got: %s", stderr.String())
+	}
+}
+
+// TestKeyringTrust_Anonymous404MentionsToken verifies the anonymous-path
+// 404 now points the operator at GH_TOKEN/GITHUB_TOKEN for private repos.
+func TestKeyringTrust_Anonymous404MentionsToken(t *testing.T) {
+	withTempHome(t)
+	withMockGitHubRaw(t, map[string][]byte{}) // 404 for every path, no token
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if rc := runKeyring([]string{"trust", "github://acme/private"}, stdout, stderr); rc == 0 {
+		t.Fatal("expected non-zero exit on 404")
+	}
+	if !strings.Contains(stderr.String(), "GH_TOKEN") || !strings.Contains(stderr.String(), "GITHUB_TOKEN") {
+		t.Errorf("expected 404 to mention GH_TOKEN/GITHUB_TOKEN; got: %s", stderr.String())
+	}
+}
+
+// TestKeyringTrust_KeyFileGrantsOwnerTrustNoNetwork covers acceptance item
+// 2: --key-file reads a local key and grants owner trust with no HTTP call.
+func TestKeyringTrust_KeyFileGrantsOwnerTrustNoNetwork(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	keyPath := filepath.Join(t.TempDir(), "publisher.pub")
+	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	// Point both bases at a server that fails the test if it is ever hit.
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected network call to %s", r.URL.Path)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(fail.Close)
+	prevRaw, prevAPI := rawGitHubBase, githubAPIBase
+	rawGitHubBase, githubAPIBase = fail.URL, fail.URL
+	t.Cleanup(func() { rawGitHubBase, githubAPIBase = prevRaw, prevAPI })
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "--key-file", keyPath, "github://acme/connector"}, stdout, stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d; stderr = %s", rc, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Trusted publisher github://acme\n") {
+		t.Errorf("expected owner-level success message; got: %s", stdout.String())
+	}
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("owner-level key not pinned from --key-file")
+	}
+}
+
+// TestKeyringTrust_KeyFileBareOwner verifies --key-file also accepts a
+// bare owner authority (which ParseFQN rejects), granting owner trust.
+func TestKeyringTrust_KeyFileBareOwner(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	keyPath := filepath.Join(t.TempDir(), "publisher.pub")
+	if err := os.WriteFile(keyPath, pemBytes, 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "--key-file", keyPath, "github://acme"}, stdout, stderr)
+	if rc != 0 {
+		t.Fatalf("rc = %d; stderr = %s", rc, stderr.String())
+	}
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasOwnerKey("github://acme", pub) {
+		t.Error("owner-level key not pinned from --key-file for bare owner")
+	}
+}
+
+// TestKeyringTrust_KeyFileMissingFileErrors verifies a bad --key-file path
+// fails cleanly with context.
+func TestKeyringTrust_KeyFileMissingFileErrors(t *testing.T) {
+	withTempHome(t)
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "--key-file", filepath.Join(t.TempDir(), "absent.pub"), "github://acme/repo"}, stdout, stderr)
+	if rc == 0 {
+		t.Fatal("expected non-zero exit for missing key file")
+	}
+	if !strings.Contains(stderr.String(), "read key file") {
+		t.Errorf("expected read-file error context; got: %s", stderr.String())
+	}
+}
+
+// TestKeyringTrust_KeyFileGarbageErrors verifies a --key-file that is not a
+// valid key fails with decode context.
+func TestKeyringTrust_KeyFileGarbageErrors(t *testing.T) {
+	withTempHome(t)
+	keyPath := filepath.Join(t.TempDir(), "publisher.pub")
+	if err := os.WriteFile(keyPath, []byte("not a key"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "--key-file", keyPath, "github://acme/repo"}, stdout, stderr)
+	if rc == 0 {
+		t.Fatal("expected non-zero exit for garbage key file")
+	}
+	if !strings.Contains(stderr.String(), "parse key file") {
+		t.Errorf("expected parse-file error context; got: %s", stderr.String())
 	}
 }
 

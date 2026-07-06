@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -77,23 +78,43 @@ func runKeyring(args []string, stdout, stderr io.Writer) int {
 //     guidance to trust via a specific connector instead of guessing a
 //     profile-repo path.
 //
+// The `--key-file <path>` flag bypasses every network fetch: it reads the
+// publisher key from a local file and grants owner-level trust for the
+// named authority. This unblocks air-gapped hosts and private-repo
+// operators who already hold `publisher.pub` locally. The authority arg
+// is still required because it names the owner the grant covers.
+//
 // Writing an owner-level key the keyring already trusts is a no-op, so
 // re-running is safe.
 func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: aileron keyring trust <authority>")
-		fmt.Fprintln(stderr, "  authority: github://owner            (trust the whole publisher, key resolved via the Hub)")
-		fmt.Fprintln(stderr, "             github://owner/connector  (trust the whole publisher, key from the connector repo)")
-		fmt.Fprintln(stderr, "  Trusting an owner covers every connector that publisher ships.")
+	flags := flag.NewFlagSet("keyring trust", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() { printTrustUsage(stderr) }
+	keyFile := flags.String("key-file", "", "Read the publisher key from a local file (no network fetch)")
+	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	authority := args[0]
+	rest := flags.Args()
+	if len(rest) != 1 {
+		printTrustUsage(stderr)
+		return 1
+	}
+	authority := rest[0]
 	if authority == "" {
 		fmt.Fprintln(stderr, "error: authority cannot be empty")
 		return 1
 	}
 
-	ownerAuthority, pub, err := resolveTrustKey(authority, stderr)
+	var (
+		ownerAuthority string
+		pub            ed25519.PublicKey
+		err            error
+	)
+	if *keyFile != "" {
+		ownerAuthority, pub, err = resolveTrustKeyFromFile(authority, *keyFile)
+	} else {
+		ownerAuthority, pub, err = resolveTrustKey(authority, stderr)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -156,6 +177,58 @@ func resolveTrustKey(authority string, stderr io.Writer) (string, ed25519.Public
 		return "", nil, fmt.Errorf("fetch publisher key for %s: %w", fqn.Authority(), err)
 	}
 	return fqn.OwnerAuthority(), pub, nil
+}
+
+// printTrustUsage writes the `keyring trust` usage block. Shared by the
+// flag parser's error path and the arg-count guard so the two stay in
+// sync.
+func printTrustUsage(stderr io.Writer) {
+	fmt.Fprintln(stderr, "usage: aileron keyring trust [--key-file <path>] <authority>")
+	fmt.Fprintln(stderr, "  authority: github://owner            (trust the whole publisher, key resolved via the Hub)")
+	fmt.Fprintln(stderr, "             github://owner/connector  (trust the whole publisher, key from the connector repo)")
+	fmt.Fprintln(stderr, "  --key-file <path>  read the publisher key from a local file with no network fetch")
+	fmt.Fprintln(stderr, "                     (for private repos or air-gapped hosts); the authority is still required.")
+	fmt.Fprintln(stderr, "  Trusting an owner covers every connector that publisher ships.")
+	fmt.Fprintln(stderr, "  Set GH_TOKEN or GITHUB_TOKEN to fetch the key from a private repo over the GitHub API.")
+}
+
+// resolveTrustKeyFromFile grants trust from a local key file with no
+// network fetch. The authority still names the owner the grant covers:
+// a bare owner (`github://owner`) or a full per-repo FQN both collapse to
+// the owner-level authority so the single grant covers every connector
+// the publisher ships (ADR-0013). The file may be PEM or base64 raw, the
+// same shapes decodePublicKey accepts on the convention path.
+func resolveTrustKeyFromFile(authority, keyFile string) (string, ed25519.PublicKey, error) {
+	ownerAuthority, err := ownerAuthorityForGrant(authority)
+	if err != nil {
+		return "", nil, err
+	}
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return "", nil, fmt.Errorf("read key file %s: %w", keyFile, err)
+	}
+	pub, err := decodePublicKey(data)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse key file %s: %w", keyFile, err)
+	}
+	return ownerAuthority, pub, nil
+}
+
+// ownerAuthorityForGrant maps a `keyring trust` authority argument to the
+// owner-level authority the grant lands under, accepting both a bare
+// owner (`github://owner`, which ParseFQN rejects for want of a repo
+// segment) and a full per-repo FQN (`github://owner/repo`). Used by the
+// `--key-file` path, which never fetches and so cannot lean on
+// resolveTrustKey's Hub / per-repo network branches.
+func ownerAuthorityForGrant(authority string) (string, error) {
+	if isBareOwnerAuthority(authority) {
+		return strings.TrimRight(authority, "/"), nil
+	}
+	fqn, err := cstore.ParseFQN(authority)
+	if err != nil {
+		return "", fmt.Errorf("parse authority %s: %w", authority, err)
+	}
+	return fqn.OwnerAuthority(), nil
 }
 
 // isBareOwnerAuthority reports whether s is a `<scheme>://<owner>` with
@@ -237,8 +310,12 @@ func ownerMatchesEntry(owner string, e hubConnectorEntry) bool {
 // publisher commits at `keys/publisher.pub` on the default branch
 // (per ADR-0002). v1 supports `github://` authorities only.
 //
-// The HTTP call is anonymous — the convention path is on the public
-// internet by definition, so no token plumbing is needed here.
+// When a GitHub token is present (GH_TOKEN then GITHUB_TOKEN, matching
+// resolveLatestRef), the key is resolved through the GitHub Contents API,
+// which serves private-repo content that raw.githubusercontent.com hides
+// behind a 404 (raw does not accept bearer tokens). Without a token the
+// fetch stays anonymous against raw, so public-repo trust still works
+// unauthenticated.
 func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 	fqn, err := cstore.ParseFQN(authority)
 	if err != nil {
@@ -246,6 +323,10 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 	}
 	if fqn.Scheme != "github" {
 		return nil, fmt.Errorf("auto-fetch supports github:// authorities only (got %s://)", fqn.Scheme)
+	}
+
+	if tok := githubToken(); tok != "" {
+		return fetchPublisherKeyViaAPI(fqn, tok)
 	}
 
 	// `HEAD` resolves to the repo's default branch on raw.githubusercontent.com,
@@ -257,6 +338,61 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 		publisherKeyPath,
 	)
 	return fetchKeyFromURL(keyURL)
+}
+
+// githubToken returns the GitHub token from the environment, preferring
+// GH_TOKEN over GITHUB_TOKEN (the gh CLI's precedence). Empty string
+// means no token is set, in which case the fetch stays anonymous.
+func githubToken() string {
+	if tok := os.Getenv("GH_TOKEN"); tok != "" {
+		return tok
+	}
+	return os.Getenv("GITHUB_TOKEN")
+}
+
+// fetchPublisherKeyViaAPI resolves the publisher key through the GitHub
+// Contents API with a bearer token, so a private repo's
+// `keys/publisher.pub` is reachable. `Accept: application/vnd.github.raw`
+// makes the endpoint return the file's raw bytes (PEM or base64), which
+// decodePublicKey handles the same as the anonymous raw path. HEAD /
+// default-branch resolution is implicit (no `?ref=`), matching the raw
+// path's `HEAD`.
+func fetchPublisherKeyViaAPI(fqn cstore.FQN, token string) (ed25519.PublicKey, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/contents/%s",
+		strings.TrimRight(githubAPIBase, "/"),
+		url.PathEscape(fqn.Owner),
+		url.PathEscape(fqn.Repo),
+		publisherKeyPath,
+	)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.raw")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: publisherKeyFetchTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch; check the token has read access to this repo)",
+			endpoint, resp.StatusCode, publisherKeyPath)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	pub, err := decodePublicKey(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", endpoint, err)
+	}
+	return pub, nil
 }
 
 // fetchKeyFromURL GETs an ed25519 public key from an absolute URL and
@@ -275,7 +411,7 @@ func fetchKeyFromURL(keyURL string) (ed25519.PublicKey, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch)",
+		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch; a private repo 404s here — set GH_TOKEN or GITHUB_TOKEN to fetch it over the GitHub API)",
 			keyURL, resp.StatusCode, publisherKeyPath)
 	}
 
