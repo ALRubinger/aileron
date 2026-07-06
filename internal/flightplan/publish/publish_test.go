@@ -417,6 +417,92 @@ func TestRunIdempotentReferrerDigest(t *testing.T) {
 	}
 }
 
+// TestRunTagsLatestAndSemver is the ergonomics regression (#2027): after a run,
+// the mutable `latest` tag, the (valid) semver label, and the canonical
+// content-hash tag all resolve to the SAME artifact descriptor.
+func TestRunTagsLatestAndSemver(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, target, "v1", body)
+
+	opts := composedOptions(target, body)
+	opts.Lock.Version = "1.2.3" // a legal OCI tag
+	res, err := Run(ctx, opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, tag := range []string{"v1", "latest", "1.2.3"} {
+		desc, err := target.Resolve(ctx, tag)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", tag, err)
+		}
+		if desc.Digest.String() != res.ArtifactDigest {
+			t.Errorf("tag %q resolves to %q, want the artifact digest %q", tag, desc.Digest, res.ArtifactDigest)
+		}
+	}
+}
+
+// TestRunNoSemverLabelTagsLatestOnly proves that with no semver label set, only
+// the content-hash and `latest` tags are written (no spurious empty tag).
+func TestRunNoSemverLabelTagsLatestOnly(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, target, "v1", body)
+
+	res, err := Run(ctx, composedOptions(target, body)) // Lock.Version is empty
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, tag := range []string{"v1", "latest"} {
+		desc, err := target.Resolve(ctx, tag)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", tag, err)
+		}
+		if desc.Digest.String() != res.ArtifactDigest {
+			t.Errorf("tag %q resolves to %q, want %q", tag, desc.Digest, res.ArtifactDigest)
+		}
+	}
+}
+
+// TestRunInvalidSemverLabelWarnsAndSkips proves an invalid semver label (semver
+// `+build` metadata is not a legal OCI tag) is skipped with a stderr warning
+// rather than failing publish; the content-hash and `latest` tags still land.
+func TestRunInvalidSemverLabelWarnsAndSkips(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, target, "v1", body)
+
+	opts := composedOptions(target, body)
+	opts.Lock.Version = "1.2.3+build.5" // '+' is outside the OCI tag grammar
+	var errb bytes.Buffer
+	opts.Stderr = &errb
+
+	res, err := Run(ctx, opts)
+	if err != nil {
+		t.Fatalf("an invalid semver label must not fail publish: %v", err)
+	}
+	// The illegal label must NOT have been tagged.
+	if _, err := target.Resolve(ctx, "1.2.3+build.5"); err == nil {
+		t.Error("the invalid semver label was tagged; want it skipped")
+	}
+	// The valid tags still resolve.
+	for _, tag := range []string{"v1", "latest"} {
+		desc, err := target.Resolve(ctx, tag)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", tag, err)
+		}
+		if desc.Digest.String() != res.ArtifactDigest {
+			t.Errorf("tag %q resolves to %q, want %q", tag, desc.Digest, res.ArtifactDigest)
+		}
+	}
+	if !strings.Contains(errb.String(), "not a valid OCI tag") {
+		t.Errorf("stderr = %q, want a warning that the label is not a valid OCI tag", errb.String())
+	}
+}
+
 func TestRunNoImage(t *testing.T) {
 	_, err := Run(context.Background(), Options{
 		Name: "demo", VersionID: "v1", Registry: "example.com/demo",

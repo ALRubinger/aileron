@@ -64,7 +64,13 @@ func runSkillInstallOCI(ref string, stdin io.Reader, stdout, stderr io.Writer) i
 		case errors.Is(err, pull.ErrMissingVersionTag):
 			fmt.Fprintf(stderr, "error: %v; install a tagged reference like ghcr.io/owner/plan:<version>\n", err)
 		case errors.Is(err, pull.ErrNotAnArtifact):
+			// This ref resolves to a manifest with no Flight Plan artifactType:
+			// an image, or a GHCR `sha256-...` OCI referrers fallback tag. Point
+			// the operator at the signed plan's version coordinate instead.
 			fmt.Fprintf(stderr, "error: %v\n", err)
+			fmt.Fprintf(stderr, "hint: %q resolves to an image or an OCI referrers fallback tag (sha256-...), not the signed plan; "+
+				"install the plan's version tag, e.g. ghcr.io/owner/plan:<16-hex> (or omit the tag for :latest). "+
+				"The exact coordinate is the `artifact:` line printed by `aileron skill publish`.\n", ref)
 		case errors.Is(err, pull.ErrMissingArtifact):
 			fmt.Fprintf(stderr, "error: %v (no published Flight Plan at %q)\n", err, ref)
 		case errors.Is(err, pull.ErrNoName):

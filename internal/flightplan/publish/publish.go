@@ -158,6 +158,9 @@ func run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Stdout == nil {
 		opts.Stdout = io.Discard
 	}
+	if opts.Stderr == nil {
+		opts.Stderr = io.Discard
+	}
 	if len(opts.Lock.ResolvedImages) == 0 {
 		return Result{}, ErrNoImage
 	}
@@ -212,9 +215,33 @@ func run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("publish: pack signed artifact: %w", err)
 	}
 
-	// 4. Tag the artifact so `skill install <registry>:<version>` resolves it.
+	// 4. Tag the artifact. The 16-hex content-hash slug (VersionID) is the
+	//    canonical immutable coordinate `skill install <registry>:<version>`
+	//    resolves. Additionally (re)point the mutable `latest` tag at this newest
+	//    artifact, and — when the frozen version carries a semver label — tag
+	//    under it too, so install can default to `latest` or resolve a
+	//    human-facing version. A moving tag records the content-hash slug in the
+	//    manifest's version annotation, so install keys the on-disk id off that
+	//    resolved slug rather than the mutable tag (which would break launch's
+	//    `<versionTag>-image` resolution and the no-op re-install).
 	if err := target.Tag(ctx, artifactDesc, opts.VersionID); err != nil {
 		return Result{}, fmt.Errorf("publish: tag artifact %s: %w", opts.VersionID, err)
+	}
+	if err := target.Tag(ctx, artifactDesc, "latest"); err != nil {
+		return Result{}, fmt.Errorf("publish: tag artifact latest: %w", err)
+	}
+	if label := opts.Lock.Version; label != "" {
+		// A semver `+build` metadata suffix (or any other character outside the
+		// OCI tag grammar) is not a legal tag. Skip the semver tag with a warning
+		// rather than hard-failing an otherwise-valid publish; the content-hash
+		// and latest tags still land.
+		if isValidOCITag(label) {
+			if err := target.Tag(ctx, artifactDesc, label); err != nil {
+				return Result{}, fmt.Errorf("publish: tag artifact %s: %w", label, err)
+			}
+		} else {
+			fmt.Fprintf(opts.Stderr, "warning: version label %q is not a valid OCI tag; skipping the semver tag (content-hash and latest tags still published)\n", label)
+		}
 	}
 
 	res := Result{
@@ -224,8 +251,11 @@ func run(ctx context.Context, opts Options) (Result, error) {
 		ArtifactDigest: artifactDesc.Digest.String(),
 		BindingKind:    bindingKind,
 	}
-	fmt.Fprintf(opts.Stdout, "published %s\n  image:    %s\n  artifact: %s (%s)\n  binding:  %s\n",
-		opts.Name, res.ImageRef, res.ArtifactRef, res.ArtifactDigest, res.BindingKind)
+	// Print the content-hash ArtifactRef as the source-of-truth install
+	// coordinate, plus a copyable install hint so the operator can hand the exact
+	// command to a second machine.
+	fmt.Fprintf(opts.Stdout, "published %s\n  image:    %s\n  artifact: %s (%s)\n  binding:  %s\nInstall with:\n  aileron skill install %s\n",
+		opts.Name, res.ImageRef, res.ArtifactRef, res.ArtifactDigest, res.BindingKind, res.ArtifactRef)
 	return res, nil
 }
 
@@ -326,6 +356,19 @@ func publishForeignBase(ctx context.Context, opts Options, pin freeze.ImagePin, 
 // anchors keep the numeric codes from misfiring on a digit run inside a digest,
 // size, or port that merely contains "401"/"403".
 var authScopeSignal = regexp.MustCompile(`(?i)\b(401|403|unauthorized|forbidden|denied|insufficient_scope|scopes)\b`)
+
+// ociTagPattern is the OCI distribution-spec tag grammar: an initial
+// [A-Za-z0-9_] followed by up to 127 of [A-Za-z0-9._-]. A semver `+build`
+// metadata suffix contains `+`, which is outside this set, so a version label
+// carrying build metadata is deliberately rejected as a tag.
+var ociTagPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
+
+// isValidOCITag reports whether label is a legal OCI tag, so publish can tag a
+// frozen version's semver label safely and skip an illegal one with a warning
+// rather than failing the whole publish.
+func isValidOCITag(label string) bool {
+	return ociTagPattern.MatchString(label)
+}
 
 // annotateRegistryAuthError wraps an auth/scope registry failure with an
 // actionable hint naming the registry host (and, for ghcr.io, the exact

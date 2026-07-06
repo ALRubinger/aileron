@@ -32,7 +32,18 @@ aileron skill publish <name> --registry <ref> [--version <id>]
 - `--registry` is the destination OCI repository, for example `ghcr.io/acme/my-plan`.
 - `--version` pins a specific frozen version id. Omit it to publish the newest.
 
-The published artifact is tagged at the version id, so the shareable reference is `<registry>:<version>`. That is the reference a second operator installs.
+The published artifact is tagged three ways. The 16-hex content-hash slug (the version id) is the canonical immutable coordinate, so the shareable reference is `<registry>:<version>`. Publish also (re)points the mutable `latest` tag at this newest artifact, and, when the frozen version carries a semver label (from `aileron skill freeze --version`), tags under that label too. A second operator can install by any of the three. Publish prints a copyable install hint with the content-hash coordinate:
+
+```
+published weekly-metrics-digest
+  image:    ghcr.io/acme/my-plan@sha256:…
+  artifact: ghcr.io/acme/my-plan:v1a2b3c4d5e6f (sha256:…)
+  binding:  config-digest
+Install with:
+  aileron skill install ghcr.io/acme/my-plan:v1a2b3c4d5e6f
+```
+
+If the semver label carries build metadata (a `+build` suffix) or any other character outside the OCI tag grammar, publish skips the semver tag with a warning and still publishes the content-hash and `latest` tags.
 
 ## Two binding kinds
 
