@@ -36,6 +36,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
@@ -135,8 +137,24 @@ var (
 	ErrConfigContentDigestMismatch = errors.New("publish: composed image config content digest does not match the signed lock")
 )
 
-// Run publishes opts.Frozen's image and signed artifact to opts.Registry.
+// Run publishes opts.Frozen's image and signed artifact to opts.Registry. It is
+// a thin wrapper over run that pipes any returned error through
+// annotateRegistryAuthError, so a registry auth/scope rejection (e.g. ghcr.io's
+// raw "permission_denied ... expected scopes" from docker push) reaches the
+// operator with an actionable hint instead of the opaque registry string.
+// Applying it at this boundary covers auth failures from every push path
+// underneath: the composed-image push, the foreign-base copy, and the
+// artifact-blob pushes.
 func Run(ctx context.Context, opts Options) (Result, error) {
+	res, err := run(ctx, opts)
+	if err != nil {
+		return res, annotateRegistryAuthError(err, opts.Registry)
+	}
+	return res, nil
+}
+
+// run does the actual publish; Run wraps its error for operator-facing guidance.
+func run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Stdout == nil {
 		opts.Stdout = io.Discard
 	}
@@ -297,6 +315,51 @@ func publishForeignBase(ctx context.Context, opts Options, pin freeze.ImagePin, 
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: copied manifest digest %s != lock attested %s", root.Digest, pin.Digest)
 	}
 	return root, freeze.BindingManifestDigest, nil
+}
+
+// authScopeSignal matches, case-insensitively and on word boundaries, the
+// tokens that mark a registry push failure as an authentication/authorization
+// problem the operator can act on (missing/expired credentials, or a token
+// lacking write scope) rather than a transient network fault. Registries phrase
+// these differently (Docker/OCI status codes, distribution-spec error codes,
+// GitHub's "expected scopes"), so the set is deliberately broad. The `\b`
+// anchors keep the numeric codes from misfiring on a digit run inside a digest,
+// size, or port that merely contains "401"/"403".
+var authScopeSignal = regexp.MustCompile(`(?i)\b(401|403|unauthorized|forbidden|denied|insufficient_scope|scopes)\b`)
+
+// annotateRegistryAuthError wraps an auth/scope registry failure with an
+// actionable hint naming the registry host (and, for ghcr.io, the exact
+// write:packages scope a GitHub token needs to push). The raw error is preserved
+// via %w so the errors.Is chain and the registry's original message both
+// survive. A nil error, or any error whose message carries no auth/scope signal
+// (a network fault, a local validation error), passes through unchanged.
+func annotateRegistryAuthError(err error, reg string) error {
+	if err == nil {
+		return nil
+	}
+	if !authScopeSignal.MatchString(err.Error()) {
+		return err
+	}
+	host := registryHostname(reg)
+	hint := fmt.Sprintf("registry %s rejected the push (authentication/authorization): "+
+		"confirm you are logged in with `docker login %s` using a token that has push/write access",
+		host, host)
+	if host == "ghcr.io" {
+		hint += "; a GitHub token must carry the write:packages scope"
+	}
+	return fmt.Errorf("%s: %w", hint, err)
+}
+
+// registryHostname returns the host[:port] of a registry reference by taking the
+// segment before the first "/", so "ghcr.io/acme/plan:v1" -> "ghcr.io" and
+// "localhost:5000/acme/plan" -> "localhost:5000". A bare host (no repository
+// path) is returned as-is. It is intentionally forgiving: it feeds a diagnostic
+// hint, never a network decision.
+func registryHostname(reg string) string {
+	if i := strings.IndexByte(reg, '/'); i >= 0 {
+		return reg[:i]
+	}
+	return reg
 }
 
 // pushBlob pushes data under mediaType, treating an already-present blob as
