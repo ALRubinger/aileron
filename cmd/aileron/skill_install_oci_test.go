@@ -68,6 +68,11 @@ func TestRunSkillInstallOCIWritesFrozenAndLists(t *testing.T) {
 	if !strings.Contains(out.String(), "Installed frozen version v1abc") {
 		t.Errorf("stdout = %q, want an installed-frozen line", out.String())
 	}
+	// The install prints a one-line pointer to the onboarding verb so the
+	// operator knows how to supply the plan's credentials without hand-editing.
+	if !strings.Contains(out.String(), `aileron skill bind "rubber-duck"`) {
+		t.Errorf("stdout = %q, want a `skill bind` pointer line", out.String())
+	}
 
 	// The store now lists the skill and holds exactly the frozen version id.
 	var listOut bytes.Buffer
