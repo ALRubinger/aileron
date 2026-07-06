@@ -94,7 +94,8 @@ type apiServer struct {
 	caveatIssuer         *auth.CaveatIssuer               // mints/validates session-scoped caveat tokens (ADR-0024, #958); nil disables caveat auth
 	actionApprovalTTL    time.Duration                    // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings             binding.Store                    // capability bindings (ADR-0006); nil when no vault is wired
-	hostBindings         binding.HostBindings             // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough
+	hostBindings         binding.HostBindings             // user-level host->credential bindings at the TLS forward-proxy boundary (#1193); nil/empty = today's passthrough. Used directly by tests; production reads through hostBindingsReloader.
+	hostBindingsReloader *hostBindingsReloader            // re-stat reloading holder for the host-binding table (#1887); when set, currentHostBindings() reads it so descriptor edits take effect without a daemon restart. nil in tests that set hostBindings directly.
 	specLoader           connectorSpecLoader              // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
 	oauth2Sessions       *oauth2Sessions                  // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient     *http.Client                     // for OAuth token exchanges; nil → http.DefaultClient

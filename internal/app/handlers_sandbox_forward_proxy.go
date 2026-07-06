@@ -295,7 +295,7 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy denied egress: the step's credential identity is incomplete")
 			return true
 		}
-		hb, ok = s.hostBindings.MatchIdentity(auth.StepScope.CredentialKind, auth.StepScope.IdentityLabel)
+		hb, ok = s.currentHostBindings().MatchIdentity(auth.StepScope.CredentialKind, auth.StepScope.IdentityLabel)
 		if !ok {
 			// The declared identity has no bound credential. Fail closed: no
 			// fallthrough to Match(host), no passthrough.
@@ -306,7 +306,7 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 	} else {
 		// Host path: today's behavior. On a miss, return false so the caller
 		// falls through to passthrough (unchanged).
-		hb, ok = s.hostBindings.Match(hostForMatch)
+		hb, ok = s.currentHostBindings().Match(hostForMatch)
 		if !ok {
 			return false
 		}
