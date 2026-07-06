@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestResolveInputs_LiteralDefaultAndOverride(t *testing.T) {
 	}, nil)
 
 	// Default applies when no override.
-	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -30,7 +31,7 @@ func TestResolveInputs_LiteralDefaultAndOverride(t *testing.T) {
 	}
 
 	// Override wins.
-	ri, err = resolveInputs(context.Background(), p, LaunchArgs{"window": 30}, FixedClock{}, &enforcer{})
+	ri, err = resolveInputs(context.Background(), p, LaunchArgs{"window": 30}, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -43,10 +44,119 @@ func TestResolveInputs_MissingRequiredLiteralErrors(t *testing.T) {
 	p := planWithInputs([]Input{
 		{Name: "req", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}); err == nil {
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, nil); err == nil {
 		t.Fatal("a required literal with no default and no override must error")
 	}
 }
+
+// fakePrompter is a test InputPrompter that returns a canned value per input
+// name and records the order it was asked, so a test can assert both the
+// resolved value and that ONLY the expected inputs reached the prompt.
+type fakePrompter struct {
+	values map[string]string
+	err    error
+	asked  []string
+}
+
+func (f *fakePrompter) PromptInput(in Input) (string, error) {
+	f.asked = append(f.asked, in.Name)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.values[in.Name], nil
+}
+
+// A wired prompter resolves a missing required literal (no override, no
+// default): the prompted value lands in the frozen set, exactly as a --input
+// override would.
+func TestResolveInputs_InteractivePromptsMissingRequiredLiteral(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "req", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+	pr := &fakePrompter{values: map[string]string{"req": "typed-in"}}
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, pr)
+	if err != nil {
+		t.Fatalf("resolveInputs: %v", err)
+	}
+	if ri.Values["req"] != "typed-in" {
+		t.Errorf("prompted value not resolved: %v", ri.Values["req"])
+	}
+	if len(pr.asked) != 1 || pr.asked[0] != "req" {
+		t.Errorf("expected exactly the missing input prompted, got %v", pr.asked)
+	}
+}
+
+// An override or a declared default is used verbatim; a resolvable literal is
+// never turned into a prompt even when a prompter is wired.
+func TestResolveInputs_InteractiveSkipsResolvableLiterals(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "overridden", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
+		{Name: "defaulted", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: "d"}},
+	}, nil)
+	pr := &fakePrompter{values: map[string]string{"overridden": "wrong", "defaulted": "wrong"}}
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"overridden": "given"}, FixedClock{}, &enforcer{}, pr)
+	if err != nil {
+		t.Fatalf("resolveInputs: %v", err)
+	}
+	if ri.Values["overridden"] != "given" || ri.Values["defaulted"] != "d" {
+		t.Errorf("resolvable literals must not be prompted: %v", ri.Values)
+	}
+	if len(pr.asked) != 0 {
+		t.Errorf("no input should have been prompted, got %v", pr.asked)
+	}
+}
+
+// Dynamic and source inputs resolve from the clock and the action boundary
+// respectively; a wired prompter must never be asked for either.
+func TestResolveInputs_InteractiveNeverPromptsDynamicOrSource(t *testing.T) {
+	ref := "aileron:metrics.query_series"
+	actions := map[string]Action{ref: {Ref: ref, TrustContract: TrustContract{Effect: EffectRead, Hosts: []string{"h"}}}}
+	p := planWithInputs([]Input{
+		{Name: "now_ts", Type: "timestamp", Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "now"}},
+		{Name: "live", Type: "array", Resolution: Resolution{Rule: ResolutionSource, SourceActionRef: ref, SourceSelect: "series[].name"}},
+	}, actions)
+	disp := &fakeDispatcher{result: map[string]any{"series": []any{map[string]any{"name": "cpu"}}}}
+	enf := &enforcer{dispatcher: disp, approver: &fakeApprover{}}
+	pr := &fakePrompter{values: map[string]string{"now_ts": "x", "live": "x"}}
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf, pr); err != nil {
+		t.Fatalf("resolveInputs: %v", err)
+	}
+	if len(pr.asked) != 0 {
+		t.Errorf("dynamic and source inputs must never be prompted, got %v", pr.asked)
+	}
+}
+
+// A prompted value is validated by the same final constraint pass as a --input
+// override, so an out-of-constraint prompt fails the launch closed.
+func TestResolveInputs_InteractivePromptedValueStillConstrained(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "env", Type: "string",
+			Resolution: Resolution{Rule: ResolutionLiteral},
+			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
+	}, nil)
+	pr := &fakePrompter{values: map[string]string{"env": "dev"}}
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, pr); err == nil {
+		t.Fatal("an out-of-constraint prompted value must fail the launch closed")
+	}
+}
+
+// A prompter error propagates as a launch failure naming the input, so a broken
+// prompt does not silently resolve to an empty value.
+func TestResolveInputs_InteractivePrompterErrorPropagates(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "req", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+	pr := &fakePrompter{err: errFakePrompt}
+	_, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, pr)
+	if err == nil {
+		t.Fatal("a prompter error must fail the launch")
+	}
+	if !strings.Contains(err.Error(), "req") {
+		t.Errorf("error must name the input: %v", err)
+	}
+}
+
+var errFakePrompt = errors.New("prompt failed")
 
 func TestResolveInputs_DynamicResolvedOnce(t *testing.T) {
 	fixed := time.Date(2026, 6, 24, 15, 4, 5, 0, time.UTC)
@@ -54,7 +164,7 @@ func TestResolveInputs_DynamicResolvedOnce(t *testing.T) {
 		{Name: "now_ts", Type: "timestamp", Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "now"}},
 		{Name: "today", Type: "string", Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"}},
 	}, nil)
-	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{T: fixed}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{T: fixed}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -85,7 +195,7 @@ func TestResolveInputs_ClockReadOnce(t *testing.T) {
 		{Name: "b", Type: "timestamp", Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "now"}},
 		{Name: "c", Type: "string", Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), p, nil, clk, &enforcer{}); err != nil {
+	if _, err := resolveInputs(context.Background(), p, nil, clk, &enforcer{}, nil); err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
 	if clk.calls != 1 {
@@ -107,7 +217,7 @@ func TestResolveInputs_SourceRecordedByBindingNotDataset(t *testing.T) {
 		},
 	}}
 	enf := &enforcer{dispatcher: disp, approver: &fakeApprover{}}
-	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf)
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -128,7 +238,7 @@ func TestResolveInputs_SourceUndeclaredActionErrors(t *testing.T) {
 		{Name: "live", Type: "array", Resolution: Resolution{Rule: ResolutionSource, SourceActionRef: "aileron:ghost.read"}},
 	}, nil)
 	enf := &enforcer{dispatcher: &fakeDispatcher{}, approver: &fakeApprover{}}
-	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf); err == nil {
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf, nil); err == nil {
 		t.Fatal("a source input naming an undeclared action must error")
 	}
 }
@@ -138,7 +248,7 @@ func TestResolveInputs_FrozenFromLaunchArgMutation(t *testing.T) {
 		{Name: "obj", Type: "object", Resolution: Resolution{Rule: ResolutionLiteral}},
 	}, nil)
 	arg := map[string]any{"k": "v"}
-	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"obj": arg}, FixedClock{}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"obj": arg}, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}
@@ -156,7 +266,7 @@ func TestResolveInputs_EnumConstraintInBoundPasses(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
 	}, nil)
-	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "prod"}, FixedClock{}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "prod"}, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("an in-constraint enum value must resolve: %v", err)
 	}
@@ -171,7 +281,7 @@ func TestResolveInputs_EnumConstraintOutOfBoundFailsClosed(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{}); err == nil {
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{}, nil); err == nil {
 		t.Fatal("an out-of-constraint enum value must fail the launch closed")
 	}
 }
@@ -182,7 +292,7 @@ func TestResolveInputs_PatternConstraintInBoundPasses(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")}},
 	}, nil)
-	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "us-east-1"}, FixedClock{}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "us-east-1"}, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("an in-constraint pattern value must resolve: %v", err)
 	}
@@ -197,7 +307,7 @@ func TestResolveInputs_PatternConstraintOutOfBoundFailsClosed(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "moon-base-7"}, FixedClock{}, &enforcer{}); err == nil {
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"region": "moon-base-7"}, FixedClock{}, &enforcer{}, nil); err == nil {
 		t.Fatal("an out-of-constraint pattern value must fail the launch closed")
 	}
 }
@@ -213,7 +323,7 @@ func TestResolveInputs_PatternErrorCapsLongResolvedValue(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Pattern: regexp.MustCompile("^short$")}},
 	}, nil)
-	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{})
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{}, nil)
 	if err == nil {
 		t.Fatal("an out-of-constraint pattern value must fail the launch closed")
 	}
@@ -240,7 +350,7 @@ func TestResolveInputs_EnumErrorCapsLongResolvedValue(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
 	}, nil)
-	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{})
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"blob": long}, FixedClock{}, &enforcer{}, nil)
 	if err == nil {
 		t.Fatal("an out-of-constraint enum value must fail the launch closed")
 	}
@@ -264,7 +374,7 @@ func TestResolveInputs_ShortResolvedValueNotTruncated(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral},
 			Constraint: &Constraint{Enum: []string{"prod", "staging"}}},
 	}, nil)
-	_, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{})
+	_, err := resolveInputs(context.Background(), p, LaunchArgs{"env": "dev"}, FixedClock{}, &enforcer{}, nil)
 	if err == nil {
 		t.Fatal("an out-of-constraint enum value must fail the launch closed")
 	}
@@ -285,10 +395,10 @@ func TestResolveInputs_ConstraintChecksStringForm(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: 7},
 			Constraint: &Constraint{Enum: []string{"7", "30"}}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}); err != nil {
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, nil); err != nil {
 		t.Fatalf("a number whose string form is allowed must resolve: %v", err)
 	}
-	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"days": 90}, FixedClock{}, &enforcer{}); err == nil {
+	if _, err := resolveInputs(context.Background(), p, LaunchArgs{"days": 90}, FixedClock{}, &enforcer{}, nil); err == nil {
 		t.Fatal("a number whose string form is not allowed must fail closed")
 	}
 }
@@ -305,7 +415,7 @@ func TestResolveInputs_ConstraintEnforcedOnDynamicInput(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"},
 			Constraint: &Constraint{Pattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)}},
 	}, nil)
-	ri, err := resolveInputs(context.Background(), inBound, nil, FixedClock{T: fixed}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), inBound, nil, FixedClock{T: fixed}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("a dynamic value inside its constraint must resolve: %v", err)
 	}
@@ -318,7 +428,7 @@ func TestResolveInputs_ConstraintEnforcedOnDynamicInput(t *testing.T) {
 			Resolution: Resolution{Rule: ResolutionDynamic, DynamicValue: "today"},
 			Constraint: &Constraint{Pattern: regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T`)}},
 	}, nil)
-	if _, err := resolveInputs(context.Background(), outOfBound, nil, FixedClock{T: fixed}, &enforcer{}); err == nil {
+	if _, err := resolveInputs(context.Background(), outOfBound, nil, FixedClock{T: fixed}, &enforcer{}, nil); err == nil {
 		t.Fatal("a dynamic value outside its constraint must fail the launch closed")
 	}
 }
@@ -328,7 +438,7 @@ func TestResolveInputs_NoConstraintUnchecked(t *testing.T) {
 	p := planWithInputs([]Input{
 		{Name: "free", Type: "string", Resolution: Resolution{Rule: ResolutionLiteral}},
 	}, nil)
-	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"free": "anything"}, FixedClock{}, &enforcer{})
+	ri, err := resolveInputs(context.Background(), p, LaunchArgs{"free": "anything"}, FixedClock{}, &enforcer{}, nil)
 	if err != nil {
 		t.Fatalf("an unconstrained input must resolve any value: %v", err)
 	}
@@ -365,7 +475,7 @@ func TestResolveInputs_SourceSelectMissingYieldsNil(t *testing.T) {
 		{Name: "x", Type: "string", Resolution: Resolution{Rule: ResolutionSource, SourceActionRef: ref, SourceSelect: "missing.path"}},
 	}, actions)
 	enf := &enforcer{dispatcher: &fakeDispatcher{result: map[string]any{"present": 1}}, approver: &fakeApprover{}}
-	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf)
+	ri, err := resolveInputs(context.Background(), p, nil, FixedClock{}, enf, nil)
 	if err != nil {
 		t.Fatalf("resolveInputs: %v", err)
 	}

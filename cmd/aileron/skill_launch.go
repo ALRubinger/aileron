@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -182,6 +183,63 @@ func launchPublisherVerifier(stderr io.Writer) runtime.PublisherVerifier {
 // is no production LLM seam provider wired in v1.
 var launchSeamForTest runtime.LLMSeam
 
+// newLaunchInputPrompter returns the interactive input prompter wired into the
+// runtime, or nil when stdin is not a TTY. The runtime consults it ONLY for a
+// missing required literal input (no `--input` override, no declared default);
+// on a TTY it asks the operator for the value instead of failing the launch. A
+// non-interactive launch (piped stdin, CI) gets nil and keeps today's
+// fail-fast behavior, so a scripted launch never blocks waiting on input. It is
+// a package-level seam so CLI tests can force either path with a fake, mirroring
+// newLaunchDispatcher and the isTTYFn seam. Prompts and the echoed value share
+// the launch's stdout so they interleave with the launch banner.
+var newLaunchInputPrompter = func(stdout io.Writer) runtime.InputPrompter {
+	if !isTTYFn() {
+		return nil
+	}
+	return linePrompter{stdin: bufio.NewReader(os.Stdin), stdout: stdout}
+}
+
+// linePrompter is the interactive InputPrompter: it reads one line from stdin
+// for a missing required literal input, echoing the input name, its declared
+// description, and any enum/pattern constraint hint so the operator knows what
+// to enter. The returned string is validated by the runtime's final constraint
+// pass exactly as a `--input name=value` override would be, so this prompter
+// does not re-validate; a bad value fails the launch closed downstream.
+type linePrompter struct {
+	stdin  io.Reader
+	stdout io.Writer
+}
+
+func (p linePrompter) PromptInput(in runtime.Input) (string, error) {
+	var b strings.Builder
+	b.WriteString(in.Name)
+	if in.Description != "" {
+		fmt.Fprintf(&b, " (%s)", in.Description)
+	}
+	if hint := inputConstraintHint(in.Constraint); hint != "" {
+		fmt.Fprintf(&b, " %s", hint)
+	}
+	b.WriteString(": ")
+	return promptLine(p.stdin, p.stdout, b.String()), nil
+}
+
+// inputConstraintHint renders a short, parenthesized hint for a declared input
+// constraint so the interactive prompt tells the operator the accepted shape:
+// the allowed enum values or the required pattern. An unconstrained input
+// returns "".
+func inputConstraintHint(c *runtime.Constraint) string {
+	if c == nil {
+		return ""
+	}
+	if len(c.Enum) > 0 {
+		return "[one of: " + strings.Join(c.Enum, ", ") + "]"
+	}
+	if c.Pattern != nil {
+		return "[matching " + c.Pattern.String() + "]"
+	}
+	return ""
+}
+
 // inputFlag collects repeated --input name=value launch overrides.
 type inputFlag struct {
 	values map[string]any
@@ -292,7 +350,12 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// the current (pinned) environment (#1829). No sibling container is
 		// ever dispatched.
 		ToolRunner: newLaunchToolStepRunner(),
-		OutDir:     *outDir,
+		// InputPrompter resolves a missing required literal input (no --input
+		// override, no declared default) interactively when stdin is a TTY, and
+		// is nil for a piped or CI launch so the runtime keeps its fail-fast
+		// error. Dynamic and source inputs are never prompted.
+		InputPrompter: newLaunchInputPrompter(stdout),
+		OutDir:        *outDir,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

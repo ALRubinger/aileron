@@ -154,6 +154,20 @@ type LLMSeam interface {
 	Run(ctx context.Context, req SeamRequest) (map[string]any, error)
 }
 
+// InputPrompter resolves a missing required literal input interactively at the
+// launch boundary. The runtime consults it ONLY for a literal input that has no
+// `--input` launch override AND declares no default; every other input (dynamic,
+// source, or a literal with an override or a default) never reaches it, so a
+// resolvable input is never turned into a prompt. The returned string is treated
+// identically to a `--input name=value` override: it is deep-copied into the
+// frozen resolved set and validated by the same final constraint pass, so a
+// prompted value outside an enum/pattern constraint fails the launch closed.
+// Nil (the default) preserves fail-fast: a missing required literal errors
+// without prompting, so a piped or CI launch never blocks waiting on input.
+type InputPrompter interface {
+	PromptInput(in Input) (string, error)
+}
+
 // ImageRunSpec is the input to the ImageRunner seam. It carries the verified
 // pinned image (the `ref@digest` string the runtime booted from the signed
 // lock) plus everything the in-container launch needs to run the plan to

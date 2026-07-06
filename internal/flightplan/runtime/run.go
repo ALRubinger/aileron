@@ -104,6 +104,17 @@ type Options struct {
 	// default registry.
 	Transforms *TransformRegistry
 
+	// InputPrompter resolves a missing required literal input interactively at
+	// the launch boundary (a literal input with no `--input` override and no
+	// declared default). When it is wired, resolveInputs asks it for the value
+	// instead of failing; when it is nil (the default), the runtime keeps
+	// today's fail-fast error, so a piped or CI launch never blocks on input.
+	// The CLI wires it only when stdin is a TTY. A prompted value is a string
+	// treated identically to a `--input name=value` override: it is deep-copied
+	// into the frozen resolved set and validated by the same final constraint
+	// pass.
+	InputPrompter InputPrompter
+
 	// OutDir is the directory file-target artifacts are written to. Empty
 	// skips writing (artifacts are still recorded in the result).
 	OutDir string
@@ -197,7 +208,7 @@ func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint str
 	enf := &enforcer{dispatcher: opts.Dispatcher, approver: opts.Approver}
 
 	// Phase A: resolve declared inputs once at the launch boundary.
-	inputs, err := resolveInputs(ctx, plan, opts.Inputs, clk, enf)
+	inputs, err := resolveInputs(ctx, plan, opts.Inputs, clk, enf, opts.InputPrompter)
 	if err != nil {
 		return RunResult{}, err
 	}
