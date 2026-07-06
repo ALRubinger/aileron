@@ -244,6 +244,18 @@ func TestParse_Errors(t *testing.T) {
 			name: "duplicate host in one descriptor",
 			yaml: "version: v1\nbindings:\n  - host: api.example.com\n    credential_ref: user/example\n    scheme: bearer\n  - host: api.example.com\n    credential_ref: user/other\n    scheme: bearer\n",
 		},
+		{
+			// Host-entry dedup is case-insensitive: two hosts differing only
+			// in case (API.example.com vs api.example.com) collide on the
+			// lowercased dedupKey and are rejected as a duplicate binding
+			// within one descriptor. This pins Entry.dedupKey's ToLower(Host)
+			// so the host-entry dedup stays consistent with the already
+			// case-insensitive host Match (NewHostBinding lowercases
+			// HostPattern); two such entries must never silently coexist as
+			// separate bindings.
+			name: "duplicate host differing only in case",
+			yaml: "version: v1\nbindings:\n  - host: API.example.com\n    credential_ref: user/example\n    scheme: bearer\n  - host: api.example.com\n    credential_ref: user/other\n    scheme: bearer\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
