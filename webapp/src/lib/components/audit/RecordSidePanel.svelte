@@ -85,10 +85,13 @@
 	const inputs = $derived(node?.event ? p.stepInputs(node.event) : []);
 
 	// Launch-config inputs (`aileron.resolved_inputs`) recorded on every
-	// output.materialized record: the literal + dynamic resolved values, each
-	// surfaced as name/type/size only (never the raw value). Rendered wherever
-	// the node's event carries a non-empty map, consistent with how the step
-	// Inputs list renders.
+	// output.materialized record: the literal + dynamic resolved values. A
+	// scalar or small value renders inline as `name = value`; a large one
+	// (size past LARGE_LITERAL) stays summarized as a `{size} chars` badge with
+	// a collapsible [view] that reveals the full value on demand, reusing the
+	// literal-descriptor pattern above. Secrets never enter resolved_inputs
+	// upstream, so surfacing the value here leaks nothing. Rendered wherever the
+	// node's event carries a non-empty map, consistent with the step Inputs list.
 	const launchInputs = $derived(node?.event ? p.resolvedInputs(node.event) : []);
 </script>
 
@@ -193,14 +196,33 @@
 							<h3 class="mb-1 text-xs font-semibold text-muted-foreground">Launch inputs</h3>
 							<ul class="flex flex-col gap-1 text-xs">
 								{#each launchInputs as input (input.name)}
-									<li
-										class="flex flex-wrap items-center gap-2"
-										data-testid="side-panel-launch-input"
-									>
-										<span class="font-medium">{input.name}</span>
-										<Badge variant="outline">{input.type}</Badge>
+									<li class="flex flex-col gap-1" data-testid="side-panel-launch-input">
+										<div class="flex flex-wrap items-center gap-2">
+											<span class="font-medium">{input.name}</span>
+											<Badge variant="outline">{input.type}</Badge>
+											{#if input.size > LARGE_LITERAL}
+												<Badge variant="secondary">{input.size} chars</Badge>
+											{:else}
+												<span
+													class="break-all font-mono text-muted-foreground"
+													data-testid="launch-input-value">= {input.value}</span
+												>
+											{/if}
+										</div>
 										{#if input.size > LARGE_LITERAL}
-											<Badge variant="secondary">{input.size} chars</Badge>
+											<Collapsible.Root>
+												<Collapsible.Trigger
+													data-testid="launch-input-view-toggle"
+													class="text-xs text-primary underline underline-offset-2"
+												>
+													view
+												</Collapsible.Trigger>
+												<Collapsible.Content>
+													<pre
+														data-testid="launch-input-full-value"
+														class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-xs">{input.value}</pre>
+												</Collapsible.Content>
+											</Collapsible.Root>
 										{/if}
 									</li>
 								{/each}

@@ -82,22 +82,28 @@ export function stepInputs(e: AuditEvent): StepInput[] {
 }
 
 /** One `aileron.resolved_inputs` entry: the launch-config input's binding
- *  name, the JS type of its resolved value, and a size measure (character
- *  length of the value's JSON serialization). Source-resolved dataset
- *  inputs are excluded upstream (ADR-0027 audit boundary), so every entry
- *  here is a literal or dynamic launch-config value. */
+ *  name, the JS type of its resolved value, a size measure (character length
+ *  of the value's JSON serialization), and the resolved value itself rendered
+ *  as a display string. Source-resolved dataset inputs are excluded upstream
+ *  (ADR-0027 audit boundary), so every entry here is a literal or dynamic
+ *  launch-config value; secrets never enter `aileron.resolved_inputs`
+ *  (launchConfigInputs, internal/flightplan/runtime/audit.go), so surfacing
+ *  the value carries no sensitive data. A large value stays summarized by
+ *  `size` alone and is revealed only on demand at the render layer. */
 export type ResolvedInput = {
 	name: string;
 	type: string;
 	size: number;
+	value: string;
 };
 
 /** Reads the `aileron.resolved_inputs` map (name -> resolved value) that
  *  every `output.materialized` record carries and returns a list of
- *  name/type/size descriptors, sorted by name for stable rendering. A
- *  missing or non-object value yields an empty list. The raw values are
- *  never surfaced directly; only their type and serialized size are, which
- *  keeps a large or sensitive literal collapsed behind its descriptor. */
+ *  name/type/size/value descriptors, sorted by name for stable rendering. A
+ *  missing or non-object value yields an empty list. A scalar or small value
+ *  is meant to be shown inline; a large one (`size` past the render layer's
+ *  threshold) stays collapsed behind its descriptor and is revealed on
+ *  demand. */
 export function resolvedInputs(e: AuditEvent): ResolvedInput[] {
 	const raw = e.payload['aileron.resolved_inputs'];
 	if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return [];
@@ -105,7 +111,12 @@ export function resolvedInputs(e: AuditEvent): ResolvedInput[] {
 	const out: ResolvedInput[] = [];
 	for (const name of Object.keys(obj)) {
 		const v = obj[name];
-		out.push({ name, type: resolvedInputType(v), size: resolvedInputSize(v) });
+		out.push({
+			name,
+			type: resolvedInputType(v),
+			size: resolvedInputSize(v),
+			value: resolvedInputValue(v)
+		});
 	}
 	out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 	return out;
@@ -128,6 +139,19 @@ function resolvedInputSize(v: unknown): number {
 		return JSON.stringify(v)?.length ?? 0;
 	} catch {
 		return 0;
+	}
+}
+
+/** Renders a resolved-input value as a display string. A string is shown
+ *  verbatim (no JSON quoting) so `region = us-east-1` reads naturally;
+ *  every other value falls back to its JSON serialization. A value that
+ *  cannot be serialized reports the empty string. */
+function resolvedInputValue(v: unknown): string {
+	if (typeof v === 'string') return v;
+	try {
+		return JSON.stringify(v) ?? '';
+	} catch {
+		return '';
 	}
 }
 

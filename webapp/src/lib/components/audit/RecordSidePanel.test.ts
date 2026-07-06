@@ -74,7 +74,7 @@ describe('RecordSidePanel — chain-of-custody section', () => {
 });
 
 describe('RecordSidePanel — launch inputs section', () => {
-	it('renders a name/type descriptor row per resolved input', () => {
+	it('renders a name/type descriptor row with the resolved value inline per input', () => {
 		const node: ProvenanceNode = {
 			id: 'artifact:h',
 			kind: 'artifact',
@@ -92,11 +92,14 @@ describe('RecordSidePanel — launch inputs section', () => {
 		// Sorted by name: limit before region.
 		expect(rows[0]).toHaveTextContent('limit');
 		expect(rows[0]).toHaveTextContent('number');
+		expect(rows[0]).toHaveTextContent('= 10');
 		expect(rows[1]).toHaveTextContent('region');
 		expect(rows[1]).toHaveTextContent('string');
+		// The string value renders verbatim, without JSON quoting.
+		expect(rows[1]).toHaveTextContent('= us-east-1');
 	});
 
-	it('badges the character size of a large literal input', () => {
+	it('summarizes a large literal input and reveals the full value on demand', () => {
 		const big = 'x'.repeat(200);
 		const node: ProvenanceNode = {
 			id: 'artifact:h',
@@ -109,6 +112,10 @@ describe('RecordSidePanel — launch inputs section', () => {
 		const row = screen.getByTestId('side-panel-launch-input');
 		// JSON.stringify adds the surrounding quotes: 202 chars.
 		expect(row).toHaveTextContent('202 chars');
+		// A large value is not shown inline; it stays behind the [view] toggle.
+		expect(screen.queryByTestId('launch-input-value')).not.toBeInTheDocument();
+		expect(screen.getByTestId('launch-input-view-toggle')).toBeInTheDocument();
+		expect(screen.getByTestId('launch-input-full-value')).toHaveTextContent(big);
 	});
 
 	it('does not render the section when the event carries no resolved inputs', () => {
