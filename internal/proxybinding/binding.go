@@ -39,6 +39,15 @@ func (e *Entry) ToHostBinding() (binding.HostBinding, error) {
 		opts = append(opts, binding.WithTrustContract(e.Effect, e.AllowedHosts))
 	}
 
+	// Carry the optional credential identity (#1978). When declared, the
+	// binding is selectable by its (kind, identity_label) pair at egress and
+	// its host may be empty. The constructor enforces the pair-is-canonical
+	// and host-or-identity rules, the single source of truth for legality, so
+	// a malformed identity entry that reached here fails construction below.
+	if e.Kind != "" || e.IdentityLabel != "" {
+		opts = append(opts, binding.WithIdentity(e.Kind, e.IdentityLabel))
+	}
+
 	if e.EmitMechanism == string(binding.EmitMechanismSentinelSwap) {
 		opts = append(opts, binding.WithEmitMechanismSentinelSwap())
 		// A sentinel-swap entry carries the sentinel shape (value + env) it

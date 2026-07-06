@@ -266,6 +266,21 @@ type HostBinding struct {
 	PlanID   string
 	StepID   string
 	ToolName string
+
+	// IdentityKind and IdentityLabel are the non-secret manifest
+	// credential-identity pair a step scope carries (#1978): the credential
+	// `kind` (e.g. `aws-sigv4`) and the manifest `identityLabel` that names
+	// which credential of that kind to inject at egress. Together they are the
+	// canonical key by which the proxy selects THIS binding for a scoped
+	// request, distinct from [HostBinding.HostPattern] (which host to reach)
+	// and [HostBinding.Scheme] (how to inject once selected). A binding may be
+	// keyed by this pair instead of (or in addition to) a host pattern: an
+	// identity binding may declare an empty [HostBinding.HostPattern] because
+	// its selection key is the identity, not the host. The pair is canonical:
+	// both must be non-empty together or neither is set. Set via
+	// [WithIdentity]. Non-secret, never the credential bytes.
+	IdentityKind  string
+	IdentityLabel string
 }
 
 // userRefRe matches the user-level credential namespace `user/<service>`
@@ -382,6 +397,23 @@ func WithToolIdentity(planID, stepID, toolName string) HostBindingOption {
 	}
 }
 
+// WithIdentity sets the non-secret credential-identity pair
+// [HostBinding.IdentityKind] and [HostBinding.IdentityLabel] the proxy uses
+// to select this binding for a step-scoped request (#1978). The pair is
+// canonical: pass both a non-empty kind and a non-empty label, or neither.
+// A half-identity (exactly one non-empty) is rejected at construction because
+// the pair, not either half alone, is the selection key. Declaring a complete
+// identity makes the binding's host pattern optional: an identity binding may
+// carry an empty host because it is selected by identity, not by host. The
+// values are non-secret; they name the manifest credential the step declared,
+// never the credential bytes.
+func WithIdentity(kind, label string) HostBindingOption {
+	return func(hb *HostBinding) {
+		hb.IdentityKind = strings.TrimSpace(kind)
+		hb.IdentityLabel = strings.TrimSpace(label)
+	}
+}
+
 // normalizeAllowedHosts trims and lowercases each allowlist entry, dropping
 // empties. It reuses the schema's host vocabulary (host or host:port form)
 // so the allowlist and the matcher agree on casing.
@@ -403,8 +435,8 @@ func normalizeAllowedHosts(hosts []string) []string {
 	return out
 }
 
-// NewHostBinding validates and constructs a HostBinding. It rejects an
-// empty or malformed host pattern, a credential-ref that is neither a
+// NewHostBinding validates and constructs a HostBinding. It rejects a
+// malformed host pattern, a credential-ref that is neither a
 // connector binding name (`<kind>/<service>/<identity>`) nor a
 // user-level ref (`user/<service>`), and a scheme outside
 // [HostBindingSchemes]. When the scheme is [SchemeBasic] a non-empty
@@ -414,13 +446,18 @@ func normalizeAllowedHosts(hosts []string) []string {
 // egress. The validation is the construction-time guard the issue's
 // acceptance criterion requires: no invalid binding ever reaches the
 // matcher.
+//
+// An empty host pattern is legal ONLY when the binding declares a complete
+// credential identity via [WithIdentity] (#1978): such a binding is selected
+// by its (kind, label) pair at egress, not by host. A binding with neither a
+// host pattern nor a complete identity, or with a half-identity, fails
+// construction.
 func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindingOption) (HostBinding, error) {
 	hp := strings.TrimSpace(strings.ToLower(hostPattern))
-	if hp == "" {
-		return HostBinding{}, fmt.Errorf("host binding: empty host pattern")
-	}
-	if err := validateHostPattern(hp); err != nil {
-		return HostBinding{}, err
+	if hp != "" {
+		if err := validateHostPattern(hp); err != nil {
+			return HostBinding{}, err
+		}
 	}
 	if !nameRe.MatchString(credentialRef) && !userRefRe.MatchString(credentialRef) {
 		return HostBinding{}, fmt.Errorf("host binding: invalid credential ref %q: must match <kind>/<service>/<identity> or user/<service>", credentialRef)
@@ -431,6 +468,18 @@ func NewHostBinding(hostPattern, credentialRef, scheme string, opts ...HostBindi
 	hb := HostBinding{HostPattern: hp, CredentialRef: credentialRef, Scheme: scheme, EmitMechanism: EmitMechanismInject}
 	for _, opt := range opts {
 		opt(&hb)
+	}
+	// A binding is keyed by a host pattern, a credential identity, or both.
+	// The identity pair is canonical: a half-identity (exactly one of kind or
+	// label set) fails closed because the pair, not either half, is the
+	// selection key. A binding with neither a host pattern nor a complete
+	// identity has no key at all and is rejected.
+	hasIdentity := hb.IdentityKind != "" && hb.IdentityLabel != ""
+	if (hb.IdentityKind != "") != (hb.IdentityLabel != "") {
+		return HostBinding{}, fmt.Errorf("host binding: credential identity requires both a kind and a label (WithIdentity); a half-identity is invalid")
+	}
+	if hp == "" && !hasIdentity {
+		return HostBinding{}, fmt.Errorf("host binding: a binding requires a host pattern or a complete credential identity (WithIdentity)")
 	}
 	if scheme == SchemeBasic && hb.BasicUsername == "" {
 		return HostBinding{}, fmt.Errorf("host binding: basic scheme requires a username (WithBasicUsername)")
@@ -534,6 +583,32 @@ func (h HostBindings) Match(host string) (HostBinding, bool) {
 	}
 	if bestWildcard != nil {
 		return *bestWildcard, true
+	}
+	return HostBinding{}, false
+}
+
+// MatchIdentity returns the HostBinding whose credential-identity pair
+// ([HostBinding.IdentityKind], [HostBinding.IdentityLabel]) equals the given
+// (kind, label), and true, or the zero binding and false when none match.
+//
+// It is the selection key for a step-scoped request that carries a credential
+// identity: the proxy resolves WHICH credential to inject by the manifest
+// identity the scope declared, not by the upstream host. The pair is
+// canonical, so an empty kind or an empty label never matches (defensive:
+// the mint already rejects a half-identity, but selection fails closed rather
+// than degrading to a fuzzy match). Inputs are trimmed before comparison. The
+// loader guarantees the table holds at most one binding per identity pair, so
+// this returns the first (and only) match deterministically.
+func (h HostBindings) MatchIdentity(kind, label string) (HostBinding, bool) {
+	kind = strings.TrimSpace(kind)
+	label = strings.TrimSpace(label)
+	if kind == "" || label == "" {
+		return HostBinding{}, false
+	}
+	for i := range h {
+		if h[i].IdentityKind == kind && h[i].IdentityLabel == label {
+			return h[i], true
+		}
 	}
 	return HostBinding{}, false
 }

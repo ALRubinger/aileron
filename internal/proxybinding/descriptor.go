@@ -40,6 +40,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -123,7 +124,23 @@ type Entry struct {
 	// form ("*.example.com"), mirroring internal/binding.HostBinding's
 	// match semantics rather than inventing a second matcher. Ports are
 	// not part of the pattern.
+	//
+	// Host is optional when the entry declares a complete credential
+	// identity ([Entry.Kind] + [Entry.IdentityLabel]): such an identity
+	// binding is selected at egress by its (kind, label) pair, not by host
+	// (#1978). An entry with neither a host nor a complete identity is a
+	// load-time error.
 	Host string `yaml:"host"`
+
+	// Kind and IdentityLabel are the non-secret manifest credential-identity
+	// pair (#1978): the credential `kind` (e.g. "aws-sigv4") and the manifest
+	// `identity_label` naming which credential of that kind to inject. When
+	// both are set, the entry is a host-less-permitted identity binding the
+	// proxy selects by identity at egress. The pair is canonical: declare both
+	// or neither. A half-identity (exactly one set) is a load-time error. Maps
+	// onto internal/binding.HostBinding via [binding.WithIdentity].
+	Kind          string `yaml:"kind"`
+	IdentityLabel string `yaml:"identity_label"`
 
 	// CredentialRef is a vault credential reference resolved daemon-side
 	// at injection time, never to the container. It is a connector-style
@@ -268,13 +285,39 @@ func Parse(data []byte) (Descriptor, error) {
 		if err := e.Validate(); err != nil {
 			return Descriptor{}, fmt.Errorf("proxybinding: binding %d (%q): %w", i, e.Host, err)
 		}
-		if _, dup := seen[e.Host]; dup {
-			return Descriptor{}, fmt.Errorf("proxybinding: duplicate host %q within a single descriptor", e.Host)
+		key := e.dedupKey()
+		if _, dup := seen[key]; dup {
+			return Descriptor{}, fmt.Errorf("proxybinding: duplicate binding %s within a single descriptor", e.dedupLabel())
 		}
-		seen[e.Host] = struct{}{}
+		seen[key] = struct{}{}
 	}
 
 	return d, nil
+}
+
+// dedupKey is the uniqueness/override key for an entry. A host entry keys on
+// its lowercased host; a host-less identity entry keys on its (kind, label)
+// pair. Keying host-less entries on the identity pair (not on host == "")
+// lets two identity bindings with different labels coexist without a spurious
+// `duplicate host ""` collision, and lets a later layer override an earlier
+// identity binding with the same pair (matching the per-host override
+// semantics). The two namespaces are prefix-disjoint so a host can never
+// collide with an identity. An entry carrying both a host and an identity keys
+// on the host: it is still primarily a host binding, and its identity is an
+// additional selection key rather than its uniqueness key.
+func (e *Entry) dedupKey() string {
+	if e.Host != "" {
+		return "host:" + strings.ToLower(e.Host)
+	}
+	return "id:" + e.Kind + "\x00" + e.IdentityLabel
+}
+
+// dedupLabel is the human-readable form of the dedup key for error messages.
+func (e *Entry) dedupLabel() string {
+	if e.Host != "" {
+		return fmt.Sprintf("host %q", e.Host)
+	}
+	return fmt.Sprintf("identity (kind %q, identity_label %q)", e.Kind, e.IdentityLabel)
 }
 
 // Validate checks that an Entry's required fields are present and
@@ -296,8 +339,18 @@ func (e *Entry) Validate() error {
 		return err
 	}
 
-	if e.Host == "" {
-		return fmt.Errorf("missing required field: host")
+	// An entry is keyed by a host, a credential identity, or both. The
+	// identity pair is canonical: a half-identity (exactly one of kind or
+	// identity_label set) fails closed, and an entry with neither a host nor
+	// a complete identity has no selection key at all. The constructor
+	// (ToHostBinding, called at the end of Validate) is the single source of
+	// truth, but naming the failure here yields a clearer descriptor error.
+	hasIdentity := e.Kind != "" && e.IdentityLabel != ""
+	if (e.Kind != "") != (e.IdentityLabel != "") {
+		return fmt.Errorf("credential identity requires both kind and identity_label; a half-identity is invalid")
+	}
+	if e.Host == "" && !hasIdentity {
+		return fmt.Errorf("missing required field: host (or a complete credential identity: kind + identity_label)")
 	}
 	if e.CredentialRef == "" {
 		return fmt.Errorf("missing required field: credential_ref")
@@ -390,6 +443,8 @@ func (e *Entry) rejectPlaceholders() error {
 	}
 	fields := []namedField{
 		{"host", e.Host},
+		{"kind", e.Kind},
+		{"identity_label", e.IdentityLabel},
 		{"credential_ref", e.CredentialRef},
 		{"scheme", e.Scheme},
 		{"emit_mechanism", e.EmitMechanism},

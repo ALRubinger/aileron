@@ -436,3 +436,163 @@ func TestHostBindings_Match_CaseInsensitiveHost(t *testing.T) {
 		t.Error("host match must be case-insensitive")
 	}
 }
+
+func TestNewHostBinding_HostlessIdentityBindingConstructs(t *testing.T) {
+	// An identity binding declares an empty host pattern but a complete
+	// (kind, label) pair. It is selected by identity at egress, not by host.
+	hb, err := binding.NewHostBinding("", "user/aws", "sigv4-resign",
+		binding.WithIdentity("aws-sigv4", "metrics-reader"),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", ""))
+	if err != nil {
+		t.Fatalf("unexpected error for host-less identity binding: %v", err)
+	}
+	if hb.HostPattern != "" {
+		t.Errorf("HostPattern = %q, want empty for identity binding", hb.HostPattern)
+	}
+	if hb.IdentityKind != "aws-sigv4" || hb.IdentityLabel != "metrics-reader" {
+		t.Errorf("identity = (%q,%q), want (aws-sigv4,metrics-reader)", hb.IdentityKind, hb.IdentityLabel)
+	}
+}
+
+func TestNewHostBinding_IdentityTrimmed(t *testing.T) {
+	hb, err := binding.NewHostBinding("", "user/aws", "sigv4-resign",
+		binding.WithIdentity("  aws-sigv4 ", " metrics-reader "),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", ""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.IdentityKind != "aws-sigv4" || hb.IdentityLabel != "metrics-reader" {
+		t.Errorf("identity = (%q,%q), want trimmed (aws-sigv4,metrics-reader)", hb.IdentityKind, hb.IdentityLabel)
+	}
+}
+
+func TestNewHostBinding_EmptyHostNoIdentityRejected(t *testing.T) {
+	// Neither a host pattern nor a complete identity: the binding has no
+	// selection key and fails construction.
+	if _, err := binding.NewHostBinding("", "user/aws", "sigv4-resign",
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", "")); err == nil {
+		t.Fatal("expected error for a binding with neither host nor identity, got nil")
+	}
+}
+
+func TestNewHostBinding_PartialIdentityRejected(t *testing.T) {
+	// The (kind, label) pair is canonical; a half-identity is never legal,
+	// even alongside a host pattern.
+	if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithIdentity("aws-sigv4", ""),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", "")); err == nil {
+		t.Fatal("expected error for kind-only identity, got nil")
+	}
+	if _, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithIdentity("", "metrics-reader"),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", "")); err == nil {
+		t.Fatal("expected error for label-only identity, got nil")
+	}
+	// Host-less with a half-identity is also rejected (no valid key at all).
+	if _, err := binding.NewHostBinding("", "user/aws", "sigv4-resign",
+		binding.WithIdentity("aws-sigv4", ""),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", "")); err == nil {
+		t.Fatal("expected error for host-less kind-only identity, got nil")
+	}
+}
+
+func TestNewHostBinding_HostBindingWithoutIdentityStillConstructs(t *testing.T) {
+	// Regression: today's host-only binding (no identity) is unchanged.
+	hb, err := binding.NewHostBinding("api.example.com", "oauth2/github/octocat", "bearer")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.IdentityKind != "" || hb.IdentityLabel != "" {
+		t.Errorf("identity = (%q,%q), want empty for a host-only binding", hb.IdentityKind, hb.IdentityLabel)
+	}
+}
+
+func TestNewHostBinding_HostAndIdentityCoexist(t *testing.T) {
+	// A binding may carry both a host pattern and a complete identity.
+	hb, err := binding.NewHostBinding("s3.amazonaws.com", "user/aws", "sigv4-resign",
+		binding.WithIdentity("aws-sigv4", "admin"),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", ""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hb.HostPattern != "s3.amazonaws.com" || hb.IdentityKind != "aws-sigv4" || hb.IdentityLabel != "admin" {
+		t.Errorf("got host=%q identity=(%q,%q)", hb.HostPattern, hb.IdentityKind, hb.IdentityLabel)
+	}
+}
+
+func mustIdentityBinding(t *testing.T, kind, label, ref string) binding.HostBinding {
+	t.Helper()
+	hb, err := binding.NewHostBinding("", ref, "sigv4-resign",
+		binding.WithIdentity(kind, label),
+		binding.WithSigV4Resign("AKIDEXAMPLE", "", ""))
+	if err != nil {
+		t.Fatalf("NewHostBinding identity (%q,%q): %v", kind, label, err)
+	}
+	return hb
+}
+
+func TestHostBindings_MatchIdentity_HitsExactPair(t *testing.T) {
+	tbl := binding.HostBindings{
+		mustIdentityBinding(t, "aws-sigv4", "metrics-reader", "user/aws"),
+	}
+	hb, ok := tbl.MatchIdentity("aws-sigv4", "metrics-reader")
+	if !ok {
+		t.Fatal("MatchIdentity must hit the exact (kind, label) pair")
+	}
+	if hb.CredentialRef != "user/aws" {
+		t.Errorf("CredentialRef = %q, want user/aws", hb.CredentialRef)
+	}
+}
+
+func TestHostBindings_MatchIdentity_Misses(t *testing.T) {
+	tbl := binding.HostBindings{
+		mustIdentityBinding(t, "aws-sigv4", "metrics-reader", "user/aws"),
+	}
+	cases := []struct{ kind, label string }{
+		{"aws-sigv4", "admin"},       // wrong label
+		{"gcp-sa", "metrics-reader"}, // wrong kind
+		{"aws-sigv4", ""},            // empty label (defensive)
+		{"", "metrics-reader"},       // empty kind (defensive)
+		{"", ""},                     // both empty
+	}
+	for _, c := range cases {
+		if _, ok := tbl.MatchIdentity(c.kind, c.label); ok {
+			t.Errorf("MatchIdentity(%q,%q) matched, want miss", c.kind, c.label)
+		}
+	}
+}
+
+func TestHostBindings_MatchIdentity_TrimsInput(t *testing.T) {
+	tbl := binding.HostBindings{
+		mustIdentityBinding(t, "aws-sigv4", "metrics-reader", "user/aws"),
+	}
+	if _, ok := tbl.MatchIdentity(" aws-sigv4 ", "  metrics-reader "); !ok {
+		t.Error("MatchIdentity must trim inputs before comparison")
+	}
+}
+
+func TestHostBindings_HostAndIdentityCoexistInOneTable(t *testing.T) {
+	// A host binding and an identity binding in the same table: Match(host)
+	// finds only the host one; MatchIdentity(pair) finds only the identity one.
+	hostBinding := mustHostBinding(t, "api.example.com", "oauth2/github/octocat", "bearer")
+	idBinding := mustIdentityBinding(t, "aws-sigv4", "metrics-reader", "user/aws")
+	tbl := binding.HostBindings{hostBinding, idBinding}
+
+	hb, ok := tbl.Match("api.example.com")
+	if !ok || hb.CredentialRef != "oauth2/github/octocat" {
+		t.Errorf("Match(host) = (%+v, %v), want the host binding", hb, ok)
+	}
+	// The identity binding has an empty host pattern, so it never matches by host.
+	if _, ok := tbl.Match(""); ok {
+		t.Error("Match must never match an empty host (identity binding is host-less)")
+	}
+
+	idHB, ok := tbl.MatchIdentity("aws-sigv4", "metrics-reader")
+	if !ok || idHB.CredentialRef != "user/aws" {
+		t.Errorf("MatchIdentity = (%+v, %v), want the identity binding", idHB, ok)
+	}
+	// The host binding declares no identity, so it never matches by identity.
+	if _, ok := tbl.MatchIdentity("", ""); ok {
+		t.Error("MatchIdentity must never match a host binding with no identity")
+	}
+}

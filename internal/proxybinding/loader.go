@@ -74,16 +74,19 @@ func Load(opts LoadOptions) ([]Entry, error) {
 	for _, e := range merged {
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	sort.Slice(out, func(i, j int) bool { return out[i].dedupKey() < out[j].dedupKey() })
 	return out, nil
 }
 
-// applyLayer overlays a layer's entries onto the merged map, last-write-
-// wins per host. The map carries the override semantics; ordering is
-// re-derived deterministically by Load.
+// applyLayer overlays a layer's entries onto the merged map, last-write-wins
+// per dedup key. The key is the host for a host entry and the (kind, label)
+// pair for a host-less identity entry (see [Entry.dedupKey]), so a user layer
+// overrides a built-in entry with the same host OR the same identity pair. The
+// map carries the override semantics; ordering is re-derived deterministically
+// by Load.
 func applyLayer(merged map[string]Entry, layer []Entry) {
 	for _, e := range layer {
-		merged[e.Host] = e
+		merged[e.dedupKey()] = e
 	}
 }
 

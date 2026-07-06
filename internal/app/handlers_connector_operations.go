@@ -525,6 +525,17 @@ const (
 	hostBindingRejectLockedVault           = "binding_locked_vault"
 	hostBindingRejectCredentialUnavailable = "binding_credential_unavailable"
 	hostBindingRejectUnsupportedScheme     = "binding_unsupported_scheme"
+	// hostBindingRejectIdentityIncomplete is emitted when a step scope
+	// carries a credential kind but an empty identity label. Identity is
+	// definitionally the (kind, label) pair; a half-identity is malformed and
+	// fails closed at egress rather than degrading to a host match (#1978).
+	// Defensive: the mint already rejects a half-identity with a 400 (#1980).
+	hostBindingRejectIdentityIncomplete = "binding_identity_incomplete"
+	// hostBindingRejectIdentityUnbound is emitted when a step scope's complete
+	// (kind, label) identity resolves to no bound credential. It fails closed:
+	// never a fallback to a host match, never a passthrough of a
+	// bound-but-unavailable credential (#1978).
+	hostBindingRejectIdentityUnbound = "binding_identity_unbound"
 )
 
 // injectSandboxProxyHostBindingCredential resolves the credential a
