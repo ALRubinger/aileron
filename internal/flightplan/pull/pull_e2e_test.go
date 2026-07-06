@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/publish"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -57,7 +58,8 @@ func docker(t *testing.T, args ...string) string {
 }
 
 // buildLocalImage builds a tiny scratch image locally and returns its tag and
-// config digest (image Id), mirroring how freeze pins a composed image.
+// serialization-agnostic config content digest, mirroring how freeze pins a
+// composed image (localImageContentDigest).
 func buildLocalImage(t *testing.T, tag string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -69,8 +71,24 @@ func buildLocalImage(t *testing.T, tag string) (string, string) {
 		t.Fatal(err)
 	}
 	docker(t, "build", "-t", tag, dir)
-	id := docker(t, "image", "inspect", "--format", "{{.Id}}", tag)
-	return tag, id
+	return tag, localContentDigest(t, tag)
+}
+
+// localContentDigest computes the config content digest of a local image the
+// same way the production ImageSource / launch resolver do (docker inspect ->
+// imgconfig).
+func localContentDigest(t *testing.T, ref string) string {
+	t.Helper()
+	inspect := docker(t, "image", "inspect", "--format", "{{json .}}", ref)
+	cc, err := imgconfig.FromDockerInspect([]byte(inspect))
+	if err != nil {
+		t.Fatalf("canonicalize %s config: %v", ref, err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		t.Fatalf("content digest %s: %v", ref, err)
+	}
+	return d
 }
 
 // e2eFrozen mints a REAL signed frozen version (no-environment manifest, no
@@ -119,11 +137,11 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	ctx := e2eContext(t)
 	host := registryHost(t)
 
-	// Build + push a composed image so publish has a config-digest subject.
-	tag, configID := buildLocalImage(t, "aileron/sandbox-tools:e2e-pull")
+	// Build + push a composed image so publish has a config-content-digest subject.
+	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-pull")
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/pull-plan"
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configID, LocalTag: tag}
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
 
 	if _, err := publish.Run(ctx, publish.Options{
 		Name: "e2e-plan", VersionID: versionID, Registry: registry,
@@ -203,8 +221,8 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullImage (composed): %v", err)
 	}
-	if imgRes.BindingKind != freeze.BindingConfigDigest {
-		t.Errorf("binding = %q, want %q", imgRes.BindingKind, freeze.BindingConfigDigest)
+	if imgRes.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want %q", imgRes.BindingKind, freeze.BindingConfigContentDigest)
 	}
 	// The boot ref is content-addressed to the composed image's MANIFEST digest
 	// (TOCTOU-closing), not the mutable tag. Resolve the published tag to learn
@@ -218,16 +236,18 @@ func TestPullE2ERoundTrip(t *testing.T) {
 		t.Errorf("boot ref = %q, want the content-addressed manifest ref %q", imgRes.BootRef, wantRef)
 	}
 	if imgRes.ImageDigest != pin.Digest {
-		t.Errorf("verified image digest = %q, want the config digest %q", imgRes.ImageDigest, pin.Digest)
+		t.Errorf("verified image digest = %q, want the config content digest %q", imgRes.ImageDigest, pin.Digest)
 	}
 	// The daemon must be able to boot the returned reference: pull it and confirm
-	// the local config digest still equals the attested pin (the same identity
-	// launch's runner relies on).
+	// the local config CONTENT digest still equals the attested pin (the same
+	// identity launch's runner relies on). The config-blob sha256 may differ after
+	// the registry round-trip under the containerd store; the content digest is
+	// what is stable, which is the whole point of #2014.
 	docker(t, "pull", imgRes.BootRef)
 	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", imgRes.BootRef).Run() })
-	pulledID := docker(t, "image", "inspect", "--format", "{{.Id}}", imgRes.BootRef)
-	if pulledID != pin.Digest {
-		t.Errorf("pulled image Id = %q, want the attested config digest %q", pulledID, pin.Digest)
+	pulledContentDigest := localContentDigest(t, imgRes.BootRef)
+	if pulledContentDigest != pin.Digest {
+		t.Errorf("pulled image content digest = %q, want the attested config content digest %q", pulledContentDigest, pin.Digest)
 	}
 }
 
@@ -241,13 +261,13 @@ func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
 	host := registryHost(t)
 
 	// Publish a real composed image + artifact honestly, then pull with a pin
-	// whose Digest is a config digest the pushed image does NOT carry: the
+	// whose Digest is a config content digest the pushed image does NOT carry: the
 	// registry served the honest image, but the signed lock attests a different
 	// identity, so the binding check must refuse.
-	tag, configID := buildLocalImage(t, "aileron/sandbox-tools:e2e-tamper")
+	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-tamper")
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/tamper-plan"
-	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configID, LocalTag: tag}
+	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
 
 	if _, err := publish.Run(ctx, publish.Options{
 		Name: "e2e-plan", VersionID: versionID, Registry: registry,

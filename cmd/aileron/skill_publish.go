@@ -75,7 +75,7 @@ func runSkillPublish(args []string, stdout, stderr io.Writer) int {
 		switch {
 		case errors.Is(err, publish.ErrNoImage):
 			fmt.Fprintf(stderr, "error: %v (nothing to publish for an instruction-only plan)\n", err)
-		case errors.Is(err, publish.ErrConfigDigestMismatch):
+		case errors.Is(err, publish.ErrConfigContentDigestMismatch):
 			fmt.Fprintf(stderr, "error: %v\n", err)
 		default:
 			fmt.Fprintf(stderr, "error: publish %q: %v\n", name, err)

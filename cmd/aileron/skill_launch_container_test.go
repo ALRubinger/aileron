@@ -810,18 +810,17 @@ func TestNewLaunchImageDigestResolver_WiresProductionResolver(t *testing.T) {
 }
 
 // TestContainerImageDigestResolver_DelegatesToInspector proves the production
-// resolver delegates to imageInspector.localImageDigest (the SAME RepoDigests-
-// then-.Id logic that produced the pin's digest at freeze time), returning the
-// local image Id for a locally-built tag with no RepoDigests. The compare the
-// runtime guard performs is therefore apples-to-apples by construction (#1863).
+// resolver delegates to imageInspector.localImageContentDigest (the SAME config
+// content-digest computation that produced the pin's digest at freeze time),
+// returning the serialization-agnostic content digest for a locally-built tag.
+// The compare the runtime guard performs is therefore apples-to-apples by
+// construction (#1863).
 func TestContainerImageDigestResolver_DelegatesToInspector(t *testing.T) {
-	imageID := "sha256:" + strings.Repeat("b", 64)
 	tag := "aileron/sandbox-tools:0123456789abcdef"
+	inspect := dockerInspectJSON(t, "booted")
+	want := wantContentDigestFromDocker(t, inspect)
 	fr := &fakeRunner{outputs: map[string]string{
-		// No RepoDigests for a locally-built image, so localImageDigest falls
-		// back to the .Id — the same fallback that produced the pin's Digest.
-		`image inspect --format {{json .RepoDigests}} ` + tag: `[]`,
-		`image inspect --format {{.Id}} ` + tag:               imageID + "\n",
+		`image inspect --format {{json .}} ` + tag: inspect + "\n",
 	}}
 	withFakeInspector(t, fr)
 
@@ -829,8 +828,8 @@ func TestContainerImageDigestResolver_DelegatesToInspector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got != imageID {
-		t.Errorf("resolved digest = %q, want the local image Id %q", got, imageID)
+	if got != want {
+		t.Errorf("resolved digest = %q, want the config content digest %q", got, want)
 	}
 }
 

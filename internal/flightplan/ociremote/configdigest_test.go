@@ -10,11 +10,51 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
 )
+
+// ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
+// the given marker, so distinct markers yield distinct content digests. The
+// returned bytes are what a registry serves as the config blob.
+func ociConfigBody(t *testing.T, marker string) []byte {
+	t.Helper()
+	img := ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Config: ocispec.ImageConfig{
+			Env:        []string{"PATH=/usr/bin"},
+			Entrypoint: []string{"/entry", marker},
+			Cmd:        []string{"bash"},
+			WorkingDir: "/work",
+		},
+	}
+	img.RootFS.Type = "layers"
+	img.RootFS.DiffIDs = nil
+	b, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal oci config: %v", err)
+	}
+	return b
+}
+
+// wantContentDigest is the content digest ConfigContentDigest must return for a
+// config blob, computed through the same imgconfig contract.
+func wantContentDigest(t *testing.T, configBody []byte) string {
+	t.Helper()
+	cc, err := imgconfig.FromOCIImageConfig(configBody)
+	if err != nil {
+		t.Fatalf("FromOCIImageConfig: %v", err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		t.Fatalf("ContentDigest: %v", err)
+	}
+	return d
+}
 
 // pushBytes pushes data under mediaType and returns its descriptor.
 func pushBytes(t *testing.T, st content.Storage, mediaType string, data []byte) ocispec.Descriptor {
@@ -26,12 +66,13 @@ func pushBytes(t *testing.T, st content.Storage, mediaType string, data []byte) 
 	return desc
 }
 
-// seedManifest pushes a minimal single-config image manifest and returns its
-// descriptor plus its config descriptor.
-func seedManifest(t *testing.T, st content.Storage, configBody string) (manifest, config ocispec.Descriptor) {
+// seedManifest pushes a minimal single-config image manifest (config blob +
+// layer + manifest) and returns the manifest descriptor plus the config bytes.
+func seedManifest(t *testing.T, st content.Storage, marker string) (manifest ocispec.Descriptor, configBody []byte) {
 	t.Helper()
-	cfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, []byte(configBody))
-	layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer-"+configBody))
+	configBody = ociConfigBody(t, marker)
+	cfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, configBody)
+	layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer-"+marker))
 	m := ocispec.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2},
 		MediaType: ocispec.MediaTypeImageManifest,
@@ -43,7 +84,7 @@ func seedManifest(t *testing.T, st content.Storage, configBody string) (manifest
 		t.Fatalf("marshal manifest: %v", err)
 	}
 	md := pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
-	return md, cfg
+	return md, configBody
 }
 
 // pushIndex pushes an OCI image index (mediaType selectable) wrapping the given
@@ -74,61 +115,113 @@ func attestationManifest(t *testing.T, st content.Storage) ocispec.Descriptor {
 	return md
 }
 
-func TestConfigDigest_ClassicSingleManifest(t *testing.T) {
+func TestConfigContentDigest_ClassicSingleManifest(t *testing.T) {
 	st := memory.New()
-	manifest, cfg := seedManifest(t, st, "classic-config")
-	got, err := ConfigDigest(context.Background(), st, manifest)
+	manifest, configBody := seedManifest(t, st, "classic")
+	got, err := ConfigContentDigest(context.Background(), st, manifest)
 	if err != nil {
-		t.Fatalf("ConfigDigest: %v", err)
+		t.Fatalf("ConfigContentDigest: %v", err)
 	}
-	if got != cfg.Digest.String() {
-		t.Errorf("config digest = %q, want %q", got, cfg.Digest)
+	if want := wantContentDigest(t, configBody); got != want {
+		t.Errorf("content digest = %q, want %q", got, want)
 	}
 }
 
-func TestConfigDigest_OCIIndexUnwrapsToImageManifest(t *testing.T) {
+func TestConfigContentDigest_OCIIndexUnwrapsToImageManifest(t *testing.T) {
 	// The containerd store behind Docker Desktop emits an OCI index wrapping the
-	// single-platform image manifest plus a buildkit attestation. The config
+	// single-platform image manifest plus a buildkit attestation. The content
 	// digest must resolve to the image manifest's config, not error out.
 	st := memory.New()
-	image, cfg := seedManifest(t, st, "composed-config")
+	image, configBody := seedManifest(t, st, "composed")
 	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
 	att := attestationManifest(t, st)
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, image, att)
 
-	got, err := ConfigDigest(context.Background(), st, idx)
+	got, err := ConfigContentDigest(context.Background(), st, idx)
 	if err != nil {
-		t.Fatalf("ConfigDigest over index: %v", err)
+		t.Fatalf("ConfigContentDigest over index: %v", err)
 	}
-	if got != cfg.Digest.String() {
-		t.Errorf("config digest = %q, want the wrapped image manifest's config %q", got, cfg.Digest)
+	if want := wantContentDigest(t, configBody); got != want {
+		t.Errorf("content digest = %q, want the wrapped image manifest's config %q", got, want)
 	}
 }
 
-func TestConfigDigest_DockerManifestListUnwraps(t *testing.T) {
+func TestConfigContentDigest_DockerManifestListUnwraps(t *testing.T) {
 	// The Docker schema2 manifest-list media type must be treated as an index too.
 	st := memory.New()
-	image, cfg := seedManifest(t, st, "docker-list-config")
+	image, configBody := seedManifest(t, st, "docker-list")
 	att := attestationManifest(t, st)
 	idx := pushIndex(t, st, dockerManifestListMediaType, image, att)
 
-	got, err := ConfigDigest(context.Background(), st, idx)
+	got, err := ConfigContentDigest(context.Background(), st, idx)
 	if err != nil {
-		t.Fatalf("ConfigDigest over docker manifest list: %v", err)
+		t.Fatalf("ConfigContentDigest over docker manifest list: %v", err)
 	}
-	if got != cfg.Digest.String() {
-		t.Errorf("config digest = %q, want %q", got, cfg.Digest)
+	if want := wantContentDigest(t, configBody); got != want {
+		t.Errorf("content digest = %q, want %q", got, want)
 	}
 }
 
-func TestConfigDigest_IndexWithOnlyAttestationErrors(t *testing.T) {
-	// An index carrying no runnable image manifest cannot yield a config digest;
+// TestConfigContentDigest_ReserializedConfigStable is the #2014 core: a config
+// blob re-serialized on push (different blob bytes, byte-identical runtime
+// fields) yields the SAME content digest, so publish/pull do not spuriously
+// report tampering.
+func TestConfigContentDigest_ReserializedConfigStable(t *testing.T) {
+	st := memory.New()
+	// Build two config blobs with the same execution-relevant fields but with
+	// serialization-only noise added to one, mimicking the containerd re-encode.
+	base := ociConfigBody(t, "same")
+	var img ocispec.Image
+	if err := json.Unmarshal(base, &img); err != nil {
+		t.Fatalf("unmarshal base: %v", err)
+	}
+	img.Author = "buildkit"
+	img.History = []ocispec.History{{CreatedBy: "RUN noise"}}
+	reserialized, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal reserialized: %v", err)
+	}
+	if bytes.Equal(base, reserialized) {
+		t.Fatal("test bug: re-serialized bytes are identical to the base")
+	}
+
+	seed := func(body []byte, layerTag string) ocispec.Descriptor {
+		cfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, body)
+		layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer-"+layerTag))
+		m := ocispec.Manifest{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: ocispec.MediaTypeImageManifest,
+			Config:    cfg,
+			Layers:    []ocispec.Descriptor{layer},
+		}
+		mb, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		return pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
+	}
+
+	gotBase, err := ConfigContentDigest(context.Background(), st, seed(base, "base"))
+	if err != nil {
+		t.Fatalf("base: %v", err)
+	}
+	gotReser, err := ConfigContentDigest(context.Background(), st, seed(reserialized, "reser"))
+	if err != nil {
+		t.Fatalf("reserialized: %v", err)
+	}
+	if gotBase != gotReser {
+		t.Errorf("re-serialized config produced a different content digest: %q vs %q", gotBase, gotReser)
+	}
+}
+
+func TestConfigContentDigest_IndexWithOnlyAttestationErrors(t *testing.T) {
+	// An index carrying no runnable image manifest cannot yield a content digest;
 	// the helper must fail closed with an actionable message.
 	st := memory.New()
 	att := attestationManifest(t, st)
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, att)
 
-	_, err := ConfigDigest(context.Background(), st, idx)
+	_, err := ConfigContentDigest(context.Background(), st, idx)
 	if err == nil {
 		t.Fatal("want an error for an index with no runnable image manifest")
 	}
@@ -137,25 +230,25 @@ func TestConfigDigest_IndexWithOnlyAttestationErrors(t *testing.T) {
 	}
 }
 
-func TestConfigDigest_MultiPlatformMatchesHost(t *testing.T) {
+func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 	st := memory.New()
 	// A foreign-platform manifest plus the host-platform manifest; the host one wins.
-	foreign, _ := seedManifest(t, st, "foreign-arch-config")
+	foreign, _ := seedManifest(t, st, "foreign-arch")
 	foreign.Platform = &ocispec.Platform{OS: "plan9", Architecture: "mips"}
-	host, hostCfg := seedManifest(t, st, "host-arch-config")
+	host, hostBody := seedManifest(t, st, "host-arch")
 	host.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, foreign, host)
 
-	got, err := ConfigDigest(context.Background(), st, idx)
+	got, err := ConfigContentDigest(context.Background(), st, idx)
 	if err != nil {
-		t.Fatalf("ConfigDigest: %v", err)
+		t.Fatalf("ConfigContentDigest: %v", err)
 	}
-	if got != hostCfg.Digest.String() {
-		t.Errorf("config digest = %q, want the host-platform config %q", got, hostCfg.Digest)
+	if want := wantContentDigest(t, hostBody); got != want {
+		t.Errorf("content digest = %q, want the host-platform config %q", got, want)
 	}
 }
 
-func TestConfigDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
+func TestConfigContentDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
 	st := memory.New()
 	a, _ := seedManifest(t, st, "arch-a")
 	a.Platform = &ocispec.Platform{OS: "plan9", Architecture: "mips"}
@@ -163,7 +256,7 @@ func TestConfigDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
 	b.Platform = &ocispec.Platform{OS: "solaris", Architecture: "sparc64"}
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, a, b)
 
-	_, err := ConfigDigest(context.Background(), st, idx)
+	_, err := ConfigContentDigest(context.Background(), st, idx)
 	if err == nil {
 		t.Fatal("want an error when no manifest matches the host platform")
 	}
@@ -172,7 +265,7 @@ func TestConfigDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
 	}
 }
 
-func TestConfigDigest_ManifestWithoutConfigErrors(t *testing.T) {
+func TestConfigContentDigest_ManifestWithoutConfigErrors(t *testing.T) {
 	st := memory.New()
 	m := ocispec.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2},
@@ -184,8 +277,30 @@ func TestConfigDigest_ManifestWithoutConfigErrors(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	md := pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
-	if _, err := ConfigDigest(context.Background(), st, md); err == nil || !strings.Contains(err.Error(), "no config digest") {
+	if _, err := ConfigContentDigest(context.Background(), st, md); err == nil || !strings.Contains(err.Error(), "no config digest") {
 		t.Fatalf("err = %v, want a no-config-digest error", err)
+	}
+}
+
+func TestConfigContentDigest_InvalidConfigBlobErrors(t *testing.T) {
+	// A manifest whose config blob is not valid image-config JSON fails closed
+	// rather than hashing garbage.
+	st := memory.New()
+	cfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, []byte("not json"))
+	layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer"))
+	m := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    cfg,
+		Layers:    []ocispec.Descriptor{layer},
+	}
+	mb, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	md := pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
+	if _, err := ConfigContentDigest(context.Background(), st, md); err == nil || !strings.Contains(err.Error(), "image config") {
+		t.Fatalf("err = %v, want an image-config decode error", err)
 	}
 }
 
@@ -200,11 +315,11 @@ func (f fetchFailStore) Fetch(context.Context, ocispec.Descriptor) (io.ReadClose
 	return nil, f.err
 }
 
-func TestConfigDigest_FetchErrorPropagates(t *testing.T) {
+func TestConfigContentDigest_FetchErrorPropagates(t *testing.T) {
 	boom := errors.New("connection reset")
 	st := fetchFailStore{Store: memory.New(), err: boom}
 	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("{}"))
-	if _, err := ConfigDigest(context.Background(), st, desc); !errors.Is(err, boom) {
+	if _, err := ConfigContentDigest(context.Background(), st, desc); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the underlying fetch error", err)
 	}
 }
@@ -224,15 +339,15 @@ func (s indexFetchFailStore) Fetch(ctx context.Context, desc ocispec.Descriptor)
 	return s.Store.Fetch(ctx, desc)
 }
 
-func TestConfigDigest_IndexChildFetchErrorPropagates(t *testing.T) {
+func TestConfigContentDigest_IndexChildFetchErrorPropagates(t *testing.T) {
 	inner := memory.New()
-	image, _ := seedManifest(t, inner, "child-config")
+	image, _ := seedManifest(t, inner, "child")
 	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
 	idx := pushIndex(t, inner, ocispec.MediaTypeImageIndex, image)
 	boom := errors.New("child manifest read reset")
 	st := indexFetchFailStore{Store: inner, failDigest: image.Digest.String(), err: boom}
 
-	_, err := ConfigDigest(context.Background(), st, idx)
+	_, err := ConfigContentDigest(context.Background(), st, idx)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the child fetch error", err)
 	}
@@ -241,21 +356,51 @@ func TestConfigDigest_IndexChildFetchErrorPropagates(t *testing.T) {
 	}
 }
 
+// configFetchFailStore serves the manifest but fails to fetch the config blob.
+type configFetchFailStore struct {
+	*memory.Store
+	failDigest string
+	err        error
+}
+
+func (s configFetchFailStore) Fetch(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+	if desc.Digest.String() == s.failDigest {
+		return nil, s.err
+	}
+	return s.Store.Fetch(ctx, desc)
+}
+
+func TestConfigContentDigest_ConfigBlobFetchErrorPropagates(t *testing.T) {
+	inner := memory.New()
+	manifest, configBody := seedManifest(t, inner, "cfg-fetch")
+	configDigest := content.NewDescriptorFromBytes(ocispec.MediaTypeImageConfig, configBody).Digest.String()
+	boom := errors.New("config blob read reset")
+	st := configFetchFailStore{Store: inner, failDigest: configDigest, err: boom}
+
+	_, err := ConfigContentDigest(context.Background(), st, manifest)
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the config-blob fetch error", err)
+	}
+	if !strings.Contains(err.Error(), "image config blob") {
+		t.Errorf("err = %v, want an image-config-blob fetch message", err)
+	}
+}
+
 // rawFetcher returns fixed bytes for any descriptor, letting a test drive
-// ConfigDigest with content a validating store (memory.Store parses index JSON
-// on Push) would reject.
+// ConfigContentDigest with content a validating store (memory.Store parses index
+// JSON on Push) would reject.
 type rawFetcher struct{ data []byte }
 
 func (r rawFetcher) Fetch(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(r.data)), nil
 }
 
-func TestConfigDigest_CorruptIndexErrors(t *testing.T) {
+func TestConfigContentDigest_CorruptIndexErrors(t *testing.T) {
 	bad := []byte("not json")
-	// Describe the bytes as an index so ConfigDigest takes the unwrap path, then
-	// serve them raw; content.FetchAll verifies the digest, and the decode fails.
+	// Describe the bytes as an index so ConfigContentDigest takes the unwrap path,
+	// then serve them raw; content.FetchAll verifies the digest, and the decode fails.
 	desc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, bad)
-	if _, err := ConfigDigest(context.Background(), rawFetcher{bad}, desc); err == nil || !strings.Contains(err.Error(), "decode image index") {
+	if _, err := ConfigContentDigest(context.Background(), rawFetcher{bad}, desc); err == nil || !strings.Contains(err.Error(), "decode image index") {
 		t.Fatalf("err = %v, want a decode-image-index error", err)
 	}
 }

@@ -12,10 +12,13 @@
 // the signed lock branches by pin type (see freeze.BindingKind):
 //
 //   - Composed-tools pins (LocalTag set): the image is built locally at freeze
-//     and pinned by its config digest. Publish verifies the local image's
-//     config digest against the signed lock and HARD-ERRORS on a mismatch
-//     BEFORE pushing, then pushes the image with docker push (which preserves
-//     the config digest). Binding: config-digest.
+//     and pinned by its serialization-agnostic config CONTENT digest (see
+//     internal/flightplan/imgconfig). Publish verifies the local image's config
+//     content digest against the signed lock and HARD-ERRORS on a mismatch
+//     BEFORE pushing, then pushes the image with docker push and re-verifies the
+//     pushed config content digest. The content digest survives the config-blob
+//     re-serialization the containerd image store performs on push (issue
+//     #2014), unlike the raw config-blob sha256. Binding: config-content-digest.
 //   - Image-only / custom-base pins (no LocalTag): the signed-lock Digest is
 //     the base image's registry manifest digest. Publish copies the exact
 //     bytes from the SOURCE registry with oras.Copy (which preserves the
@@ -53,17 +56,19 @@ import (
 const reproducibleCreated = "1970-01-01T00:00:00Z"
 
 // ImageSource pushes a locally-built composed-tools image to the destination
-// registry. Only the composed (config-digest) branch uses it; foreign-base
-// pins copy from their source registry instead. Splitting inspect from push
-// lets publish verify the config digest against the signed lock BEFORE any
-// bytes leave the machine.
+// registry. Only the composed (config-content-digest) branch uses it;
+// foreign-base pins copy from their source registry instead. Splitting inspect
+// from push lets publish verify the config content digest against the signed
+// lock BEFORE any bytes leave the machine.
 type ImageSource interface {
-	// ConfigDigest returns the local composed image's config digest (its image
-	// Id), so publish can fail closed before pushing a mismatched image.
-	ConfigDigest(ctx context.Context, localTag string) (string, error)
-	// Push tags the local image into registry under imageTag and pushes it,
-	// preserving the config blob digest, so the image is resolvable in the
-	// destination repository afterward.
+	// ConfigContentDigest returns the local composed image's serialization-
+	// agnostic config content digest (see internal/flightplan/imgconfig), so
+	// publish can fail closed before pushing a mismatched image.
+	ConfigContentDigest(ctx context.Context, localTag string) (string, error)
+	// Push tags the local image into registry under imageTag and pushes it, so
+	// the image is resolvable in the destination repository afterward. The
+	// content digest (unlike the config-blob digest) is preserved across the
+	// containerd store's push-time re-serialization by construction.
 	Push(ctx context.Context, localTag, registry, imageTag string) error
 }
 
@@ -111,7 +116,8 @@ type Result struct {
 	// ArtifactDigest is the artifact (referrers) manifest digest; stable across
 	// idempotent re-publishes of the same frozen version.
 	ArtifactDigest string
-	// BindingKind is "config-digest" or "manifest-digest" (freeze.BindingKind).
+	// BindingKind is "config-content-digest" or "manifest-digest"
+	// (freeze.BindingKind).
 	BindingKind string
 }
 
@@ -120,11 +126,13 @@ var (
 	// ErrNoImage is returned when the frozen version has no resolved image pin
 	// to publish (an instruction-only plan).
 	ErrNoImage = errors.New("publish: frozen version has no resolved image to publish")
-	// ErrConfigDigestMismatch is returned when a composed pin's pushed image
-	// config digest does not equal the signed-lock digest (a mislabeled or
-	// tampered composed image). It fails closed rather than shipping a binding
-	// #1903 would reject.
-	ErrConfigDigestMismatch = errors.New("publish: composed image config digest does not match the signed lock")
+	// ErrConfigContentDigestMismatch is returned when a composed pin's local or
+	// pushed image config CONTENT digest does not equal the signed-lock digest (a
+	// mislabeled or tampered composed image). It fails closed rather than shipping
+	// a binding #1903 would reject. Because the check is content-based, the
+	// benign config-blob re-serialization the containerd store performs on push
+	// does not trigger it; only a genuine execution-relevant field change does.
+	ErrConfigContentDigestMismatch = errors.New("publish: composed image config content digest does not match the signed lock")
 )
 
 // Run publishes opts.Frozen's image and signed artifact to opts.Registry.
@@ -207,28 +215,28 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 // use as the artifact subject, plus the binding kind, verifying the binding.
 func publishImage(ctx context.Context, opts Options, pin freeze.ImagePin, target oras.Target) (ocispec.Descriptor, string, error) {
 	switch freeze.BindingKind(pin) {
-	case freeze.BindingConfigDigest:
+	case freeze.BindingConfigContentDigest:
 		return publishComposed(ctx, opts, pin, target)
 	default:
 		return publishForeignBase(ctx, opts, pin, target)
 	}
 }
 
-// publishComposed verifies the local composed image's config digest against the
-// signed lock, pushes it into the destination repository, and returns the
-// pushed image descriptor. The config digest is checked BEFORE the push, so a
-// mismatched (tampered/mislabeled) image never reaches the registry.
+// publishComposed verifies the local composed image's config content digest
+// against the signed lock, pushes it into the destination repository, and
+// returns the pushed image descriptor. The content digest is checked BEFORE the
+// push, so a mismatched (tampered/mislabeled) image never reaches the registry.
 func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, target oras.Target) (ocispec.Descriptor, string, error) {
 	src := opts.ImageSource
 	if src == nil {
 		src = dockerImageSource{}
 	}
-	localConfig, err := src.ConfigDigest(ctx, pin.LocalTag)
+	localConfig, err := src.ConfigContentDigest(ctx, pin.LocalTag)
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: inspect composed image %q: %w", pin.LocalTag, err)
 	}
 	if localConfig != pin.Digest {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigDigestMismatch, localConfig, pin.Digest)
+		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigContentDigestMismatch, localConfig, pin.Digest)
 	}
 
 	imageTag := freeze.ComposedImageTag(opts.VersionID)
@@ -239,20 +247,23 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: resolve pushed composed image: %w", err)
 	}
-	// Defense in depth: the pushed manifest's config digest must still equal
-	// the signed lock (a registry must not have altered the config on push).
-	// ociremote.ConfigDigest unwraps an OCI image index (the containerd image
-	// store behind Docker Desktop makes `docker push` emit one wrapping the
-	// single-platform image manifest plus a buildkit attestation) so the read
-	// back succeeds on both the classic and containerd stores.
-	pushedConfig, err := ociremote.ConfigDigest(ctx, target, desc)
+	// Defense in depth: the pushed image's config CONTENT digest must still equal
+	// the signed lock. ociremote.ConfigContentDigest fetches the pushed config
+	// blob and canonicalizes it, so the containerd image store's benign push-time
+	// re-serialization (a different config-blob sha256 for byte-identical runtime
+	// fields, issue #2014) passes while a genuine field substitution is still
+	// caught. It also unwraps an OCI image index (the shape `docker push` emits
+	// on the containerd store: the single-platform image manifest plus a buildkit
+	// attestation) so the read-back succeeds on both the classic and containerd
+	// stores.
+	pushedConfig, err := ociremote.ConfigContentDigest(ctx, target, desc)
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: read pushed image config: %w", err)
 	}
 	if pushedConfig != pin.Digest {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: pushed config %s, lock attested %s", ErrConfigDigestMismatch, pushedConfig, pin.Digest)
+		return ocispec.Descriptor{}, "", fmt.Errorf("%w: pushed config %s, lock attested %s", ErrConfigContentDigestMismatch, pushedConfig, pin.Digest)
 	}
-	return desc, freeze.BindingConfigDigest, nil
+	return desc, freeze.BindingConfigContentDigest, nil
 }
 
 // publishForeignBase copies the exact source-registry bytes for an image-only

@@ -13,6 +13,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
@@ -320,29 +321,27 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	if err != nil {
 		return "", fmt.Errorf("compose environment tools: %w", err)
 	}
-	// The built image is a local tag; resolve it to a digest. A locally-built
-	// image typically has no RepoDigests, so fall back to its image Id.
-	return in.localImageDigest(ctx, result.Image)
+	// The built image is a local tag; attest its serialization-agnostic config
+	// content digest, the value publish and launch re-check against the lock.
+	return in.localImageContentDigest(ctx, result.Image)
 }
 
-// localImageDigest resolves a locally-built image tag to a content digest.
-// It prefers the registry RepoDigests pin, then falls back to the local
-// image Id (also a `sha256:` content address) for an image that was never
-// pushed.
-func (in imageInspector) localImageDigest(ctx context.Context, image string) (string, error) {
-	if rd, err := in.inspectFormat(ctx, image, "{{json .RepoDigests}}"); err == nil {
-		if digest, derr := digestFromRepoDigests(rd, image); derr == nil {
-			return digest, nil
-		}
-	}
-
-	id, err := in.inspectFormat(ctx, image, "{{.Id}}")
+// localImageContentDigest resolves a local image tag to its serialization-
+// agnostic config content digest (see internal/flightplan/imgconfig): a hash
+// over the parsed config's execution-relevant fields, not the config blob's own
+// sha256. It is the value freeze attests for a composed-tools pin and the value
+// launch re-checks the local daemon image against, so the two are apples-to-
+// apples by construction. Binding to the content digest (rather than the image
+// Id) is what makes publish survive the containerd store's push-time config
+// re-serialization (issue #2014).
+func (in imageInspector) localImageContentDigest(ctx context.Context, image string) (string, error) {
+	raw, err := in.inspectFormat(ctx, image, "{{json .}}")
 	if err != nil {
-		return "", fmt.Errorf("resolve digest for built image %q: %w", image, err)
+		return "", fmt.Errorf("resolve config content digest for image %q: %w", image, err)
 	}
-	digest := strings.TrimSpace(string(id))
-	if !strings.HasPrefix(digest, "sha256:") {
-		return "", fmt.Errorf("built image %q reported a non-sha256 Id %q", image, digest)
+	cc, err := imgconfig.FromDockerInspect(raw)
+	if err != nil {
+		return "", fmt.Errorf("resolve config content digest for image %q: %w", image, err)
 	}
-	return digest, nil
+	return cc.ContentDigest()
 }

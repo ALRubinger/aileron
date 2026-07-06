@@ -86,9 +86,10 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	// CI must have pullable. newDigestResolver pulls+inspects that base for its
 	// registry digest; newFeatureComposer routes the environment tools through
 	// builderFeatureComposer -> container.Builder + composition.ToolsPlan, which
-	// BUILDS a genuine composed image in the local daemon and resolves its attested
-	// Id (localImageDigest). The produced pin carries the bootable LocalTag and
-	// that Id as its Digest.
+	// BUILDS a genuine composed image in the local daemon and attests its
+	// serialization-agnostic config content digest (localImageContentDigest). The
+	// produced pin carries the bootable LocalTag and that content digest as its
+	// Digest.
 	raw, err := os.ReadFile(exampleManifestPath(t))
 	if err != nil {
 		t.Fatalf("read worked example: %v", err)

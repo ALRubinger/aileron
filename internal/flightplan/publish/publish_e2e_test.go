@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/content"
@@ -57,7 +58,8 @@ func docker(t *testing.T, args ...string) string {
 }
 
 // buildLocalImage builds a tiny scratch image locally and returns its tag and
-// config digest (image Id), mirroring how freeze pins a composed image.
+// serialization-agnostic config content digest, mirroring how freeze pins a
+// composed image (localImageContentDigest).
 func buildLocalImage(t *testing.T, tag string) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -69,17 +71,32 @@ func buildLocalImage(t *testing.T, tag string) (string, string) {
 		t.Fatal(err)
 	}
 	docker(t, "build", "-t", tag, dir)
-	id := docker(t, "image", "inspect", "--format", "{{.Id}}", tag)
-	return tag, id
+	return tag, localContentDigest(t, tag)
+}
+
+// localContentDigest computes the config content digest of a local image the
+// same way the production ImageSource does (docker inspect -> imgconfig).
+func localContentDigest(t *testing.T, ref string) string {
+	t.Helper()
+	inspect := docker(t, "image", "inspect", "--format", "{{json .}}", ref)
+	cc, err := imgconfig.FromDockerInspect([]byte(inspect))
+	if err != nil {
+		t.Fatalf("canonicalize %s config: %v", ref, err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		t.Fatalf("content digest %s: %v", ref, err)
+	}
+	return d
 }
 
 func TestPublishE2EComposed(t *testing.T) {
 	ctx := e2eContext(t)
 	host := registryHost(t)
-	tag, configID := buildLocalImage(t, "aileron/sandbox-tools:e2e-composed")
+	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-composed")
 	registry := host + "/e2e/composed-plan"
 
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configID, LocalTag: tag}
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
 	opts := Options{
 		Name: "e2e", VersionID: "v1", Registry: registry,
 		Frozen: testFrozen(),
@@ -89,8 +106,8 @@ func TestPublishE2EComposed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("publish composed: %v", err)
 	}
-	if res.BindingKind != freeze.BindingConfigDigest {
-		t.Errorf("binding = %q, want config-digest", res.BindingKind)
+	if res.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want config-content-digest", res.BindingKind)
 	}
 	// Re-publish must be byte-stable (idempotency) against the real registry.
 	res2, err := Run(ctx, opts)
@@ -100,7 +117,7 @@ func TestPublishE2EComposed(t *testing.T) {
 	if res.ArtifactDigest != res2.ArtifactDigest {
 		t.Errorf("re-publish artifact digest drift: %q vs %q", res.ArtifactDigest, res2.ArtifactDigest)
 	}
-	assertPublishedArtifact(t, ctx, registry, "v1", res.ImageDigest, freeze.BindingConfigDigest)
+	assertPublishedArtifact(t, ctx, registry, "v1", res.ImageDigest, freeze.BindingConfigContentDigest)
 }
 
 func TestPublishE2EForeignBase(t *testing.T) {
