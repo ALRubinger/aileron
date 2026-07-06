@@ -130,7 +130,7 @@ type Entry struct {
 	// binding is selected at egress by its (kind, label) pair, not by host
 	// (#1978). An entry with neither a host nor a complete identity is a
 	// load-time error.
-	Host string `yaml:"host"`
+	Host string `yaml:"host,omitempty"`
 
 	// Kind and IdentityLabel are the non-secret manifest credential-identity
 	// pair (#1978): the credential `kind` (e.g. "aws-sigv4") and the manifest
@@ -139,20 +139,20 @@ type Entry struct {
 	// proxy selects by identity at egress. The pair is canonical: declare both
 	// or neither. A half-identity (exactly one set) is a load-time error. Maps
 	// onto internal/binding.HostBinding via [binding.WithIdentity].
-	Kind          string `yaml:"kind"`
-	IdentityLabel string `yaml:"identity_label"`
+	Kind          string `yaml:"kind,omitempty"`
+	IdentityLabel string `yaml:"identity_label,omitempty"`
 
 	// CredentialRef is a vault credential reference resolved daemon-side
 	// at injection time, never to the container. It is a connector-style
 	// binding name ("<kind>/<service>/<identity>") or a user-level ref
 	// ("user/<service>"), the same name contract internal/binding
 	// enforces. It is never the credential bytes.
-	CredentialRef string `yaml:"credential_ref"`
+	CredentialRef string `yaml:"credential_ref,omitempty"`
 
 	// Scheme is one of the closed injection-scheme set (#1194):
 	// bearer | basic | header-template | query-param | sigv4-resign. An
 	// unknown scheme is a load-time error (fail closed, no silent skip).
-	Scheme string `yaml:"scheme"`
+	Scheme string `yaml:"scheme,omitempty"`
 
 	// EmitMechanism declares how the credential reaches egress: "inject"
 	// (inject at the proxy) or "sentinel-swap". Optional; empty defaults to
@@ -160,7 +160,7 @@ type Entry struct {
 	// [Entry.Sentinel] block; an inject binding (explicit or defaulted)
 	// must declare none. Any value outside the closed set is a load-time
 	// error.
-	EmitMechanism string `yaml:"emit_mechanism"`
+	EmitMechanism string `yaml:"emit_mechanism,omitempty"`
 
 	// Sentinel is the sentinel-swap placeholder declaration: the non-secret
 	// value the launcher plants inside the container and the env-var name it
@@ -169,26 +169,26 @@ type Entry struct {
 	// load-time error, since the field is meaningless without sentinel-swap).
 	// It is a pointer so an absent block is distinguishable from a present
 	// block with empty fields. See [Sentinel].
-	Sentinel *Sentinel `yaml:"sentinel"`
+	Sentinel *Sentinel `yaml:"sentinel,omitempty"`
 
 	// Username is the non-secret HTTP basic-auth username, required only
 	// for the basic scheme (e.g. "x-access-token" for git-over-HTTPS).
-	Username string `yaml:"username"`
+	Username string `yaml:"username,omitempty"`
 
 	// Header is the header name to set, required only for the
 	// header-template scheme (e.g. "Authorization" or a vendor header).
-	Header string `yaml:"header"`
+	Header string `yaml:"header,omitempty"`
 
 	// Template is the verbatim header value for the header-template
 	// scheme, with the "{token}" placeholder substituted with the secret
 	// at inject time. Required for header-template. To emit Linear's
 	// verbatim "Authorization: <key>" with no Bearer prefix, set
 	// Template to "{token}".
-	Template string `yaml:"template"`
+	Template string `yaml:"template,omitempty"`
 
 	// QueryParam is the query-parameter name to set, required only for the
 	// query-param scheme.
-	QueryParam string `yaml:"query_param"`
+	QueryParam string `yaml:"query_param,omitempty"`
 
 	// AccessKeyID is the non-secret AWS access key ID, required only for the
 	// sigv4-resign scheme. It appears verbatim in the signed request's
@@ -197,7 +197,7 @@ type Entry struct {
 	// service: the egress injector derives the SigV4 credential scope from the
 	// resolved upstream host (#1978), so there is no second, operator-supplied
 	// copy of the region that could drift from the host being signed for.
-	AccessKeyID string `yaml:"access_key_id"`
+	AccessKeyID string `yaml:"access_key_id,omitempty"`
 
 	// AllowedHosts is the optional per-binding trust-contract host
 	// allowlist. Empty means unconstrained: egress on the bound host stays
@@ -206,7 +206,7 @@ type Entry struct {
 	// match an entry (host or host:port form) or the request is denied and
 	// audited. Non-secret. Maps onto internal/binding.HostBinding via
 	// [binding.WithTrustContract].
-	AllowedHosts []string `yaml:"allowed_hosts"`
+	AllowedHosts []string `yaml:"allowed_hosts,omitempty"`
 
 	// Effect is the optional per-binding trust-contract effect, one of
 	// internal/binding.HostBindingEffects (read | write | delete | spend |
@@ -216,7 +216,7 @@ type Entry struct {
 	// effect admits all methods (the proxy cannot distinguish write from
 	// delete/spend/external-send on the wire). An unknown effect is a
 	// load-time error (fail closed). Non-secret.
-	Effect string `yaml:"effect"`
+	Effect string `yaml:"effect,omitempty"`
 }
 
 // Sentinel is the per-binding sentinel-swap placeholder declaration. It makes
