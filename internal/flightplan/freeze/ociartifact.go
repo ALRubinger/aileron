@@ -37,11 +37,16 @@ const (
 	AnnotationName    = "ai.aileron.flightplan.name"
 	AnnotationVersion = "ai.aileron.flightplan.version"
 
-	// BindingConfigDigest marks a composed-tools image whose signed-lock Digest
-	// is the image config digest (the image was built at freeze, so its
-	// attested identity is the config blob digest, preserved across export and
-	// push). Launch verifies the pushed image's `.config.digest` == lock Digest.
-	BindingConfigDigest = "config-digest"
+	// BindingConfigContentDigest marks a composed-tools image whose signed-lock
+	// Digest is the image's serialization-agnostic config CONTENT digest (see
+	// internal/flightplan/imgconfig): a hash over the parsed config's
+	// execution-relevant fields (rootfs.diff_ids plus Env/Entrypoint/Cmd/User/
+	// WorkingDir/Volumes/ExposedPorts/Labels and os/arch), not the config blob's
+	// own sha256. The image is built at freeze, so its attested identity is this
+	// content digest, which is stable across the config-blob re-serialization the
+	// containerd image store performs on `docker push` (issue #2014). Publish and
+	// launch verify the pushed image's config content digest == lock Digest.
+	BindingConfigContentDigest = "config-content-digest"
 	// BindingManifestDigest marks an image-only/custom-base image whose
 	// signed-lock Digest is the base image's registry manifest digest. Publish
 	// copies the exact source-registry bytes (oras.Copy preserves the manifest
@@ -63,20 +68,20 @@ func ComposedImageTag(versionID string) string { return versionID + "-image" }
 // BindingKind reports how a resolved image pin's signed-lock Digest binds to
 // the published/pulled image, derived purely from the signature-covered pin:
 //
-//   - A composed-tools pin carries a LocalTag and a config-digest Digest
-//     (freeze builds the image locally and pins its config Id; see
-//     skill_freeze.go localImageDigest and ADR-0027), so it binds by config
-//     digest.
+//   - A composed-tools pin carries a LocalTag and a config-content-digest Digest
+//     (freeze builds the image locally and pins its serialization-agnostic
+//     config content digest; see skill_freeze.go localImageContentDigest and
+//     ADR-0027), so it binds by config content digest.
 //   - An image-only or custom-base pin has no LocalTag and a registry
 //     manifest-digest Digest, so it binds by manifest digest.
 //
 // Both #1901 (publish, which additionally hard-errors if a composed pin's
-// pushed config digest does not match) and #1903 (launch) derive the binding
-// kind through this function so the two halves cannot disagree, and so the
-// decision is rooted in the signed lock rather than a mutable annotation.
+// pushed config content digest does not match) and #1903 (launch) derive the
+// binding kind through this function so the two halves cannot disagree, and so
+// the decision is rooted in the signed lock rather than a mutable annotation.
 func BindingKind(p ImagePin) string {
 	if p.LocalTag != "" {
-		return BindingConfigDigest
+		return BindingConfigContentDigest
 	}
 	return BindingManifestDigest
 }

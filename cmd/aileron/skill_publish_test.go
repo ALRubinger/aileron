@@ -94,15 +94,15 @@ func TestRunSkillPublishMismatchMapped(t *testing.T) {
 	t.Cleanup(func() { skillStoreDir = "" })
 	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{{Ref: "r", Digest: "sha256:abc", LocalTag: "t"}}})
 	withStubPublish(t, func(context.Context, publish.Options) (publish.Result, error) {
-		return publish.Result{}, publish.ErrConfigDigestMismatch
+		return publish.Result{}, publish.ErrConfigContentDigestMismatch
 	})
 	var out, errBuf bytes.Buffer
 	code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(errBuf.String(), "config digest") {
-		t.Errorf("stderr = %q, want config-digest message", errBuf.String())
+	if !strings.Contains(errBuf.String(), "config content digest") {
+		t.Errorf("stderr = %q, want config-content-digest message", errBuf.String())
 	}
 }
 

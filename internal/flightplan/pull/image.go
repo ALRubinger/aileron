@@ -21,9 +21,9 @@ var (
 	// longer serves the image cannot boot.
 	ErrImageMissing = errors.New("pull: published image is missing from the source registry")
 	// ErrImageDigestMismatch is returned when the pulled image does not verify
-	// against the signed lock pin under the pin's binding kind (config digest for
-	// a composed pin, manifest digest for an image-only/foreign-base pin). The
-	// registry served a different image than the signature attested.
+	// against the signed lock pin under the pin's binding kind (config content
+	// digest for a composed pin, manifest digest for an image-only/foreign-base
+	// pin). The registry served a different image than the signature attested.
 	ErrImageDigestMismatch = errors.New("pull: pulled image does not match the signed lock digest")
 	// ErrImagePullFailed wraps any other pull/network/fetch failure so the caller
 	// refuses to boot rather than proceed on a partial pull.
@@ -60,17 +60,18 @@ type ImagePullResult struct {
 	// BootRef is the reference the runner boots verbatim, content-addressed to a
 	// manifest digest in both cases so a mutable tag can never be booted after
 	// verification. For a composed pin it is "<registry>@<manifest-digest>" where
-	// the manifest was config-digest-verified against the signed lock; for an
+	// the manifest was config-content-verified against the signed lock; for an
 	// image-only/foreign-base pin it is "<registry>@<manifest-digest>" where the
 	// manifest digest itself is the signed lock pin. The value derives only from
 	// the verified digests and the recorded coordinate, never from a re-parse of
 	// untrusted manifest bytes beyond the digest comparison itself.
 	BootRef string
-	// BindingKind is the binding the verification used (freeze.BindingConfigDigest
-	// or freeze.BindingManifestDigest), surfaced for provenance/logging.
+	// BindingKind is the binding the verification used
+	// (freeze.BindingConfigContentDigest or freeze.BindingManifestDigest),
+	// surfaced for provenance/logging.
 	BindingKind string
 	// ImageDigest is the verified digest the boot reference is anchored to: the
-	// image config digest for a composed pin, the manifest digest for an
+	// image config content digest for a composed pin, the manifest digest for an
 	// image-only/foreign-base pin. Both equal Pin.Digest by construction.
 	ImageDigest string
 }
@@ -102,7 +103,7 @@ func PullImage(ctx context.Context, opts ImagePullOptions) (ImagePullResult, err
 	}
 
 	switch freeze.BindingKind(opts.Pin) {
-	case freeze.BindingConfigDigest:
+	case freeze.BindingConfigContentDigest:
 		return pullComposedImage(ctx, src, opts)
 	default:
 		return pullManifestDigestImage(ctx, src, opts)
@@ -110,20 +111,23 @@ func PullImage(ctx context.Context, opts ImagePullOptions) (ImagePullResult, err
 }
 
 // pullComposedImage resolves the composed image by its published tag, reads its
-// config digest through the shared ociremote.ConfigDigest helper (the same
-// index-aware read publish uses post-push, so the read and write halves compute
-// the same value), and requires it to equal the signed lock pin. When the
-// published ref is an OCI image index (the containerd store behind Docker
-// Desktop), the helper unwraps it to the platform image manifest before reading
-// config; BootRef stays anchored to the resolved (index) manifest digest, which
-// the runner/daemon boot correctly. The bootable
+// config CONTENT digest through the shared ociremote.ConfigContentDigest helper
+// (the same index-aware, serialization-agnostic read publish uses post-push, so
+// the read and write halves compute the same value), and requires it to equal
+// the signed lock pin. Binding to the config content digest (not the config
+// blob's own sha256) is what lets a clean-machine install verify an image
+// published through the containerd store, which re-serializes the config blob on
+// push (issue #2014). When the published ref is an OCI image index (the
+// containerd store behind Docker Desktop), the helper unwraps it to the platform
+// image manifest before reading config; BootRef stays anchored to the resolved
+// (index) manifest digest, which the runner/daemon boot correctly. The bootable
 // reference is content-addressed to the resolved MANIFEST digest
-// ("<registry>@<manifest-digest>"), not the mutable tag: the config-digest check
-// proved this exact manifest carries the attested config, so anchoring the boot
-// to that manifest digest closes the TOCTOU window a tag would leave open (the
-// tag could be repointed between this verification and the runner's boot). The
-// runner boots the same manifest bytes verified here, and the daemon re-checks
-// the digest itself on pull.
+// ("<registry>@<manifest-digest>"), not the mutable tag: the config-content
+// check proved this exact manifest carries the attested config, so anchoring the
+// boot to that manifest digest closes the TOCTOU window a tag would leave open
+// (the tag could be repointed between this verification and the runner's boot).
+// The runner boots the same manifest bytes verified here, and the daemon
+// re-checks the digest itself on pull.
 func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImagePullOptions) (ImagePullResult, error) {
 	imageTag := freeze.ComposedImageTag(opts.VersionTag)
 	desc, err := src.Resolve(ctx, imageTag)
@@ -137,7 +141,7 @@ func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImageP
 		return ImagePullResult{}, fmt.Errorf("%w: composed image %q resolved to an empty manifest digest", ErrImagePullFailed, imageTag)
 	}
 
-	config, err := ociremote.ConfigDigest(ctx, src, desc)
+	config, err := ociremote.ConfigContentDigest(ctx, src, desc)
 	if err != nil {
 		return ImagePullResult{}, fmt.Errorf("%w: read composed image config: %w", ErrImagePullFailed, err)
 	}
@@ -147,10 +151,10 @@ func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImageP
 
 	return ImagePullResult{
 		// Boot by the verified manifest digest, not the tag: content-addressed so
-		// the runner cannot boot a repointed tag, while the config-digest check
+		// the runner cannot boot a repointed tag, while the config-content check
 		// above is the identity binding to the signed lock.
 		BootRef:     opts.Registry + "@" + desc.Digest.String(),
-		BindingKind: freeze.BindingConfigDigest,
+		BindingKind: freeze.BindingConfigContentDigest,
 		ImageDigest: config,
 	}, nil
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 
 	specs "github.com/opencontainers/image-spec/specs-go"
@@ -18,18 +19,96 @@ import (
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
+	"oras.land/oras-go/v2/errdef"
 )
 
-// seedImage pushes a minimal single-config, single-layer OCI image into st and
-// returns the image manifest descriptor and its config blob descriptor. A
-// composed pin binds by the config digest; a foreign-base pin by the manifest
-// digest.
-func seedImage(t *testing.T, st content.Storage, configBody string) (manifest, config ocispec.Descriptor) {
+// ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
+// the given marker, so distinct markers yield distinct content digests. A
+// composed pin binds by the serialization-agnostic config CONTENT digest of
+// this blob, not the blob's own sha256.
+func ociConfigBody(t *testing.T, marker string) []byte {
 	t.Helper()
-	cfg := content.NewDescriptorFromBytes(ocispec.MediaTypeImageConfig, []byte(configBody))
-	mustPush(t, st, cfg, []byte(configBody))
-	layer := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayerGzip, []byte("layer-bytes"))
-	mustPush(t, st, layer, []byte("layer-bytes"))
+	img := ocispec.Image{
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Config: ocispec.ImageConfig{
+			Env:        []string{"PATH=/usr/bin"},
+			Entrypoint: []string{"/entry", marker},
+			Cmd:        []string{"bash"},
+			WorkingDir: "/work",
+		},
+	}
+	img.RootFS.Type = "layers"
+	b, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal oci config: %v", err)
+	}
+	return b
+}
+
+// contentDigest is the serialization-agnostic content digest of a config blob,
+// the value a composed pin attests and publish verifies.
+func contentDigest(t *testing.T, configBody []byte) string {
+	t.Helper()
+	cc, err := imgconfig.FromOCIImageConfig(configBody)
+	if err != nil {
+		t.Fatalf("FromOCIImageConfig: %v", err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		t.Fatalf("ContentDigest: %v", err)
+	}
+	return d
+}
+
+// reserialize returns config bytes that add serialization-only noise
+// (author/history) to configBody while preserving every execution-relevant
+// field, mimicking the containerd store's push-time config re-encode. Its
+// content digest equals configBody's; its raw sha256 differs.
+func reserialize(t *testing.T, configBody []byte) []byte {
+	t.Helper()
+	var img ocispec.Image
+	if err := json.Unmarshal(configBody, &img); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	img.Author = "buildkit"
+	img.History = []ocispec.History{{CreatedBy: "RUN noise"}}
+	b, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal reserialized config: %v", err)
+	}
+	if bytes.Equal(b, configBody) {
+		t.Fatal("test bug: re-serialized bytes are identical to the base")
+	}
+	return b
+}
+
+// tamper returns config bytes with a changed Entrypoint (an execution-relevant
+// field), so its content digest differs from configBody's.
+func tamper(t *testing.T, configBody []byte) []byte {
+	t.Helper()
+	var img ocispec.Image
+	if err := json.Unmarshal(configBody, &img); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	img.Config.Entrypoint = []string{"/evil"}
+	b, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal tampered config: %v", err)
+	}
+	return b
+}
+
+// seedImage pushes a minimal single-config, single-layer OCI image whose config
+// blob is configBody into st and returns the image manifest descriptor. A
+// composed pin binds by the config content digest; a foreign-base pin by the
+// manifest digest.
+func seedImage(t *testing.T, st content.Storage, configBody []byte) ocispec.Descriptor {
+	t.Helper()
+	cfg := content.NewDescriptorFromBytes(ocispec.MediaTypeImageConfig, configBody)
+	mustPush(t, st, cfg, configBody)
+	layerBody := []byte("layer-" + string(cfg.Digest))
+	layer := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayerGzip, layerBody)
+	mustPush(t, st, layer, layerBody)
 	m := ocispec.Manifest{
 		Versioned: specs.Versioned{SchemaVersion: 2},
 		MediaType: ocispec.MediaTypeImageManifest,
@@ -42,42 +121,43 @@ func seedImage(t *testing.T, st content.Storage, configBody string) (manifest, c
 	}
 	md := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, mb)
 	mustPush(t, st, md, mb)
-	return md, cfg
+	return md
 }
 
 func mustPush(t *testing.T, st content.Storage, desc ocispec.Descriptor, data []byte) {
 	t.Helper()
-	if err := st.Push(context.Background(), desc, bytes.NewReader(data)); err != nil {
+	err := st.Push(context.Background(), desc, bytes.NewReader(data))
+	if err != nil && !errors.Is(err, errdef.ErrAlreadyExists) {
 		t.Fatalf("push %s: %v", desc.Digest, err)
 	}
 }
 
-// fakeImageSource stands in for the docker CLI: ConfigDigest returns a
-// controllable local config digest, and Push is a no-op (composed tests
+// fakeImageSource stands in for the docker CLI: ConfigContentDigest returns a
+// controllable local config content digest, and Push is a no-op (composed tests
 // pre-seed the target with the "pushed" image tagged as freeze.ComposedImageTag).
 type fakeImageSource struct {
-	configDigest string
-	configErr    error
-	pushErr      error
+	configContentDigest string
+	configErr           error
+	pushErr             error
 }
 
-func (f fakeImageSource) ConfigDigest(ctx context.Context, localTag string) (string, error) {
-	return f.configDigest, f.configErr
+func (f fakeImageSource) ConfigContentDigest(ctx context.Context, localTag string) (string, error) {
+	return f.configContentDigest, f.configErr
 }
 
 func (f fakeImageSource) Push(ctx context.Context, localTag, registry, imageTag string) error {
 	return f.pushErr
 }
 
-// seedComposedTarget seeds target with a composed image tagged where
-// publishComposed resolves it, returning the manifest and config descriptors.
-func seedComposedTarget(t *testing.T, target *memory.Store, versionID, configBody string) (manifest, config ocispec.Descriptor) {
+// seedComposedTarget seeds target with a composed image (config blob = configBody)
+// tagged where publishComposed resolves it, returning the manifest descriptor.
+func seedComposedTarget(t *testing.T, target *memory.Store, versionID string, configBody []byte) ocispec.Descriptor {
 	t.Helper()
-	manifest, config = seedImage(t, target, configBody)
+	manifest := seedImage(t, target, configBody)
 	if err := target.Tag(context.Background(), manifest, freeze.ComposedImageTag(versionID)); err != nil {
 		t.Fatalf("tag composed image: %v", err)
 	}
-	return manifest, config
+	return manifest
 }
 
 func testFrozen() store.FrozenVersion {
@@ -89,52 +169,121 @@ func testFrozen() store.FrozenVersion {
 	}
 }
 
-func composedOptions(target *memory.Store, cfg ocispec.Descriptor) Options {
+// composedOptions builds publish options for a composed pin whose attested
+// Digest is the content digest of configBody, with a fake image source that
+// reports the same local content digest (an honest local image).
+func composedOptions(target *memory.Store, configBody []byte) Options {
+	cd := contentDigestNoT(configBody)
 	return Options{
 		Name:      "demo",
 		VersionID: "v1",
 		Registry:  "example.com/demo",
 		Frozen:    testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "aileron/sandbox-tools", Digest: cfg.Digest.String(), LocalTag: "aileron/sandbox-tools:abc123"},
+			{Ref: "aileron/sandbox-tools", Digest: cd, LocalTag: "aileron/sandbox-tools:abc123"},
 		}},
-		ImageSource: fakeImageSource{configDigest: cfg.Digest.String()},
+		ImageSource: fakeImageSource{configContentDigest: cd},
 		Target:      target,
 	}
 }
 
-func TestRunComposedConfigDigestBinding(t *testing.T) {
+// contentDigestNoT computes the content digest outside a *testing.T context (for
+// option construction); it panics on a malformed body, which only a test bug
+// produces.
+func contentDigestNoT(configBody []byte) string {
+	cc, err := imgconfig.FromOCIImageConfig(configBody)
+	if err != nil {
+		panic(err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+func TestRunComposedContentDigestBinding(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	manifest, cfg := seedComposedTarget(t, target, "v1", "composed-config")
+	body := ociConfigBody(t, "composed")
+	manifest := seedComposedTarget(t, target, "v1", body)
 
-	res, err := Run(ctx, composedOptions(target, cfg))
+	res, err := Run(ctx, composedOptions(target, body))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.BindingKind != freeze.BindingConfigDigest {
-		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigDigest)
+	if res.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
 	}
 	if res.ImageDigest != manifest.Digest.String() {
 		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
 	}
-	assertReferrerAttached(t, target, res, manifest.Digest.String(), freeze.BindingConfigDigest)
+	assertReferrerAttached(t, target, res, manifest.Digest.String(), freeze.BindingConfigContentDigest)
+}
+
+// TestRunComposedReserializedConfigPublishes is the #2014 core regression: a
+// composed image whose PUSHED config blob was re-serialized (byte-different
+// config blob, identical runtime fields, as the containerd store produces)
+// publishes successfully because the binding is content-based, not blob-digest.
+func TestRunComposedReserializedConfigPublishes(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	honest := ociConfigBody(t, "composed")
+	// The registry holds the re-serialized config (what containerd `docker push`
+	// emits); the local image reports the honest content digest.
+	pushed := reserialize(t, honest)
+	manifest := seedComposedTarget(t, target, "v1", pushed)
+
+	// The lock attests the honest content digest; the fake local source reports it.
+	opts := composedOptions(target, honest)
+
+	res, err := Run(ctx, opts)
+	if err != nil {
+		t.Fatalf("Run over a re-serialized pushed config must succeed: %v", err)
+	}
+	if res.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
+	}
+	if res.ImageDigest != manifest.Digest.String() {
+		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
+	}
+}
+
+// TestRunComposedTamperedPushedConfigFailsClosed proves the integrity guarantee
+// is preserved: if the registry serves a composed image whose config has a
+// changed execution-relevant field, the post-push content-digest check refuses
+// it even though the local pre-push check passed.
+func TestRunComposedTamperedPushedConfigFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	honest := ociConfigBody(t, "composed")
+	tampered := tamper(t, honest)
+	seedComposedTarget(t, target, "v1", tampered)
+
+	opts := composedOptions(target, honest) // local honest, pushed tampered
+	_, err := Run(ctx, opts)
+	if !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "pushed config") {
+		t.Errorf("err = %v, want a pushed-config mismatch message", err)
+	}
 }
 
 // seedComposedIndexTarget seeds target with the composed image published as an
 // OCI image index (the shape `docker push` emits on Docker Desktop's containerd
 // image store): the single-platform image manifest plus a buildkit attestation
-// manifest, tagged where publishComposed resolves it. It returns the index and
-// config descriptors. The config-digest read-back must unwrap the index.
-func seedComposedIndexTarget(t *testing.T, target *memory.Store, versionID, configBody string) (index, config ocispec.Descriptor) {
+// manifest, tagged where publishComposed resolves it. It returns the index
+// descriptor. The content-digest read-back must unwrap the index.
+func seedComposedIndexTarget(t *testing.T, target *memory.Store, versionID string, configBody []byte) ocispec.Descriptor {
 	t.Helper()
 	ctx := context.Background()
-	image, cfg := seedImage(t, target, configBody)
+	image := seedImage(t, target, configBody)
 	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
 
 	// A buildkit attestation entry: unknown/unknown platform + attestation type.
 	// Selection skips it, so its blobs are never fetched and need not be pushed.
-	attManifest := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-"+configBody))
+	attManifest := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-"+string(image.Digest)))
 	attManifest.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
 	attManifest.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
 
@@ -152,65 +301,67 @@ func seedComposedIndexTarget(t *testing.T, target *memory.Store, versionID, conf
 	if err := target.Tag(ctx, id, freeze.ComposedImageTag(versionID)); err != nil {
 		t.Fatalf("tag composed index: %v", err)
 	}
-	return id, cfg
+	return id
 }
 
-// TestRunComposedConfigDigestBindingOverOCIIndex is the #2012 regression: the
-// containerd image store makes the pushed composed ref an OCI index wrapping the
-// image manifest plus a buildkit attestation. Publish's post-push config-digest
-// read-back must unwrap the index and verify against the signed lock rather than
-// hard-erroring "image manifest has no config digest".
-func TestRunComposedConfigDigestBindingOverOCIIndex(t *testing.T) {
+// TestRunComposedContentDigestBindingOverOCIIndex is the #2012+#2014 regression:
+// the containerd image store makes the pushed composed ref an OCI index wrapping
+// the image manifest plus a buildkit attestation. Publish's post-push
+// content-digest read-back must unwrap the index and verify against the signed
+// lock rather than hard-erroring.
+func TestRunComposedContentDigestBindingOverOCIIndex(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	index, cfg := seedComposedIndexTarget(t, target, "v1", "composed-config")
+	body := ociConfigBody(t, "composed")
+	index := seedComposedIndexTarget(t, target, "v1", body)
 
-	res, err := Run(ctx, composedOptions(target, cfg))
+	res, err := Run(ctx, composedOptions(target, body))
 	if err != nil {
 		t.Fatalf("Run over an OCI-index composed image: %v", err)
 	}
-	if res.BindingKind != freeze.BindingConfigDigest {
-		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigDigest)
+	if res.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
 	}
 	// The subject/image digest is the resolved INDEX digest (what Docker/containerd
-	// boot correctly); the config-digest binding was verified from the unwrapped
+	// boot correctly); the content-digest binding was verified from the unwrapped
 	// image manifest.
 	if res.ImageDigest != index.Digest.String() {
 		t.Errorf("image digest = %q, want the resolved index digest %q", res.ImageDigest, index.Digest)
 	}
-	assertReferrerAttached(t, target, res, index.Digest.String(), freeze.BindingConfigDigest)
+	assertReferrerAttached(t, target, res, index.Digest.String(), freeze.BindingConfigContentDigest)
 }
 
-func TestRunComposedConfigDigestMismatchFailsClosed(t *testing.T) {
+func TestRunComposedContentDigestMismatchFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
 
-	// The local image's config digest differs from what the signed lock attests,
-	// so publish must fail BEFORE pushing anything (no image seeded into target).
+	// The local image's config content digest differs from what the signed lock
+	// attests, so publish must fail BEFORE pushing anything (no image seeded).
 	opts := Options{
 		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
 		Frozen: testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
 			{Ref: "r", Digest: "sha256:" + strings.Repeat("0", 64), LocalTag: "t"},
 		}},
-		ImageSource: fakeImageSource{configDigest: "sha256:" + strings.Repeat("1", 64)},
+		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("1", 64)},
 		Target:      target,
 	}
-	if _, err := Run(ctx, opts); !errors.Is(err, ErrConfigDigestMismatch) {
-		t.Fatalf("err = %v, want ErrConfigDigestMismatch", err)
+	if _, err := Run(ctx, opts); !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch", err)
 	}
 	// Nothing must have been published on the mismatch path.
 	if _, err := target.Resolve(ctx, "v1"); err == nil {
-		t.Error("artifact was tagged despite a config-digest mismatch")
+		t.Error("artifact was tagged despite a config-content mismatch")
 	}
 }
 
 func TestRunComposedPushError(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	_, cfg := seedComposedTarget(t, target, "v1", "composed-config")
-	opts := composedOptions(target, cfg)
-	opts.ImageSource = fakeImageSource{configDigest: cfg.Digest.String(), pushErr: errors.New("registry unauthorized")}
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, target, "v1", body)
+	opts := composedOptions(target, body)
+	opts.ImageSource = fakeImageSource{configContentDigest: contentDigest(t, body), pushErr: errors.New("registry unauthorized")}
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push composed image") {
 		t.Fatalf("err = %v, want a push-composed-image error", err)
 	}
@@ -219,7 +370,7 @@ func TestRunComposedPushError(t *testing.T) {
 func TestRunForeignBaseManifestDigestBinding(t *testing.T) {
 	ctx := context.Background()
 	src := memory.New()
-	manifest, _ := seedImage(t, src, "base-config")
+	manifest := seedImage(t, src, ociConfigBody(t, "base"))
 	// The source registry resolves the pin's manifest digest as a reference.
 	if err := src.Tag(ctx, manifest, manifest.Digest.String()); err != nil {
 		t.Fatalf("tag source: %v", err)
@@ -250,10 +401,11 @@ func TestRunForeignBaseManifestDigestBinding(t *testing.T) {
 
 func TestRunIdempotentReferrerDigest(t *testing.T) {
 	ctx := context.Background()
+	body := ociConfigBody(t, "composed")
 	run := func() Result {
 		target := memory.New()
-		_, cfg := seedComposedTarget(t, target, "v1", "composed-config")
-		res, err := Run(ctx, composedOptions(target, cfg))
+		seedComposedTarget(t, target, "v1", body)
+		res, err := Run(ctx, composedOptions(target, body))
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -386,8 +538,9 @@ func (pushFailTarget) Push(context.Context, ocispec.Descriptor, io.Reader) error
 func TestRunPushBlobError(t *testing.T) {
 	ctx := context.Background()
 	inner := memory.New()
-	_, cfg := seedComposedTarget(t, inner, "v1", "composed-config") // image pre-seeded, no push needed
-	opts := composedOptions(inner, cfg)
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, inner, "v1", body) // image pre-seeded, no push needed
+	opts := composedOptions(inner, body)
 	opts.Target = pushFailTarget{inner}
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push artifact blob") {
 		t.Fatalf("err = %v, want a push-artifact-blob error", err)
@@ -403,7 +556,7 @@ func TestRunComposedResolveError(t *testing.T) {
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
 			{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"},
 		}},
-		ImageSource: fakeImageSource{configDigest: "sha256:" + strings.Repeat("a", 64)},
+		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("a", 64)},
 		Target:      target,
 	}
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "resolve pushed composed image") {

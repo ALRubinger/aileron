@@ -8,7 +8,7 @@ func TestBindingKind(t *testing.T) {
 		pin  ImagePin
 		want string
 	}{
-		{"composed pin binds by config digest", ImagePin{Digest: "sha256:aa", LocalTag: "aileron/sandbox-tools:x"}, BindingConfigDigest},
+		{"composed pin binds by config content digest", ImagePin{Digest: "sha256:aa", LocalTag: "aileron/sandbox-tools:x"}, BindingConfigContentDigest},
 		{"image-only pin binds by manifest digest", ImagePin{Ref: "docker.io/library/python", Digest: "sha256:bb"}, BindingManifestDigest},
 	}
 	for _, tc := range cases {

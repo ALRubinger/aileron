@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -15,10 +16,54 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
 )
+
+// dockerInspectJSON builds a `docker image inspect --format '{{json .}}'` body
+// for an image whose Entrypoint carries marker, so distinct markers yield
+// distinct config content digests. It is the local-side input the composer and
+// launch resolver canonicalize.
+func dockerInspectJSON(t *testing.T, marker string) string {
+	t.Helper()
+	obj := map[string]any{
+		"Id":           "sha256:" + strings.Repeat("0", 64),
+		"Os":           "linux",
+		"Architecture": "amd64",
+		"Config": map[string]any{
+			"Env":        []string{"PATH=/usr/bin"},
+			"Entrypoint": []string{"/entry", marker},
+			"Cmd":        []string{"bash"},
+			"WorkingDir": "/work",
+		},
+		"RootFS": map[string]any{
+			"Type":   "layers",
+			"Layers": []string{"sha256:" + strings.Repeat("a", 64)},
+		},
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal docker inspect: %v", err)
+	}
+	return string(b)
+}
+
+// wantContentDigestFromDocker computes the content digest a docker-inspect body
+// canonicalizes to, the value the composer/resolver must return for it.
+func wantContentDigestFromDocker(t *testing.T, inspectJSON string) string {
+	t.Helper()
+	cc, err := imgconfig.FromDockerInspect([]byte(inspectJSON))
+	if err != nil {
+		t.Fatalf("FromDockerInspect: %v", err)
+	}
+	d, err := cc.ContentDigest()
+	if err != nil {
+		t.Fatalf("ContentDigest: %v", err)
+	}
+	return d
+}
 
 const fakeFreezeDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -733,18 +778,14 @@ func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
 	base := "base@" + fakeFreezeDigest
 	features := []string{"aws-cli"}
 	// The Builder builds the ToolsPlan image under this deterministic tag, then
-	// localImageDigest inspects it. A locally-built image has no RepoDigests, so
-	// the composer falls back to the image Id (also a sha256 content address).
+	// localImageContentDigest inspects it and attests the serialization-agnostic
+	// config content digest.
 	tag := composition.LocalToolsImageTag(base, features)
-	wantID := "sha256:" + strings.Repeat("b", 64)
+	inspect := dockerInspectJSON(t, "host-npx")
+	want := wantContentDigestFromDocker(t, inspect)
 	fr := &fakeRunner{
-		fails: map[string]error{
-			// Force the RepoDigests fallback: a locally-built image has no
-			// registry digest.
-			`image inspect --format {{json .RepoDigests}} ` + tag: errTestInspect,
-		},
 		outputs: map[string]string{
-			`image inspect --format {{.Id}} ` + tag: wantID + "\n",
+			`image inspect --format {{json .}} ` + tag: inspect + "\n",
 		},
 	}
 	withFakeInspector(t, fr)
@@ -753,8 +794,8 @@ func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
 	}
-	if got != wantID {
-		t.Errorf("digest = %q, want %q", got, wantID)
+	if got != want {
+		t.Errorf("digest = %q, want the config content digest %q", got, want)
 	}
 }
 
@@ -786,13 +827,11 @@ func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
 	base := "base@" + fakeFreezeDigest
 	features := []string{"aws-cli"}
 	tag := composition.LocalToolsImageTag(base, features)
-	wantID := "sha256:" + strings.Repeat("d", 64)
+	inspect := dockerInspectJSON(t, "managed")
+	want := wantContentDigestFromDocker(t, inspect)
 	fr := &fakeRunner{
-		fails: map[string]error{
-			`image inspect --format {{json .RepoDigests}} ` + tag: errTestInspect,
-		},
 		outputs: map[string]string{
-			`image inspect --format {{.Id}} ` + tag: wantID + "\n",
+			`image inspect --format {{json .}} ` + tag: inspect + "\n",
 		},
 	}
 	withFakeInspector(t, fr)
@@ -801,8 +840,8 @@ func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComposeDigest with managed toolchain + escape hatch: %v", err)
 	}
-	if got != wantID {
-		t.Errorf("digest = %q, want %q", got, wantID)
+	if got != want {
+		t.Errorf("digest = %q, want the config content digest %q", got, want)
 	}
 }
 
@@ -853,59 +892,39 @@ func TestImageInspector_ResolveDigest_InspectFails(t *testing.T) {
 	}
 }
 
-func TestImageInspector_LocalImageDigest_RepoDigestsWins(t *testing.T) {
-	digest := "sha256:" + strings.Repeat("d", 64)
+func TestImageInspector_LocalImageContentDigest_CanonicalizesInspect(t *testing.T) {
+	inspect := dockerInspectJSON(t, "built")
+	want := wantContentDigestFromDocker(t, inspect)
 	fr := &fakeRunner{outputs: map[string]string{
-		`image inspect --format {{json .RepoDigests}} built:local`: `["built@` + digest + `"]`,
+		`image inspect --format {{json .}} built:local`: inspect + "\n",
 	}}
 	in := imageInspector{runner: fr, runtime: "docker"}
-	got, err := in.localImageDigest(context.Background(), "built:local")
+	got, err := in.localImageContentDigest(context.Background(), "built:local")
 	if err != nil {
-		t.Fatalf("localImageDigest: %v", err)
+		t.Fatalf("localImageContentDigest: %v", err)
 	}
-	if got != digest {
-		t.Errorf("digest = %q", got)
-	}
-}
-
-func TestImageInspector_LocalImageDigest_FallsBackToID(t *testing.T) {
-	id := "sha256:" + strings.Repeat("e", 64)
-	fr := &fakeRunner{
-		// RepoDigests empty -> digestFromRepoDigests errors -> fall back to Id.
-		outputs: map[string]string{
-			`image inspect --format {{json .RepoDigests}} built:local`: `[]`,
-			`image inspect --format {{.Id}} built:local`:               id + "\n",
-		},
-	}
-	in := imageInspector{runner: fr, runtime: "docker"}
-	got, err := in.localImageDigest(context.Background(), "built:local")
-	if err != nil {
-		t.Fatalf("localImageDigest: %v", err)
-	}
-	if got != id {
-		t.Errorf("digest = %q, want the image Id %q", got, id)
+	if got != want {
+		t.Errorf("digest = %q, want the config content digest %q", got, want)
 	}
 }
 
-func TestImageInspector_LocalImageDigest_NonSha256IDRejected(t *testing.T) {
-	fr := &fakeRunner{outputs: map[string]string{
-		`image inspect --format {{json .RepoDigests}} built:local`: `[]`,
-		`image inspect --format {{.Id}} built:local`:               "not-a-digest\n",
-	}}
-	in := imageInspector{runner: fr, runtime: "docker"}
-	if _, err := in.localImageDigest(context.Background(), "built:local"); err == nil {
-		t.Error("a non-sha256 image Id must be rejected")
-	}
-}
-
-func TestImageInspector_LocalImageDigest_BothInspectsFail(t *testing.T) {
+func TestImageInspector_LocalImageContentDigest_InspectFails(t *testing.T) {
 	fr := &fakeRunner{fails: map[string]error{
-		`image inspect --format {{json .RepoDigests}} built:local`: errTestInspect,
-		`image inspect --format {{.Id}} built:local`:               errTestInspect,
+		`image inspect --format {{json .}} built:local`: errTestInspect,
 	}}
 	in := imageInspector{runner: fr, runtime: "docker"}
-	if _, err := in.localImageDigest(context.Background(), "built:local"); err == nil {
-		t.Error("when both inspects fail, localImageDigest must error")
+	if _, err := in.localImageContentDigest(context.Background(), "built:local"); err == nil {
+		t.Error("a failing inspect must error")
+	}
+}
+
+func TestImageInspector_LocalImageContentDigest_InvalidJSONRejected(t *testing.T) {
+	fr := &fakeRunner{outputs: map[string]string{
+		`image inspect --format {{json .}} built:local`: "not json\n",
+	}}
+	in := imageInspector{runner: fr, runtime: "docker"}
+	if _, err := in.localImageContentDigest(context.Background(), "built:local"); err == nil {
+		t.Error("an unparsable inspect body must be rejected")
 	}
 }
 
