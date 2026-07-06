@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 )
 
@@ -236,6 +237,17 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn net.Conn, decrypted 
 // target host. It is called only when no unique connector spec matched,
 // so the precedence is connector-spec -> host-binding -> passthrough.
 //
+// Binding selection has two modes (#1978). When the connection's step scope
+// declares a credential identity (a non-empty kind), the binding is selected
+// by the manifest (kind, label) pair via MatchIdentity, and selection fails
+// closed: a half-identity (kind without label) or an identity with no bound
+// credential is a 403 denial, never a fallback to a host match and never a
+// passthrough. Otherwise the binding is selected by host via Match, exactly
+// as before, and a host miss returns handled=false so the caller falls
+// through to passthrough. Everything after selection (the private-IP refusal,
+// the trust-contract gate, sentinel-swap, injection, dial, and audit) is
+// identical for both modes.
+//
 // On a binding match it resolves the bound credential daemon-side
 // (through the vault), injects it onto a fresh upstream request per the
 // binding's scheme, re-issues the request, and streams the response
@@ -255,9 +267,39 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 	if h, _, err := net.SplitHostPort(targetHost); err == nil {
 		hostForMatch = h
 	}
-	hb, ok := s.hostBindings.Match(hostForMatch)
-	if !ok {
-		return false
+
+	var hb binding.HostBinding
+	var ok bool
+	// Identity path (#1978): a step scope that declares a credential kind
+	// selects WHICH credential to inject by its manifest (kind, label) pair,
+	// not by the upstream host. It fails closed — never a fallback to a host
+	// match, never a passthrough of a bound-but-unavailable credential — so a
+	// scoped request can only ever egress with the exact credential its
+	// manifest identity names.
+	if auth.StepScope != nil && auth.StepScope.CredentialKind != "" {
+		if auth.StepScope.IdentityLabel == "" {
+			// A present kind with an empty label is a malformed half-identity.
+			// The mint already 400s this (#1980); fail closed defensively here
+			// rather than degrade to a host match.
+			s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, hostBindingRejectIdentityIncomplete)
+			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy denied egress: the step's credential identity is incomplete")
+			return true
+		}
+		hb, ok = s.hostBindings.MatchIdentity(auth.StepScope.CredentialKind, auth.StepScope.IdentityLabel)
+		if !ok {
+			// The declared identity has no bound credential. Fail closed: no
+			// fallthrough to Match(host), no passthrough.
+			s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, hostBindingRejectIdentityUnbound)
+			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy denied egress: the step's credential identity is not bound to a credential")
+			return true
+		}
+	} else {
+		// Host path: today's behavior. On a miss, return false so the caller
+		// falls through to passthrough (unchanged).
+		hb, ok = s.hostBindings.Match(hostForMatch)
+		if !ok {
+			return false
+		}
 	}
 
 	if sandboxForwardProxyTargetIsPrivateIPLiteral(targetHost) {
