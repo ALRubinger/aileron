@@ -269,25 +269,17 @@ var daemonUnitLayers = func(ctx context.Context) ([]capture.CaptureDescriptor, [
 // and preserves today's defaults-only table. A present-but-malformed unit, or
 // a malformed descriptor in any layer, fails construction loudly rather than
 // silently shipping an empty (passthrough) table.
+//
+// It returns the table snapshot the reloader loads at construction. The daemon
+// boot path (NewHandlerWithConfig) instead retains the [hostBindingsReloader]
+// itself so later user-file edits are observed without a restart (#1887); this
+// helper preserves the one-shot table contract the unit-layer tests assert.
 func assembleHostBindings(ctx context.Context, log *slog.Logger) (binding.HostBindings, error) {
-	_, sealingLayer, err := daemonUnitLayers(ctx)
+	r, err := newHostBindingsReloader(ctx, log)
 	if err != nil {
-		return nil, fmt.Errorf("assemble host bindings: load image unit layer: %w", err)
+		return nil, err
 	}
-	opts := proxybinding.DefaultLoadOptions()
-	opts.ExtraEntries = sealingLayer
-	table, warnings, err := proxybinding.LoadHostBindingsWithWarnings(opts)
-	if err != nil {
-		return nil, fmt.Errorf("assemble host bindings: %w", err)
-	}
-	// Warnings are non-fatal: a well-formed-but-suspect binding (e.g. a
-	// sigv4-resign access_key_id that does not match the AWS shape) is logged
-	// at startup so an operator sees the likely mistake before it fails at
-	// launch, without blocking daemon boot.
-	for _, w := range warnings {
-		log.Warn("host binding descriptor warning", "detail", w)
-	}
-	return table, nil
+	return r.current(), nil
 }
 
 // NewHandlerWithConfig is the configurable entry point. The launcher
@@ -551,7 +543,13 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// bindings now that #1323 removed the central github.yaml; its projection
 	// is byte-identical to that former default (pinned by internal/app's
 	// TestGHUnitDriftGuard).
-	server.hostBindings, err = assembleHostBindings(ctx, log)
+	// #1887: hold the table in a re-stat reloader so out-of-band edits to
+	// ~/.aileron/binding-descriptors.yaml (including `aileron skill bind`
+	// writes) take effect at the proxy boundary without a daemon restart. The
+	// image unit layer is resolved once here and cached; a later reload
+	// re-reads only the user file. The initial load fails boot loudly on a
+	// malformed descriptor, unchanged from the previous one-shot assembly.
+	server.hostBindingsReloader, err = newHostBindingsReloader(ctx, log)
 	if err != nil {
 		return nil, err
 	}
