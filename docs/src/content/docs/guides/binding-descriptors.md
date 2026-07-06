@@ -52,7 +52,7 @@ Decoding is strict. An unknown YAML key is an error, not a silently ignored fiel
 Descriptors load from two layers, in increasing precedence.
 
 1. **Built-in defaults.** Trusted community profiles Aileron ships, embedded at build time. The Linear descriptor above is one. This is the trusted layer, distinct from the user layer below.
-2. **User layer.** `~/.aileron/binding-descriptors.yaml`.
+2. **User layer.** `~/.aileron/binding-descriptors.yaml`. `aileron skill bind <name>` writes this file programmatically when it onboards a Flight Plan's credential requirements, so hand-editing it is the fallback rather than the default. See [Onboarding credentials](/guides/installing-a-skill/#onboarding-credentials). The file format below is the reference for both the written entries and any you add by hand.
 
 A `gh` request is sealed too, but `gh`'s bindings no longer arrive as an embedded built-in default. They arrive through a third source: the sealing plane of `gh`'s CLI-capability unit, carried on its devcontainer Feature and projected into the binding table from the sandbox image's `devcontainer.metadata` label (see [the gh sealing plane](#shipped-via-the-gh-cli-capability-unit-sealing) below). Linear remains the embedded built-in worked example.
 

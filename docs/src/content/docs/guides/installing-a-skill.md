@@ -49,11 +49,26 @@ An OCI install writes a frozen version, so it appears under `~/.aileron/skills/<
 
 ```
 Installed frozen version v1a2b3c4d5e6f of skill "weekly-metrics-digest" to /Users/you/.aileron/skills/weekly-metrics-digest/versions/v1a2b3c4d5e6f
+Run `aileron skill bind "weekly-metrics-digest"` to supply this plan's credentials
 ```
 
-The version id is the frozen content-hash slug, so a re-install of the same published plan is a no-op that reuses the same directory. Install does not pull the plan's container image. The image pin recorded in the lockfile is resolved at `aileron skill launch`, not at install.
+The version id is the frozen content-hash slug, so a re-install of the same published plan is a no-op that reuses the same directory. Install does not pull the plan's container image. The image pin recorded in the lockfile is resolved at `aileron skill launch`, not at install. The install prints a one-line pointer to `aileron skill bind` so you know how to onboard the plan's credentials next.
 
 > Installing by an [agentskills.io](https://agentskills.io) registry slug is not supported. agentskills.io is a format spec, not a registry, so a slug has no canonical location to resolve against. Install from a local path, a git URL, or an OCI reference instead.
+
+## Onboarding credentials
+
+A published Flight Plan declares the credentials it needs in its frozen trust contracts, but it never carries the secrets. After you install a frozen plan, run `aileron skill bind <name>` to supply them:
+
+```sh
+aileron skill bind weekly-metrics-digest
+```
+
+The verb derives the plan's credential requirements from its verified frozen trust contracts, then fills only the gaps. For each requirement it checks two places: your vault for the secret, and `~/.aileron/binding-descriptors.yaml` for the non-secret binding. A requirement already present in both is reported as satisfied and left untouched. A missing requirement prompts you for its secret with a hidden prompt that writes straight to the vault, prompts for any non-secret parameter such as an AWS access key ID, and writes the binding descriptor entry.
+
+The write is programmatic, so you do not hand-edit any file. A single run stores the vault secret, writes the descriptor entry, prints a per-requirement summary, and reminds you to restart the daemon. The daemon reads binding descriptors once at startup, so a new binding takes effect only after a restart.
+
+The same verb onboards a second operator on their own machine. They install the same frozen plan, run `aileron skill bind <name>`, and supply their own identity and key. The plan is shared once; each operator binds their own credentials against it. A requirement whose host carries an unresolved input template is surfaced as an advisory rather than written automatically, since the concrete host is not known until launch resolves the input.
 
 ## Action requirements and graceful degrade
 

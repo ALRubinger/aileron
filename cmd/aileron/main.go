@@ -249,6 +249,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron skill install <source>     Install a skill (local path or git URL) into ~/.aileron/skills")
 	fmt.Fprintln(w, "  aileron skill list                 List installed skills (mounted read-only at launch)")
 	fmt.Fprintln(w, "  aileron skill freeze <name>        Seal an installed skill into a signed, pinned Flight Plan version")
+	fmt.Fprintln(w, "  aileron skill bind <name>          Onboard a frozen plan's credential requirements (vault + descriptor)")
 	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
 	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
 	fmt.Fprintln(w, "  aileron keyring revoke <auth>      Remove a publisher's keys from the trust list")

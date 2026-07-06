@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/resolver"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -16,6 +17,7 @@ const skillUsage = `usage:
   aileron skill list               List installed skills
   aileron skill freeze <name>      Seal an installed skill into a signed, digest-pinned Flight Plan version
   aileron skill launch <name>      Run a frozen Flight Plan deterministically (no-LLM step graph)
+  aileron skill bind <name>        Onboard a frozen plan's credential requirements (vault secret + binding descriptor)
   aileron skill publish <name>     Push a frozen version's image + signed artifact to an OCI registry`
 
 // skillStoreDir is a seam so tests can point the CLI at a temp store
@@ -52,6 +54,8 @@ func runSkill(args []string, stdout, stderr io.Writer) int {
 		return runSkillFreeze(args[1:], stdout, stderr)
 	case "launch":
 		return runSkillLaunch(args[1:], stdout, stderr)
+	case "bind":
+		return runSkillBind(args[1:], os.Stdin, stdout, stderr)
 	case "publish":
 		return runSkillPublish(args[1:], stdout, stderr)
 	default:

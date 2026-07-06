@@ -97,5 +97,6 @@ func runSkillInstallOCI(ref string, stdout, stderr io.Writer) int {
 
 	fmt.Fprintf(stdout, "Installed frozen version %s of skill %q to %s\n",
 		res.Frozen.ID, res.Name, s.FrozenDir(res.Name, res.Frozen.ID))
+	fmt.Fprintf(stdout, "Run `aileron skill bind %q` to supply this plan's credentials\n", res.Name)
 	return 0
 }
