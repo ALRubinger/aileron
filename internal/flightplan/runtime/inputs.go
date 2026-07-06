@@ -41,7 +41,7 @@ type LaunchArgs map[string]any
 // The clock is read at most once and the value reused for every dynamic input,
 // so the launch-boundary straddle (#1523) cannot give two steps different
 // clock values.
-func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *enforcer) (ResolvedInputs, error) {
+func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *enforcer, prompter InputPrompter) (ResolvedInputs, error) {
 	if args == nil {
 		args = LaunchArgs{}
 	}
@@ -56,7 +56,7 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 	for _, in := range p.Inputs {
 		switch in.Resolution.Rule {
 		case ResolutionLiteral:
-			val, err := resolveLiteral(in, args)
+			val, err := resolveLiteral(in, args, prompter)
 			if err != nil {
 				return ResolvedInputs{}, err
 			}
@@ -136,13 +136,25 @@ func enforceConstraint(name string, v any, c *Constraint) error {
 }
 
 // resolveLiteral resolves a literal input: the launch override wins, then the
-// declared default. A literal with neither is a missing required input.
-func resolveLiteral(in Input, args LaunchArgs) (any, error) {
+// declared default. A literal with neither is a missing required input; when an
+// InputPrompter is wired (an interactive launch) it is asked for the value
+// instead, and the prompted string flows through the same deep-copy and
+// constraint-enforcement passes as a `--input name=value` override. When no
+// prompter is wired (a piped or CI launch), the missing input fails fast, as
+// before.
+func resolveLiteral(in Input, args LaunchArgs, prompter InputPrompter) (any, error) {
 	if v, ok := args[in.Name]; ok {
 		return v, nil
 	}
 	if in.Resolution.HasDefault {
 		return in.Resolution.Default, nil
+	}
+	if prompter != nil {
+		v, err := prompter.PromptInput(in)
+		if err != nil {
+			return nil, fmt.Errorf("input %q: prompt for value: %w", in.Name, err)
+		}
+		return v, nil
 	}
 	return nil, fmt.Errorf("input %q is required: pass it at launch (it declares no default)", in.Name)
 }
