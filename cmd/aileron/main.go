@@ -193,7 +193,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "action":
 		return runAction(args[1:], os.Stdin, stdout, stderr)
 	case "skill":
-		return runSkill(args[1:], stdout, stderr)
+		return runSkill(args[1:], os.Stdin, stdout, stderr)
 	case "keyring":
 		return runKeyring(args[1:], stdout, stderr)
 	case "hub":

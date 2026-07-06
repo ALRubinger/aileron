@@ -49,10 +49,18 @@ An OCI install writes a frozen version, so it appears under `~/.aileron/skills/<
 
 ```
 Installed frozen version v1a2b3c4d5e6f of skill "weekly-metrics-digest" to /Users/you/.aileron/skills/weekly-metrics-digest/versions/v1a2b3c4d5e6f
+Bind "weekly-metrics-digest"'s declared credentials now? [Y/n]:
+```
+
+A frozen plan carries a signed trust contract, so the install can derive its credential requirements right away. When you run the install at a terminal, it offers to bind those credentials on the spot. Answering yes (the default) chains straight into `aileron skill bind` for the version it just wrote, so you onboard the plan's credentials in one step. Answering no prints the pointer instead:
+
+```
 Run `aileron skill bind "weekly-metrics-digest"` to supply this plan's credentials
 ```
 
-The version id is the frozen content-hash slug, so a re-install of the same published plan is a no-op that reuses the same directory. Install does not pull the plan's container image. The image pin recorded in the lockfile is resolved at `aileron skill launch`, not at install. The install prints a one-line pointer to `aileron skill bind` so you know how to onboard the plan's credentials next.
+The offer only appears at an interactive terminal. A non-interactive install (in CI, or with piped stdin) never blocks on the prompt and always prints the pointer, so a scripted install behaves exactly as before.
+
+The version id is the frozen content-hash slug, so a re-install of the same published plan is a no-op that reuses the same directory. Install does not pull the plan's container image. The image pin recorded in the lockfile is resolved at `aileron skill launch`, not at install.
 
 > Installing by an [agentskills.io](https://agentskills.io) registry slug is not supported. agentskills.io is a format spec, not a registry, so a slug has no canonical location to resolve against. Install from a local path, a git URL, or an OCI reference instead.
 

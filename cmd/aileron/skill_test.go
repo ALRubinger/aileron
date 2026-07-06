@@ -100,7 +100,7 @@ func TestRunSkillInstall_InstructionOnly_Clean(t *testing.T) {
 	constructed := stubFetcher(t, nil, nil, errors.New("must not be reached"))
 
 	var stdout, stderr bytes.Buffer
-	if code := runSkillInstall([]string{src}, &stdout, &stderr); code != 0 {
+	if code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
 	if *constructed {
@@ -133,7 +133,7 @@ func TestRunSkillInstall_CredentialedSatisfiable_NoWarning(t *testing.T) {
 	}, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	if code := runSkillInstall([]string{src}, &stdout, &stderr); code != 0 {
+	if code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "warning") {
@@ -148,7 +148,7 @@ func TestRunSkillInstall_Unsatisfiable_WarnsButExits0(t *testing.T) {
 	stubFetcher(t, nil, nil, nil)
 
 	var stdout, stderr bytes.Buffer
-	code := runSkillInstall([]string{src}, &stdout, &stderr)
+	code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("unsatisfiable install must still exit 0, got %d", code)
 	}
@@ -167,7 +167,7 @@ func TestRunSkillInstall_DaemonDownInstructionOnly_Clean(t *testing.T) {
 	stubFetcher(t, nil, nil, errors.New("daemon down"))
 
 	var stdout, stderr bytes.Buffer
-	if code := runSkillInstall([]string{src}, &stdout, &stderr); code != 0 {
+	if code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
 	if strings.Contains(stderr.String(), "daemon") {
@@ -182,7 +182,7 @@ func TestRunSkillInstall_DaemonDownCredentialed_DegradesNotFails(t *testing.T) {
 	stubFetcher(t, nil, nil, errors.New("connection refused"))
 
 	var stdout, stderr bytes.Buffer
-	code := runSkillInstall([]string{src}, &stdout, &stderr)
+	code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("daemon-down credentialed install must degrade not fail, got %d", code)
 	}
@@ -226,7 +226,7 @@ func TestRunSkillList_Empty(t *testing.T) {
 
 func TestRunSkill_UnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runSkill([]string{"frobnicate"}, &stdout, &stderr); code != 1 {
+	if code := runSkill([]string{"frobnicate"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("unknown subcommand exit = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "unknown skill command") {
@@ -238,11 +238,11 @@ func TestRunSkillInstall_RequiresExactlyOneSource(t *testing.T) {
 	withTempStore(t)
 	var stdout, stderr bytes.Buffer
 	// No source argument.
-	if code := runSkillInstall(nil, &stdout, &stderr); code != 1 {
+	if code := runSkillInstall(nil, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("no source exit = %d, want 1", code)
 	}
 	// Two sources.
-	if code := runSkillInstall([]string{"a", "b"}, &stdout, &stderr); code != 1 {
+	if code := runSkillInstall([]string{"a", "b"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("two sources exit = %d, want 1", code)
 	}
 }
@@ -250,7 +250,7 @@ func TestRunSkillInstall_RequiresExactlyOneSource(t *testing.T) {
 func TestRunSkillInstall_BadFlag(t *testing.T) {
 	withTempStore(t)
 	var stdout, stderr bytes.Buffer
-	if code := runSkillInstall([]string{"--nope"}, &stdout, &stderr); code != 1 {
+	if code := runSkillInstall([]string{"--nope"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("bad flag exit = %d, want 1", code)
 	}
 }
@@ -261,7 +261,7 @@ func TestRunSkillInstall_BadSourceError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// A nonexistent local path that is not a git URL classifies as a slug,
 	// which is not wired, so install surfaces an error and exits 1.
-	if code := runSkillInstall([]string{"definitely/not/installed"}, &stdout, &stderr); code != 1 {
+	if code := runSkillInstall([]string{"definitely/not/installed"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("unresolvable source exit = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "error:") {
@@ -278,7 +278,7 @@ func TestNewSkillFetcher_DaemonUnreachableDegrades(t *testing.T) {
 	src := exampleSource(t)
 
 	var stdout, stderr bytes.Buffer
-	code := runSkillInstall([]string{src}, &stdout, &stderr)
+	code := runSkillInstall([]string{src}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("daemon-unreachable credentialed install must degrade not fail, got %d, stderr=%s", code, stderr.String())
 	}
@@ -289,7 +289,7 @@ func TestNewSkillFetcher_DaemonUnreachableDegrades(t *testing.T) {
 
 func TestRunSkill_NoArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runSkill(nil, &stdout, &stderr); code != 1 {
+	if code := runSkill(nil, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Errorf("no-args exit = %d, want 1", code)
 	}
 }
