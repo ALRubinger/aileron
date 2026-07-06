@@ -316,9 +316,11 @@ func runSkillBind(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 // caller against a live view of the vault and descriptors, so a
 // partially-onboarded requirement fills only its missing half and a secret
 // shared by two requirements is prompted once. It returns the descriptor entries
-// the caller batches into a single Upsert, any advisories (for templated hosts),
-// and whether it stored a secret (so the caller keeps its live vault view in
-// sync and reports an accurate summary).
+// the caller batches into a single Upsert, any advisories (a templated host that
+// cannot be onboarded automatically, or a sigv4 access key ID written while an
+// existing secret is reused so a rotation mismatch is caught at bind time), and
+// whether it stored a secret (so the caller keeps its live vault view in sync and
+// reports an accurate summary).
 func fillRequirement(req credreq.RequiredBinding, needSecret, needDescriptor bool, client bindVaultClient, stdin *bufio.Reader, stdout, stderr io.Writer) ([]proxybinding.Entry, []string, bool, error) {
 	storedSecret := false
 	if needSecret {
@@ -358,7 +360,21 @@ func fillRequirement(req credreq.RequiredBinding, needSecret, needDescriptor boo
 		for _, w := range entry.Warnings() {
 			fmt.Fprintf(stderr, "warning: %s\n", w)
 		}
-		return []proxybinding.Entry{entry}, nil, storedSecret, nil
+		// For an aws-sigv4 credential the access key ID and the secret are a
+		// matched pair. When bind writes an access key ID while reusing a secret
+		// it did not just capture (!needSecret), the operator may have rotated
+		// the key (new ID + new secret) but only re-entered the new ID, leaving
+		// the stale old secret in the vault. That mismatch surfaces far away as an
+		// opaque SignatureDoesNotMatch at launch, so warn at bind time to update
+		// the secret if this key was rotated. The access key ID is the non-secret
+		// half and is safe to echo.
+		var advisories []string
+		if !needSecret {
+			advisories = append(advisories, fmt.Sprintf(
+				"reusing the secret already stored at %s with access key ID %s; if you rotated this key, run `aileron vault put %s` with the new secret access key so the stored secret matches the new access key ID (they must belong to the same key)",
+				req.CredentialRef, akid, req.CredentialRef))
+		}
+		return []proxybinding.Entry{entry}, advisories, storedSecret, nil
 	}
 
 	// Host-keyed (bearer): one entry per non-templated host. A templated host
