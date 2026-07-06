@@ -45,12 +45,11 @@ func setPreflightHome(t *testing.T, body string) {
 func TestPreflightHostBindings_CleanDescriptorPasses(t *testing.T) {
 	setPreflightHome(t, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: AKIAIOSFODNN7EXAMPLE\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: AKIAIOSFODNN7EXAMPLE\n")
 
 	var out bytes.Buffer
 	if err := preflightHostBindings(&out); err != nil {
@@ -93,12 +92,11 @@ func TestPreflightHostBindings_NoDescriptorPasses(t *testing.T) {
 func TestPreflightHostBindings_PlaceholderFailsLaunch(t *testing.T) {
 	setPreflightHome(t, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: <AccessKeyId>\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: <AccessKeyId>\n")
 
 	var out bytes.Buffer
 	err := preflightHostBindings(&out)
@@ -118,12 +116,11 @@ func TestPreflightHostBindings_PlaceholderFailsLaunch(t *testing.T) {
 func TestPreflightHostBindings_SuspectShapeWarnsNotFatal(t *testing.T) {
 	setPreflightHome(t, "version: v1\n"+
 		"bindings:\n"+
-		"  - host: s3.amazonaws.com\n"+
+		"  - kind: aws-sigv4\n"+
+		"    identity_label: metrics-reader\n"+
 		"    credential_ref: user/aws\n"+
 		"    scheme: sigv4-resign\n"+
-		"    access_key_id: totally-wrong-shape\n"+
-		"    region: us-east-1\n"+
-		"    service: s3\n")
+		"    access_key_id: totally-wrong-shape\n")
 
 	var out bytes.Buffer
 	if err := preflightHostBindings(&out); err != nil {

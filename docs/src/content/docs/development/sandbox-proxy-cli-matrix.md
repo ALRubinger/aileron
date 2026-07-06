@@ -214,7 +214,7 @@ aws configure set aws_secret_access_key placeholder-aileron-injects-real
 aws configure set region us-east-1
 ```
 
-`aws` is `proxy-sealable` via `sigv4-resign`. The placeholder credentials above let botocore sign the request locally so it leaves the client. At the TLS proxy boundary the daemon strips that local signature and re-signs the request with the real secret access key resolved host-side, using the access key id, region, and service declared in the `sigv4-resign` host binding. The real secret access key never enters the container; it is HMAC key material the daemon holds in the vault. See [ADR-0019](/adr/0019-v4-https-data-plane/).
+`aws` is `proxy-sealable` via `sigv4-resign`. The placeholder credentials above let botocore sign the request locally so it leaves the client. At the TLS proxy boundary the daemon strips that local signature and re-signs the request with the real secret access key resolved host-side, using the access key id declared in the `sigv4-resign` binding. The binding carries only the access key id and is keyed by its credential identity rather than a host. The daemon derives the signing region and service from the resolved upstream host, so the binding carries no region or service and no second copy of the region can drift from the host being signed for. The real secret access key never enters the container; it is HMAC key material the daemon holds in the vault. See [ADR-0019](/adr/0019-v4-https-data-plane/).
 
 ### Success case
 

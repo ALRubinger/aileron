@@ -193,20 +193,11 @@ type Entry struct {
 	// AccessKeyID is the non-secret AWS access key ID, required only for the
 	// sigv4-resign scheme. It appears verbatim in the signed request's
 	// Credential= field; the secret access key travels in the resolved
-	// credential value, never here.
+	// credential value, never here. A sigv4-resign entry carries no region or
+	// service: the egress injector derives the SigV4 credential scope from the
+	// resolved upstream host (#1978), so there is no second, operator-supplied
+	// copy of the region that could drift from the host being signed for.
 	AccessKeyID string `yaml:"access_key_id"`
-
-	// Region is the non-secret AWS region (e.g. "us-east-1") used for the
-	// SigV4 credential scope. Optional for the sigv4-resign scheme: the
-	// egress injector derives the region from the resolved upstream host
-	// and consults this field only as a fallback for an unparseable host.
-	Region string `yaml:"region"`
-
-	// Service is the non-secret AWS service name (e.g. "s3") used for the
-	// SigV4 credential scope. Optional for the sigv4-resign scheme: the
-	// egress injector derives the service from the resolved upstream host
-	// and consults this field only as a fallback for an unparseable host.
-	Service string `yaml:"service"`
 
 	// AllowedHosts is the optional per-binding trust-contract host
 	// allowlist. Empty means unconstrained: egress on the bound host stays
@@ -283,7 +274,7 @@ func Parse(data []byte) (Descriptor, error) {
 	for i := range d.Bindings {
 		e := &d.Bindings[i]
 		if err := e.Validate(); err != nil {
-			return Descriptor{}, fmt.Errorf("proxybinding: binding %d (%q): %w", i, e.Host, err)
+			return Descriptor{}, fmt.Errorf("proxybinding: binding %d (%s): %w", i, e.dedupLabel(), err)
 		}
 		key := e.dedupKey()
 		if _, dup := seen[key]; dup {
@@ -408,13 +399,21 @@ func (e *Entry) Validate() error {
 			return fmt.Errorf("query-param scheme requires a query_param name")
 		}
 	case string(inject.SchemeSigV4Resign):
-		// Only access_key_id is required: it is non-derivable and appears
-		// verbatim in the signed Credential= field. region and service are
-		// optional because the egress injector derives the SigV4 scope from
-		// the resolved upstream host, consulting the stored region/service
-		// only as a fallback for an unparseable host.
+		// A sigv4-resign entry is identity-only (#1978). It requires the
+		// non-derivable access_key_id (it appears verbatim in the signed
+		// Credential= field) plus a complete credential identity, and it must
+		// not carry a host: the egress injector derives the SigV4 credential
+		// scope (region + service) from the resolved upstream host and selects
+		// the credential by its (kind, identity_label) pair, so a host on the
+		// entry would be the very second copy the umbrella eliminates.
 		if e.AccessKeyID == "" {
 			return fmt.Errorf("sigv4-resign scheme requires an access_key_id")
+		}
+		if !hasIdentity {
+			return fmt.Errorf("sigv4-resign scheme requires a complete credential identity (kind + identity_label)")
+		}
+		if e.Host != "" {
+			return fmt.Errorf("sigv4-resign scheme must not carry a host; the credential is selected by identity and the SigV4 scope is derived from the resolved upstream host at egress")
 		}
 	}
 
@@ -453,8 +452,6 @@ func (e *Entry) rejectPlaceholders() error {
 		{"template", e.Template},
 		{"query_param", e.QueryParam},
 		{"access_key_id", e.AccessKeyID},
-		{"region", e.Region},
-		{"service", e.Service},
 		{"effect", e.Effect},
 	}
 	if e.Sentinel != nil {
@@ -491,8 +488,8 @@ func (e *Entry) Warnings() []string {
 		e.AccessKeyID != "" &&
 		!sigv4AccessKeyIDPattern.MatchString(e.AccessKeyID) {
 		out = append(out, fmt.Sprintf(
-			"binding %q: sigv4-resign access_key_id %q does not match the expected AWS access key ID shape (AKIA/ASIA + 16 uppercase alphanumerics); verify it is correct",
-			e.Host, e.AccessKeyID))
+			"binding %s: sigv4-resign access_key_id %q does not match the expected AWS access key ID shape (AKIA/ASIA + 16 uppercase alphanumerics); verify it is correct",
+			e.dedupLabel(), e.AccessKeyID))
 	}
 	return out
 }

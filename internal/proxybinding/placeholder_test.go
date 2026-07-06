@@ -19,12 +19,11 @@ func TestLoad_RejectsPlaceholderAccessKeyID(t *testing.T) {
 	dir := t.TempDir()
 	body := "version: v1\n" +
 		"bindings:\n" +
-		"  - host: s3.amazonaws.com\n" +
+		"  - kind: aws-sigv4\n" +
+		"    identity_label: metrics-reader\n" +
 		"    credential_ref: user/aws\n" +
 		"    scheme: sigv4-resign\n" +
-		"    access_key_id: <AccessKeyId>\n" +
-		"    region: us-east-1\n" +
-		"    service: s3\n"
+		"    access_key_id: <AccessKeyId>\n"
 	path := writeDescriptor(t, dir, "user.yaml", body)
 
 	_, err := Load(LoadOptions{UserPath: path})
@@ -32,7 +31,7 @@ func TestLoad_RejectsPlaceholderAccessKeyID(t *testing.T) {
 		t.Fatal("Load = nil error, want a load-time rejection of the placeholder access_key_id")
 	}
 	msg := err.Error()
-	for _, want := range []string{"access_key_id", "<AccessKeyId>", "s3.amazonaws.com", path} {
+	for _, want := range []string{"access_key_id", "<AccessKeyId>", "metrics-reader", path} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q missing %q (want file+entry+field naming)", msg, want)
 		}
@@ -61,22 +60,11 @@ func TestValidate_RejectsPlaceholderInEveryStringField(t *testing.T) {
 		}},
 		{"query_param", func(e *Entry) { e.Scheme = binding.SchemeQueryParam; e.QueryParam = "<qp>" }},
 		{"access_key_id", func(e *Entry) {
+			e.Host = ""
+			e.Kind = "aws-sigv4"
+			e.IdentityLabel = "metrics-reader"
 			e.Scheme = binding.SchemeSigV4Resign
 			e.AccessKeyID = "<AccessKeyId>"
-			e.Region = "us-east-1"
-			e.Service = "s3"
-		}},
-		{"region", func(e *Entry) {
-			e.Scheme = binding.SchemeSigV4Resign
-			e.AccessKeyID = "AKIAIOSFODNN7EXAMPLE"
-			e.Region = "<region>"
-			e.Service = "s3"
-		}},
-		{"service", func(e *Entry) {
-			e.Scheme = binding.SchemeSigV4Resign
-			e.AccessKeyID = "AKIAIOSFODNN7EXAMPLE"
-			e.Region = "us-east-1"
-			e.Service = "<service>"
 		}},
 		{"effect", func(e *Entry) { e.Effect = "<effect>" }},
 		{"allowed_hosts[0]", func(e *Entry) { e.AllowedHosts = []string{"<host>"} }},
@@ -122,19 +110,18 @@ func TestLoad_AKIDEXAMPLEAndBuiltinsLoadClean(t *testing.T) {
 	dir := t.TempDir()
 	body := "version: v1\n" +
 		"bindings:\n" +
-		"  - host: s3.amazonaws.com\n" +
+		"  - kind: aws-sigv4\n" +
+		"    identity_label: metrics-reader\n" +
 		"    credential_ref: user/aws\n" +
 		"    scheme: sigv4-resign\n" +
-		"    access_key_id: AKIDEXAMPLE\n" +
-		"    region: us-east-1\n" +
-		"    service: s3\n"
+		"    access_key_id: AKIDEXAMPLE\n"
 	path := writeDescriptor(t, dir, filepath.Base("aws-user.yaml"), body)
 
 	table, warnings, err := LoadHostBindingsWithWarnings(LoadOptions{UserPath: path})
 	if err != nil {
 		t.Fatalf("AKIDEXAMPLE vector must load clean, not error: %v", err)
 	}
-	if _, ok := table.Match("s3.amazonaws.com"); !ok {
+	if _, ok := table.MatchIdentity("aws-sigv4", "metrics-reader"); !ok {
 		t.Error("AKIDEXAMPLE binding must be present in the table")
 	}
 	// AKIDEXAMPLE does not match the AKIA/ASIA shape, so warn-only surfaces a
@@ -150,19 +137,18 @@ func TestLoadWithWarnings_SuspectSigV4KeyWarns(t *testing.T) {
 	dir := t.TempDir()
 	body := "version: v1\n" +
 		"bindings:\n" +
-		"  - host: s3.amazonaws.com\n" +
+		"  - kind: aws-sigv4\n" +
+		"    identity_label: metrics-reader\n" +
 		"    credential_ref: user/aws\n" +
 		"    scheme: sigv4-resign\n" +
-		"    access_key_id: totally-wrong-shape\n" +
-		"    region: us-east-1\n" +
-		"    service: s3\n"
+		"    access_key_id: totally-wrong-shape\n"
 	path := writeDescriptor(t, dir, "user.yaml", body)
 
 	table, warnings, err := LoadHostBindingsWithWarnings(LoadOptions{UserPath: path})
 	if err != nil {
 		t.Fatalf("suspect-shape key must not block load: %v", err)
 	}
-	if _, ok := table.Match("s3.amazonaws.com"); !ok {
+	if _, ok := table.MatchIdentity("aws-sigv4", "metrics-reader"); !ok {
 		t.Error("suspect-key binding must still be present in the table")
 	}
 	if len(warnings) == 0 {
@@ -182,12 +168,11 @@ func TestLoadWithWarnings_SuspectSigV4KeyWarns(t *testing.T) {
 func TestWarnings_WellShapedSigV4KeyIsSilent(t *testing.T) {
 	for _, key := range []string{"AKIAIOSFODNN7EXAMPLE", "ASIAY34FZKBOKMUTVV7A"} {
 		e := &Entry{
-			Host:          "s3.amazonaws.com",
+			Kind:          "aws-sigv4",
+			IdentityLabel: "metrics-reader",
 			CredentialRef: "user/aws",
 			Scheme:        binding.SchemeSigV4Resign,
 			AccessKeyID:   key,
-			Region:        "us-east-1",
-			Service:       "s3",
 		}
 		if err := e.Validate(); err != nil {
 			t.Fatalf("well-shaped key %q must validate: %v", key, err)

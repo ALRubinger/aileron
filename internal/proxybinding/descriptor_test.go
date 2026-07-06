@@ -78,16 +78,12 @@ func TestParse_EachSchemeValidates(t *testing.T) {
 			want: binding.SchemeQueryParam,
 		},
 		{
-			name: "sigv4-resign",
-			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n    service: s3\n",
-			want: binding.SchemeSigV4Resign,
-		},
-		{
-			// region and service are optional: the egress injector derives the
-			// SigV4 scope from the resolved upstream host, so a descriptor may
-			// omit them and still load.
-			name: "sigv4-resign no region or service",
-			yaml: "version: v1\nbindings:\n  - host: athena.us-east-1.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n",
+			// A sigv4-resign entry is identity-only (#1978): it carries an
+			// access_key_id plus a credential identity and no host, region, or
+			// service. The egress injector derives the SigV4 scope from the
+			// resolved upstream host and selects the credential by identity.
+			name: "sigv4-resign identity-only",
+			yaml: "version: v1\nbindings:\n  - kind: aws-sigv4\n    identity_label: metrics-reader\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n",
 			want: binding.SchemeSigV4Resign,
 		},
 	}
@@ -194,7 +190,31 @@ func TestParse_Errors(t *testing.T) {
 		},
 		{
 			name: "sigv4-resign missing access_key_id",
-			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    region: us-east-1\n    service: s3\n",
+			yaml: "version: v1\nbindings:\n  - kind: aws-sigv4\n    identity_label: metrics-reader\n    credential_ref: user/aws\n    scheme: sigv4-resign\n",
+		},
+		{
+			// A sigv4-resign entry is identity-only: with no credential
+			// identity it has no selection key and is rejected.
+			name: "sigv4-resign missing identity",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n",
+		},
+		{
+			// A host on a sigv4-resign entry is the second copy of the region
+			// the umbrella eliminates: fail closed.
+			name: "sigv4-resign with a host",
+			yaml: "version: v1\nbindings:\n  - host: s3.amazonaws.com\n    kind: aws-sigv4\n    identity_label: metrics-reader\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n",
+		},
+		{
+			// region is no longer a descriptor field: strict YAML decoding
+			// rejects a legacy descriptor that still carries it, so no second
+			// copy of the region can be supplied by an operator.
+			name: "sigv4-resign with legacy region key rejected",
+			yaml: "version: v1\nbindings:\n  - kind: aws-sigv4\n    identity_label: metrics-reader\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    region: us-east-1\n",
+		},
+		{
+			// service is likewise no longer a descriptor field.
+			name: "sigv4-resign with legacy service key rejected",
+			yaml: "version: v1\nbindings:\n  - kind: aws-sigv4\n    identity_label: metrics-reader\n    credential_ref: user/aws\n    scheme: sigv4-resign\n    access_key_id: AKIDEXAMPLE\n    service: s3\n",
 		},
 		{
 			name: "invalid credential_ref",

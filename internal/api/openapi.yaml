@@ -7370,18 +7370,14 @@ components:
         account:
           type: string
           description: Human-readable account label derived from credential metadata when available.
-        region:
-          type: string
-          description: |
-            AWS region this binding signs for, set only on `aws_sigv4`
-            bindings. Non-secret. Disambiguates multiple region-scoped
-            bindings for the same connector install.
         access_key_id:
           type: string
           description: |
             AWS access key ID for an `aws_sigv4` binding. Non-secret (it
             appears verbatim in the signed `Authorization` header). Empty
-            for other kinds.
+            for other kinds. The signing region and service are derived from
+            the resolved upstream host at egress, so no region rides on the
+            binding.
         created_at:
           type: string
           format: date-time
@@ -7464,14 +7460,6 @@ components:
             `aws_sigv4` it is the AWS secret access key. Required for both
             kinds. The runtime stores this encrypted in the vault and never
             exposes it to the connector.
-        region:
-          type: string
-          description: |
-            Optional AWS region for an `aws_sigv4` binding (e.g.
-            `us-east-1`). Non-secret. When set it is stored on the binding
-            and wins over the connector manifest's `region` at signing
-            time, which is what lets one connector install hold several
-            region-scoped bindings. Ignored for other kinds.
         access_key_id:
           type: string
           description: |
@@ -7479,7 +7467,9 @@ components:
             (it appears verbatim in the signed `Authorization` header's
             `Credential=` field). When set it is stored on the binding and
             wins over the connector manifest's `access_key_id` at signing
-            time. Ignored for other kinds.
+            time. Ignored for other kinds. The signing region and service are
+            derived from the resolved upstream host at egress, so a binding
+            carries no region.
 
     BindingSetupRequest:
       type: object

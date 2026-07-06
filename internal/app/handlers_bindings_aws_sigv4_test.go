@@ -15,8 +15,9 @@ import (
 // TestSetupBindings_CreatesAWSSigV4Binding is the setup-gate half of the
 // #1663 regression: an aws_sigv4 source is accepted (no longer rejected as
 // unsupported_kind), the secret access key is stored, and the non-secret
-// region / access_key_id are persisted on the binding so request-time
-// region selection can disambiguate multiple installs.
+// access_key_id is persisted on the binding. The source carries no region:
+// the signing region and service are derived from the resolved upstream host
+// at egress (#1978), so there is no operator-supplied region to persist.
 func TestSetupBindings_CreatesAWSSigV4Binding(t *testing.T) {
 	srv, _ := bindingTestServer(t)
 	installFakeAPIKeyConnector(t, srv.installer.Store, "github://acme/athena", "1.0.0", "aws_sigv4")
@@ -29,7 +30,6 @@ func TestSetupBindings_CreatesAWSSigV4Binding(t *testing.T) {
 				"source": {
 					"kind": "aws_sigv4",
 					"value": "wJalrSecretAccessKeyEXAMPLE",
-					"region": "us-east-1",
 					"access_key_id": "AKIAEASTEXAMPLE"
 				}
 			}
@@ -51,11 +51,13 @@ func TestSetupBindings_CreatesAWSSigV4Binding(t *testing.T) {
 	if b.Name != "aws_sigv4/athena/prod-east" {
 		t.Errorf("Name = %q, want aws_sigv4/athena/prod-east", b.Name)
 	}
-	if b.Region == nil || *b.Region != "us-east-1" {
-		t.Errorf("Region = %v, want us-east-1", b.Region)
-	}
 	if b.AccessKeyId == nil || *b.AccessKeyId != "AKIAEASTEXAMPLE" {
 		t.Errorf("AccessKeyId = %v, want AKIAEASTEXAMPLE", b.AccessKeyId)
+	}
+
+	// The response no longer carries a region field at all.
+	if strings.Contains(rec.Body.String(), `"region"`) {
+		t.Errorf("response still carries a region field: %s", rec.Body.String())
 	}
 
 	// The secret access key must never appear in the response surface.
@@ -63,13 +65,46 @@ func TestSetupBindings_CreatesAWSSigV4Binding(t *testing.T) {
 		t.Errorf("response leaked the secret access key: %s", rec.Body.String())
 	}
 
-	// And the stored binding's metadata carries region/access_key_id.
+	// And the stored binding's metadata carries the access key id.
 	stored, err := srv.bindings.Get(context.Background(), binding.Name("aws_sigv4/athena/prod-east"))
 	if err != nil {
 		t.Fatalf("Get stored binding: %v", err)
 	}
-	if stored.Region != "us-east-1" || stored.AccessKeyID != "AKIAEASTEXAMPLE" {
-		t.Errorf("stored region/akid = %q/%q", stored.Region, stored.AccessKeyID)
+	if stored.AccessKeyID != "AKIAEASTEXAMPLE" {
+		t.Errorf("stored akid = %q, want AKIAEASTEXAMPLE", stored.AccessKeyID)
+	}
+}
+
+// TestSetupBindings_RejectsLegacyRegion is the #1978 regression: an aws_sigv4
+// setup payload that still carries a `region` field is rejected with a
+// structured 400 rather than silently accepted with the stray field dropped.
+// The operator surface no longer has any place to supply a region, so no
+// second copy of the region can drift from the host being signed for.
+func TestSetupBindings_RejectsLegacyRegion(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	installFakeAPIKeyConnector(t, srv.installer.Store, "github://acme/athena", "1.0.0", "aws_sigv4")
+
+	body := `{
+		"connector_fqn": "github://acme/athena",
+		"bindings": [
+			{
+				"identity": "prod-east",
+				"source": {
+					"kind": "aws_sigv4",
+					"value": "wJalrSecretAccessKeyEXAMPLE",
+					"access_key_id": "AKIAEASTEXAMPLE",
+					"region": "us-east-1"
+				}
+			}
+		]
+	}`
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Errorf("expected invalid_request for legacy region field: %s", rec.Body.String())
 	}
 }
 
@@ -82,7 +117,7 @@ func TestSetupBindings_AWSSigV4MissingValueIs400(t *testing.T) {
 	body := `{
 		"connector_fqn": "github://acme/athena",
 		"bindings": [
-			{"identity": "prod", "source": {"kind": "aws_sigv4", "region": "us-east-1"}}
+			{"identity": "prod", "source": {"kind": "aws_sigv4", "access_key_id": "AKIAEASTEXAMPLE"}}
 		]
 	}`
 	rec := httptest.NewRecorder()
@@ -114,17 +149,17 @@ func TestSetupBindings_RejectsTrulyUnsupportedKind(t *testing.T) {
 	}
 }
 
-// TestRebind_ReplacesAWSSigV4SecretAndRegion exercises the rebind twin of
-// the gate: aws_sigv4 rebind rotates the secret and may update the
-// non-secret region / access_key_id.
-func TestRebind_ReplacesAWSSigV4SecretAndRegion(t *testing.T) {
+// TestRebind_ReplacesAWSSigV4SecretAndAccessKeyID exercises the rebind twin of
+// the gate: aws_sigv4 rebind rotates the secret and may update the non-secret
+// access_key_id. The source carries no region (#1978).
+func TestRebind_ReplacesAWSSigV4SecretAndAccessKeyID(t *testing.T) {
 	srv, _ := bindingTestServer(t)
 	installFakeAPIKeyConnector(t, srv.installer.Store, "github://acme/athena", "1.0.0", "aws_sigv4")
 
 	// Seed via setup.
 	setupBody := `{
 		"connector_fqn": "github://acme/athena",
-		"bindings": [{"identity":"prod","source":{"kind":"aws_sigv4","value":"old-secret","region":"us-east-1","access_key_id":"AKIAOLD"}}]
+		"bindings": [{"identity":"prod","source":{"kind":"aws_sigv4","value":"old-secret","access_key_id":"AKIAOLD"}}]
 	}`
 	rec := httptest.NewRecorder()
 	srv.SetupBindings(rec, httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(setupBody)))
@@ -132,7 +167,7 @@ func TestRebind_ReplacesAWSSigV4SecretAndRegion(t *testing.T) {
 		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	rebindBody := `{"source":{"kind":"aws_sigv4","value":"new-secret","region":"eu-west-1","access_key_id":"AKIANEW"}}`
+	rebindBody := `{"source":{"kind":"aws_sigv4","value":"new-secret","access_key_id":"AKIANEW"}}`
 	rec = httptest.NewRecorder()
 	srv.RebindBinding(rec,
 		httptest.NewRequest(http.MethodPost, "/v1/bindings/aws_sigv4/athena/prod/rebind", strings.NewReader(rebindBody)),
@@ -145,7 +180,37 @@ func TestRebind_ReplacesAWSSigV4SecretAndRegion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Region != "eu-west-1" || stored.AccessKeyID != "AKIANEW" {
-		t.Errorf("after rebind region/akid = %q/%q, want eu-west-1/AKIANEW", stored.Region, stored.AccessKeyID)
+	if stored.AccessKeyID != "AKIANEW" {
+		t.Errorf("after rebind akid = %q, want AKIANEW", stored.AccessKeyID)
+	}
+}
+
+// TestRebind_RejectsLegacyRegion is the rebind twin of the #1978 regression:
+// a rebind payload that still carries a `region` field is rejected with a
+// structured 400 rather than silently accepted.
+func TestRebind_RejectsLegacyRegion(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	installFakeAPIKeyConnector(t, srv.installer.Store, "github://acme/athena", "1.0.0", "aws_sigv4")
+
+	setupBody := `{
+		"connector_fqn": "github://acme/athena",
+		"bindings": [{"identity":"prod","source":{"kind":"aws_sigv4","value":"old-secret","access_key_id":"AKIAOLD"}}]
+	}`
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(setupBody)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rebindBody := `{"source":{"kind":"aws_sigv4","value":"new-secret","access_key_id":"AKIANEW","region":"eu-west-1"}}`
+	rec = httptest.NewRecorder()
+	srv.RebindBinding(rec,
+		httptest.NewRequest(http.MethodPost, "/v1/bindings/aws_sigv4/athena/prod/rebind", strings.NewReader(rebindBody)),
+		api.BindingName("aws_sigv4/athena/prod"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("rebind status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Errorf("expected invalid_request for legacy region field: %s", rec.Body.String())
 	}
 }

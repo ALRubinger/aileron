@@ -878,8 +878,6 @@ func runBindingInspect(args []string, stdout, stderr io.Writer) int {
 func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("binding setup", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	region := flags.String("region", "",
-		"AWS region for an aws_sigv4 binding (e.g. us-east-1); non-secret, wins over the connector manifest")
 	accessKeyID := flags.String("access-key-id", "",
 		"AWS access key id for an aws_sigv4 binding; non-secret, wins over the connector manifest")
 	if err := flags.Parse(args); err != nil {
@@ -887,7 +885,7 @@ func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 	}
 	rest := flags.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(stderr, "usage: aileron binding setup [--region R] [--access-key-id ID] <connector-FQN>")
+		fmt.Fprintln(stderr, "usage: aileron binding setup [--access-key-id ID] <connector-FQN>")
 		return 1
 	}
 	connectorFQN := rest[0]
@@ -914,14 +912,14 @@ func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 		// Connector isn't oauth2 — fall through to a secret flow. The
 		// not_oauth2 response carries the connector's declared kind so the
 		// CLI prompts for the right secret and sends the matching kind
-		// without guessing. The --region / --access-key-id flags also imply
-		// the aws_sigv4 path for connectors whose manifest leaves them out.
+		// without guessing. The --access-key-id flag also implies the
+		// aws_sigv4 path for connectors whose manifest leaves it out.
 	default:
 		fmt.Fprintf(stderr, "server returned %d: %s\n", initStatus, string(initRespBody))
 		return 1
 	}
-	if declaredKindFromNotOAuth2(initRespBody) == "aws_sigv4" || *region != "" || *accessKeyID != "" {
-		return runBindingSetupAWSSigV4(connectorFQN, identity, *region, *accessKeyID, stdin, stdout, stderr)
+	if declaredKindFromNotOAuth2(initRespBody) == "aws_sigv4" || *accessKeyID != "" {
+		return runBindingSetupAWSSigV4(connectorFQN, identity, *accessKeyID, stdin, stdout, stderr)
 	}
 	return runBindingSetupAPIKey(connectorFQN, identity, stdin, stdout, stderr)
 }
@@ -946,18 +944,16 @@ func declaredKindFromNotOAuth2(body []byte) string {
 	return ""
 }
 
-// runBindingSetupAWSSigV4 prompts for the AWS access key id, secret access
-// key, and region, then POSTs an aws_sigv4 binding. A value supplied via the
-// --access-key-id / --region flags takes precedence and suppresses the
-// matching prompt, so one connector install can hold several region-scoped
-// bindings (multi-region / binding-wins). The non-secret access key id and
-// region ride alongside the secret so the host can sign without consulting
-// the manifest; when both flag and prompt are left blank they default to the
-// connector manifest's values at signing time. Prompting (rather than relying
-// on flags alone) is what lets the bare `binding setup <fqn>` form and the
-// add-suite auto-bind loop, neither of which passes flags, produce a complete
-// aws_sigv4 source.
-func runBindingSetupAWSSigV4(connectorFQN, identity, region, accessKeyID string, stdin io.Reader, stdout, stderr io.Writer) int {
+// runBindingSetupAWSSigV4 prompts for the AWS access key id and secret access
+// key, then POSTs an aws_sigv4 binding. An access key id supplied via the
+// --access-key-id flag takes precedence and suppresses its prompt. The
+// non-secret access key id rides alongside the secret; the signing region and
+// service are derived from the resolved upstream host at egress (#1978), so the
+// CLI supplies no region and there is no second copy of the region to drift.
+// Prompting (rather than relying on the flag alone) is what lets the bare
+// `binding setup <fqn>` form and the add-suite auto-bind loop, neither of which
+// passes flags, produce a complete aws_sigv4 source.
+func runBindingSetupAWSSigV4(connectorFQN, identity, accessKeyID string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if accessKeyID == "" {
 		accessKeyID = promptLine(stdin, stdout,
 			"AWS access key id (leave blank to use the connector default): ")
@@ -967,14 +963,7 @@ func runBindingSetupAWSSigV4(connectorFQN, identity, region, accessKeyID string,
 		fmt.Fprintln(stderr, "value is required")
 		return 1
 	}
-	if region == "" {
-		region = promptLine(stdin, stdout,
-			"AWS region, e.g. us-east-1 (leave blank to use the connector default): ")
-	}
 	source := map[string]any{"kind": "aws_sigv4", "value": value}
-	if region != "" {
-		source["region"] = region
-	}
 	if accessKeyID != "" {
 		source["access_key_id"] = accessKeyID
 	}
@@ -1606,7 +1595,14 @@ func showStatusHostBindings(w io.Writer) {
 	fmt.Fprintf(w, "  Bindings:    %d configured\n", len(entries))
 	for i := range entries {
 		e := entries[i]
-		fmt.Fprintf(w, "    - %s (%s)\n", e.Host, e.Scheme)
+		// A host binding is named by its host; a host-less identity binding
+		// (e.g. an aws_sigv4 credential selected by identity at egress, #1978)
+		// is named by its (kind, identity_label) pair.
+		label := e.Host
+		if label == "" {
+			label = fmt.Sprintf("%s/%s", e.Kind, e.IdentityLabel)
+		}
+		fmt.Fprintf(w, "    - %s (%s)\n", label, e.Scheme)
 		for _, warning := range e.Warnings() {
 			fmt.Fprintf(w, "      warning: %s\n", warning)
 		}
