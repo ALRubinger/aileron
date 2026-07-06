@@ -246,6 +246,17 @@ func runSkillBind(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 
 	statuses := diffRequirements(reqs, vaultRefs, existing)
 
+	// haveSecret tracks which credential refs already hold a vault secret,
+	// seeded from the vault snapshot and updated after each PutUser. Two
+	// host-keyed requirements can share one CredentialRef (same identity, distinct
+	// host sets), so once the first has stored the shared secret the second must
+	// not re-prompt for it; the descriptor diff is still per-host, so each host's
+	// entry is written independently.
+	haveSecret := make(map[string]bool, len(vaultRefs))
+	for ref := range vaultRefs {
+		haveSecret[ref] = true
+	}
+
 	br := bufio.NewReader(stdin)
 	var (
 		toWrite    []proxybinding.Entry
@@ -257,14 +268,26 @@ func runSkillBind(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			summary = append(summary, fmt.Sprintf("  satisfied: %s (%s)", st.req.CredentialRef, requirementLabel(st.req)))
 			continue
 		}
-		entries, adv, err := fillRequirement(st, client, br, stdout, stderr)
+		needSecret := !haveSecret[st.req.CredentialRef]
+		entries, adv, storedSecret, err := fillRequirement(st.req, needSecret, !st.descriptorPresent, client, br, stdout, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %s: %v\n", st.req.CredentialRef, err)
 			return 1
 		}
+		if storedSecret {
+			haveSecret[st.req.CredentialRef] = true
+		}
 		toWrite = append(toWrite, entries...)
 		advisories = append(advisories, adv...)
-		summary = append(summary, fmt.Sprintf("  onboarded: %s (%s)", st.req.CredentialRef, requirementLabel(st.req)))
+		// "onboarded" reports a completed action (a secret stored or a descriptor
+		// entry written). A requirement that produced only an advisory (for
+		// example a host-keyed binding whose only host is a template) and stored
+		// nothing is reported as pending so the summary never overstates progress.
+		if len(entries) > 0 || storedSecret {
+			summary = append(summary, fmt.Sprintf("  onboarded: %s (%s)", st.req.CredentialRef, requirementLabel(st.req)))
+		} else {
+			summary = append(summary, fmt.Sprintf("  pending:   %s (%s)", st.req.CredentialRef, requirementLabel(st.req)))
+		}
 	}
 
 	if len(toWrite) > 0 {
@@ -289,39 +312,41 @@ func runSkillBind(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 }
 
 // fillRequirement captures the secret and non-secret params for a requirement
-// that is not fully satisfied. It prompts for the vault secret only when the
-// vault does not already hold it, and builds descriptor entries only when the
-// descriptors do not already satisfy it, so a partially-onboarded requirement
-// fills only its missing half. It returns the descriptor entries the caller
-// batches into a single Upsert plus any advisories (for templated hosts).
-func fillRequirement(st reqStatus, client bindVaultClient, stdin *bufio.Reader, stdout, stderr io.Writer) ([]proxybinding.Entry, []string, error) {
-	req := st.req
-
-	if !st.vaultPresent {
+// that is not fully satisfied. needSecret and needDescriptor are computed by the
+// caller against a live view of the vault and descriptors, so a
+// partially-onboarded requirement fills only its missing half and a secret
+// shared by two requirements is prompted once. It returns the descriptor entries
+// the caller batches into a single Upsert, any advisories (for templated hosts),
+// and whether it stored a secret (so the caller keeps its live vault view in
+// sync and reports an accurate summary).
+func fillRequirement(req credreq.RequiredBinding, needSecret, needDescriptor bool, client bindVaultClient, stdin *bufio.Reader, stdout, stderr io.Writer) ([]proxybinding.Entry, []string, bool, error) {
+	storedSecret := false
+	if needSecret {
 		secret, err := promptPassphrase(fmt.Sprintf("Secret for %s: ", req.CredentialRef), stderr)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if secret == "" {
-			return nil, nil, fmt.Errorf("secret cannot be empty")
+			return nil, nil, false, fmt.Errorf("secret cannot be empty")
 		}
 		service := strings.TrimPrefix(req.CredentialRef, "user/")
 		if err := client.PutUser(service, []byte(secret)); err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
+		storedSecret = true
 	}
 
-	if st.descriptorPresent {
-		return nil, nil, nil
+	if !needDescriptor {
+		return nil, nil, storedSecret, nil
 	}
 
 	if req.HostLessIdentity() {
 		if req.IdentityLabel == "" {
-			return nil, nil, fmt.Errorf("cannot write a valid %s descriptor without an identity_label; the frozen plan declares a %s credential with no identityLabel", req.Scheme, req.CredentialKind)
+			return nil, nil, storedSecret, fmt.Errorf("cannot write a valid %s descriptor without an identity_label; the frozen plan declares a %s credential with no identityLabel", req.Scheme, req.CredentialKind)
 		}
 		akid := strings.TrimSpace(promptLine(stdin, stdout, fmt.Sprintf("AWS access key ID for %s: ", req.CredentialRef)))
 		if akid == "" {
-			return nil, nil, fmt.Errorf("access key ID cannot be empty")
+			return nil, nil, storedSecret, fmt.Errorf("access key ID cannot be empty")
 		}
 		entry := proxybinding.Entry{
 			Kind:          req.CredentialKind,
@@ -333,7 +358,7 @@ func fillRequirement(st reqStatus, client bindVaultClient, stdin *bufio.Reader, 
 		for _, w := range entry.Warnings() {
 			fmt.Fprintf(stderr, "warning: %s\n", w)
 		}
-		return []proxybinding.Entry{entry}, nil, nil
+		return []proxybinding.Entry{entry}, nil, storedSecret, nil
 	}
 
 	// Host-keyed (bearer): one entry per non-templated host. A templated host
@@ -354,7 +379,7 @@ func fillRequirement(st reqStatus, client bindVaultClient, stdin *bufio.Reader, 
 			Scheme:        req.Scheme,
 		})
 	}
-	return entries, advisories, nil
+	return entries, advisories, storedSecret, nil
 }
 
 // requirementLabel is a short human description of what a requirement binds:

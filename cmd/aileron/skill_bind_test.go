@@ -262,6 +262,41 @@ func TestRunSkillBindPartiallySatisfied(t *testing.T) {
 	}
 }
 
+// TestRunSkillBindSharedCredentialRefPromptsOnce proves two host-keyed
+// requirements that share one CredentialRef (same identity, distinct host sets,
+// which the deriver keeps as two bindings) prompt for the shared secret once and
+// still write both host entries.
+func TestRunSkillBindSharedCredentialRefPromptsOnce(t *testing.T) {
+	vault := &fakeBindVault{}
+	reqs := []credreq.RequiredBinding{
+		bearerReq("workspace-a", "api.one.example.com"),
+		bearerReq("workspace-a", "api.two.example.com"),
+	}
+	descPath := withBindSeams(t, reqs, vault)
+	seedFrozen(t, "rubber-duck", "v1")
+	secretCalls := withSecret(t, "shared-token")
+
+	var out, errb bytes.Buffer
+	code := runSkillBind([]string{"rubber-duck"}, strings.NewReader(""), &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, errb.String())
+	}
+	if *secretCalls != 1 {
+		t.Errorf("secret prompted %d times, want 1 for the shared ref", *secretCalls)
+	}
+	if vault.puts != 1 {
+		t.Errorf("vault puts = %d, want 1 for the shared ref", vault.puts)
+	}
+	d := parseDescriptor(t, descPath)
+	hosts := map[string]bool{}
+	for _, e := range d.Bindings {
+		hosts[e.Host] = true
+	}
+	if !hosts["api.one.example.com"] || !hosts["api.two.example.com"] {
+		t.Errorf("descriptor hosts = %v, want both api.one and api.two", hosts)
+	}
+}
+
 // TestRunSkillBindFullySatisfied proves an already-onboarded plan prompts
 // nothing and rewrites no descriptor.
 func TestRunSkillBindFullySatisfied(t *testing.T) {
