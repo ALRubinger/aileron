@@ -306,7 +306,7 @@ func runSkillBind(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 	if len(toWrite) > 0 {
 		fmt.Fprintf(stdout, "Wrote %d descriptor entr%s to %s\n", len(toWrite), plural(len(toWrite), "y", "ies"), descriptorPath())
-		fmt.Fprintln(stdout, "These bindings are live: the daemon reloads binding descriptors from the file on the next request (#1887), so no restart is needed. If a request still isn't matched, `aileron daemon stop` then `aileron daemon start` reloads them as a fallback.")
+		fmt.Fprintln(stdout, "These bindings are live.")
 	}
 	return 0
 }

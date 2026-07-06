@@ -150,7 +150,7 @@ func bearerReq(service string, hosts ...string) credreq.RequiredBinding {
 // TestRunSkillBindFullyMissingSigv4 proves a fully-missing sigv4 requirement is
 // onboarded: the secret lands in the vault, the descriptor gains a valid
 // identity entry with the access key ID and no host, and the summary plus the
-// no-restart-needed confirmation (#1887) are printed.
+// trimmed liveness confirmation are printed.
 func TestRunSkillBindFullyMissingSigv4(t *testing.T) {
 	vault := &fakeBindVault{}
 	descPath := withBindSeams(t, []credreq.RequiredBinding{sigv4Req("prod-reader", "athena.us-east-1.amazonaws.com")}, vault)
@@ -189,15 +189,15 @@ func TestRunSkillBindFullyMissingSigv4(t *testing.T) {
 	if !strings.Contains(out.String(), "onboarded: user/prod-reader") {
 		t.Errorf("stdout = %q, want an onboarded summary line", out.String())
 	}
-	// The daemon now reloads descriptors from the file without a restart
-	// (#1887), so the closing message must confirm the bindings are live and
-	// must NOT instruct the operator to restart the daemon to apply them.
+	// The closing message must confirm the bindings are live, and must stay
+	// trimmed: no reload internals, no fallback disclaimer, and no issue
+	// reference (#1887) leaking into user-facing CLI output.
 	msg := out.String()
-	if !strings.Contains(msg, "#1887") || !strings.Contains(msg, "live") || !strings.Contains(msg, "no restart is needed") {
-		t.Errorf("stdout = %q, want a no-restart-needed confirmation citing #1887", msg)
+	if !strings.Contains(msg, "These bindings are live.") {
+		t.Errorf("stdout = %q, want a trimmed liveness confirmation", msg)
 	}
-	if strings.Contains(msg, "restart it") || strings.Contains(msg, "for these bindings to take effect") {
-		t.Errorf("stdout = %q, must not instruct a restart to apply the bindings", msg)
+	if strings.Contains(msg, "#1887") || strings.Contains(msg, "reloads") || strings.Contains(msg, "fallback") || strings.Contains(msg, "restart") {
+		t.Errorf("stdout = %q, must not carry reload internals, a fallback disclaimer, or an issue reference", msg)
 	}
 }
 
