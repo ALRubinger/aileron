@@ -69,6 +69,80 @@ func TestParseAWSEndpointHostErrors(t *testing.T) {
 	}
 }
 
+// TestParseAWSEndpointHostServiceIsHostLabel pins the host-label == signing
+// service assumption that ParseAWSEndpointHost relies on. For every service
+// Aileron signs today the SigV4 service name equals the endpoint host label,
+// so the parser returns that label verbatim as the service. Athena is the
+// live example (athena.<region> -> service "athena"); this test fails loudly
+// if the derived service ever stops matching the host label for it.
+func TestParseAWSEndpointHostServiceIsHostLabel(t *testing.T) {
+	const region = "us-east-1"
+	cases := []struct {
+		hostLabel string // the leading (service-shaped) label of the endpoint host
+	}{
+		{"athena"},
+		{"s3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.hostLabel, func(t *testing.T) {
+			host := tc.hostLabel + "." + region + ".amazonaws.com"
+			service, gotRegion, err := ParseAWSEndpointHost(host)
+			if err != nil {
+				t.Fatalf("ParseAWSEndpointHost(%q) unexpected error: %v", host, err)
+			}
+			if service != tc.hostLabel {
+				t.Errorf("service = %q, want host label %q (host-label==service assumption)", service, tc.hostLabel)
+			}
+			if gotRegion != region {
+				t.Errorf("region = %q, want %q", gotRegion, region)
+			}
+		})
+	}
+}
+
+// TestParseAWSEndpointHostDivergentServiceDeferred documents the known cliff
+// in the host-label == signing service assumption: a few AWS services must be
+// signed under a SigV4 service name that differs from their endpoint host
+// label. These are NOT on Aileron's signing path today, and divergent-service
+// handling is deferred (see ParseAWSEndpointHost's doc comment). This test
+// pins the CURRENT behavior — the parser returns the raw host label, not the
+// real signing service — so that if a mapping is ever added, the follow-up is
+// forced to update this test deliberately. The wantSigningService field
+// records the service these hosts would actually need to sign as; it is the
+// deferred cliff, intentionally NOT what the parser returns today.
+func TestParseAWSEndpointHostDivergentServiceDeferred(t *testing.T) {
+	const region = "us-east-1"
+	cases := []struct {
+		name string
+		host string
+		// wantLabel is what ParseAWSEndpointHost returns today (the host
+		// label), which is what we assert on.
+		wantLabel string
+		// wantSigningService is the correct SigV4 service for this endpoint.
+		// It differs from wantLabel; handling this divergence is DEFERRED, so
+		// it is documented here but deliberately not asserted as the result.
+		wantSigningService string
+	}{
+		{"ses-email", "email." + region + ".amazonaws.com", "email", "ses"},
+		{"simpledb-sdb", "sdb." + region + ".amazonaws.com", "sdb", "sdb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service, gotRegion, err := ParseAWSEndpointHost(tc.host)
+			if err != nil {
+				t.Fatalf("ParseAWSEndpointHost(%q) unexpected error: %v", tc.host, err)
+			}
+			if service != tc.wantLabel {
+				t.Errorf("service = %q, want host label %q (divergent-service handling is deferred; real signing service would be %q)",
+					service, tc.wantLabel, tc.wantSigningService)
+			}
+			if gotRegion != region {
+				t.Errorf("region = %q, want %q", gotRegion, region)
+			}
+		})
+	}
+}
+
 // TestParseAWSEndpointHostErrorNamesHost asserts the error clearly names the
 // offending host so an operator can diagnose it. The host is non-secret;
 // there is no credential material in this function at all.

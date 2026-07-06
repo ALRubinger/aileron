@@ -50,6 +50,28 @@ var endpointInfixModifiers = map[string]bool{
 // This is the single host->scope parser shared by the SigV4 injector
 // (host-authoritative signing scope) and the WASM host's region-scoped
 // binding selection, so the two cannot drift.
+//
+// Assumption (host-label == signing service): the derived service is the
+// endpoint host label itself. This holds for every service Aileron signs
+// today (Athena: "athena.<region>.amazonaws.com" -> service "athena"), so
+// the parser returns the host label verbatim as the SigV4 signing service.
+// A handful of AWS services break this assumption because their endpoint
+// host label differs from the SigV4 service name they must be signed as:
+//   - Amazon SES: "email.<region>.amazonaws.com" is signed as service "ses"
+//     (the host label is "email", not "ses").
+//   - Amazon SimpleDB: "sdb.<region>.amazonaws.com" is signed as service
+//     "sdb", and other historical endpoints carry similar host/service skew.
+//
+// For those divergent-service endpoints the host-authoritative service this
+// function returns (the raw host label, e.g. "email") is not the correct
+// SigV4 signing service (e.g. "ses"). Divergent-service handling is
+// deliberately deferred: none of these services are on Aileron's signing
+// path yet, and the operator decision (consistent with the no-back-compat
+// stance) is to keep the signing service host-authoritative rather than
+// carry a host-label->service lookup table before a concrete need. Adding a
+// divergent-service mapping here is the named follow-up if such a service is
+// ever put on the SigV4 path. Do not change signing behavior for these
+// hosts without that mapping; today they simply parse to their host label.
 func ParseAWSEndpointHost(host string) (service, region string, err error) {
 	h := strings.TrimSpace(strings.ToLower(host))
 	// Strip a trailing :port if present. A hostname never contains a colon,
