@@ -503,6 +503,49 @@ func TestRunInvalidSemverLabelWarnsAndSkips(t *testing.T) {
 	}
 }
 
+// tagFailTarget wraps a memory store but fails Tag for the tag named failOn,
+// standing in for a registry that rejects a specific tag write.
+type tagFailTarget struct {
+	*memory.Store
+	failOn string
+}
+
+func (t tagFailTarget) Tag(ctx context.Context, desc ocispec.Descriptor, ref string) error {
+	if ref == t.failOn {
+		return errors.New("registry rejected tag " + ref)
+	}
+	return t.Store.Tag(ctx, desc, ref)
+}
+
+// TestRunLatestTagError proves a failure writing the mutable `latest` tag
+// surfaces as a publish error rather than being swallowed.
+func TestRunLatestTagError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, inner, "v1", body)
+	opts := composedOptions(inner, body)
+	opts.Target = tagFailTarget{Store: inner, failOn: "latest"}
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "tag artifact latest") {
+		t.Fatalf("err = %v, want a tag-artifact-latest error", err)
+	}
+}
+
+// TestRunSemverTagError proves a failure writing a valid semver label tag
+// surfaces as a publish error.
+func TestRunSemverTagError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, inner, "v1", body)
+	opts := composedOptions(inner, body)
+	opts.Lock.Version = "1.2.3"
+	opts.Target = tagFailTarget{Store: inner, failOn: "1.2.3"}
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "tag artifact 1.2.3") {
+		t.Fatalf("err = %v, want a tag-artifact-1.2.3 error", err)
+	}
+}
+
 func TestRunNoImage(t *testing.T) {
 	_, err := Run(context.Background(), Options{
 		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
