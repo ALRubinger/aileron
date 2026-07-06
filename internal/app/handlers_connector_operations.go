@@ -685,10 +685,11 @@ func isSafeHTTPMethod(method string) bool {
 }
 
 // addHostBindingTrustIdentity stamps the optional, non-secret trust-contract
-// effect and audit-addressing identity triple onto a proxy audit payload
-// when the matched binding declares them. Empty fields are omitted. It
-// carries the declared effect and the plan/step/tool addressing only, never
-// a credential byte, the credential-ref, or an AllowedHosts value.
+// effect, audit-addressing identity triple, and manifest credential-identity
+// pair onto a proxy audit payload when the matched binding declares them.
+// Empty fields are omitted. It carries the declared effect, the plan/step/tool
+// addressing, and the (kind, label) credential identity only, never a
+// credential byte, the credential-ref, or an AllowedHosts value.
 func addHostBindingTrustIdentity(payload map[string]any, hb binding.HostBinding) {
 	if hb.Effect != "" {
 		payload["aileron.trust.effect"] = hb.Effect
@@ -701,6 +702,16 @@ func addHostBindingTrustIdentity(payload map[string]any, hb binding.HostBinding)
 	}
 	if hb.ToolName != "" {
 		payload["aileron.tool.name"] = hb.ToolName
+	}
+	// The manifest credential-identity pair (kind, label) is the selection
+	// key for an identity binding (#1978), which may declare an empty
+	// HostPattern. Without this field an identity-selected injection would
+	// audit with a blank binding.host and no operator-credential attribution.
+	// It is the non-secret (kind, label) pair only, never the credential
+	// bytes, the credential-ref, or an AllowedHosts value. Both fields are
+	// canonical: emitted only when both are set (see HostBinding.IdentityKind).
+	if hb.IdentityKind != "" && hb.IdentityLabel != "" {
+		payload["aileron.proxy.binding.identity"] = hb.IdentityKind + "/" + hb.IdentityLabel
 	}
 }
 

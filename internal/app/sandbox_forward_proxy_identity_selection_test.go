@@ -332,6 +332,101 @@ func TestSandboxForwardProxy_TwoIdentitiesDisambiguate(t *testing.T) {
 	}
 }
 
+// TestSandboxForwardProxy_IdentityInjectedAuditCarriesIdentity pins the
+// success-path attribution fix: a host-less identity binding leaves
+// aileron.proxy.binding.host blank, so the binding_injected audit event must
+// carry aileron.proxy.binding.identity = "<kind>/<label>" for the injection to
+// be attributable to an operator credential. The field is the non-secret
+// (kind, label) pair, never the credential bytes or the credential-ref.
+func TestSandboxForwardProxy_IdentityInjectedAuditCarriesIdentity(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditStore:    auditStore,
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-attr" }),
+		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
+		vault:         mustVaultWith(t, "user/aws", "user", []byte("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY")),
+		hostBindings:  binding.HostBindings{mustSigV4IdentityBinding(t, "user/aws", "metrics-reader", "AKIDEXAMPLE")},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+	}
+	token := registerStepScope(srv, "session-123", "extract", []string{identityTargetHost}, "aws-sigv4", "metrics-reader")
+	client := setupIdentityProxyServer(t, srv, "session-123", token)
+
+	resp, err := client.Get("https://" + identityTargetHost + "/")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	evt := events[0]
+	if evt.EventType != model.EventTypeSandboxProxyBindingInjected {
+		t.Fatalf("event type = %q, want binding_injected", evt.EventType)
+	}
+	// The host-less identity binding leaves binding.host blank; the identity
+	// field is what makes the injection attributable.
+	if got := evt.Payload["aileron.proxy.binding.host"]; got != "" {
+		t.Errorf("binding.host = %v, want empty for a host-less identity binding", got)
+	}
+	if got := evt.Payload["aileron.proxy.binding.identity"]; got != "aws-sigv4/metrics-reader" {
+		t.Errorf("binding.identity = %v, want %q", got, "aws-sigv4/metrics-reader")
+	}
+}
+
+// TestSandboxForwardProxy_IdentityNonDerivableHostFailsClosed pins the
+// mixed-reach forfeiture: a step scope that declares a sigv4-resign identity
+// enters the identity path for EVERY in-reach host, so a request to a
+// non-derivable (non-AWS) host — whose SigV4 scope cannot be derived and whose
+// binding carries no Region/Service fallback — fails closed at injection
+// rather than passing through un-injected. injected=false, a protocol_rejected
+// audit event is emitted, and no upstream dial occurs.
+func TestSandboxForwardProxy_IdentityNonDerivableHostFailsClosed(t *testing.T) {
+	const nonDerivableHost = "metrics.example.com"
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditStore:    auditStore,
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-nonderivable" }),
+		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
+		vault:         mustVaultWith(t, "user/aws", "user", []byte("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY")),
+		// A host-less sigv4 identity binding with no Region/Service fallback:
+		// its scope is derivable only from an AWS host.
+		hostBindings: binding.HostBindings{mustSigV4IdentityBinding(t, "user/aws", "metrics-reader", "AKIDEXAMPLE")},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			t.Errorf("upstream must not be dialed when sigv4 injection fails closed; got %s", req.URL)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+		})},
+	}
+	// The scope's reach includes the non-derivable host; the identity is
+	// matched by (kind, label), not by host, so selection succeeds and the
+	// request is driven to injection on a host the scheme cannot serve.
+	token := registerStepScope(srv, "session-123", "extract", []string{nonDerivableHost}, "aws-sigv4", "metrics-reader")
+	client := setupIdentityProxyServer(t, srv, "session-123", token)
+
+	resp, err := client.Get("https://" + nonDerivableHost + "/")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 400 {
+		t.Fatalf("status = %d, want a 4xx/5xx fail-closed", resp.StatusCode)
+	}
+	assertProxyReason(t, auditStore, model.EventTypeSandboxProxyRejected, hostBindingRejectUnsupportedScheme)
+}
+
 // TestSandboxForwardProxy_IdentityBindingTrustGateUnchanged proves the
 // per-step trust-contract gate runs identically on an identity-selected
 // binding: a `read`-effect binding still denies a mutating method at

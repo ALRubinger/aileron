@@ -276,6 +276,16 @@ func (s *apiServer) routeSandboxForwardProxyHostBinding(conn net.Conn, decrypted
 	// match, never a passthrough of a bound-but-unavailable credential — so a
 	// scoped request can only ever egress with the exact credential its
 	// manifest identity names.
+	//
+	// Mixed-reach forfeiture: an identity-declaring step scope enters this
+	// path for EVERY in-reach host it targets and forfeits passthrough for its
+	// non-credential hosts. Once MatchIdentity succeeds the selected scheme is
+	// injected on whatever host the request targets; a host the scheme cannot
+	// serve (e.g. a non-AWS host under a sigv4-resign identity, whose SigV4
+	// scope is non-derivable) makes injectSandboxProxyHostBindingCredential
+	// return injected=false and fails closed at the injection point below. It
+	// is never passed through un-injected. A step that needs plain passthrough
+	// to some other in-reach host must not declare a credential identity.
 	if auth.StepScope != nil && auth.StepScope.CredentialKind != "" {
 		if auth.StepScope.IdentityLabel == "" {
 			// A present kind with an empty label is a malformed half-identity.
