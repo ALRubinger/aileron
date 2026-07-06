@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -77,6 +78,114 @@ func seedComposed(t *testing.T, st *memory.Store, versionTag, configBody string)
 		LocalTag: "aileron/sandbox-tools:abc123",
 	}
 	return pin, manifest
+}
+
+// seedComposedIndex publishes the composed image as an OCI image index (the
+// shape Docker Desktop's containerd store emits): the single-platform image
+// manifest plus a buildkit attestation manifest, tagged where PullImage's
+// composed branch resolves it. It returns the composed pin and the index
+// descriptor (the value BootRef must anchor to).
+func seedComposedIndex(t *testing.T, st *memory.Store, versionTag, configBody string) (freeze.ImagePin, ocispec.Descriptor) {
+	t.Helper()
+	ctx := context.Background()
+	image, cfg := seedImage(t, st, configBody)
+	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+
+	// Selection skips the attestation, so its blobs are never fetched; craft the
+	// descriptor without pushing (the shared layer would collide on a second push).
+	att := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-"+configBody))
+	att.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
+	att.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
+
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{image, att},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	id := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, ib)
+	if err := st.Push(ctx, id, bytes.NewReader(ib)); err != nil {
+		t.Fatalf("push index: %v", err)
+	}
+	if err := st.Tag(ctx, id, freeze.ComposedImageTag(versionTag)); err != nil {
+		t.Fatalf("tag composed index: %v", err)
+	}
+	pin := freeze.ImagePin{
+		Ref:      "aileron/sandbox-tools+tools(gh)",
+		Digest:   cfg.Digest.String(),
+		LocalTag: "aileron/sandbox-tools:abc123",
+	}
+	return pin, id
+}
+
+// TestPullImage_ComposedOverOCIIndex is the consumer half of the #2012
+// regression: `skill install`+launch resolves the same published composed tag,
+// which is an OCI index on a containerd store. The config-digest read-back must
+// unwrap the index and verify, and BootRef must anchor to the resolved index
+// digest (what Docker/containerd boot correctly).
+func TestPullImage_ComposedOverOCIIndex(t *testing.T) {
+	st := memory.New()
+	pin, index := seedComposedIndex(t, st, "v1abc", "composed-config-bytes")
+
+	got, err := PullImage(context.Background(), ImagePullOptions{
+		Source:     st,
+		Registry:   testRegistry,
+		VersionTag: "v1abc",
+		Pin:        pin,
+	})
+	if err != nil {
+		t.Fatalf("PullImage over an OCI-index composed image: %v", err)
+	}
+	if got.BindingKind != freeze.BindingConfigDigest {
+		t.Errorf("binding = %q, want %q", got.BindingKind, freeze.BindingConfigDigest)
+	}
+	wantRef := testRegistry + "@" + index.Digest.String()
+	if got.BootRef != wantRef {
+		t.Errorf("boot ref = %q, want the content-addressed index ref %q", got.BootRef, wantRef)
+	}
+	if got.ImageDigest != pin.Digest {
+		t.Errorf("image digest = %q, want the config digest %q", got.ImageDigest, pin.Digest)
+	}
+}
+
+// TestPullImage_ComposedIndexNoRunnableManifestFailsClosed proves an index with
+// no runnable image manifest (only an attestation) fails closed with an
+// actionable message rather than booting an unverifiable image.
+func TestPullImage_ComposedIndexNoRunnableManifestFailsClosed(t *testing.T) {
+	st := memory.New()
+	ctx := context.Background()
+	att := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-only"))
+	att.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
+	att.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{att},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	id := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, ib)
+	if err := st.Push(ctx, id, bytes.NewReader(ib)); err != nil {
+		t.Fatalf("push index: %v", err)
+	}
+	if err := st.Tag(ctx, id, freeze.ComposedImageTag("v1abc")); err != nil {
+		t.Fatalf("tag: %v", err)
+	}
+	pin := freeze.ImagePin{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"}
+	_, err = PullImage(ctx, ImagePullOptions{
+		Source: st, Registry: testRegistry, VersionTag: "v1abc", Pin: pin,
+	})
+	if !errors.Is(err, ErrImagePullFailed) {
+		t.Fatalf("err = %v, want ErrImagePullFailed", err)
+	}
+	if !strings.Contains(err.Error(), "runnable image manifest") {
+		t.Errorf("err = %v, want an actionable no-runnable-manifest message", err)
+	}
 }
 
 func TestPullImage_ComposedMatchReturnsBootableRef(t *testing.T) {
