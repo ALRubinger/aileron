@@ -36,10 +36,26 @@ import (
 // first Upsert into a fresh path creates a valid descriptor. The parent
 // directory is created 0700 if absent.
 //
+// A zero-entry Upsert is a no-op: it returns nil without reading, creating, or
+// rewriting the file, so an absent path stays absent and an existing file is
+// left byte-identical.
+//
+// The write itself is atomic: the merged document is written to a temp file in
+// the same directory and renamed over path, so a crash or concurrent writer
+// never leaves a truncated or partially-written descriptor.
+//
 // Upsert handles only [Entry] values, which carry a credential *reference*
 // (a vault path) and never credential bytes. It never resolves or logs secret
 // material, inheriting this package's secret-hygiene invariant.
 func Upsert(path string, entries ...Entry) error {
+	// A zero-entry Upsert is a no-op: with nothing to merge in, the only
+	// possible effect would be to create or rewrite the file for no reason,
+	// so return before touching the filesystem. This keeps an absent path
+	// absent and an existing file byte-identical.
+	if len(entries) == 0 {
+		return nil
+	}
+
 	existing, err := readExisting(path)
 	if err != nil {
 		return fmt.Errorf("proxybinding: read existing descriptor %q: %w", path, err)
@@ -60,12 +76,57 @@ func Upsert(path string, entries ...Entry) error {
 		return fmt.Errorf("proxybinding: merged descriptor is invalid: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("proxybinding: create descriptor dir: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := atomicWrite(path, data); err != nil {
 		return fmt.Errorf("proxybinding: write descriptor %q: %w", path, err)
 	}
+	return nil
+}
+
+// atomicWrite replaces path with data via a temp-file-plus-rename so a crash or
+// concurrent writer can never observe a truncated or partially-written
+// descriptor: readers see either the old file or the fully-written new one. The
+// temp file is created in the same directory as path (so the final rename is a
+// same-filesystem operation, which is atomic on POSIX) with 0600 permissions,
+// matching the descriptor's secret-adjacent sensitivity. On any error before
+// the rename the temp file is removed so a failed write leaves no litter.
+func atomicWrite(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".binding-descriptors-*.yaml.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	// From here on, ensure the temp file is cleaned up on any failure path.
+	// After a successful rename tmpName no longer exists, so the deferred
+	// Remove is a harmless no-op.
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
 	return nil
 }
 
