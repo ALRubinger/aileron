@@ -4,17 +4,76 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	stdruntime "runtime"
 	"sort"
+	"strings"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
 )
+
+// hostPlatform reports this host's container platform as GOOS/GOARCH (for
+// example "linux/amd64"). It is a package-level seam so the cross-arch launch
+// error test drives a deterministic platform independent of the test host's
+// real architecture.
+var hostPlatform = func() string { return stdruntime.GOOS + "/" + stdruntime.GOARCH }
+
+// prefixCaptureWriter tees writes to an underlying writer while recording a
+// bounded prefix of the bytes for later inspection. The docker daemon emits the
+// no-matching-manifest error at container-create, before any plan output, so a
+// bounded prefix reliably contains the classification signal while keeping
+// memory bounded on long successful runs. Writes always pass through to w in
+// full; only the recorded copy is capped.
+type prefixCaptureWriter struct {
+	w   io.Writer
+	max int
+	buf []byte
+}
+
+func (p *prefixCaptureWriter) Write(b []byte) (int, error) {
+	if remaining := p.max - len(p.buf); remaining > 0 {
+		if len(b) <= remaining {
+			p.buf = append(p.buf, b...)
+		} else {
+			p.buf = append(p.buf, b[:remaining]...)
+		}
+	}
+	return p.w.Write(b)
+}
+
+// captured returns the recorded prefix as a string.
+func (p *prefixCaptureWriter) captured() string { return string(p.buf) }
+
+// crossArchStderrCaptureMax bounds the recorded stderr prefix. The manifest
+// error is short and emitted first, so 64 KiB is generous headroom while
+// keeping the capture memory-bounded regardless of run length.
+const crossArchStderrCaptureMax = 64 * 1024
+
+// crossArchManifestMessage classifies a launch run error as a cross-arch
+// manifest miss and, when it matches, returns an actionable operator message.
+// The robust signal is the docker daemon's "no matching manifest for" stderr
+// text, captured from the run's stderr, not the returned error (which carries
+// only "exit status 125", a generic docker-daemon failure that would over-match
+// on exit code alone). The match is case-insensitive and tolerant of
+// surrounding daemon text. When the signal is absent it returns ("", false) so
+// the caller falls through to the generic wrap unchanged.
+func crossArchManifestMessage(image, capturedStderr, platform string) (string, bool) {
+	if !strings.Contains(strings.ToLower(capturedStderr), "no matching manifest for") {
+		return "", false
+	}
+	msg := fmt.Sprintf("skill launch: the pinned image %q has no build for this host's platform %s. "+
+		"The publisher must publish an image that includes a build for %s. "+
+		"This is a gap in what the publisher shipped, not a problem with your local configuration.",
+		image, platform, platform)
+	return msg, true
+}
 
 // containerImageRunner is the production runtime.ImageRunner: it boots the
 // verified pinned environment image and runs the frozen Flight Plan inside it
@@ -302,7 +361,17 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		}
 	}
 
-	if _, err := containerRunFlightPlan(ctx, runtimeName, os.Stdout, os.Stderr, opts); err != nil {
+	// Tee the container's stderr so the run-error boundary can classify a
+	// cross-arch manifest miss. The docker daemon writes "no matching manifest
+	// for <platform> …" to stderr but returns only "exit status 125" as the
+	// error, so the specific signal lives in the captured text, not the error.
+	// Pass-through to os.Stderr is preserved in full; only the recorded prefix
+	// is bounded.
+	stderrCapture := &prefixCaptureWriter{w: os.Stderr, max: crossArchStderrCaptureMax}
+	if _, err := containerRunFlightPlan(ctx, runtimeName, os.Stdout, stderrCapture, opts); err != nil {
+		if msg, ok := crossArchManifestMessage(spec.Image, stderrCapture.captured(), hostPlatform()); ok {
+			return runtime.ImageRunResult{}, errors.New(msg)
+		}
 		return runtime.ImageRunResult{}, fmt.Errorf("skill launch: run pinned image %q: %w", spec.Image, err)
 	}
 
