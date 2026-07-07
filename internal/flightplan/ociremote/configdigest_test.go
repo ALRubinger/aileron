@@ -265,8 +265,10 @@ func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 // child it actually attests, matching freeze.hostPlatform()'s arch vocabulary.
 // Both children share the host GOOS (composed images are linux-only) so only the
 // arch distinguishes them. Production sets hostGOARCH from runtime.GOARCH; a
-// genuinely foreign consumer (an arm64 binary under QEMU) selects its own child
-// naturally — the seam drives that branch deterministically here.
+// genuinely foreign consumer (e.g. an arm64 host) selects its own child naturally.
+// The e2e runs host-native (the orchestrator must exec native-arch build tooling),
+// so this seam is where the foreign-arch selection is driven deterministically —
+// including arches no test runner or emulator provides.
 func TestConfigContentDigest_SelectsForeignArchChild(t *testing.T) {
 	st := memory.New()
 	native, nativeBody := seedManifest(t, st, "native-arch")

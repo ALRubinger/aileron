@@ -29,9 +29,10 @@ func TestHostPlatform(t *testing.T) {
 // TestHostPlatformReflectsHostGOARCH pins the contract that hostPlatform() reports
 // (linux, hostGOARCH): the os is always the composed-image "linux", the arch is
 // whatever the hostGOARCH seam holds. A genuine host of a given arch (e.g. an
-// arm64 binary under QEMU in the cross-arch CI job, #2038) selects that arch's
-// child of a multi-arch artifact naturally; the seam lets a test drive both the
-// native and a foreign arch deterministically regardless of the test binary's arch.
+// arm64 machine) selects that arch's child of a multi-arch artifact naturally; the
+// seam lets a test drive both the native and a foreign arch deterministically
+// regardless of the test binary's arch, which is how the foreign-arch #2025 case
+// is covered (#2038) — the e2e itself runs host-native.
 func TestHostPlatformReflectsHostGOARCH(t *testing.T) {
 	t.Run("reports the native host arch", func(t *testing.T) {
 		withHostGOARCH(t, runtime.GOARCH)
