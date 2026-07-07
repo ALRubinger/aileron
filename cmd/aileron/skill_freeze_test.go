@@ -801,16 +801,38 @@ type fakeRunner struct {
 	// fails maps a join of the args to an error the command returns.
 	fails map[string]error
 	calls []string
+	// callEnvs is parallel to calls: the per-invocation env each command saw
+	// (nil for a plain Run), so a test can assert a scoped BUILDX_BUILDER
+	// selection reached the multi-arch build but not the daemon-load build.
+	callEnvs [][]string
 }
 
-func (f *fakeRunner) Run(_ context.Context, _ string, args []string, stdout, _ io.Writer) error {
+func (f *fakeRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return f.RunWithEnv(ctx, name, args, nil, stdout, stderr)
+}
+
+// RunWithEnv implements the container package's optional env-aware Runner
+// capability so a scoped BUILDX_BUILDER selection is observable in tests.
+func (f *fakeRunner) RunWithEnv(_ context.Context, _ string, args, env []string, stdout, _ io.Writer) error {
 	key := strings.Join(args, " ")
 	f.calls = append(f.calls, key)
+	f.callEnvs = append(f.callEnvs, append([]string(nil), env...))
 	if err, ok := f.fails[key]; ok {
 		return err
 	}
 	if out, ok := f.outputs[key]; ok {
 		_, _ = stdout.Write([]byte(out))
+	}
+	return nil
+}
+
+// envForCall returns the env recorded for the first recorded call whose joined
+// args contain sub, or nil if no such call was recorded.
+func (f *fakeRunner) envForCall(sub string) []string {
+	for i, c := range f.calls {
+		if strings.Contains(c, sub) {
+			return f.callEnvs[i]
+		}
 	}
 	return nil
 }
@@ -938,11 +960,12 @@ func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
 }
 
 // buildxPreflightOK is the fake-runner output that makes CheckMultiArchBuild pass:
-// `buildx version` succeeds (empty output, no error) and `buildx inspect
-// --bootstrap` advertises both required platforms.
+// `buildx version` succeeds (empty output, no error), the dedicated
+// `aileron-freeze` builder's existence probe succeeds (empty output, treated as
+// present), and its `--bootstrap` inspect advertises both required platforms.
 func buildxPreflightOK() map[string]string {
 	return map[string]string{
-		"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/arm64, linux/arm/v7\n",
+		"buildx inspect " + container.FreezeBuilderName + " --bootstrap": "Platforms: linux/amd64, linux/arm64, linux/arm/v7\n",
 	}
 }
 
@@ -982,6 +1005,72 @@ func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
 		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
 	}
 	assertTwoArchDigests(t, got, amd, arm)
+}
+
+// TestBuilderFeatureComposer_ScopesFreezeBuilder is the regression guard for
+// #2054: the composer preflight must provision the dedicated `aileron-freeze`
+// docker-container builder and scope the multi-arch build to it via a
+// BUILDX_BUILDER env entry, while leaving the single-arch daemon-load build on the
+// default driver (no BUILDX_BUILDER) so the composed image lands in the daemon.
+// The default builder is never repointed with `docker buildx use`.
+func TestBuilderFeatureComposer_ScopesFreezeBuilder(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	// The freeze builder is absent, so the preflight must create it exactly once.
+	fr := &fakeRunner{
+		outputs: buildxPreflightOK(),
+		fails: map[string]error{
+			"buildx inspect " + container.FreezeBuilderName: errors.New("no builder named aileron-freeze"),
+		},
+	}
+	withFakeInspector(t, fr)
+
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err != nil {
+		t.Fatalf("ComposeDigest: %v", err)
+	}
+
+	// Builder provisioned once with the docker-container driver, never `use`d.
+	createKey := "buildx create --name " + container.FreezeBuilderName + " --driver docker-container"
+	created := 0
+	for _, c := range fr.calls {
+		if c == createKey {
+			created++
+		}
+		if strings.HasPrefix(c, "buildx use") {
+			t.Fatalf("composer must not `buildx use` the operator's default builder, saw %q", c)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("freeze builder created %d times, want exactly 1", created)
+	}
+
+	// The multi-arch build (carries --output) must run on the scoped builder.
+	wantEnv := "BUILDX_BUILDER=" + container.FreezeBuilderName
+	multiEnv := fr.envForCall("--output")
+	if !containsString(multiEnv, wantEnv) {
+		t.Fatalf("multi-arch build env = %#v, want it to carry %q", multiEnv, wantEnv)
+	}
+	// The single-arch daemon-load build (--image-name, no --output) must NOT carry
+	// the selection, so it stays on the default driver and loads into the daemon.
+	for i, c := range fr.calls {
+		if strings.Contains(c, "--image-name") && !strings.Contains(c, "--output") {
+			if containsString(fr.callEnvs[i], wantEnv) {
+				t.Fatalf("daemon-load build must not carry %q (docker-container cannot load into the daemon), env = %#v", wantEnv, fr.callEnvs[i])
+			}
+		}
+	}
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner covers the managed

@@ -211,6 +211,92 @@ func TestBuildDevcontainerWithFeaturesMultiArchEmitsOCILayout(t *testing.T) {
 	}
 }
 
+// envRecordingRunner records the env passed to each build invocation, so a test
+// can assert a scoped BUILDX_BUILDER selection reaches the build subprocess. It
+// implements the optional envRunner capability.
+type envRecordingRunner struct {
+	args []string
+	env  []string
+}
+
+func (r *envRecordingRunner) Run(_ context.Context, _ string, args []string, _, _ io.Writer) error {
+	r.args = append([]string(nil), args...)
+	r.env = nil
+	return nil
+}
+
+func (r *envRecordingRunner) RunWithEnv(_ context.Context, _ string, args, env []string, _, _ io.Writer) error {
+	r.args = append([]string(nil), args...)
+	r.env = append([]string(nil), env...)
+	return nil
+}
+
+// TestBuildMultiArchScopesBuildxBuilder proves BuildOptions.BuildxBuilder scopes a
+// multi-arch build to the named buildx builder via a BUILDX_BUILDER env entry on
+// the build subprocess, without any `docker buildx use` (which would repoint the
+// operator's default builder). Regression for #2054.
+func TestBuildMultiArchScopesBuildxBuilder(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	dest := filepath.Join(t.TempDir(), "layout")
+	runner := &envRecordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
+		Platforms:     composition.MultiArchPlatforms,
+		OCILayoutDest: dest,
+		BuildxBuilder: FreezeBuilderName,
+		Plan: composition.Plan{
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	wantEnv := "BUILDX_BUILDER=" + FreezeBuilderName
+	found := false
+	for _, e := range runner.env {
+		if e == wantEnv {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("build env = %#v, want it to carry %q", runner.env, wantEnv)
+	}
+	// The builder selection must be scoped to the env, never `buildx use`.
+	for _, a := range runner.args {
+		if a == "use" {
+			t.Fatalf("multi-arch build must not `buildx use`, args = %#v", runner.args)
+		}
+	}
+}
+
+// TestBuildSingleArchIgnoresBuildxBuilder proves BuildxBuilder is inert for a
+// single-arch daemon-load build: no BUILDX_BUILDER env is exported, so that build
+// stays on the default `docker` driver and lands the image in the local daemon
+// (the docker-container freeze builder cannot). Regression for #2054.
+func TestBuildSingleArchIgnoresBuildxBuilder(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	runner := &envRecordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
+		BuildxBuilder: FreezeBuilderName, // set but no Platforms -> must be ignored
+		Plan: composition.Plan{
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(runner.env) != 0 {
+		t.Fatalf("single-arch build env = %#v, want no BUILDX_BUILDER (default driver must load into the daemon)", runner.env)
+	}
+}
+
 // TestBuild_MultiArchPairingValidated proves Build fails fast on a half-configured
 // multi-arch request rather than emitting a broken `--output type=oci,dest=` token.
 func TestBuild_MultiArchPairingValidated(t *testing.T) {
@@ -284,11 +370,17 @@ func TestBaseBuildArgs_MultiArchSwitchesToBuildx(t *testing.T) {
 	}
 }
 
-// TestCheckMultiArchBuild covers the three preflight outcomes over the Runner
-// seam (Docker-free): buildx missing, an arch missing from inspect, and both
-// arches present. On any miss the error must name the tonistiigi/binfmt remedy.
+// TestCheckMultiArchBuild covers the preflight outcomes over the Runner seam
+// (Docker-free): buildx missing, the dedicated builder absent-then-provisioned,
+// an arch missing after bootstrap, both arches present, and a bootstrap failure.
+// On a platform/bootstrap miss the error must name the tonistiigi/binfmt remedy.
+// The preflight targets the dedicated `aileron-freeze` builder, so its inspect and
+// bootstrap keys carry that name.
 func TestCheckMultiArchBuild(t *testing.T) {
 	const binfmt = "tonistiigi/binfmt"
+	const inspectFreeze = "buildx inspect " + FreezeBuilderName
+	const bootstrapFreeze = "buildx inspect " + FreezeBuilderName + " --bootstrap"
+	const createFreeze = "buildx create --name " + FreezeBuilderName + " --driver docker-container"
 
 	t.Run("buildx missing", func(t *testing.T) {
 		fr := &scriptedRunner{fails: map[string]error{"buildx version": errors.New("unknown command")}}
@@ -299,8 +391,10 @@ func TestCheckMultiArchBuild(t *testing.T) {
 	})
 
 	t.Run("arch missing", func(t *testing.T) {
+		// The existence probe succeeds (builder present) by default; the bootstrap
+		// advertises only one required arch.
 		fr := &scriptedRunner{outputs: map[string]string{
-			"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/386\n",
+			bootstrapFreeze: "Platforms: linux/amd64, linux/386\n",
 		}}
 		err := CheckMultiArchBuild(context.Background(), fr, "docker")
 		if err == nil || !strings.Contains(err.Error(), "linux/arm64") || !strings.Contains(err.Error(), binfmt) {
@@ -308,30 +402,46 @@ func TestCheckMultiArchBuild(t *testing.T) {
 		}
 	})
 
-	t.Run("both arches present", func(t *testing.T) {
+	t.Run("both arches present with builder already provisioned", func(t *testing.T) {
 		fr := &scriptedRunner{outputs: map[string]string{
-			"buildx inspect --bootstrap": "Driver: docker-container\nPlatforms: linux/amd64, linux/arm64, linux/arm/v7\n",
+			bootstrapFreeze: "Driver: docker-container\nPlatforms: linux/amd64, linux/arm64, linux/arm/v7\n",
 		}}
 		if err := CheckMultiArchBuild(context.Background(), fr, "docker"); err != nil {
 			t.Fatalf("both arches present must pass, got %v", err)
 		}
+		// The builder already existed (inspect probe succeeded), so it must not be
+		// created again.
+		if n := fr.countCalls(createFreeze); n != 0 {
+			t.Fatalf("create called %d times, want 0 when the builder is already present", n)
+		}
 	})
 
-	t.Run("default docker driver rejected", func(t *testing.T) {
-		// The default `docker` driver advertises both platforms but cannot export a
-		// multi-arch OCI layout; the preflight must reject it with a docker-container
-		// hint rather than let the build fail mid-flight.
-		fr := &scriptedRunner{outputs: map[string]string{
-			"buildx inspect --bootstrap": "Name: default\nDriver: docker\nPlatforms: linux/amd64, linux/arm64\n",
-		}}
-		err := CheckMultiArchBuild(context.Background(), fr, "docker")
-		if err == nil || !strings.Contains(err.Error(), "docker-container") {
-			t.Fatalf("err = %v, want a docker-container driver remediation", err)
+	t.Run("default docker-driver setup auto-provisions the freeze builder", func(t *testing.T) {
+		// Regression for #2054: on a default Docker Desktop setup the freeze builder
+		// is absent (existence probe fails), so the preflight creates it exactly once
+		// with the docker-container driver and does NOT hard-fail on the `docker`
+		// driver. It never selects the builder as the default (no `buildx use`).
+		fr := &scriptedRunner{
+			fails: map[string]error{inspectFreeze: errors.New("no builder named aileron-freeze")},
+			outputs: map[string]string{
+				bootstrapFreeze: "Driver: docker-container\nPlatforms: linux/amd64, linux/arm64, linux/arm/v7\n",
+			},
+		}
+		if err := CheckMultiArchBuild(context.Background(), fr, "docker"); err != nil {
+			t.Fatalf("auto-provisioning a default setup must pass, got %v", err)
+		}
+		if n := fr.countCalls(createFreeze); n != 1 {
+			t.Fatalf("create called %d times, want exactly 1 when the builder is absent", n)
+		}
+		for _, c := range fr.calls {
+			if strings.HasPrefix(c, "buildx use") {
+				t.Fatalf("preflight must not `buildx use` the operator's default builder, saw %q", c)
+			}
 		}
 	})
 
 	t.Run("bootstrap fails", func(t *testing.T) {
-		fr := &scriptedRunner{fails: map[string]error{"buildx inspect --bootstrap": errors.New("no builder")}}
+		fr := &scriptedRunner{fails: map[string]error{bootstrapFreeze: errors.New("failed to pull buildkit image")}}
 		err := CheckMultiArchBuild(context.Background(), fr, "docker")
 		if err == nil || !strings.Contains(err.Error(), binfmt) {
 			t.Fatalf("err = %v, want a bootstrap-failure remediation", err)
@@ -339,15 +449,57 @@ func TestCheckMultiArchBuild(t *testing.T) {
 	})
 }
 
+// TestEnsureFreezeBuilder proves the dedicated freeze builder is created only
+// when absent and skipped when already present, over the Runner seam (#2054).
+func TestEnsureFreezeBuilder(t *testing.T) {
+	const inspectFreeze = "buildx inspect " + FreezeBuilderName
+	const createFreeze = "buildx create --name " + FreezeBuilderName + " --driver docker-container"
+
+	t.Run("absent: created once with docker-container driver", func(t *testing.T) {
+		fr := &scriptedRunner{fails: map[string]error{inspectFreeze: errors.New("no such builder")}}
+		if err := EnsureFreezeBuilder(context.Background(), fr, "docker"); err != nil {
+			t.Fatalf("EnsureFreezeBuilder: %v", err)
+		}
+		if n := fr.countCalls(createFreeze); n != 1 {
+			t.Fatalf("create called %d times, want exactly 1", n)
+		}
+	})
+
+	t.Run("present: create skipped", func(t *testing.T) {
+		fr := &scriptedRunner{} // inspect succeeds by default
+		if err := EnsureFreezeBuilder(context.Background(), fr, "docker"); err != nil {
+			t.Fatalf("EnsureFreezeBuilder: %v", err)
+		}
+		if n := fr.countCalls(createFreeze); n != 0 {
+			t.Fatalf("create called %d times, want 0 when the builder already exists", n)
+		}
+	})
+
+	t.Run("create failure surfaces an actionable error", func(t *testing.T) {
+		fr := &scriptedRunner{fails: map[string]error{
+			inspectFreeze: errors.New("no such builder"),
+			createFreeze:  errors.New("permission denied"),
+		}}
+		err := EnsureFreezeBuilder(context.Background(), fr, "docker")
+		if err == nil || !strings.Contains(err.Error(), FreezeBuilderName) {
+			t.Fatalf("err = %v, want a create-failure error naming the builder", err)
+		}
+	})
+}
+
 // scriptedRunner is a Runner whose Run is keyed on the joined args, writing the
-// mapped stdout and returning the mapped error, so preflight checks run Docker-free.
+// mapped stdout and returning the mapped error, so preflight checks run
+// Docker-free. It records every joined-args key it saw so a test can assert which
+// commands ran (e.g. that the freeze builder was created once, or skipped).
 type scriptedRunner struct {
 	outputs map[string]string
 	fails   map[string]error
+	calls   []string
 }
 
 func (s *scriptedRunner) Run(_ context.Context, _ string, args []string, stdout, _ io.Writer) error {
 	key := strings.Join(args, " ")
+	s.calls = append(s.calls, key)
 	if err, ok := s.fails[key]; ok {
 		return err
 	}
@@ -355,6 +507,17 @@ func (s *scriptedRunner) Run(_ context.Context, _ string, args []string, stdout,
 		_, _ = stdout.Write([]byte(out))
 	}
 	return nil
+}
+
+// countCalls returns how many recorded calls equal key.
+func (s *scriptedRunner) countCalls(key string) int {
+	n := 0
+	for _, c := range s.calls {
+		if c == key {
+			n++
+		}
+	}
+	return n
 }
 
 func TestBuildDevcontainerWithFeaturesNoBuildArgs(t *testing.T) {

@@ -111,6 +111,16 @@ type Runner interface {
 	Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error
 }
 
+// envRunner is an optional capability a Runner may implement: run a command with
+// additional environment variables layered onto the inherited process
+// environment. The production execRunner implements it. The build path uses it
+// to scope a buildx builder selection (BUILDX_BUILDER) to a single multi-arch
+// build invocation, and falls back to plain Run when the Runner does not
+// implement it (issue #2054).
+type envRunner interface {
+	RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error
+}
+
 // DefaultRunner returns the production Runner that shells out to the
 // container runtime executable (docker). Callers outside this
 // package use it to drive runtime commands (e.g. image inspection)
@@ -119,10 +129,29 @@ func DefaultRunner() Runner { return execRunner{} }
 
 type execRunner struct{}
 
-func (execRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+func (r execRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return r.run(ctx, name, args, nil, stdout, stderr)
+}
+
+// RunWithEnv runs the runtime command with extra environment variables (each
+// "KEY=value") layered onto the inherited process environment. It exists so a
+// build can select a scoped buildx builder via BUILDX_BUILDER for a single
+// invocation without mutating the aileron process's global environment — a
+// global change would leak the selection into the sibling single-arch
+// daemon-load build, which must stay on the default `docker` driver to land the
+// image in the local daemon. execRunner satisfies the optional envRunner
+// interface so the build path can opt into it (issue #2054).
+func (r execRunner) RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
+	return r.run(ctx, name, args, env, stdout, stderr)
+}
+
+func (execRunner) run(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	// Put the runtime child in its own process group so a terminal
 	// Ctrl-C (SIGINT to the foreground process group) reaches only
 	// aileron, not `docker` directly. This keeps aileron's
@@ -315,6 +344,16 @@ type BuildOptions struct {
 	// it to publish (S3/S4 seam); it is not an ephemeral temp dir. Ignored when
 	// Platforms is empty.
 	OCILayoutDest string
+	// BuildxBuilder, when set, selects a specific buildx builder instance for a
+	// multi-arch build by exporting BUILDX_BUILDER=<name> in the build
+	// subprocess environment (rather than `docker buildx use`, which would
+	// repoint the operator's default builder). It is honored ONLY for a
+	// multi-arch build (Platforms set): the single-arch daemon-load build must
+	// run on the default `docker` driver so the composed image lands in the
+	// local daemon, and a docker-container builder cannot load into the daemon.
+	// The freeze producer sets it to the dedicated `aileron-freeze`
+	// docker-container builder (issue #2054). Ignored when Platforms is empty.
+	BuildxBuilder string
 }
 
 // BuildResult reports the image selected or built for launch.
@@ -422,6 +461,10 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// Per-invocation environment for the build subprocess. It carries a scoped
+	// BUILDX_BUILDER selection for a multi-arch build (issue #2054) and is nil for
+	// a single-arch build, keeping that argv+env byte-identical to before.
+	buildEnv := multiArchBuildEnv(opts)
 
 	// A multi-arch build and its OCI-layout output are one atomic request: the
 	// `--output type=oci,dest=<dir>` token is only emitted when both are set, so a
@@ -461,7 +504,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if err != nil {
 			return BuildResult{}, err
 		}
-		if err := runBuildStep(ctx, runner, runtimeName, args, stdout, stderr); err != nil {
+		if err := runBuildStep(ctx, runner, runtimeName, args, buildEnv, stdout, stderr); err != nil {
 			return BuildResult{}, err
 		}
 		result.Built = true
@@ -531,7 +574,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			if err != nil {
 				return BuildResult{}, err
 			}
-			if err := runBuildStep(ctx, runner, name, args, stdout, stderr); err != nil {
+			if err := runBuildStep(ctx, runner, name, args, buildEnv, stdout, stderr); err != nil {
 				return BuildResult{}, err
 			}
 			result.Built = true
@@ -542,7 +585,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if err != nil {
 			return BuildResult{}, err
 		}
-		if err := runBuildStep(ctx, runner, runtimeName, args, stdout, stderr); err != nil {
+		if err := runBuildStep(ctx, runner, runtimeName, args, buildEnv, stdout, stderr); err != nil {
 			return BuildResult{}, err
 		}
 		result.Built = true
@@ -579,7 +622,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		}
 		// BuildPolicyAuto with the image absent, or BuildPolicyAlways: pull it.
 		pullArgs := []string{"pull", result.Image}
-		if err := runBuildStep(ctx, runner, runtimeName, pullArgs, stdout, stderr); err != nil {
+		if err := runBuildStep(ctx, runner, runtimeName, pullArgs, nil, stdout, stderr); err != nil {
 			return BuildResult{}, err
 		}
 		return result, nil
@@ -607,10 +650,19 @@ const daemonUnreachableMessage = "Docker isn't reachable; make sure Docker Deskt
 // chaining the original `<runtime> <args>: <exit>` error via %w, so
 // errors.Is/Unwrap continue to expose the underlying diagnostic. All other
 // failures keep the established `%s %s: %w` framing verbatim.
-func runBuildStep(ctx context.Context, runner Runner, runtimeName string, args []string, stdout, stderr io.Writer) error {
+//
+// env carries extra "KEY=value" environment entries for this single invocation
+// (e.g. BUILDX_BUILDER to scope a multi-arch build to a dedicated builder). It is
+// applied only when the Runner implements envRunner; a plain Runner ignores it.
+func runBuildStep(ctx context.Context, runner Runner, runtimeName string, args, env []string, stdout, stderr io.Writer) error {
 	var stderrBuf bytes.Buffer
 	teedStderr := io.MultiWriter(stderr, &stderrBuf)
-	err := runner.Run(ctx, runtimeName, args, stdout, teedStderr)
+	var err error
+	if er, ok := runner.(envRunner); ok && len(env) > 0 {
+		err = er.RunWithEnv(ctx, runtimeName, args, env, stdout, teedStderr)
+	} else {
+		err = runner.Run(ctx, runtimeName, args, stdout, teedStderr)
+	}
 	if err == nil {
 		return nil
 	}
@@ -1227,20 +1279,77 @@ func multiArchLayoutDir(opts BuildOptions) string {
 	return opts.OCILayoutDest
 }
 
+// multiArchBuildEnv returns the extra environment entries a multi-arch build
+// subprocess needs to select a scoped buildx builder, or nil for a single-arch
+// build. When BuildxBuilder is set on a multi-arch build (Platforms non-empty) it
+// exports BUILDX_BUILDER=<name> so buildx — whether invoked as `docker buildx
+// build` (raw tiers) or under `@devcontainers/cli` (which inherits the
+// environment and shells out to buildx) — runs on that dedicated builder without
+// `docker buildx use` repointing the operator's default. It is gated on Platforms
+// so the single-arch daemon-load build never inherits the selection: that build
+// must stay on the default `docker` driver to land the image in the local daemon,
+// which a docker-container builder cannot do (issue #2054).
+func multiArchBuildEnv(opts BuildOptions) []string {
+	if len(opts.Platforms) == 0 || strings.TrimSpace(opts.BuildxBuilder) == "" {
+		return nil
+	}
+	return []string{"BUILDX_BUILDER=" + opts.BuildxBuilder}
+}
+
+// FreezeBuilderName is the name of the dedicated buildx builder `aileron skill
+// freeze` provisions and uses for its multi-arch composed build. It is created
+// with the `docker-container` driver and, deliberately, is NOT selected as the
+// operator's default builder (issue #2054).
+const FreezeBuilderName = "aileron-freeze"
+
+// EnsureFreezeBuilder idempotently ensures the dedicated FreezeBuilderName buildx
+// builder — backed by the `docker-container` driver — exists, creating it only
+// when absent. The docker-container driver is required because the default
+// `docker` driver (Docker Desktop's out-of-the-box buildx builder) cannot export
+// a multi-arch OCI layout, the artifact a Flight Plan freeze pins; the driver
+// also bundles the QEMU emulators, so a single-arch host can build both
+// linux/amd64 and linux/arm64 without a separate binfmt install. The builder is
+// created but NOT selected as the operator's default (no `docker buildx use`), so
+// freeze transparently provisions its own build environment and leaves the
+// operator's existing buildx setup untouched. It runs through the Runner seam so
+// it is unit-testable without Docker (issue #2054).
+func EnsureFreezeBuilder(ctx context.Context, runner Runner, runtimeName string) error {
+	if runner == nil {
+		runner = execRunner{}
+	}
+	// `docker buildx inspect <name>` (no --bootstrap) is a cheap existence probe:
+	// it succeeds iff the named builder already exists and starts nothing.
+	if err := runner.Run(ctx, runtimeName, []string{"buildx", "inspect", FreezeBuilderName}, io.Discard, io.Discard); err == nil {
+		return nil
+	}
+	var out bytes.Buffer
+	if err := runner.Run(ctx, runtimeName, []string{"buildx", "create", "--name", FreezeBuilderName, "--driver", "docker-container"}, &out, &out); err != nil {
+		detail := strings.TrimSpace(out.String())
+		if detail != "" {
+			return fmt.Errorf("provision the dedicated `%s` buildx builder for a multi-arch freeze (%w): %s", FreezeBuilderName, err, detail)
+		}
+		return fmt.Errorf("provision the dedicated `%s` buildx builder for a multi-arch freeze: %w", FreezeBuilderName, err)
+	}
+	return nil
+}
+
 // CheckMultiArchBuild is the freeze-time preflight for a multi-architecture
-// composed build: it verifies buildx is installed and its active builder can
-// build both linux/amd64 and linux/arm64. It runs BEFORE the build so the freeze
-// producer aborts with an actionable remediation rather than silently producing a
-// single-arch pin (issue #2036, Q2). It shells out through the Runner seam so it
-// is unit-testable without Docker.
+// composed build. It runs BEFORE the build so the freeze producer aborts with an
+// actionable remediation rather than silently producing a single-arch pin (issue
+// #2036, Q2). It shells out through the Runner seam so it is unit-testable
+// without Docker.
 //
-// Three checks: `docker buildx version` must succeed (buildx present); `docker
-// buildx inspect --bootstrap` must succeed; and the active builder must both use
-// a driver that can export a multi-platform OCI layout (the default `docker`
-// driver cannot) and advertise every default freeze platform (the QEMU emulators
-// are installed and registered). A miss returns an error naming the concrete fix:
-// create a docker-container builder, and/or register the QEMU emulators with
-// `docker run --privileged --rm tonistiigi/binfmt --install all`.
+// Rather than require the operator's default builder to support multi-arch OCI
+// export (Docker Desktop's default `docker` driver cannot), freeze provisions its
+// own dedicated `docker-container` builder and scopes the build to it. The
+// preflight therefore: verifies `docker buildx version` succeeds (buildx
+// present); idempotently ensures the FreezeBuilderName builder exists; bootstraps
+// it with `docker buildx inspect <name> --bootstrap` (which pulls the buildkit
+// image and registers the bundled QEMU emulators); and confirms it advertises
+// every default freeze platform. A genuine miss returns an error naming the
+// concrete fix (register the QEMU emulators with `docker run --privileged --rm
+// tonistiigi/binfmt --install all`). Docker-unreachable and buildkit-image-pull
+// failures surface through the same error chain (issue #2054).
 func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string) error {
 	if runner == nil {
 		runner = execRunner{}
@@ -1248,18 +1357,18 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 	if err := runner.Run(ctx, runtimeName, []string{"buildx", "version"}, io.Discard, io.Discard); err != nil {
 		return fmt.Errorf("multi-arch freeze build requires docker buildx, which is not available (%w); install/enable Docker buildx, then register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
 	}
+	// Transparently provision the dedicated docker-container builder (a no-op when
+	// it already exists) so a default Docker Desktop setup — whose active builder
+	// uses the `docker` driver that cannot export a multi-arch OCI layout — works
+	// without any operator setup.
+	if err := EnsureFreezeBuilder(ctx, runner, runtimeName); err != nil {
+		return err
+	}
 	var out bytes.Buffer
-	if err := runner.Run(ctx, runtimeName, []string{"buildx", "inspect", "--bootstrap"}, &out, &out); err != nil {
-		return fmt.Errorf("multi-arch freeze build could not bootstrap the buildx builder (%w); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
+	if err := runner.Run(ctx, runtimeName, []string{"buildx", "inspect", FreezeBuilderName, "--bootstrap"}, &out, &out); err != nil {
+		return fmt.Errorf("multi-arch freeze build could not bootstrap the dedicated `%s` buildx builder (%w); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", FreezeBuilderName, err)
 	}
 	inspect := out.String()
-	// The default `docker` buildx driver cannot export a multi-platform image to
-	// an OCI layout (`--output type=oci`); only a container/remote/k8s driver can.
-	// Catch it here so the operator gets an actionable "create a docker-container
-	// builder" hint rather than a mid-build buildx export error.
-	if driver := buildxInspectDriver(inspect); driver == "docker" {
-		return fmt.Errorf("the active docker buildx builder uses the `docker` driver, which cannot export a multi-arch OCI layout (needed for a multi-arch freeze); create and select a container builder with `docker buildx create --driver docker-container --use`")
-	}
 	var missing []string
 	for _, want := range composition.MultiArchPlatforms {
 		if !buildxInspectHasPlatform(inspect, want) {
@@ -1267,23 +1376,9 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("the active docker buildx builder cannot build %s (needed for a multi-arch freeze); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`, or select a builder that supports these platforms with `docker buildx create --use`", strings.Join(missing, ", "))
+		return fmt.Errorf("the dedicated `%s` buildx builder cannot build %s (needed for a multi-arch freeze); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", FreezeBuilderName, strings.Join(missing, ", "))
 	}
 	return nil
-}
-
-// buildxInspectDriver returns the lowercased driver name from a `docker buildx
-// inspect` output (the value on the `Driver:` line), or "" when no such line is
-// present. It parses the exact token so `docker` is not confused with
-// `docker-container`.
-func buildxInspectDriver(inspect string) string {
-	for _, line := range strings.Split(inspect, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "Driver:" {
-			return strings.ToLower(fields[1])
-		}
-	}
-	return ""
 }
 
 // buildxInspectHasPlatform reports whether `docker buildx inspect` output
