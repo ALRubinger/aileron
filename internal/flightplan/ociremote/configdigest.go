@@ -12,6 +12,15 @@ import (
 	"oras.land/oras-go/v2/content"
 )
 
+// composedOS is the operating system a composed container image always declares.
+// It mirrors freeze's composedOS: `imgconfig.CanonicalConfig.OS` for a container
+// image is "linux" regardless of the launching host GOOS (v4 supports
+// macOS/Windows/Linux hosts), and freeze keys its per-arch config-digest set on
+// this constant, so a consumer must select the index child by the container
+// runtime OS ("linux"), NOT the host GOOS. Matching the host GOOS would never hit
+// on a Mac or Windows host, refusing an otherwise-bootable linux image (#2055).
+const composedOS = "linux"
+
 // hostGOARCH is the architecture a single-child platform selection targets. It
 // mirrors freeze's hostGOARCH seam: a package var (not a direct runtime.GOARCH
 // read) so tests can exercise the foreign-arch child-selection branch
@@ -21,6 +30,14 @@ import (
 // genuinely foreign consumer (e.g. an arm64 binary under QEMU) reports its own
 // arch here naturally.
 var hostGOARCH = runtime.GOARCH
+
+// hostGOOS is the launching host's GOOS, exposed as a package var (not a direct
+// runtime.GOOS read) so tests can drive the non-linux-host selection branch
+// deterministically regardless of the OS the test binary runs on. It is used
+// only to name the host in the fail-closed message; selection itself keys on
+// composedOS, never on hostGOOS, so a Windows or macOS host still resolves the
+// linux child of a composed multi-arch artifact (#2055).
+var hostGOOS = runtime.GOOS
 
 // Docker media type / annotation constants not exported by image-spec. A
 // containerd-backed `docker push` (Docker Desktop's default image store) emits
@@ -60,8 +77,10 @@ const (
 // Selection inside an index skips attestation entries (platform os == "unknown"
 // or the docker attestation reference-type annotation). For the single-platform
 // composed image exactly one real manifest remains and is used; when several
-// real manifests exist the host runtime.GOOS/GOARCH match is chosen; when none
-// is usable an actionable error is returned rather than a silently-wrong digest.
+// real manifests exist the composedOS ("linux") + host-arch match is chosen (a
+// composed image always declares os="linux", so selection never keys on the host
+// GOOS); when none is usable an actionable error is returned rather than a
+// silently-wrong digest.
 func ConfigContentDigest(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descriptor) (string, error) {
 	blob, err := configBlob(ctx, fetcher, desc)
 	if err != nil {
@@ -204,9 +223,10 @@ func enumeratePlatformManifests(raw []byte) ([]ocispec.Descriptor, error) {
 
 // selectPlatformManifest picks the single runnable image manifest from an index's
 // raw bytes for the host-only config read: it enumerates the runnable children,
-// then returns the sole remaining manifest, or the host-platform match when
-// several remain. It shares enumeratePlatformManifests with the all-arch walk so
-// the two can never diverge on which children count as runnable.
+// then returns the sole remaining manifest, or the composedOS ("linux") +
+// host-arch match when several remain. It shares enumeratePlatformManifests with
+// the all-arch walk so the two can never diverge on which children count as
+// runnable.
 func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
 	candidates, err := enumeratePlatformManifests(raw)
 	if err != nil {
@@ -215,17 +235,21 @@ func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
 	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
-	// Select the child for the consumer's target arch (the hostGOARCH seam,
-	// runtime.GOARCH in production), matching freeze.hostPlatform()'s arch
-	// vocabulary so a cross-arch consumer verifies the child it actually attests
-	// (#2025).
+	// Select the child for the container runtime platform: OS is always
+	// composedOS ("linux", what a composed image declares and what freeze keys
+	// its per-arch config-digest set on), and arch is the consumer's target arch
+	// (the hostGOARCH seam, runtime.GOARCH in production), matching
+	// freeze.hostPlatform()'s vocabulary so a cross-arch consumer verifies the
+	// child it actually attests (#2025). Keying OS on composedOS rather than the
+	// host GOOS is what lets a macOS or Windows host resolve the linux child
+	// instead of demanding a nonexistent darwin/windows manifest (#2055).
 	wantArch := hostGOARCH
 	for _, m := range candidates {
-		if m.Platform != nil && m.Platform.OS == runtime.GOOS && m.Platform.Architecture == wantArch {
+		if m.Platform != nil && m.Platform.OS == composedOS && m.Platform.Architecture == wantArch {
 			return m, nil
 		}
 	}
-	return ocispec.Descriptor{}, fmt.Errorf("image index has %d image manifests but none match host platform %s/%s", len(candidates), runtime.GOOS, wantArch)
+	return ocispec.Descriptor{}, fmt.Errorf("image index has %d image manifests but none targets the container runtime platform %s/%s (host %s/%s)", len(candidates), composedOS, wantArch, hostGOOS, wantArch)
 }
 
 // isAttestationManifest reports whether a child descriptor is a buildkit
