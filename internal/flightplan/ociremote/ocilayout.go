@@ -21,15 +21,33 @@ import (
 // no registry auth. The layout is read only; the caller owns its lifetime (freeze
 // keeps it for the publish handoff, it does not delete it here).
 func ConfigContentDigestsFromOCILayout(ctx context.Context, dir string) ([]PlatformConfigDigest, error) {
-	store, err := oci.NewFromFS(ctx, os.DirFS(dir))
-	if err != nil {
-		return nil, fmt.Errorf("open OCI layout %s: %w", dir, err)
-	}
-	root, err := ociLayoutRootDescriptor(dir)
+	store, root, err := OpenOCILayout(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
 	return AllPlatformConfigContentDigests(ctx, store, root)
+}
+
+// OpenOCILayout opens a local OCI image-layout directory as a read-only content
+// store and returns it together with the single root descriptor its index.json
+// points at (the multi-arch manifest list buildx writes for a multi-platform
+// build, or a single image manifest for one arch). Publish needs both halves: the
+// store is a copy source (oras.CopyGraph pushes the whole manifest-list graph into
+// the destination registry) and a config-digest fetcher (the pre-push per-arch
+// verify reads every platform child straight from it), so exposing one open+root
+// path keeps the read and the copy anchored to the exact same bytes.
+// *oci.ReadOnlyStore satisfies both oras.ReadOnlyTarget and content.Fetcher. The
+// layout is read only; the caller owns its lifetime.
+func OpenOCILayout(ctx context.Context, dir string) (*oci.ReadOnlyStore, ocispec.Descriptor, error) {
+	store, err := oci.NewFromFS(ctx, os.DirFS(dir))
+	if err != nil {
+		return nil, ocispec.Descriptor{}, fmt.Errorf("open OCI layout %s: %w", dir, err)
+	}
+	root, err := ociLayoutRootDescriptor(dir)
+	if err != nil {
+		return nil, ocispec.Descriptor{}, err
+	}
+	return store, root, nil
 }
 
 // ociLayoutRootDescriptor reads the layout's top-level index.json and returns the

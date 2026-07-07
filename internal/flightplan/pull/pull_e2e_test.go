@@ -14,6 +14,7 @@ package pull
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -27,6 +28,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/publish"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
+
+	specs "github.com/opencontainers/image-spec/specs-go"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	oras "oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content/oci"
 )
 
 const e2eTimeout = 3 * time.Minute
@@ -91,6 +97,53 @@ func localContentDigest(t *testing.T, ref string) string {
 	return d
 }
 
+// stageComposedLayout turns the real, daemon-built image `tag` into an on-disk OCI
+// image layout the publish ComposedLayout seam opens, WITHOUT `docker buildx` or
+// the docker-container driver (real buildx + QEMU is reserved for S5, #2038). It
+// pushes the image to a scratch repo in the local registry, then oras-copies the
+// pushed graph back into a fresh on-disk OCI layout carrying the REAL config and
+// layer blobs. That is the difference from the synthetic publish-unit fixtures: the
+// composed image publish pushes is a genuinely pullable image, so the round-trip's
+// `docker pull` of the boot ref actually boots. It returns the layout directory.
+//
+// oci.Store records every pushed manifest in its index.json (a multi-root index the
+// OpenOCILayout reader rejects); like publish's stageProductionLayout, the helper
+// overwrites index.json with the single manifest-list root the copy resolved.
+func stageComposedLayout(t *testing.T, ctx context.Context, host, tag string) string {
+	t.Helper()
+	_, variant, _ := strings.Cut(tag, ":")
+	src := host + "/e2e/layout-src-" + variant
+	docker(t, "tag", tag, src+":latest")
+	docker(t, "push", src+":latest")
+
+	repo, err := ociremote.NewRepository(src)
+	if err != nil {
+		t.Fatalf("connect layout source registry: %v", err)
+	}
+	layoutDir := t.TempDir()
+	st, err := oci.New(layoutDir)
+	if err != nil {
+		t.Fatalf("oci.New layout: %v", err)
+	}
+	root, err := oras.Copy(ctx, repo, "latest", st, "latest", oras.DefaultCopyOptions)
+	if err != nil {
+		t.Fatalf("copy image into OCI layout: %v", err)
+	}
+	singleRoot := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{root},
+	}
+	ib, err := json.Marshal(singleRoot)
+	if err != nil {
+		t.Fatalf("marshal single-root index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(layoutDir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+		t.Fatalf("write single-root index.json: %v", err)
+	}
+	return layoutDir
+}
+
 // e2eFrozen mints a REAL signed frozen version (no-environment manifest, no
 // image resolver needed) so the pulled artifact actually verifies against the
 // launch-time gate. It returns the freeze result and the version-id slug used
@@ -137,8 +190,11 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	ctx := e2eContext(t)
 	host := registryHost(t)
 
-	// Build + push a composed image so publish has a config-content-digest subject.
+	// Build a composed image so publish has a config-content-digest subject, then
+	// stage it as a REAL on-disk OCI layout (no buildx) the ComposedLayout seam
+	// opens — the same seam production wires to composition.OCILayoutDir.
 	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-pull")
+	layoutDir := stageComposedLayout(t, ctx, host, tag)
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/pull-plan"
 	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
@@ -153,6 +209,9 @@ func TestPullE2ERoundTrip(t *testing.T) {
 			PublicKey: res.PublicKey,
 		},
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}},
+		ComposedLayout: func(ctx context.Context, _ freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+			return ociremote.OpenOCILayout(ctx, layoutDir)
+		},
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -265,6 +324,7 @@ func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
 	// registry served the honest image, but the signed lock attests a different
 	// identity, so the binding check must refuse.
 	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-tamper")
+	layoutDir := stageComposedLayout(t, ctx, host, tag)
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/tamper-plan"
 	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
@@ -279,6 +339,9 @@ func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
 			PublicKey: res.PublicKey,
 		},
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{honestPin}},
+		ComposedLayout: func(ctx context.Context, _ freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+			return ociremote.OpenOCILayout(ctx, layoutDir)
+		},
 	}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}

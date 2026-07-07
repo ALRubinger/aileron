@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -93,6 +95,23 @@ func LocalToolsImageTag(base string, featureRefs []string) string {
 		h.Write([]byte(ref))
 	}
 	return "aileron/sandbox-tools:" + hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// OCILayoutDir returns the deterministic directory a multi-arch composed build
+// writes its OCI image layout to, keyed by the composed image's local tag
+// (LocalToolsImageTag), never an ephemeral temp dir. Freeze writes the layout
+// here and publish reads it back, so both compute a byte-identical path from this
+// one function rather than each inlining the mapping (the two must never drift, or
+// publish would look for the layout somewhere freeze never wrote it). The slug
+// replaces the `/` and `:` that a tag carries but a path segment cannot, and the
+// dir lives under the user cache so it survives across a freeze -> publish gap.
+func OCILayoutDir(tag string) (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve composed OCI layout cache dir: %w", err)
+	}
+	repl := strings.NewReplacer("/", "_", ":", "_")
+	return filepath.Join(base, "aileron", "freeze-oci-layouts", repl.Replace(tag)), nil
 }
 
 // sortedRefs returns a sorted copy of refs so plan content and tags are

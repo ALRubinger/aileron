@@ -20,9 +20,11 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
-	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 
+	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 )
 
@@ -57,10 +59,9 @@ func docker(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// buildLocalImage builds a tiny scratch image locally and returns its tag and
-// serialization-agnostic config content digest, mirroring how freeze pins a
-// composed image (localImageContentDigest).
-func buildLocalImage(t *testing.T, tag string) (string, string) {
+// buildLocalImage builds a tiny scratch image locally and returns its tag,
+// mirroring how a foreign base is seeded into the registry.
+func buildLocalImage(t *testing.T, tag string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("aileron-e2e\n"), 0o644); err != nil {
@@ -71,36 +72,154 @@ func buildLocalImage(t *testing.T, tag string) (string, string) {
 		t.Fatal(err)
 	}
 	docker(t, "build", "-t", tag, dir)
-	return tag, localContentDigest(t, tag)
+	return tag
 }
 
-// localContentDigest computes the config content digest of a local image the
-// same way the production ImageSource does (docker inspect -> imgconfig).
-func localContentDigest(t *testing.T, ref string) string {
+// writeSyntheticMultiArchLayout writes a hand-built multi-arch OCI image layout
+// into layoutDir: an OCI image-index (manifest list) over two platform children,
+// linux/amd64 and linux/arm64, each a real image manifest with its own config and
+// layer blob. This is the S4 contract fixture — it is byte-for-byte the artifact
+// shape freeze's multi-arch `docker buildx build --output type=oci` writes, but is
+// constructed in-process so the push + per-arch re-verify contract is proven
+// WITHOUT real buildx, QEMU, the docker-container driver, or cross-arch emulation
+// (the real buildx path is reserved for the S5 job that provisions binfmt). It
+// mirrors the synthetic-layout helpers #2036 introduced in ociremote's
+// ocilayout_test.go (writeBlob / archImageManifest / writeOCILayoutRoot). It
+// returns the per-arch config content digests read back from the layout via the
+// same production reader freeze uses, so the caller pins exactly what publish will
+// re-verify against the registry.
+func writeSyntheticMultiArchLayout(t *testing.T, layoutDir string) []ociremote.PlatformConfigDigest {
 	t.Helper()
-	inspect := docker(t, "image", "inspect", "--format", "{{json .}}", ref)
-	cc, err := imgconfig.FromDockerInspect([]byte(inspect))
-	if err != nil {
-		t.Fatalf("canonicalize %s config: %v", ref, err)
+	amd := writeArchImageManifest(t, layoutDir, "linux", "amd64", "amd")
+	arm := writeArchImageManifest(t, layoutDir, "linux", "arm64", "arm")
+	list := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{amd, arm},
 	}
-	d, err := cc.ContentDigest()
+	lb, err := json.Marshal(list)
 	if err != nil {
-		t.Fatalf("content digest %s: %v", ref, err)
+		t.Fatalf("marshal manifest list: %v", err)
 	}
-	return d
+	root := writeLayoutBlob(t, layoutDir, ocispec.MediaTypeImageIndex, lb)
+	writeOCILayoutRoot(t, layoutDir, root)
+
+	digs, err := ociremote.ConfigContentDigestsFromOCILayout(context.Background(), layoutDir)
+	if err != nil {
+		t.Fatalf("read layout per-arch digests: %v", err)
+	}
+	return digs
+}
+
+// writeLayoutBlob writes data into the OCI layout's content-addressed blob store
+// (blobs/<algo>/<hex>) and returns its descriptor, the same on-disk shape a real
+// OCI image layout uses.
+func writeLayoutBlob(t *testing.T, dir, mediaType string, data []byte) ocispec.Descriptor {
+	t.Helper()
+	desc := content.NewDescriptorFromBytes(mediaType, data)
+	path := filepath.Join(dir, "blobs", desc.Digest.Algorithm().String(), desc.Digest.Encoded())
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir blob dir: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write blob: %v", err)
+	}
+	return desc
+}
+
+// writeArchImageManifest stages one platform child of the synthetic manifest list:
+// a config blob declaring (os, arch) plus a layer and an image manifest. The
+// marker perturbs the config so each arch's serialization-agnostic content digest
+// differs, exactly as two real per-arch builds would. It returns the
+// platform-stamped manifest descriptor for the parent index.
+func writeArchImageManifest(t *testing.T, dir, os, arch, marker string) ocispec.Descriptor {
+	t.Helper()
+	img := ocispec.Image{
+		Platform: ocispec.Platform{OS: os, Architecture: arch},
+		Config: ocispec.ImageConfig{
+			Env:        []string{"PATH=/usr/bin"},
+			Entrypoint: []string{"/entry", marker},
+			Cmd:        []string{"bash"},
+			WorkingDir: "/work",
+		},
+	}
+	img.RootFS.Type = "layers"
+	configBody, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	cfg := writeLayoutBlob(t, dir, ocispec.MediaTypeImageConfig, configBody)
+	layer := writeLayoutBlob(t, dir, ocispec.MediaTypeImageLayerGzip, []byte("layer-"+marker))
+	m := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    cfg,
+		Layers:    []ocispec.Descriptor{layer},
+	}
+	mb, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	md := writeLayoutBlob(t, dir, ocispec.MediaTypeImageManifest, mb)
+	md.Platform = &ocispec.Platform{OS: os, Architecture: arch}
+	return md
+}
+
+// writeOCILayoutRoot writes the oci-layout marker and the top-level index.json
+// pointing at the single root descriptor, completing a valid OCI image layout the
+// production OpenOCILayout / ConfigContentDigestsFromOCILayout readers accept.
+func writeOCILayoutRoot(t *testing.T, dir string, root ocispec.Descriptor) {
+	t.Helper()
+	layout, err := json.Marshal(ocispec.ImageLayout{Version: ocispec.ImageLayoutVersion})
+	if err != nil {
+		t.Fatalf("marshal oci-layout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageLayoutFile), layout, 0o644); err != nil {
+		t.Fatalf("write oci-layout: %v", err)
+	}
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{root},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+		t.Fatalf("write index.json: %v", err)
+	}
 }
 
 func TestPublishE2EComposed(t *testing.T) {
 	ctx := e2eContext(t)
 	host := registryHost(t)
-	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-composed")
 	registry := host + "/e2e/composed-plan"
 
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
+	// The artifact under test is a SYNTHETIC multi-arch OCI layout (linux/amd64 +
+	// linux/arm64) written on disk, not a real buildx build: S4 proves the
+	// manifest-list push + per-arch re-verify contract against the local registry
+	// without buildx/QEMU/the docker-container driver (that path is S5, #2038).
+	layoutDir := t.TempDir()
+	perArch := writeSyntheticMultiArchLayout(t, layoutDir)
+	if len(perArch) != 2 {
+		t.Fatalf("synthetic layout has %d arches, want the two-arch (amd64+arm64) manifest list", len(perArch))
+	}
+	cds := make([]freeze.PlatformDigest, 0, len(perArch))
+	for _, p := range perArch {
+		cds = append(cds, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: p.Digest})
+	}
+
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: cds, LocalTag: "aileron/sandbox-tools:e2e"}
 	opts := Options{
 		Name: "e2e", VersionID: "v1", Registry: registry,
 		Frozen: testFrozen(),
 		Lock:   freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}},
+		// Point the layout seam at the just-written synthetic multi-arch OCI layout,
+		// opened through the same production reader freeze's real layout flows.
+		ComposedLayout: func(ctx context.Context, _ freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+			return ociremote.OpenOCILayout(ctx, layoutDir)
+		},
 	}
 	res, err := Run(ctx, opts)
 	if err != nil {
@@ -126,7 +245,7 @@ func TestPublishE2EForeignBase(t *testing.T) {
 
 	// Seed a "foreign base" in the registry: build locally and push it, then
 	// read back its manifest digest — the digest a freeze foreign-base pin holds.
-	srcTag, _ := buildLocalImage(t, "aileron/sandbox-tools:e2e-base")
+	srcTag := buildLocalImage(t, "aileron/sandbox-tools:e2e-base")
 	srcRef := host + "/e2e/base"
 	docker(t, "tag", srcTag, srcRef+":latest")
 	docker(t, "push", srcRef+":latest")

@@ -2,6 +2,7 @@ package composition
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,64 @@ func TestToolsPlan_DeterministicTag(t *testing.T) {
 	d := ToolsPlan("other-base@sha256:"+strings.Repeat("b", 64), []string{"ghcr.io/x/aws-cli:0", "ghcr.io/x/gh:0"})
 	if d.Image == a.Image {
 		t.Errorf("distinct bases must produce distinct tags, both %q", d.Image)
+	}
+}
+
+// TestOCILayoutDir_Deterministic proves a tag maps to a stable cache-dir path so
+// freeze (write) and publish (read) compute byte-identical paths from one source.
+func TestOCILayoutDir_Deterministic(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", base) // Linux resolves UserCacheDir here
+	t.Setenv("HOME", base)           // darwin resolves $HOME/Library/Caches
+
+	tag := "aileron/sandbox-tools:abc123def4567890"
+	a, err := OCILayoutDir(tag)
+	if err != nil {
+		t.Fatalf("OCILayoutDir: %v", err)
+	}
+	b, err := OCILayoutDir(tag)
+	if err != nil {
+		t.Fatalf("OCILayoutDir (2nd): %v", err)
+	}
+	if a != b {
+		t.Errorf("path not deterministic: %q vs %q", a, b)
+	}
+	if !strings.Contains(a, filepath.Join("aileron", "freeze-oci-layouts")) {
+		t.Errorf("path %q is not under aileron/freeze-oci-layouts", a)
+	}
+}
+
+// TestOCILayoutDir_SlugsTagSeparators proves the `/` and `:` a tag carries but a
+// path segment cannot are slugged to `_`, so the dir is a single path segment.
+func TestOCILayoutDir_SlugsTagSeparators(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", base)
+	t.Setenv("HOME", base)
+
+	got, err := OCILayoutDir("aileron/sandbox-tools:tagwith/slash:colon")
+	if err != nil {
+		t.Fatalf("OCILayoutDir: %v", err)
+	}
+	slug := filepath.Base(got)
+	if strings.ContainsAny(slug, "/:") {
+		t.Errorf("slug %q still contains a `/` or `:` separator", slug)
+	}
+	if slug != "aileron_sandbox-tools_tagwith_slash_colon" {
+		t.Errorf("slug = %q, want the `/`+`:`->`_` replacement", slug)
+	}
+}
+
+// TestOCILayoutDir_CacheDirError proves an unresolvable user cache dir surfaces as
+// a wrapped error rather than a bogus path.
+func TestOCILayoutDir_CacheDirError(t *testing.T) {
+	// Clear every var os.UserCacheDir consults across the supported platforms so it
+	// fails deterministically: $XDG_CACHE_HOME and $HOME on Linux/macOS, and
+	// %LocalAppData% on Windows (where os.UserCacheDir does not read HOME at all).
+	// Missing the Windows var is why this previously passed on Unix but not Windows.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("LocalAppData", "")
+	if _, err := OCILayoutDir("aileron/sandbox-tools:x"); err == nil {
+		t.Fatal("want an error when the user cache dir is unresolvable")
 	}
 }

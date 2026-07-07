@@ -145,6 +145,82 @@ func TestConfigContentDigestsFromOCILayout_TwoArch(t *testing.T) {
 	}
 }
 
+// TestOpenOCILayout_ReturnsManifestListRoot proves the exported opener returns a
+// read-only store plus the single manifest-list root descriptor for a staged
+// multi-arch layout, so publish can both verify and copy from the same open.
+func TestOpenOCILayout_ReturnsManifestListRoot(t *testing.T) {
+	dir := t.TempDir()
+	amd, _ := archImageManifest(t, dir, "linux", "amd64", "amd")
+	arm, _ := archImageManifest(t, dir, "linux", "arm64", "arm")
+	list := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{amd, arm},
+	}
+	lb, err := json.Marshal(list)
+	if err != nil {
+		t.Fatalf("marshal manifest list: %v", err)
+	}
+	root := writeBlob(t, dir, ocispec.MediaTypeImageIndex, lb)
+	writeOCILayoutRoot(t, dir, root)
+
+	store, gotRoot, err := OpenOCILayout(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("OpenOCILayout: %v", err)
+	}
+	if store == nil {
+		t.Fatal("OpenOCILayout returned a nil store")
+	}
+	if gotRoot.Digest != root.Digest {
+		t.Errorf("root = %s, want the manifest-list digest %s", gotRoot.Digest, root.Digest)
+	}
+	if gotRoot.MediaType != ocispec.MediaTypeImageIndex {
+		t.Errorf("root media type = %q, want an image index", gotRoot.MediaType)
+	}
+	// The returned store must fetch the manifest-list root the descriptor names.
+	if _, err := content.FetchAll(context.Background(), store, gotRoot); err != nil {
+		t.Errorf("returned store cannot fetch its own root: %v", err)
+	}
+}
+
+// TestOpenOCILayout_MultiRootErrors proves the exported opener rejects a layout
+// whose index.json carries more than one root through the shared root check.
+func TestOpenOCILayout_MultiRootErrors(t *testing.T) {
+	dir := t.TempDir()
+	amd, _ := archImageManifest(t, dir, "linux", "amd64", "amd")
+	arm, _ := archImageManifest(t, dir, "linux", "arm64", "arm")
+	layout, err := json.Marshal(ocispec.ImageLayout{Version: ocispec.ImageLayoutVersion})
+	if err != nil {
+		t.Fatalf("marshal oci-layout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageLayoutFile), layout, 0o644); err != nil {
+		t.Fatalf("write oci-layout: %v", err)
+	}
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{amd, arm},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+		t.Fatalf("write index.json: %v", err)
+	}
+	if _, _, err := OpenOCILayout(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "want exactly 1") {
+		t.Fatalf("err = %v, want a multi-root rejection", err)
+	}
+}
+
+// TestOpenOCILayout_MissingLayoutErrors proves opening a non-layout directory
+// fails with a clear error, not a panic.
+func TestOpenOCILayout_MissingLayoutErrors(t *testing.T) {
+	if _, _, err := OpenOCILayout(context.Background(), t.TempDir()); err == nil {
+		t.Fatal("want an error for a directory that is not an OCI layout")
+	}
+}
+
 // TestConfigContentDigestsFromOCILayout_NoRunnableManifestErrors proves a layout
 // whose manifest list carries no runnable image (only an unknown-platform child)
 // fails closed rather than yielding an empty set.
