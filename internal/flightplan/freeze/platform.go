@@ -1,6 +1,22 @@
 package freeze
 
-import "runtime"
+import (
+	"os"
+	"runtime"
+)
+
+// hostArchOverrideEnv lets a consumer running on one architecture select and
+// verify a foreign architecture's child of a multi-arch composed artifact. When
+// set to a non-empty GOARCH string (e.g. "arm64"), hostPlatform() reports that
+// arch instead of runtime.GOARCH, so HostConfigDigest()/ConfigDigestFor pick the
+// override arch's entry from a composed pin's per-arch set. This is legitimate
+// operator behavior: an amd64 operator can pull and verify the arm64 child of a
+// multi-arch plan it will hand to an arm64 host. It is also the one honest way
+// to drive the cross-arch pull+verify path (issue #2025) end to end in a
+// dedicated CI job whose runner is a single architecture, without running a
+// foreign-arch aileron binary under QEMU. Empty (the default) selects the true
+// host arch.
+const hostArchOverrideEnv = "AILERON_FLIGHTPLAN_HOST_ARCH"
 
 // composedOS is the operating system a composed container image is always built
 // for. `imgconfig.CanonicalConfig.OS` for a container image is `"linux"`
@@ -20,9 +36,14 @@ var hostGOARCH = runtime.GOARCH
 // re-check, publish verify, pull verify) uses to select from it. Producer and
 // consumer share this one helper so they can never disagree on the platform
 // vocabulary. The os is always composedOS ("linux"); the arch is the host
-// GOARCH.
-func hostPlatform() (os, arch string) {
-	return composedOS, hostGOARCH
+// GOARCH, unless the hostArchOverrideEnv env var names a foreign arch, in which
+// case the consumer selects/verifies that arch's child of a multi-arch artifact.
+func hostPlatform() (platformOS, arch string) {
+	arch = hostGOARCH
+	if override := os.Getenv(hostArchOverrideEnv); override != "" {
+		arch = override
+	}
+	return composedOS, arch
 }
 
 // ConfigDigestFor returns the config content digest recorded for the given

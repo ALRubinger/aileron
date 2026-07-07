@@ -518,6 +518,31 @@ tasks:
     cmds:
       - go test -tags=integration_sandbox -run TestSandboxAgentImageSmoke ./launch/...
 
+  test:integration:multiarch:
+    desc: >-
+      Run the cross-arch multi-arch freeze->publish->launch e2e plus the
+      host-arch composed-tools boot guard, both under the
+      integration_sandbox_multiarch tag (#2038). FAIL-FAST — requires: Docker; a
+      docker-container buildx builder (docker buildx create --driver
+      docker-container --use); the QEMU binfmt emulators (docker run --privileged
+      tonistiigi/binfmt --install all) for the real linux/amd64+linux/arm64 build;
+      @devcontainers/cli for the composer; a reachable OCI registry in
+      AILERON_TEST_REGISTRY (e.g. localhost:5000); the multi-arch runner base on
+      that registry/ghcr; and, for the boot guard, a live host daemon via
+      AILERON_API_URL/AILERON_TOKEN. The cross-arch test drives the consumer-arch
+      override (AILERON_FLIGHTPLAN_HOST_ARCH) itself, so it need not be set in the
+      environment. No self-skip: an absent prerequisite is a hard failure.
+    dir: cmd/aileron
+    cmds:
+      - go test -tags=integration_sandbox_multiarch -run 'TestFlightPlanComposedToolsBootGuard|TestFlightPlanCrossArchMultiArchE2E' .
+    env:
+      # The production composer builds the composed image onto the sandbox base
+      # from this context, exactly as the sandbox-features target does.
+      AILERON_SANDBOX_BASE_CONTEXT:
+        sh: cd "{{.ROOT_DIR}}/images/sandbox-base" && pwd
+      AILERON_SANDBOX_FEATURES_CONTEXT:
+        sh: cd "{{.ROOT_DIR}}/images/sandbox-features" && pwd
+
   build:launch:
     desc: >-
       Build the binaries `aileron launch --sandbox=docker` needs: the CLI

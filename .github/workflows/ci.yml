@@ -780,17 +780,12 @@ jobs:
         run: go test -tags=integration -race -run TestRunAuthGitHub_PUTReachesRealDaemonRoute .
         working-directory: cmd/aileron
 
-      # The composed-tools boot-guard integration test (#1863) moved to the
-      # `integration_sandbox_multiarch` build tag in #2036: the composed-tools
-      # freeze path now builds a REAL multi-architecture image (linux/amd64 +
-      # linux/arm64) via docker buildx, so running it needs a docker-container
-      # buildx builder, the QEMU binfmt emulators, and a multi-arch runner base on
-      # the registry. Provisioning that emulated build environment (and the
-      # multi-arch base) is owned by the S5 CI job, the last sub-issue of #2034;
-      # this base job no longer runs the boot-guard test so it stays green until
-      # that environment exists. S5 re-adds the @devcontainers/cli install, the
-      # `docker buildx create --driver docker-container --use`/`tonistiigi/binfmt`
-      # provisioning, and the `-tags=integration_sandbox_multiarch` run here.
+      # The composed-tools boot-guard (#1863) and the cross-arch multi-arch e2e
+      # (#2038) run under the `integration_sandbox_multiarch` tag in the dedicated
+      # `integration-multiarch` job below, which provisions the docker-container
+      # buildx builder, the QEMU binfmt emulators, a local registry, and the
+      # @devcontainers/cli the real linux/amd64+linux/arm64 build needs. This base
+      # job intentionally does not run them.
 
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}
@@ -868,6 +863,109 @@ jobs:
           slug: ALRubinger/aileron
           files: internal/coverage-publish-e2e.txt
           flags: integration
+
+      - name: Registry logs on failure
+        if: failure()
+        run: docker logs registry || true
+
+  integration-multiarch:
+    name: Integration Tests (Multi-Arch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      # A docker-container buildx builder is required for a REAL multi-platform
+      # build (`docker buildx build --platform linux/amd64,linux/arm64`); the
+      # default docker driver cannot emit a manifest list. This provisions and
+      # selects that builder.
+      - uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      # Register the QEMU emulators so the non-native arch (arm64 on an amd64
+      # runner) actually builds under emulation. Without this the arm64 leg of
+      # the multi-arch build fails with an exec-format error.
+      - name: Register QEMU/binfmt emulators
+        run: docker run --privileged --rm tonistiigi/binfmt --install all
+
+      - name: Start a local OCI registry
+        run: |
+          docker run -d -p 5000:5000 --restart=always --name registry registry:2
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5000/v2/; then echo "registry up"; exit 0; fi
+            sleep 1
+          done
+          echo "registry did not come up"; exit 1
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # The composer routes environment tools through Aileron's Builder, which
+      # invokes `npx --yes @devcontainers/cli@<pinned>`. Pin to the same version
+      # the Go source pins (container.DevcontainerCLIVersion) for parity with the
+      # other Feature jobs.
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli@0.87.0
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      # The cross-arch multi-arch freeze -> publish -> launch e2e (#2038): a real
+      # buildx+QEMU linux/amd64+linux/arm64 freeze, a real manifest-list push to
+      # the local registry, and a real cross-arch pull+verify where an amd64
+      # runner is overridden to consume the arm64 child (the #2025 repro). This
+      # mirrors `task test:integration:multiarch` but runs through gotestsum so the
+      # JUnit report backs the anti-silent-skip guard below. The test drives the
+      # AILERON_FLIGHTPLAN_HOST_ARCH override itself and needs no daemon.
+      #
+      # KNOWN GAP (documented, not a silent skip): the pre-existing host-arch boot
+      # guard TestFlightPlanComposedToolsBootGuard shares this build tag but is NOT
+      # run here. It boots a real container that expects a live host daemon
+      # (AILERON_API_URL/AILERON_TOKEN); provisioning that daemon + a minted token
+      # + in-container networking is a separate lift with no established CI
+      # pattern. It stays runnable via `task test:integration:multiarch` where a
+      # daemon is available; wiring it into CI is a follow-up.
+      - name: Run cross-arch multi-arch e2e (#2038)
+        run: gotestsum --junitfile junit-multiarch.xml -- -tags=integration_sandbox_multiarch -run 'TestFlightPlanCrossArchMultiArchE2E' .
+        working-directory: cmd/aileron
+        env:
+          AILERON_TEST_REGISTRY: localhost:5000
+          AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
+          AILERON_SANDBOX_FEATURES_CONTEXT: ${{ github.workspace }}/images/sandbox-features
+
+      # Anti-silent-skip guard (mirrors test-ui/test-webapp): a green result must
+      # mean the emulated test actually ran. A missing report or zero executed
+      # <testcase> elements fails the job rather than passing on a silent skip.
+      - name: Assert multi-arch e2e executed (anti-silent-skip)
+        working-directory: cmd/aileron
+        run: |
+          report="junit-multiarch.xml"
+          if [ ! -f "$report" ]; then
+            echo "::error::gotestsum JUnit report $report not found; the multi-arch e2e did not produce results" >&2
+            exit 1
+          fi
+          cases="$(grep -o '<testcase' "$report" | wc -l | tr -d ' ')"
+          skipped="$(grep -o '<skipped' "$report" | wc -l | tr -d ' ')"
+          echo "multi-arch e2e executed $cases test(s), $skipped skipped"
+          # The e2e uses t.Fatalf (never t.Skip), so a skipped testcase is itself a
+          # regression: a run that skipped every case must not pass as "green".
+          if [ "$cases" -eq 0 ] || [ "$cases" -eq "$skipped" ]; then
+            echo "::error::multi-arch e2e ran 0 non-skipped tests; refusing to pass on a silent skip" >&2
+            exit 1
+          fi
 
       - name: Registry logs on failure
         if: failure()
