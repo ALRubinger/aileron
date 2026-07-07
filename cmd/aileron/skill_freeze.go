@@ -378,8 +378,8 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	// LocalTag; buildx reuses the layer cache, so it is cheap. This host-arch daemon
 	// image is intentionally retained: local `launch` of an un-published Flight Plan
 	// resolves the composed image straight from the daemon under LocalTag, with no
-	// publish step in between. (Publish itself no longer needs it — as of S4 (#2047)
-	// it consumes the OCI layout directly.) Dropping this second build is a documented
+	// publish step in between. Publish itself no longer needs it: as of S4 (#2047)
+	// it consumes the OCI layout directly. Dropping this second build is a documented
 	// launch-side follow-up, not done here.
 	loadOpts := buildOpts
 	loadOpts.Platforms = nil
