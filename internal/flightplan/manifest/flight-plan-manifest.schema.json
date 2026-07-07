@@ -644,24 +644,47 @@
       "properties": {
         "resolvedImages": {
           "type": "array",
-          "description": "The resolved image digest pins. The plan runs in one container, so a plan with a declared environment pins exactly one image: the digest-resolved custom base, or the image composed from the runtime base plus the declared tools. Each entry pairs the pre-freeze reference with its resolved image@sha256: digest and carries no per-step linkage; the step-keyed sealed reach lives in the sibling stepTrust section.",
+          "description": "The resolved image digest pins. The plan runs in one container, so a plan with a declared environment pins exactly one image: the digest-resolved custom base, or the image composed from the runtime base plus the declared tools. A composed-tools pin (localTag set) binds by a per-arch configDigests set of serialization-agnostic config content digests; an image-only / foreign-base pin (no localTag) binds by its single manifest digest. Each entry carries no per-step linkage; the step-keyed sealed reach lives in the sibling stepTrust section.",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["ref", "digest"],
+            "required": ["ref"],
+            "description": "One resolved image pin. A composed-tools pin carries localTag and configDigests (the per-arch config content digest set, no single digest); a foreign-base pin carries digest (the base image's manifest digest) and no localTag.",
             "properties": {
               "ref": { "type": "string", "description": "The pre-freeze image reference.", "minLength": 1 },
               "digest": {
                 "type": "string",
-                "description": "The resolved content-addressed digest.",
+                "description": "The resolved content-addressed manifest digest of an image-only / foreign-base pin. Absent on a composed-tools pin, which binds by the per-arch configDigests set instead.",
                 "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "configDigests": {
+                "type": "array",
+                "description": "The per-arch set of serialization-agnostic config content digests for a composed-tools pin, one entry per platform the composed image was built for. Launch/publish/pull select the host platform's entry. Present only on a composed-tools pin (localTag set); absent on a foreign-base pin.",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["os", "arch", "digest"],
+                  "properties": {
+                    "os": { "type": "string", "description": "The image operating system this entry's digest was built for (always \"linux\" for a container image).", "minLength": 1 },
+                    "arch": { "type": "string", "description": "The image architecture this entry's digest was built for (for example amd64 or arm64).", "minLength": 1 },
+                    "digest": {
+                      "type": "string",
+                      "description": "The serialization-agnostic config content digest of the composed image for this platform.",
+                      "pattern": "^sha256:[a-f0-9]{64}$"
+                    }
+                  }
+                }
               },
               "localTag": {
                 "type": "string",
                 "description": "The bootable local-daemon tag the runtime boots for a composed-tools pin (aileron/sandbox-tools:<hex>). Present only on a composed-tools pin; absent for a directly-pinned base, which boots ref@digest.",
                 "minLength": 1
               }
-            }
+            },
+            "if": { "required": ["localTag"] },
+            "then": { "required": ["configDigests"] },
+            "else": { "required": ["digest"] }
           }
         },
         "resolvedCapabilitySet": {

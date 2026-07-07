@@ -3,6 +3,7 @@ package freeze
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,108 @@ func freezeToolSteps(t *testing.T) Result {
 	return res
 }
 
+// emitFrozenArtifacts reproduces the freeze emit path (content.go/freeze.go) for
+// an arbitrary lock over raw, returning the recorded hash and the four stored
+// artifacts. Entries are written to disk in the lock's given order (injectLock /
+// MarshalLockfile do not sort), which lets a test model a lock whose
+// configDigests were persisted in a non-canonical order.
+func emitFrozenArtifacts(t *testing.T, priv ed25519.PrivateKey, raw []byte, lock Lockfile) (hash string, manifest, lockfile, sig, pub []byte) {
+	t.Helper()
+	noHash := lock.withoutContentHash()
+	mNoHash, err := injectLockMaybe(raw, noHash, false)
+	if err != nil {
+		t.Fatalf("injectLockMaybe (no hash): %v", err)
+	}
+	lfNoHash, err := MarshalLockfile(noHash)
+	if err != nil {
+		t.Fatalf("MarshalLockfile (no hash): %v", err)
+	}
+	hash = contentHash(mNoHash, lfNoHash)
+	sig, pub, err = Sign(priv, canonicalContent(mNoHash, lfNoHash))
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	lock.ContentHash = hash
+	if manifest, err = injectLockMaybe(raw, lock, false); err != nil {
+		t.Fatalf("injectLockMaybe (with hash): %v", err)
+	}
+	if lockfile, err = MarshalLockfile(lock); err != nil {
+		t.Fatalf("MarshalLockfile (with hash): %v", err)
+	}
+	return hash, manifest, lockfile, sig, pub
+}
+
+// TestVerifyFrozen_ConfigDigestOrderIndependent is the #2035 acceptance test: a
+// two-entry composed lock re-serialized with its configDigests in a different
+// order yields the identical content hash AND still verifies against the
+// original signature. VerifyFrozen re-marshals from the parsed struct through
+// withoutContentHash (which sorts the set), so a lock whose entries were
+// reordered on disk re-hashes to the identical canonical value.
+func TestVerifyFrozen_ConfigDigestOrderIndependent(t *testing.T) {
+	priv, _ := genSigningKey(t)
+	raw := exampleSkillMD(t)
+
+	composed := func(entries []PlatformDigest) Lockfile {
+		return Lockfile{
+			ResolvedImages: []ImagePin{{
+				Ref:           "aileron/sandbox-tools+tools(gh)",
+				ConfigDigests: entries,
+				LocalTag:      "aileron/sandbox-tools:abc123",
+			}},
+			Version: "1.0.0",
+		}
+	}
+	amdFirst := []PlatformDigest{
+		{OS: "linux", Arch: "amd64", Digest: fakeDigest},
+		{OS: "linux", Arch: "arm64", Digest: fakeDigest2},
+	}
+	armFirst := []PlatformDigest{
+		{OS: "linux", Arch: "arm64", Digest: fakeDigest2},
+		{OS: "linux", Arch: "amd64", Digest: fakeDigest},
+	}
+
+	// Emit the canonical, signed artifact from the amd-first ordering.
+	hashA, _, _, sigA, pubA := emitFrozenArtifacts(t, priv, raw, composed(amdFirst))
+
+	// Emit the on-disk artifacts from the arm-first ordering but carrying hashA:
+	// a lock whose configDigests were persisted in a different order.
+	lockB := composed(armFirst)
+	lockB.ContentHash = hashA
+	manifestB, err := injectLockMaybe(raw, lockB, false)
+	if err != nil {
+		t.Fatalf("injectLockMaybe B: %v", err)
+	}
+	lockfileB, err := MarshalLockfile(lockB)
+	if err != nil {
+		t.Fatalf("MarshalLockfile B: %v", err)
+	}
+	// Sanity: the on-disk bytes really do differ in entry order.
+	if bytes.Contains(manifestB, []byte("arm64\n")) {
+		firstArm := bytes.Index(manifestB, []byte("arm64"))
+		firstAmd := bytes.Index(manifestB, []byte("amd64"))
+		if firstArm > firstAmd {
+			t.Fatal("test bug: manifestB was not persisted arm-first")
+		}
+	}
+
+	// VerifyFrozen must accept the reordered artifacts against the original
+	// signature, and recompute the identical content hash.
+	v, err := VerifyFrozen(manifestB, lockfileB, sigA, pubA)
+	if err != nil {
+		t.Fatalf("VerifyFrozen rejected an order-reordered composed lock: %v", err)
+	}
+	if v.ContentHash != hashA {
+		t.Errorf("recomputed content hash = %q, want the order-independent %q", v.ContentHash, hashA)
+	}
+	// Both host arches still select correctly from the verified pin.
+	if got, ok := v.ResolvedImages[0].ConfigDigestFor("linux", "amd64"); !ok || got != fakeDigest {
+		t.Errorf("verified amd64 digest = %q (ok=%v), want %q", got, ok, fakeDigest)
+	}
+	if got, ok := v.ResolvedImages[0].ConfigDigestFor("linux", "arm64"); !ok || got != fakeDigest2 {
+		t.Errorf("verified arm64 digest = %q (ok=%v), want %q", got, ok, fakeDigest2)
+	}
+}
+
 func TestVerifyFrozen_AcceptsUntamperedUnit(t *testing.T) {
 	res := freezeExample(t)
 	v, err := VerifyFrozen(res.FrozenManifest, res.Lockfile, res.Signature, res.PublicKey)
@@ -70,8 +173,8 @@ func TestVerifyFrozen_ExposesResolvedImagesForEnvironmentTools(t *testing.T) {
 	if len(v.ResolvedImages) != 1 {
 		t.Fatalf("ResolvedImages = %+v, want exactly one pin", v.ResolvedImages)
 	}
-	if v.ResolvedImages[0].Digest != fakeDigest {
-		t.Errorf("ResolvedImages[0].Digest = %q, want %q", v.ResolvedImages[0].Digest, fakeDigest)
+	if got, _, ok := v.ResolvedImages[0].HostConfigDigest(); !ok || got != fakeDigest {
+		t.Errorf("host config digest = %q (ok=%v), want %q", got, ok, fakeDigest)
 	}
 	if v.ResolvedImages[0].Ref == "" {
 		t.Error("ResolvedImages[0].Ref must carry the pre-freeze reference")

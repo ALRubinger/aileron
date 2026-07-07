@@ -275,6 +275,15 @@ func publishImage(ctx context.Context, opts Options, pin freeze.ImagePin, target
 // returns the pushed image descriptor. The content digest is checked BEFORE the
 // push, so a mismatched (tampered/mislabeled) image never reaches the registry.
 func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, target oras.Target) (ocispec.Descriptor, string, error) {
+	// Select the host platform's config content digest from the composed pin's
+	// per-arch set. Single-arch publish verifies against the entry for this host;
+	// a plan not built for this host's platform fails closed rather than pushing
+	// an image it cannot verify (multi-arch push is S4).
+	want, platform, ok := pin.HostConfigDigest()
+	if !ok {
+		return ocispec.Descriptor{}, "", fmt.Errorf("%w: this artifact was not published for %s", ErrConfigContentDigestMismatch, platform)
+	}
+
 	src := opts.ImageSource
 	if src == nil {
 		src = dockerImageSource{}
@@ -283,8 +292,8 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: inspect composed image %q: %w", pin.LocalTag, err)
 	}
-	if localConfig != pin.Digest {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigContentDigestMismatch, localConfig, pin.Digest)
+	if localConfig != want {
+		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigContentDigestMismatch, localConfig, want)
 	}
 
 	imageTag := freeze.ComposedImageTag(opts.VersionID)
@@ -308,8 +317,8 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: read pushed image config: %w", err)
 	}
-	if pushedConfig != pin.Digest {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: pushed config %s, lock attested %s", ErrConfigContentDigestMismatch, pushedConfig, pin.Digest)
+	if pushedConfig != want {
+		return ocispec.Descriptor{}, "", fmt.Errorf("%w: pushed config %s, lock attested %s", ErrConfigContentDigestMismatch, pushedConfig, want)
 	}
 	return desc, freeze.BindingConfigContentDigest, nil
 }

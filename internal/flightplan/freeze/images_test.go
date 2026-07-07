@@ -105,8 +105,11 @@ func TestResolveImages_ToolsComposeOntoDefaultBase(t *testing.T) {
 	if strings.Join(gotFeatures, ",") != wantFeatures {
 		t.Errorf("composer got features %v, want the catalog-resolved %q", gotFeatures, wantFeatures)
 	}
-	if len(pins) != 1 || pins[0].Digest != fakeDigest2 {
-		t.Fatalf("a tools environment must pin exactly one image with the composed digest, got %+v", pins)
+	if len(pins) != 1 {
+		t.Fatalf("a tools environment must pin exactly one image, got %+v", pins)
+	}
+	if got, _, ok := pins[0].HostConfigDigest(); !ok || got != fakeDigest2 {
+		t.Fatalf("host config digest = %q (ok=%v), want the composed digest %q", got, ok, fakeDigest2)
 	}
 	if !strings.Contains(pins[0].Ref, wantBase+"@"+fakeDigest) || !strings.Contains(pins[0].Ref, "aws-cli@2.x") {
 		t.Errorf("the pin ref must record the pinned base and the composed tools, got %q", pins[0].Ref)
@@ -170,8 +173,11 @@ func TestResolveImages_ToolsComposeOntoCustomImage(t *testing.T) {
 	if strings.Join(gotFeatures, ",") != want {
 		t.Errorf("composer got features %v, want %q (declared order, catalog-resolved)", gotFeatures, want)
 	}
-	if len(pins) != 1 || pins[0].Digest != fakeDigest2 {
+	if len(pins) != 1 {
 		t.Fatalf("tools onto a custom base must pin exactly one image, got %+v", pins)
+	}
+	if got, _, ok := pins[0].HostConfigDigest(); !ok || got != fakeDigest2 {
+		t.Fatalf("host config digest = %q (ok=%v), want the composed digest %q", got, ok, fakeDigest2)
 	}
 	wantTag := composition.LocalToolsImageTag("registry.example.com/base:1@"+fakeDigest, gotFeatures)
 	if !strings.HasPrefix(wantTag, "aileron/sandbox-tools:") {
@@ -393,8 +399,13 @@ func TestResolveImages_DistinctToolSetsDistinctPins(t *testing.T) {
 	if len(pinsA) != 1 || len(pinsB) != 1 {
 		t.Fatalf("each composition must pin exactly one image, got A=%+v B=%+v", pinsA, pinsB)
 	}
-	if pinsA[0].Digest == pinsB[0].Digest {
-		t.Errorf("distinct tool sets must produce distinct pinned digests, both pinned %q", pinsA[0].Digest)
+	digestA, _, okA := pinsA[0].HostConfigDigest()
+	digestB, _, okB := pinsB[0].HostConfigDigest()
+	if !okA || !okB {
+		t.Fatalf("both composed pins must carry a host config digest, got A ok=%v B ok=%v", okA, okB)
+	}
+	if digestA == digestB {
+		t.Errorf("distinct tool sets must produce distinct pinned digests, both pinned %q", digestA)
 	}
 	// Tag collision-freedom carries through freeze: distinct tool sets get
 	// distinct bootable local tags.
@@ -412,8 +423,9 @@ func TestResolveImages_DistinctToolSetsDistinctPins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recompose tool set A: %v", err)
 	}
-	if pinsA2[0].Digest != pinsA[0].Digest {
-		t.Errorf("the same tool set must reproduce the same pin: %q vs %q", pinsA2[0].Digest, pinsA[0].Digest)
+	digestA2, _, okA2 := pinsA2[0].HostConfigDigest()
+	if !okA2 || digestA2 != digestA {
+		t.Errorf("the same tool set must reproduce the same pin: %q vs %q", digestA2, digestA)
 	}
 	if pinsA2[0].LocalTag != pinsA[0].LocalTag {
 		t.Errorf("the same tool set must reproduce the same LocalTag: %q vs %q", pinsA2[0].LocalTag, pinsA[0].LocalTag)

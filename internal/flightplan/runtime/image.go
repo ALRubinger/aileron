@@ -100,16 +100,26 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 	// Docker's mutable-tag model; closing it would require booting by image Id,
 	// which is a change to imageRef's boot-target semantics outside this issue.
 	if pin.LocalTag != "" && opts.ImageDigestResolver != nil {
+		// Select the host platform's config content digest from the composed
+		// pin's per-arch set. A plan not built for this host's platform fails
+		// closed rather than booting an unattested image: the signed-lock
+		// counterpart to the docker-level cross-arch launch message (#2039).
+		want, platform, ok := pin.HostConfigDigest()
+		if !ok {
+			return RunResult{}, fmt.Errorf(
+				"flightplan: refusing to boot composed local tag %q: this artifact was not published for %s",
+				pin.LocalTag, platform)
+		}
 		observed, err := opts.ImageDigestResolver.Resolve(ctx, pin.LocalTag)
 		if err != nil {
 			return RunResult{}, fmt.Errorf(
 				"flightplan: refusing to boot composed local tag %q: cannot resolve its digest in the local daemon (attested %s): %w",
-				pin.LocalTag, pin.Digest, err)
+				pin.LocalTag, want, err)
 		}
-		if observed != pin.Digest {
+		if observed != want {
 			return RunResult{}, fmt.Errorf(
 				"flightplan: refusing to boot composed local tag %q: it resolves to %s but the signed lock attested %s; the local image was rebuilt or repointed since freeze",
-				pin.LocalTag, observed, pin.Digest)
+				pin.LocalTag, observed, want)
 		}
 	}
 	return runBooted(ctx, opts, spec)

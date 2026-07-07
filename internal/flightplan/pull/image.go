@@ -49,8 +49,9 @@ type ImagePullOptions struct {
 	// back through that tag.
 	VersionTag string
 	// Pin is the verified image pin from the signed lock. freeze.BindingKind(Pin)
-	// governs verification; Pin.Digest is the attested digest. It is authoritative
-	// from the signature, never from any registry annotation.
+	// governs verification: a composed pin binds by the host platform's entry in
+	// its per-arch ConfigDigests set, a foreign-base pin by Pin.Digest. Either is
+	// authoritative from the signature, never from any registry annotation.
 	Pin freeze.ImagePin
 }
 
@@ -70,11 +71,12 @@ type ImagePullResult struct {
 	// (freeze.BindingConfigContentDigest or freeze.BindingManifestDigest),
 	// surfaced for provenance/logging.
 	BindingKind string
-	// ImageDigest is the verified identity digest: the image config content digest
-	// for a composed pin, the manifest digest for an image-only/foreign-base pin.
-	// Both equal Pin.Digest by construction. For a composed pin the identity is
-	// the config content digest while BootRef is anchored to the resolved manifest
-	// digest; for a foreign-base pin the manifest digest is both.
+	// ImageDigest is the verified identity digest: the host platform's config
+	// content digest (selected from the pin's per-arch configDigests set) for a
+	// composed pin, the manifest digest for an image-only/foreign-base pin. For a
+	// composed pin it equals the selected configDigests entry while BootRef is
+	// anchored to the resolved manifest digest; for a foreign-base pin it equals
+	// Pin.Digest and the manifest digest is both.
 	ImageDigest string
 }
 
@@ -91,8 +93,17 @@ func PullImage(ctx context.Context, opts ImagePullOptions) (ImagePullResult, err
 	if opts.Registry == "" {
 		return ImagePullResult{}, fmt.Errorf("%w: no source registry recorded for the install", ErrImagePullFailed)
 	}
-	if opts.Pin.Digest == "" {
-		return ImagePullResult{}, fmt.Errorf("%w: the signed lock pins no image digest", ErrImageDigestMismatch)
+	// The empty-pin guard is binding-aware: a composed pin binds by its per-arch
+	// configDigests set, a foreign-base pin by its single manifest Digest.
+	switch freeze.BindingKind(opts.Pin) {
+	case freeze.BindingConfigContentDigest:
+		if len(opts.Pin.ConfigDigests) == 0 {
+			return ImagePullResult{}, fmt.Errorf("%w: the signed lock pins no image config digests", ErrImageDigestMismatch)
+		}
+	default:
+		if opts.Pin.Digest == "" {
+			return ImagePullResult{}, fmt.Errorf("%w: the signed lock pins no image digest", ErrImageDigestMismatch)
+		}
 	}
 
 	src := opts.Source
@@ -131,6 +142,15 @@ func PullImage(ctx context.Context, opts ImagePullOptions) (ImagePullResult, err
 // The runner boots the same manifest bytes verified here, and the daemon
 // re-checks the digest itself on pull.
 func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImagePullOptions) (ImagePullResult, error) {
+	// Select the host platform's config content digest from the composed pin's
+	// per-arch set. A plan not published for this host's platform fails closed
+	// rather than booting an unattested image (the signed-lock counterpart to the
+	// docker-level cross-arch launch message, #2039).
+	want, platform, ok := opts.Pin.HostConfigDigest()
+	if !ok {
+		return ImagePullResult{}, fmt.Errorf("%w: this artifact was not published for %s", ErrImageDigestMismatch, platform)
+	}
+
 	imageTag := freeze.ComposedImageTag(opts.VersionTag)
 	desc, err := src.Resolve(ctx, imageTag)
 	if err != nil {
@@ -147,8 +167,8 @@ func pullComposedImage(ctx context.Context, src oras.ReadOnlyTarget, opts ImageP
 	if err != nil {
 		return ImagePullResult{}, fmt.Errorf("%w: read composed image config: %w", ErrImagePullFailed, err)
 	}
-	if config != opts.Pin.Digest {
-		return ImagePullResult{}, fmt.Errorf("%w: composed image config %s, lock attested %s", ErrImageDigestMismatch, config, opts.Pin.Digest)
+	if config != want {
+		return ImagePullResult{}, fmt.Errorf("%w: composed image config %s, lock attested %s", ErrImageDigestMismatch, config, want)
 	}
 
 	return ImagePullResult{

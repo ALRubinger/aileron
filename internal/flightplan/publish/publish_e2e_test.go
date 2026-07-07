@@ -96,7 +96,7 @@ func TestPublishE2EComposed(t *testing.T) {
 	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-composed")
 	registry := host + "/e2e/composed-plan"
 
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
 	opts := Options{
 		Name: "e2e", VersionID: "v1", Registry: registry,
 		Frozen: testFrozen(),

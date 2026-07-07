@@ -3,11 +3,20 @@ package runtime
 import (
 	"context"
 	"errors"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 )
+
+// hostConfigDigests builds a one-entry per-arch config-digest set keyed by the
+// host platform (linux/GOARCH), so a composed pin's HostConfigDigest selects it
+// on whatever arch the test runs on. The package is named runtime, so the
+// stdlib runtime is aliased goruntime.
+func hostConfigDigests(digest string) []freeze.PlatformDigest {
+	return []freeze.PlatformDigest{{OS: "linux", Arch: goruntime.GOARCH, Digest: digest}}
+}
 
 // fakeImageDigestResolver is the shared test double for the
 // LocalImageDigestResolver seam: it records the image it was asked to resolve
@@ -48,7 +57,7 @@ func composedPin(localTag, imageID string) LoadedPlan {
 	return LoadedPlan{
 		ContentHash: "sha256:content",
 		ResolvedImages: []freeze.ImagePin{
-			{Ref: descriptiveRef, Digest: imageID, LocalTag: localTag},
+			{Ref: descriptiveRef, ConfigDigests: hostConfigDigests(imageID), LocalTag: localTag},
 		},
 	}
 }
@@ -147,6 +156,44 @@ func TestRunInImage_GuardFailsClosedOnResolveError(t *testing.T) {
 	}
 	if res.ContentHash != "" {
 		t.Errorf("a refused boot must produce a zero RunResult, got %+v", res)
+	}
+}
+
+func TestRunInImage_GuardFailsClosedWhenHostArchAbsent(t *testing.T) {
+	// A composed pin whose per-arch config-digest set carries no entry for the
+	// host platform fails closed with the "not published for <host platform>"
+	// message: the artifact was built for other arches only, so this host must not
+	// boot an unattested image. The resolver is never consulted and the runner is
+	// never called.
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	lp := LoadedPlan{
+		ContentHash: "sha256:content",
+		ResolvedImages: []freeze.ImagePin{{
+			Ref: "aileron/sandbox-tools+tools(gh)",
+			// A bogus arch that never equals the host GOARCH, so HostConfigDigest misses.
+			ConfigDigests: []freeze.PlatformDigest{{OS: "linux", Arch: "no-such-arch", Digest: "sha256:" + strings.Repeat("b", 64)}},
+			LocalTag:      localTag,
+		}},
+	}
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	resolver := &fakeImageDigestResolver{digest: "sha256:" + strings.Repeat("b", 64)}
+	_, err := runInImage(context.Background(), lp, Options{
+		Name:                "tools-plan",
+		Version:             "1.0.0",
+		ImageRunner:         runner,
+		ImageDigestResolver: resolver,
+	})
+	if err == nil {
+		t.Fatal("a composed pin lacking the host arch must fail closed")
+	}
+	if !strings.Contains(err.Error(), "not published for") {
+		t.Errorf("error = %v, want a 'not published for <host platform>' message", err)
+	}
+	if resolver.called {
+		t.Error("the guard must fail closed BEFORE consulting the resolver when the host arch is absent")
+	}
+	if runner.called {
+		t.Fatal("a host-arch-absent pin must NOT boot the image runner")
 	}
 }
 

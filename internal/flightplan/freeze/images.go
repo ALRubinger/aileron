@@ -153,17 +153,23 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 		return nil, nil, err
 	}
 	// The composed pin carries three identities: the descriptive Ref (what was
-	// composed onto which pinned base, for errors/audit), the attesting Digest
-	// (the composed image's content address), and the bootable LocalTag (the
+	// composed onto which pinned base, for errors/audit), the attesting
+	// per-arch ConfigDigests set (the composed image's serialization-agnostic
+	// config content digest, keyed by platform), and the bootable LocalTag (the
 	// local-daemon tag the composed image actually carries, so the runtime can
-	// boot it). LocalTag is computed from the SAME pinnedBase and
-	// catalog-resolved featureRefs the composer received, so it is byte-identical
-	// to composition.ToolsPlan(pinnedBase, featureRefs).Image; LocalToolsImageTag
+	// boot it). For S2 the composer builds one native-arch image, so the set has
+	// exactly one entry keyed by hostPlatform() (native build ⇒ image arch ==
+	// runtime.GOARCH, os == linux); S3 replaces ComposeDigest with a per-arch
+	// producer that fills the set from a real multi-arch build. LocalTag is
+	// computed from the SAME pinnedBase and catalog-resolved featureRefs the
+	// composer received, so it is byte-identical to
+	// composition.ToolsPlan(pinnedBase, featureRefs).Image; LocalToolsImageTag
 	// sorts internally, so declaration order does not matter.
+	os, arch := hostPlatform()
 	return []ImagePin{{
-		Ref:      composedToolsRef(pinnedBase, tools),
-		Digest:   digest,
-		LocalTag: composition.LocalToolsImageTag(pinnedBase, featureRefs),
+		Ref:           composedToolsRef(pinnedBase, tools),
+		ConfigDigests: sortedConfigDigests([]PlatformDigest{{OS: os, Arch: arch, Digest: digest}}),
+		LocalTag:      composition.LocalToolsImageTag(pinnedBase, featureRefs),
 	}}, tools, nil
 }
 

@@ -333,7 +333,9 @@ type RegistryImageOrigin struct {
 //
 // Its contract, consumed ONLY when a loaded plan carries a registry origin
 // (RegistryImageOrigin.Present): pull the published image the origin points at,
-// verify it equals the signature-covered pin.Digest per the pin's binding, and
+// verify it against the signature-covered pin per the pin's binding (the host
+// platform's entry from the configDigests set for a composed pin, the manifest
+// digest for a foreign-base pin), and
 // return a content-addressed bootable "ref@manifest-digest" (both binding kinds
 // anchor the boot to a manifest digest so a mutable tag is never booted after
 // verification). Any mismatch, missing image, or pull failure is a fail-closed

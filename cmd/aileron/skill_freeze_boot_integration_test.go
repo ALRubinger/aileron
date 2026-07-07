@@ -138,8 +138,9 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	}
 
 	// Read back the composed pin and assert its shape: a bootable LocalTag and a
-	// sha256: Digest (the freeze-built image's attested Id). This is the exact
-	// input the boot-time guard re-checks against the daemon.
+	// per-arch configDigests set carrying a sha256: content digest for the host
+	// platform (the freeze-built image's attested Id). This is the exact input the
+	// boot-time guard re-checks against the daemon.
 	if len(res.Lock.ResolvedImages) != 1 {
 		t.Fatalf("expected exactly one composed pin, got %+v", res.Lock.ResolvedImages)
 	}
@@ -147,14 +148,18 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	if pin.LocalTag == "" {
 		t.Fatalf("the composed pin must carry a bootable LocalTag; got %+v", pin)
 	}
-	if !strings.HasPrefix(pin.Digest, "sha256:") {
-		t.Fatalf("the composed pin's Digest must be a sha256: attested Id, got %q", pin.Digest)
+	attested, _, ok := pin.HostConfigDigest()
+	if !ok {
+		t.Fatalf("the composed pin must carry a config digest for the host platform; got %+v", pin)
+	}
+	if !strings.HasPrefix(attested, "sha256:") {
+		t.Fatalf("the composed pin's host config digest must be a sha256: attested Id, got %q", attested)
 	}
 
 	// Boot the produced composed pin through the production runner with the
 	// production digest resolver wired. The runtime consults the resolver on the
 	// composed boot path: it re-inspects pin.LocalTag in the daemon and MUST
-	// resolve it to pin.Digest (the exact freeze-built Id) or fail closed. A
+	// resolve it to the host platform's attested config digest or fail closed. A
 	// successful boot is the proof that the guard resolves the genuine daemon
 	// image to the attested Id and lets the linkage through.
 	// The plan materializes report.html into the out-dir, which is bind-mounted
@@ -175,7 +180,7 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		ImageDigestResolver: containerImageDigestResolver{},
 	})
 	if err != nil {
-		t.Fatalf("boot the composed pin (guard must resolve the just-built local tag %q to the attested %s): %v", pin.LocalTag, pin.Digest, err)
+		t.Fatalf("boot the composed pin (guard must resolve the just-built local tag %q to the attested %s): %v", pin.LocalTag, attested, err)
 	}
 	_ = res2
 }

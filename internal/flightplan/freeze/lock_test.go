@@ -215,3 +215,100 @@ func TestWithoutContentHash_ClearsHashOnly(t *testing.T) {
 		t.Error("withoutContentHash must only clear the hash")
 	}
 }
+
+// composedLock builds a lockfile carrying one composed pin with a two-entry
+// per-arch config-digest set (amd64 + arm64), the S3+ multi-arch shape.
+func composedLock() Lockfile {
+	return Lockfile{
+		ResolvedImages: []ImagePin{{
+			Ref: "aileron/sandbox-tools+tools(gh)",
+			ConfigDigests: []PlatformDigest{
+				{OS: "linux", Arch: "amd64", Digest: fakeDigest},
+				{OS: "linux", Arch: "arm64", Digest: fakeDigest2},
+			},
+			LocalTag: "aileron/sandbox-tools:abc123",
+		}},
+		Version: "1.2.3",
+	}
+}
+
+// TestMarshalLockfile_ComposedPinRoundTrip proves a composed pin's per-arch
+// config-digest set survives a marshal/unmarshal round-trip intact, and carries
+// no single `digest` field (that is retired for composed pins).
+func TestMarshalLockfile_ComposedPinRoundTrip(t *testing.T) {
+	want := composedLock()
+	b, err := MarshalLockfile(want)
+	if err != nil {
+		t.Fatalf("MarshalLockfile: %v", err)
+	}
+	var got Lockfile
+	if err := yaml.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("composed pin round-trip mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+	if got.ResolvedImages[0].Digest != "" {
+		t.Errorf("a composed pin must not carry a single digest, got %q", got.ResolvedImages[0].Digest)
+	}
+	if !strings.Contains(string(b), "configDigests:") {
+		t.Errorf("marshaled composed pin missing configDigests:\n%s", b)
+	}
+}
+
+// TestMarshalLockfile_ForeignBaseRoundTrip proves a foreign-base pin still
+// round-trips with a single `digest` and no `configDigests`.
+func TestMarshalLockfile_ForeignBaseRoundTrip(t *testing.T) {
+	want := Lockfile{
+		ResolvedImages: []ImagePin{{Ref: "registry.example.com/runner:1.4", Digest: fakeDigest}},
+		Version:        "1.2.3",
+	}
+	b, err := MarshalLockfile(want)
+	if err != nil {
+		t.Fatalf("MarshalLockfile: %v", err)
+	}
+	var got Lockfile
+	if err := yaml.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("foreign-base round-trip mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+	if len(got.ResolvedImages[0].ConfigDigests) != 0 {
+		t.Errorf("a foreign-base pin must not carry configDigests, got %+v", got.ResolvedImages[0].ConfigDigests)
+	}
+	if strings.Contains(string(b), "configDigests:") {
+		t.Errorf("marshaled foreign-base pin must not emit configDigests:\n%s", b)
+	}
+}
+
+// TestWithoutContentHash_SortsConfigDigests proves withoutContentHash sorts
+// each pin's config-digest set by (os, arch) regardless of input order, and
+// never mutates the caller's original slice. This is what makes the content
+// hash and signature order-independent.
+func TestWithoutContentHash_SortsConfigDigests(t *testing.T) {
+	unsorted := Lockfile{
+		ResolvedImages: []ImagePin{{
+			Ref: "aileron/sandbox-tools",
+			ConfigDigests: []PlatformDigest{
+				{OS: "linux", Arch: "arm64", Digest: fakeDigest2},
+				{OS: "linux", Arch: "amd64", Digest: fakeDigest},
+			},
+			LocalTag: "aileron/sandbox-tools:x",
+		}},
+	}
+	// Capture the caller's original order to prove non-mutation.
+	origFirst := unsorted.ResolvedImages[0].ConfigDigests[0].Arch
+
+	got := unsorted.withoutContentHash()
+	arches := []string{
+		got.ResolvedImages[0].ConfigDigests[0].Arch,
+		got.ResolvedImages[0].ConfigDigests[1].Arch,
+	}
+	if arches[0] != "amd64" || arches[1] != "arm64" {
+		t.Errorf("withoutContentHash config-digest order = %v, want [amd64 arm64]", arches)
+	}
+	if unsorted.ResolvedImages[0].ConfigDigests[0].Arch != origFirst {
+		t.Error("withoutContentHash must not mutate the caller's ConfigDigests slice")
+	}
+}

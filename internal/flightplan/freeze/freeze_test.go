@@ -34,8 +34,13 @@ func TestRun_EnvironmentToolsHappyPath(t *testing.T) {
 	if res.Version != "1.0.0" {
 		t.Errorf("version = %q", res.Version)
 	}
-	if len(res.Lock.ResolvedImages) != 1 || res.Lock.ResolvedImages[0].Digest != fakeDigest {
-		t.Errorf("resolvedImages = %+v", res.Lock.ResolvedImages)
+	if len(res.Lock.ResolvedImages) != 1 {
+		t.Fatalf("resolvedImages = %+v, want exactly one composed pin", res.Lock.ResolvedImages)
+	}
+	// The composed pin binds by its per-arch config-digest set; the host
+	// platform's entry must select to the composed digest.
+	if got, _, ok := res.Lock.ResolvedImages[0].HostConfigDigest(); !ok || got != fakeDigest {
+		t.Errorf("host config digest = %q (ok=%v), want %q", got, ok, fakeDigest)
 	}
 	// The composed-tools pin carries the bootable local-daemon tag (#1856), so
 	// the runtime can boot the composed image rather than the unbootable
