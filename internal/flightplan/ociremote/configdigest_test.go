@@ -29,6 +29,18 @@ func withHostGOARCH(t *testing.T, arch string) {
 	t.Cleanup(func() { hostGOARCH = prev })
 }
 
+// withHostGOOS overrides the hostGOOS seam for the duration of the test, so a
+// test can simulate a non-linux launching host (Windows, macOS) deterministically
+// regardless of the OS the test binary runs on. Selection keys on composedOS, so
+// this only changes the host named in the fail-closed message; the point is to
+// prove a non-linux host still resolves the linux child (#2055).
+func withHostGOOS(t *testing.T, goos string) {
+	t.Helper()
+	prev := hostGOOS
+	hostGOOS = goos
+	t.Cleanup(func() { hostGOOS = prev })
+}
+
 // ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
 // the given marker, so distinct markers yield distinct content digests. The
 // returned bytes are what a registry serves as the config blob.
@@ -144,7 +156,9 @@ func TestConfigContentDigest_OCIIndexUnwrapsToImageManifest(t *testing.T) {
 	// digest must resolve to the image manifest's config, not error out.
 	st := memory.New()
 	image, configBody := seedManifest(t, st, "composed")
-	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	// A composed container image always declares os="linux", independent of the
+	// launching host GOOS.
+	image.Platform = &ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH}
 	att := attestationManifest(t, st)
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, image, att)
 
@@ -243,11 +257,12 @@ func TestConfigContentDigest_IndexWithOnlyAttestationErrors(t *testing.T) {
 
 func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 	st := memory.New()
-	// A foreign-platform manifest plus the host-platform manifest; the host one wins.
+	// A foreign-platform manifest plus the composed linux/host-arch manifest; the
+	// linux one wins (a composed image always declares os="linux").
 	foreign, _ := seedManifest(t, st, "foreign-arch")
 	foreign.Platform = &ocispec.Platform{OS: "plan9", Architecture: "mips"}
 	host, hostBody := seedManifest(t, st, "host-arch")
-	host.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	host.Platform = &ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH}
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, foreign, host)
 
 	got, err := ConfigContentDigest(context.Background(), st, idx)
@@ -272,10 +287,10 @@ func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 func TestConfigContentDigest_SelectsForeignArchChild(t *testing.T) {
 	st := memory.New()
 	native, nativeBody := seedManifest(t, st, "native-arch")
-	native.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	native.Platform = &ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH}
 	const foreignArch = "s390x" // a stable arch distinct from any test runner's GOARCH
 	foreign, foreignBody := seedManifest(t, st, "foreign-arch")
-	foreign.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: foreignArch}
+	foreign.Platform = &ocispec.Platform{OS: "linux", Architecture: foreignArch}
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, native, foreign)
 
 	t.Run("a foreign-arch consumer selects the foreign child", func(t *testing.T) {
@@ -320,10 +335,46 @@ func TestConfigContentDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
 
 	_, err := ConfigContentDigest(context.Background(), st, idx)
 	if err == nil {
-		t.Fatal("want an error when no manifest matches the host platform")
+		t.Fatal("want an error when no manifest targets the container runtime platform")
 	}
-	if !strings.Contains(err.Error(), "host platform") {
-		t.Errorf("err = %v, want a host-platform mismatch message", err)
+	if !strings.Contains(err.Error(), "container runtime platform") {
+		t.Errorf("err = %v, want a container-runtime-platform mismatch message", err)
+	}
+}
+
+// TestConfigContentDigest_SelectsLinuxChildOnNonLinuxHost is the #2055 regression
+// guard: a composed multi-arch index declares os="linux" for every child, so a
+// non-linux launching host (Windows, macOS) must still resolve the linux child
+// for its own arch rather than refusing to boot because no windows/darwin manifest
+// exists. Before the fix selectPlatformManifest matched the child OS against the
+// host GOOS, so a linux/amd64+linux/arm64 index matched nothing on Windows/macOS.
+func TestConfigContentDigest_SelectsLinuxChildOnNonLinuxHost(t *testing.T) {
+	st := memory.New()
+	amd, amdBody := seedArchManifest(t, st, "linux", "amd64", "amd")
+	arm, armBody := seedArchManifest(t, st, "linux", "arm64", "arm")
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, amd, arm)
+
+	cases := []struct {
+		name     string
+		hostGOOS string
+		hostArch string
+		wantBody []byte
+	}{
+		{"windows/amd64 host resolves the linux/amd64 child", "windows", "amd64", amdBody},
+		{"darwin/arm64 host resolves the linux/arm64 child", "darwin", "arm64", armBody},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withHostGOOS(t, tc.hostGOOS)
+			withHostGOARCH(t, tc.hostArch)
+			got, err := ConfigContentDigest(context.Background(), st, idx)
+			if err != nil {
+				t.Fatalf("ConfigContentDigest as %s/%s: %v", tc.hostGOOS, tc.hostArch, err)
+			}
+			if want := wantContentDigest(t, tc.wantBody); got != want {
+				t.Errorf("content digest = %q, want the linux/%s child's config %q", got, tc.hostArch, want)
+			}
+		})
 	}
 }
 
@@ -404,7 +455,7 @@ func (s indexFetchFailStore) Fetch(ctx context.Context, desc ocispec.Descriptor)
 func TestConfigContentDigest_IndexChildFetchErrorPropagates(t *testing.T) {
 	inner := memory.New()
 	image, _ := seedManifest(t, inner, "child")
-	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	image.Platform = &ocispec.Platform{OS: "linux", Architecture: runtime.GOARCH}
 	idx := pushIndex(t, inner, ocispec.MediaTypeImageIndex, image)
 	boom := errors.New("child manifest read reset")
 	st := indexFetchFailStore{Store: inner, failDigest: image.Digest.String(), err: boom}
@@ -620,7 +671,7 @@ func TestAllPlatformConfigContentDigests_InvalidChildConfigErrors(t *testing.T) 
 func TestSelectPlatformManifest_HostOnlyUnchanged(t *testing.T) {
 	st := memory.New()
 	foreign, _ := seedArchManifest(t, st, "plan9", "mips", "foreign")
-	host, hostBody := seedArchManifest(t, st, runtime.GOOS, runtime.GOARCH, "host")
+	host, hostBody := seedArchManifest(t, st, "linux", runtime.GOARCH, "host")
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, foreign, host)
 	got, err := ConfigContentDigest(context.Background(), st, idx)
 	if err != nil {
