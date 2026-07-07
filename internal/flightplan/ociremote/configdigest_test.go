@@ -404,3 +404,117 @@ func TestConfigContentDigest_CorruptIndexErrors(t *testing.T) {
 		t.Fatalf("err = %v, want a decode-image-index error", err)
 	}
 }
+
+// seedArchManifest pushes a single-config image manifest whose config declares
+// the given (os, arch) and returns the manifest descriptor (platform-stamped)
+// plus its config bytes, so a test can build a multi-arch index by hand.
+func seedArchManifest(t *testing.T, st content.Storage, os, arch, marker string) (manifest ocispec.Descriptor, configBody []byte) {
+	t.Helper()
+	img := ocispec.Image{
+		Platform: ocispec.Platform{OS: os, Architecture: arch},
+		Config: ocispec.ImageConfig{
+			Env:        []string{"PATH=/usr/bin"},
+			Entrypoint: []string{"/entry", marker},
+			Cmd:        []string{"bash"},
+			WorkingDir: "/work",
+		},
+	}
+	img.RootFS.Type = "layers"
+	configBody, err := json.Marshal(img)
+	if err != nil {
+		t.Fatalf("marshal arch config: %v", err)
+	}
+	cfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, configBody)
+	layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer-"+marker))
+	m := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    cfg,
+		Layers:    []ocispec.Descriptor{layer},
+	}
+	mb, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal arch manifest: %v", err)
+	}
+	md := pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
+	md.Platform = &ocispec.Platform{OS: os, Architecture: arch}
+	return md, configBody
+}
+
+// TestAllPlatformConfigContentDigests_TwoArchIndex proves the all-arch walk
+// returns one content digest per runnable platform from a hand-built two-arch
+// index, keyed by each config's own os/arch, with attestation children skipped.
+func TestAllPlatformConfigContentDigests_TwoArchIndex(t *testing.T) {
+	st := memory.New()
+	amd, amdBody := seedArchManifest(t, st, "linux", "amd64", "amd")
+	arm, armBody := seedArchManifest(t, st, "linux", "arm64", "arm")
+	att := attestationManifest(t, st)
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, amd, arm, att)
+
+	got, err := AllPlatformConfigContentDigests(context.Background(), st, idx)
+	if err != nil {
+		t.Fatalf("AllPlatformConfigContentDigests: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 platform digests (attestation skipped), got %d: %+v", len(got), got)
+	}
+	byArch := map[string]PlatformConfigDigest{}
+	for _, p := range got {
+		if p.OS != "linux" {
+			t.Errorf("os = %q, want linux", p.OS)
+		}
+		byArch[p.Arch] = p
+	}
+	if want := wantContentDigest(t, amdBody); byArch["amd64"].Digest != want {
+		t.Errorf("amd64 digest = %q, want %q", byArch["amd64"].Digest, want)
+	}
+	if want := wantContentDigest(t, armBody); byArch["arm64"].Digest != want {
+		t.Errorf("arm64 digest = %q, want %q", byArch["arm64"].Digest, want)
+	}
+}
+
+// TestAllPlatformConfigContentDigests_SingleManifest proves a non-index root
+// (a plain image manifest) yields exactly one entry keyed by its config's os/arch.
+func TestAllPlatformConfigContentDigests_SingleManifest(t *testing.T) {
+	st := memory.New()
+	md, body := seedArchManifest(t, st, "linux", "arm64", "solo")
+	got, err := AllPlatformConfigContentDigests(context.Background(), st, md)
+	if err != nil {
+		t.Fatalf("AllPlatformConfigContentDigests: %v", err)
+	}
+	if len(got) != 1 || got[0].OS != "linux" || got[0].Arch != "arm64" {
+		t.Fatalf("want a single linux/arm64 entry, got %+v", got)
+	}
+	if want := wantContentDigest(t, body); got[0].Digest != want {
+		t.Errorf("digest = %q, want %q", got[0].Digest, want)
+	}
+}
+
+// TestAllPlatformConfigContentDigests_OnlyAttestationErrors proves an index with
+// no runnable child fails closed with the shared no-runnable-manifest message.
+func TestAllPlatformConfigContentDigests_OnlyAttestationErrors(t *testing.T) {
+	st := memory.New()
+	att := attestationManifest(t, st)
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, att)
+	if _, err := AllPlatformConfigContentDigests(context.Background(), st, idx); err == nil || !strings.Contains(err.Error(), "runnable image manifest") {
+		t.Fatalf("err = %v, want a no-runnable-manifest error", err)
+	}
+}
+
+// TestSelectPlatformManifest_HostOnlyUnchanged is the regression guard that
+// refactoring selectPlatformManifest into a thin wrapper over
+// enumeratePlatformManifests kept the host-only single-pick behavior: a two-arch
+// index still resolves ConfigContentDigest to the host-platform config.
+func TestSelectPlatformManifest_HostOnlyUnchanged(t *testing.T) {
+	st := memory.New()
+	foreign, _ := seedArchManifest(t, st, "plan9", "mips", "foreign")
+	host, hostBody := seedArchManifest(t, st, runtime.GOOS, runtime.GOARCH, "host")
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, foreign, host)
+	got, err := ConfigContentDigest(context.Background(), st, idx)
+	if err != nil {
+		t.Fatalf("ConfigContentDigest: %v", err)
+	}
+	if want := wantContentDigest(t, hostBody); got != want {
+		t.Errorf("content digest = %q, want the host-platform config %q", got, want)
+	}
+}

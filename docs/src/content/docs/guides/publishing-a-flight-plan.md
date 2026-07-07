@@ -20,7 +20,7 @@ A consumer follows the single reference, verifies the signature and the publishe
 
 - A frozen version in your store (`aileron skill freeze <name>` first; see `aileron skill list`).
 - Push access to the destination OCI repository. Publish uses your existing Docker/OCI credentials (the ones `docker login` writes), so authenticate to the registry the usual way before publishing.
-- A working Docker daemon. A composed-tools plan is pushed straight from your local image with `docker push`, so no special image-store configuration is required.
+- A working Docker daemon. A composed-tools plan is pushed straight from your local image with `docker push`. A composed image is built for both `linux/amd64` and `linux/arm64` at freeze, so pushing it needs Docker's containerd image store enabled to carry the multi-architecture manifest list (Docker Desktop: Settings, then General, then "Use containerd for pulling and storing images"). The same store requirement applies to the local daemon load freeze performs, so a plan that froze successfully is already push-ready.
 
 ## Publishing
 

@@ -64,6 +64,64 @@ func ConfigContentDigest(ctx context.Context, fetcher content.Fetcher, desc ocis
 	return cc.ContentDigest()
 }
 
+// PlatformConfigDigest is the serialization-agnostic config content digest of one
+// platform image inside a multi-arch artifact, keyed by the `(OS, Arch)` the
+// image config declares. AllPlatformConfigContentDigests returns one per runnable
+// platform; the freeze producer maps these into the lock's per-arch pin set so a
+// consumer selects the entry matching its host platform (ADR-0027).
+type PlatformConfigDigest struct {
+	OS     string
+	Arch   string
+	Digest string
+}
+
+// AllPlatformConfigContentDigests returns the serialization-agnostic config
+// content digest for every runnable platform reachable from rootDesc. When
+// rootDesc names an OCI image index / docker manifest list it enumerates all
+// platform children (attestation/unknown-platform entries filtered out); when it
+// names a single image manifest it yields exactly one entry. Each returned
+// `(OS, Arch)` is read from the parsed config's own os/architecture, so the
+// platform key ties to the exact config the consumer compares against, and the
+// Digest is imgconfig.FromOCIImageConfig(config).ContentDigest() for that child.
+// It is the all-arch generalization of ConfigContentDigest, used by the local
+// OCI-layout reader the freeze multi-arch build feeds.
+func AllPlatformConfigContentDigests(ctx context.Context, fetcher content.Fetcher, rootDesc ocispec.Descriptor) ([]PlatformConfigDigest, error) {
+	var children []ocispec.Descriptor
+	if isImageIndex(rootDesc.MediaType) {
+		raw, err := content.FetchAll(ctx, fetcher, rootDesc)
+		if err != nil {
+			return nil, err
+		}
+		children, err = enumeratePlatformManifests(raw)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		children = []ocispec.Descriptor{rootDesc}
+	}
+	out := make([]PlatformConfigDigest, 0, len(children))
+	for _, child := range children {
+		raw, err := content.FetchAll(ctx, fetcher, child)
+		if err != nil {
+			return nil, fmt.Errorf("fetch platform image manifest %s: %w", child.Digest, err)
+		}
+		cfg, err := configFromManifestBytes(ctx, fetcher, raw)
+		if err != nil {
+			return nil, err
+		}
+		cc, err := imgconfig.FromOCIImageConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		digest, err := cc.ContentDigest()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PlatformConfigDigest{OS: cc.OS, Arch: cc.Architecture, Digest: digest})
+	}
+	return out, nil
+}
+
 // configBlob fetches the raw image config blob bytes for the image at desc,
 // unwrapping an OCI image index / docker manifest list to the platform image
 // manifest first. It is the shared read the content-digest verification is
@@ -83,6 +141,14 @@ func configBlob(ctx context.Context, fetcher content.Fetcher, desc ocispec.Descr
 			return nil, fmt.Errorf("fetch platform image manifest %s: %w", child.Digest, err)
 		}
 	}
+	return configFromManifestBytes(ctx, fetcher, raw)
+}
+
+// configFromManifestBytes decodes a single image manifest's raw bytes and
+// fetches its config blob. It is shared by the single-select configBlob path and
+// the all-arch AllPlatformConfigContentDigests walk so both compute the config
+// read the same way.
+func configFromManifestBytes(ctx context.Context, fetcher content.Fetcher, raw []byte) ([]byte, error) {
 	var m ocispec.Manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("decode image manifest: %w", err)
@@ -103,14 +169,15 @@ func isImageIndex(mediaType string) bool {
 	return mediaType == ocispec.MediaTypeImageIndex || mediaType == dockerManifestListMediaType
 }
 
-// selectPlatformManifest picks the runnable image manifest from an index's raw
-// bytes: it drops attestation/unknown-platform entries, then returns the sole
-// remaining manifest, or the host-platform match when several remain. It returns
-// an actionable error when no runnable manifest is present.
-func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
+// enumeratePlatformManifests returns every runnable image manifest descriptor in
+// an index's raw bytes, dropping attestation/unknown-platform children. Unlike
+// selectPlatformManifest it does not pick one: the all-arch config-digest walk
+// wants the full per-platform set. It returns an actionable error when the index
+// carries no runnable image manifest at all.
+func enumeratePlatformManifests(raw []byte) ([]ocispec.Descriptor, error) {
 	var idx ocispec.Index
 	if err := json.Unmarshal(raw, &idx); err != nil {
-		return ocispec.Descriptor{}, fmt.Errorf("decode image index: %w", err)
+		return nil, fmt.Errorf("decode image index: %w", err)
 	}
 	candidates := make([]ocispec.Descriptor, 0, len(idx.Manifests))
 	for _, m := range idx.Manifests {
@@ -119,10 +186,23 @@ func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
 		}
 		candidates = append(candidates, m)
 	}
-	switch len(candidates) {
-	case 0:
-		return ocispec.Descriptor{}, fmt.Errorf("image index has no runnable image manifest (found %d entr%s, all attestation or unknown-platform)", len(idx.Manifests), plural(len(idx.Manifests)))
-	case 1:
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("image index has no runnable image manifest (found %d entr%s, all attestation or unknown-platform)", len(idx.Manifests), plural(len(idx.Manifests)))
+	}
+	return candidates, nil
+}
+
+// selectPlatformManifest picks the single runnable image manifest from an index's
+// raw bytes for the host-only config read: it enumerates the runnable children,
+// then returns the sole remaining manifest, or the host-platform match when
+// several remain. It shares enumeratePlatformManifests with the all-arch walk so
+// the two can never diverge on which children count as runnable.
+func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
+	candidates, err := enumeratePlatformManifests(raw)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
 	for _, m := range candidates {

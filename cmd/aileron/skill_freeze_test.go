@@ -17,6 +17,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
@@ -81,9 +82,21 @@ func stubFreezeResolvers(t *testing.T, digest string) {
 		return freeze.DigestResolverFunc(func(context.Context, string) (string, error) { return digest, nil })
 	}
 	newFeatureComposer = func() freeze.FeatureComposer {
-		return freeze.FeatureComposerFunc(func(context.Context, string, []string) (string, error) { return digest, nil })
+		return freeze.FeatureComposerFunc(func(context.Context, string, []string) ([]freeze.PlatformDigest, error) {
+			return bothArchDigests(digest), nil
+		})
 	}
 	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
+}
+
+// bothArchDigests wraps a single digest as a linux/amd64 + linux/arm64 per-arch
+// set, so a stubbed composer produces a pin whose host-platform entry exists on
+// either architecture the test runner uses.
+func bothArchDigests(digest string) []freeze.PlatformDigest {
+	return []freeze.PlatformDigest{
+		{OS: "linux", Arch: "amd64", Digest: digest},
+		{OS: "linux", Arch: "arm64", Digest: digest},
+	}
 }
 
 // writeSigningKey writes a fresh PKCS#8 ed25519 PEM key to a temp file and
@@ -164,6 +177,93 @@ func TestRunSkillFreeze_HappyPath(t *testing.T) {
 	// The private key is never stored.
 	if _, err := os.Stat(filepath.Join(s.FrozenDir("weekly-metrics-digest", ids[0]), "signing-key.pem")); !os.IsNotExist(err) {
 		t.Error("the signing private key must never be written to the store")
+	}
+}
+
+// TestRunSkillFreeze_MultiArchRecordsBothArchesInLock proves the S3 producer end
+// to end through the CLI: a full freeze of a tools-declaring skill runs the REAL
+// builderFeatureComposer (buildx preflight + multi-arch build + per-arch layout
+// read) and records BOTH linux/amd64 and linux/arm64 config digests in the signed
+// lock (#2036). The base digest resolver is stubbed and the OCI-layout read seam
+// returns a fixed two-arch set, so the run needs no Docker or emulation.
+func TestRunSkillFreeze_MultiArchRecordsBothArchesInLock(t *testing.T) {
+	// host-npx avoids the managed provisioner's network fetch; the fake runner
+	// answers the buildx build with a no-op.
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	key := writeSigningKey(t)
+
+	// Stub the base digest resolver; keep the REAL composer wired.
+	origDR := newDigestResolver
+	newDigestResolver = func() freeze.DigestResolver {
+		return freeze.DigestResolverFunc(func(context.Context, string) (string, error) {
+			return "sha256:" + strings.Repeat("e", 64), nil
+		})
+	}
+	t.Cleanup(func() { newDigestResolver = origDR })
+
+	amd := "sha256:" + strings.Repeat("a", 64)
+	arm := "sha256:" + strings.Repeat("b", 64)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: amd},
+		{OS: "linux", Arch: "arm64", Digest: arm},
+	})
+	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	withFakeInspector(t, fr)
+
+	var stdout, stderr bytes.Buffer
+	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("multi-arch freeze must succeed, exit=%d stderr=%s", code, stderr.String())
+	}
+
+	s := store.New(storeDir)
+	ids, err := s.FrozenVersions("weekly-metrics-digest")
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("FrozenVersions = %v, %v", ids, err)
+	}
+	v, err := s.ReadFrozen("weekly-metrics-digest", ids[0])
+	if err != nil {
+		t.Fatalf("ReadFrozen: %v", err)
+	}
+	lf := string(v.Lockfile)
+	for _, want := range []string{"arch: amd64", "arch: arm64", amd, arm} {
+		if !strings.Contains(lf, want) {
+			t.Errorf("lockfile must record %q for the multi-arch pin:\n%s", want, lf)
+		}
+	}
+}
+
+// TestRunSkillFreeze_MissingBuildxAbortsWithNoPin proves the freeze aborts with the
+// buildx/binfmt remediation and writes NO frozen version when the multi-arch
+// preflight fails (#2036, Q2): a partial single-arch pin is never emitted.
+func TestRunSkillFreeze_MissingBuildxAbortsWithNoPin(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	key := writeSigningKey(t)
+
+	origDR := newDigestResolver
+	newDigestResolver = func() freeze.DigestResolver {
+		return freeze.DigestResolverFunc(func(context.Context, string) (string, error) {
+			return "sha256:" + strings.Repeat("e", 64), nil
+		})
+	}
+	t.Cleanup(func() { newDigestResolver = origDR })
+
+	fr := &fakeRunner{fails: map[string]error{"buildx version": errors.New("unknown command: buildx")}}
+	withFakeInspector(t, fr)
+
+	var stdout, stderr bytes.Buffer
+	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("a missing-buildx freeze must exit non-zero, stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tonistiigi/binfmt") {
+		t.Errorf("stderr = %q, want the buildx/binfmt remediation", stderr.String())
+	}
+	s := store.New(storeDir)
+	if ids, _ := s.FrozenVersions("weekly-metrics-digest"); len(ids) != 0 {
+		t.Errorf("a preflight-aborted freeze must write no frozen version, got %v", ids)
 	}
 }
 
@@ -513,10 +613,10 @@ func TestRunSkillFreeze_ToolsComposeOntoCustomBase(t *testing.T) {
 		})
 	}
 	newFeatureComposer = func() freeze.FeatureComposer {
-		return freeze.FeatureComposerFunc(func(_ context.Context, base string, features []string) (string, error) {
+		return freeze.FeatureComposerFunc(func(_ context.Context, base string, features []string) ([]freeze.PlatformDigest, error) {
 			composeBase = base
 			composeFeatures = features
-			return composedDigest, nil
+			return bothArchDigests(composedDigest), nil
 		})
 	}
 	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
@@ -753,6 +853,44 @@ func TestRuntimeDigestResolver_InspectorError(t *testing.T) {
 	}
 }
 
+// TestBuilderFeatureComposer_LayoutReadErrorPropagates proves a failure reading
+// the per-arch config digests back from the built OCI layout surfaces as an error
+// (freeze must not seal a pin it could not attest).
+func TestBuilderFeatureComposer_LayoutReadErrorPropagates(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	origDir, origRead := freezeOCILayoutDir, readOCILayoutConfigDigests
+	freezeOCILayoutDir = func(string) (string, error) { return t.TempDir(), nil }
+	readOCILayoutConfigDigests = func(context.Context, string) ([]ociremote.PlatformConfigDigest, error) {
+		return nil, errors.New("layout corrupt")
+	}
+	t.Cleanup(func() { freezeOCILayoutDir, readOCILayoutConfigDigests = origDir, origRead })
+
+	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	withFakeInspector(t, fr)
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err == nil || !strings.Contains(err.Error(), "per-arch config digests") {
+		t.Fatalf("err = %v, want the layout-read failure", err)
+	}
+}
+
+// TestBuilderFeatureComposer_LayoutDirPrepareErrors proves a non-creatable layout
+// directory (its parent is a regular file) fails fast before any build runs.
+func TestBuilderFeatureComposer_LayoutDirPrepareErrors(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parent, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocking file: %v", err)
+	}
+	origDir := freezeOCILayoutDir
+	freezeOCILayoutDir = func(string) (string, error) { return filepath.Join(parent, "layout"), nil }
+	t.Cleanup(func() { freezeOCILayoutDir = origDir })
+
+	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	withFakeInspector(t, fr)
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err == nil || !strings.Contains(err.Error(), "OCI layout dir") {
+		t.Fatalf("err = %v, want a layout-dir prepare error", err)
+	}
+}
+
 func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
 	orig := newImageInspector
 	newImageInspector = func() (imageInspector, error) {
@@ -764,53 +902,60 @@ func TestBuilderFeatureComposer_InspectorError(t *testing.T) {
 	}
 }
 
-// TestBuilderFeatureComposer_ResolvesHostNPXToolchain is the regression guard
-// for #1866: the composer must resolve the toolchain from the environment and
-// wire it into the Builder. Before the fix ComposeDigest ignored the toolchain
-// selection, so the Builder saw an empty ToolchainMode (normalized to managed)
-// with no provisioner and hard-errored ("no provisioner is configured…"),
-// making freeze-with-tools fail for every real caller. With
-// AILERON_SANDBOX_TOOLCHAIN=host-npx set, the composer must resolve the
-// host-npx opt-out (no provisioner) and compose successfully.
-func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
-	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
-
-	base := "base@" + fakeFreezeDigest
-	features := []string{"aws-cli"}
-	// The Builder builds the ToolsPlan image under this deterministic tag, then
-	// localImageContentDigest inspects it and attests the serialization-agnostic
-	// config content digest.
-	tag := composition.LocalToolsImageTag(base, features)
-	inspect := dockerInspectJSON(t, "host-npx")
-	want := wantContentDigestFromDocker(t, inspect)
-	fr := &fakeRunner{
-		outputs: map[string]string{
-			`image inspect --format {{json .}} ` + tag: inspect + "\n",
-		},
-	}
-	withFakeInspector(t, fr)
-
-	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), base, features)
-	if err != nil {
-		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
-	}
-	if got != want {
-		t.Errorf("digest = %q, want the config content digest %q", got, want)
+// buildxPreflightOK is the fake-runner output that makes CheckMultiArchBuild pass:
+// `buildx version` succeeds (empty output, no error) and `buildx inspect
+// --bootstrap` advertises both required platforms.
+func buildxPreflightOK() map[string]string {
+	return map[string]string{
+		"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/arm64, linux/arm/v7\n",
 	}
 }
 
-// TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner covers the
-// managed branch of the #1866 fix: when the resolved toolchain is managed (the
-// default), ComposeDigest must wire the managed provisioner onto the Builder.
-// To exercise the managed branch without a network provision, this test sets
-// the managed escape-hatch env (AILERON_SANDBOX_NODE + AILERON_DEVCONTAINER_CLI)
-// to on-disk paths, which resolveDevcontainerCLI honors ahead of the wired
-// provisioner. The composer must resolve managed, wire the provisioner, take
-// the escape hatch, and compose successfully.
+// stubOCILayoutDigests points the composer's OCI-layout reader at a fixed
+// per-arch set and redirects the layout directory to a temp dir, so the composer
+// runs its preflight + build orchestration + mapping without a real buildx build
+// or an on-disk layout (the layout read is covered in the ociremote package).
+func stubOCILayoutDigests(t *testing.T, digests []ociremote.PlatformConfigDigest) {
+	t.Helper()
+	origDir, origRead := freezeOCILayoutDir, readOCILayoutConfigDigests
+	freezeOCILayoutDir = func(string) (string, error) { return t.TempDir(), nil }
+	readOCILayoutConfigDigests = func(context.Context, string) ([]ociremote.PlatformConfigDigest, error) {
+		return digests, nil
+	}
+	t.Cleanup(func() { freezeOCILayoutDir, readOCILayoutConfigDigests = origDir, origRead })
+}
+
+// TestBuilderFeatureComposer_ResolvesHostNPXToolchain is the regression guard
+// for #1866: the composer must resolve the toolchain from the environment and
+// wire it into the Builder. With AILERON_SANDBOX_TOOLCHAIN=host-npx set, the
+// composer resolves the host-npx opt-out (no provisioner) and composes the
+// multi-arch image successfully, returning the per-arch config-digest set.
+func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+
+	amd := "sha256:" + strings.Repeat("a", 64)
+	arm := "sha256:" + strings.Repeat("b", 64)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: amd},
+		{OS: "linux", Arch: "arm64", Digest: arm},
+	})
+	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	withFakeInspector(t, fr)
+
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
+	if err != nil {
+		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
+	}
+	assertTwoArchDigests(t, got, amd, arm)
+}
+
+// TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner covers the managed
+// branch of the #1866 fix: when the resolved toolchain is managed (the default),
+// ComposeDigest wires the managed provisioner onto the Builder. The managed
+// escape-hatch env points at on-disk paths so the managed branch does not attempt
+// a network provision. The composer resolves managed, takes the escape hatch, and
+// returns the per-arch set.
 func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
-	// Managed is the default; leave AILERON_SANDBOX_TOOLCHAIN unset (empty
-	// resolves to managed). Provide the escape hatch so the managed branch does
-	// not attempt a network provision.
 	t.Setenv(container.ToolchainModeEnv, "")
 	dir := t.TempDir()
 	node := filepath.Join(dir, "node")
@@ -824,24 +969,62 @@ func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
 	t.Setenv(container.NodeBinaryEnv, node)
 	t.Setenv(container.DevcontainerCLIEnv, cli)
 
-	base := "base@" + fakeFreezeDigest
-	features := []string{"aws-cli"}
-	tag := composition.LocalToolsImageTag(base, features)
-	inspect := dockerInspectJSON(t, "managed")
-	want := wantContentDigestFromDocker(t, inspect)
-	fr := &fakeRunner{
-		outputs: map[string]string{
-			`image inspect --format {{json .}} ` + tag: inspect + "\n",
-		},
-	}
+	amd := "sha256:" + strings.Repeat("c", 64)
+	arm := "sha256:" + strings.Repeat("d", 64)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: amd},
+		{OS: "linux", Arch: "arm64", Digest: arm},
+	})
+	fr := &fakeRunner{outputs: buildxPreflightOK()}
 	withFakeInspector(t, fr)
 
-	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), base, features)
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
 	if err != nil {
 		t.Fatalf("ComposeDigest with managed toolchain + escape hatch: %v", err)
 	}
-	if got != want {
-		t.Errorf("digest = %q, want the config content digest %q", got, want)
+	assertTwoArchDigests(t, got, amd, arm)
+}
+
+func assertTwoArchDigests(t *testing.T, got []freeze.PlatformDigest, amd, arm string) {
+	t.Helper()
+	if len(got) != 2 {
+		t.Fatalf("want two per-arch digests, got %+v", got)
+	}
+	byArch := map[string]string{}
+	for _, p := range got {
+		byArch[p.Arch] = p.Digest
+	}
+	if byArch["amd64"] != amd {
+		t.Errorf("amd64 digest = %q, want %q", byArch["amd64"], amd)
+	}
+	if byArch["arm64"] != arm {
+		t.Errorf("arm64 digest = %q, want %q", byArch["arm64"], arm)
+	}
+}
+
+// TestBuilderFeatureComposer_MissingBuildxReturnsRemediation proves the multi-arch
+// preflight fails closed: when `docker buildx version` is unavailable, the composer
+// returns the actionable tonistiigi/binfmt remediation and never reads a layout or
+// emits a pin (#2036, Q2).
+func TestBuilderFeatureComposer_MissingBuildxReturnsRemediation(t *testing.T) {
+	readHit := false
+	origDir, origRead := freezeOCILayoutDir, readOCILayoutConfigDigests
+	freezeOCILayoutDir = func(string) (string, error) { return t.TempDir(), nil }
+	readOCILayoutConfigDigests = func(context.Context, string) ([]ociremote.PlatformConfigDigest, error) {
+		readHit = true
+		return nil, nil
+	}
+	t.Cleanup(func() { freezeOCILayoutDir, readOCILayoutConfigDigests = origDir, origRead })
+
+	fr := &fakeRunner{fails: map[string]error{"buildx version": errors.New("unknown command: buildx")}}
+	withFakeInspector(t, fr)
+
+	_, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
+	if err == nil || !strings.Contains(err.Error(), "tonistiigi/binfmt") {
+		t.Fatalf("err = %v, want a buildx/binfmt remediation", err)
+	}
+	if readHit {
+		t.Error("a failed preflight must not read the OCI layout")
 	}
 }
 

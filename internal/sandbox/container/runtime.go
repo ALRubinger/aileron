@@ -300,6 +300,21 @@ type BuildOptions struct {
 	// with the --node/--devcontainer-cli escape hatch up front, so the escape
 	// hatch never reaches a build with Offline set.
 	Offline bool
+	// Platforms requests a multi-architecture build. When non-empty the build
+	// routes through `docker buildx build` (raw tiers) or `devcontainer build`
+	// with `--platform <p1,p2,...>`, and OCILayoutDest must be set so the built
+	// manifest list is written to a local OCI image layout rather than loaded
+	// into the daemon. The freeze producer sets composition.MultiArchPlatforms so
+	// the composed image is built for both linux/amd64 and linux/arm64 (ADR-0027,
+	// issue #2036). Empty keeps the single-arch, daemon-loading build byte-for-byte
+	// identical to before.
+	Platforms []string
+	// OCILayoutDest is the directory a multi-arch build (Platforms set) writes its
+	// OCI image layout to, via `--output type=oci,dest=<dir>,tar=false`. The freeze
+	// producer reads the per-arch config-digest set back from this layout and hands
+	// it to publish (S3/S4 seam); it is not an ephemeral temp dir. Ignored when
+	// Platforms is empty.
+	OCILayoutDest string
 }
 
 // BuildResult reports the image selected or built for launch.
@@ -308,6 +323,11 @@ type BuildResult struct {
 	Image   string
 	Built   bool
 	Tier    composition.Tier
+	// OCILayoutDir is the directory a multi-arch build wrote its OCI image layout
+	// to (echoing BuildOptions.OCILayoutDest). It is empty for a single-arch,
+	// daemon-loading build. The freeze producer reads the per-arch config-digest
+	// set back from it (issue #2036).
+	OCILayoutDir string
 }
 
 // RunOptions configures one sandbox container execution.
@@ -426,7 +446,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if !shouldBuild {
 			return result, nil
 		}
-		args, err := baseBuildArgs(workDir, image)
+		args, err := baseBuildArgs(workDir, image, opts.Platforms, opts.OCILayoutDest)
 		if err != nil {
 			return BuildResult{}, err
 		}
@@ -434,6 +454,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			return BuildResult{}, err
 		}
 		result.Built = true
+		result.OCILayoutDir = multiArchLayoutDir(opts)
 		return result, nil
 	case composition.TierDevcontainer:
 		useFeatures := len(opts.Plan.Features) > 0
@@ -495,7 +516,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 				defer cleanup()
 				buildWorkDir = tmp
 			}
-			name, args, err := devcontainerCLIBuildArgs(prefix, buildWorkDir, opts.Plan, result.Image)
+			name, args, err := devcontainerCLIBuildArgs(prefix, buildWorkDir, opts.Plan, result.Image, opts.Platforms, opts.OCILayoutDest)
 			if err != nil {
 				return BuildResult{}, err
 			}
@@ -503,9 +524,10 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 				return BuildResult{}, err
 			}
 			result.Built = true
+			result.OCILayoutDir = multiArchLayoutDir(opts)
 			return result, nil
 		}
-		args, err := devcontainerBuildArgs(workDir, opts.Plan, result.Image)
+		args, err := devcontainerBuildArgs(workDir, opts.Plan, result.Image, opts.Platforms, opts.OCILayoutDest)
 		if err != nil {
 			return BuildResult{}, err
 		}
@@ -513,6 +535,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			return BuildResult{}, err
 		}
 		result.Built = true
+		result.OCILayoutDir = multiArchLayoutDir(opts)
 		return result, nil
 	case composition.TierPublished:
 		// A published per-agent image is pulled, never built locally — that is
@@ -1153,13 +1176,101 @@ func ProjectImageTag(workDir string) string {
 	return "aileron/sandbox-project:" + hex.EncodeToString(sum[:])[:12]
 }
 
-func baseBuildArgs(start, image string) ([]string, error) {
+// buildVerb returns the leading argv tokens for a build: the plain `build` verb
+// for a single-arch daemon-loading build, or `buildx build` when a multi-arch
+// build (platforms set) is requested, since only buildx can drive `--platform`
+// and the OCI-layout `--output`. Kept as a shared helper so the three assemblers
+// switch verbs identically.
+func buildVerb(platforms []string) []string {
+	if len(platforms) == 0 {
+		return []string{"build"}
+	}
+	return []string{"buildx", "build"}
+}
+
+// multiArchBuildTokens returns the buildx multi-platform + OCI-layout output flags
+// a build appends when platforms is non-empty: `--platform <p1,p2,...> --output
+// type=oci,dest=<dir>,tar=false`. `tar=false` makes buildx emit an unpacked OCI
+// image-layout directory (the shape internal/flightplan/ociremote reads) rather
+// than a tarball. It returns nil when platforms is empty so the single-arch argv
+// is byte-identical to before. The three assemblers share it so they never
+// diverge on the multi-arch token shape (issue #2036).
+func multiArchBuildTokens(platforms []string, ociLayoutDest string) []string {
+	if len(platforms) == 0 {
+		return nil
+	}
+	return []string{
+		"--platform", strings.Join(platforms, ","),
+		"--output", "type=oci,dest=" + ociLayoutDest + ",tar=false",
+	}
+}
+
+// multiArchLayoutDir reports the OCI-layout directory a build wrote, or "" for a
+// single-arch daemon-loading build. A multi-arch build's output only lands in the
+// layout when both Platforms and OCILayoutDest are set, so BuildResult.OCILayoutDir
+// is populated only then.
+func multiArchLayoutDir(opts BuildOptions) string {
+	if len(opts.Platforms) == 0 {
+		return ""
+	}
+	return opts.OCILayoutDest
+}
+
+// CheckMultiArchBuild is the freeze-time preflight for a multi-architecture
+// composed build: it verifies buildx is installed and its active builder can
+// build both linux/amd64 and linux/arm64. It runs BEFORE the build so the freeze
+// producer aborts with an actionable remediation rather than silently producing a
+// single-arch pin (issue #2036, Q2). It shells out through the Runner seam so it
+// is unit-testable without Docker.
+//
+// Two checks: `docker buildx version` must succeed (buildx present), and `docker
+// buildx inspect --bootstrap` must report both required platforms (the QEMU
+// emulators are installed and registered). A miss on either returns an error
+// naming the concrete fix: install/enable buildx, and register the QEMU emulators
+// with `docker run --privileged --rm tonistiigi/binfmt --install all`.
+func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string) error {
+	if runner == nil {
+		runner = execRunner{}
+	}
+	if err := runner.Run(ctx, runtimeName, []string{"buildx", "version"}, io.Discard, io.Discard); err != nil {
+		return fmt.Errorf("multi-arch freeze build requires docker buildx, which is not available (%w); install/enable Docker buildx, then register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
+	}
+	var out bytes.Buffer
+	if err := runner.Run(ctx, runtimeName, []string{"buildx", "inspect", "--bootstrap"}, &out, &out); err != nil {
+		return fmt.Errorf("multi-arch freeze build could not bootstrap the buildx builder (%w); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
+	}
+	inspect := out.String()
+	var missing []string
+	for _, want := range []string{"linux/amd64", "linux/arm64"} {
+		if !buildxInspectHasPlatform(inspect, want) {
+			missing = append(missing, want)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the active docker buildx builder cannot build %s (needed for a multi-arch freeze); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`, or select a builder that supports these platforms with `docker buildx create --use`", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// buildxInspectHasPlatform reports whether `docker buildx inspect` output
+// advertises platform. The inspect output lists supported platforms on a
+// `Platforms:` line as a comma-separated set (with each emulated platform
+// sometimes annotated, e.g. `linux/arm64*`), so a substring match on the exact
+// platform token is sufficient and tolerant of that annotation.
+func buildxInspectHasPlatform(inspect, platform string) bool {
+	return strings.Contains(inspect, platform)
+}
+
+func baseBuildArgs(start, image string, platforms []string, ociLayoutDest string) ([]string, error) {
 	contextDir, err := findBaseContext(start)
 	if err != nil {
 		return nil, err
 	}
 	containerfile := filepath.Join(contextDir, "Containerfile")
-	return []string{"build", "-t", image, "-f", containerfile, contextDir}, nil
+	args := buildVerb(platforms)
+	args = append(args, "-t", image, "-f", containerfile)
+	args = append(args, multiArchBuildTokens(platforms, ociLayoutDest)...)
+	return append(args, contextDir), nil
 }
 
 func findBaseContext(start string) (string, error) {
@@ -1183,12 +1294,13 @@ func findBaseContext(start string) (string, error) {
 	}
 }
 
-func devcontainerBuildArgs(workDir string, plan composition.Plan, image string) ([]string, error) {
+func devcontainerBuildArgs(workDir string, plan composition.Plan, image string, platforms []string, ociLayoutDest string) ([]string, error) {
 	dockerfile, err := resolveDockerfile(workDir, plan)
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"build", "-t", image, "-f", dockerfile}
+	args := buildVerb(platforms)
+	args = append(args, "-t", image, "-f", dockerfile)
 	keys := make([]string, 0, len(plan.BuildArgs))
 	for k := range plan.BuildArgs {
 		keys = append(keys, k)
@@ -1197,8 +1309,8 @@ func devcontainerBuildArgs(workDir string, plan composition.Plan, image string) 
 	for _, k := range keys {
 		args = append(args, "--build-arg", k+"="+plan.BuildArgs[k])
 	}
-	args = append(args, workDir)
-	return args, nil
+	args = append(args, multiArchBuildTokens(platforms, ociLayoutDest)...)
+	return append(args, workDir), nil
 }
 
 // resolveDevcontainerCLI resolves the @devcontainers/cli invocation prefix for
@@ -1366,7 +1478,7 @@ func materializeSynthesizedWorkspace(content string) (string, func(), error) {
 	return tmp, cleanup, nil
 }
 
-func devcontainerCLIBuildArgs(prefix []string, workDir string, plan composition.Plan, image string) (string, []string, error) {
+func devcontainerCLIBuildArgs(prefix []string, workDir string, plan composition.Plan, image string, platforms []string, ociLayoutDest string) (string, []string, error) {
 	devcontainerPath := filepath.Join(workDir, composition.DefaultDevcontainerPath)
 	if _, err := os.Stat(devcontainerPath); err != nil {
 		return "", nil, fmt.Errorf("devcontainer features build requires %s: %w", devcontainerPath, err)
@@ -1385,6 +1497,9 @@ func devcontainerCLIBuildArgs(prefix []string, workDir string, plan composition.
 	for _, k := range keys {
 		args = append(args, "--build-arg", k+"="+plan.BuildArgs[k])
 	}
+	// @devcontainers/cli forwards --platform/--output straight to buildx, so a
+	// multi-arch composed build emits the same OCI-layout output the raw tiers do.
+	args = append(args, multiArchBuildTokens(platforms, ociLayoutDest)...)
 	return name, args, nil
 }
 

@@ -176,6 +176,147 @@ func TestBuildDevcontainerWithFeaturesUsesDevcontainerCLI(t *testing.T) {
 	}
 }
 
+// TestBuildDevcontainerWithFeaturesMultiArchEmitsOCILayout proves the Features
+// build the freeze producer drives appends the buildx multi-platform + OCI-layout
+// output tokens when BuildOptions.Platforms is set, and records the layout dir on
+// the result. The composed freeze path exercises exactly this assembler.
+func TestBuildDevcontainerWithFeaturesMultiArchEmitsOCILayout(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	dest := filepath.Join(t.TempDir(), "layout")
+	runner := &recordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir:       dir,
+		ToolchainMode: ToolchainModeHostNPX,
+		Platforms:     composition.MultiArchPlatforms,
+		OCILayoutDest: dest,
+		Plan: composition.Plan{
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	wantTag := ProjectImageTag(dir)
+	want := append(append([]string(nil), devcontainerCLI[1:]...),
+		"build", "--workspace-folder", dir, "--image-name", wantTag,
+		"--platform", "linux/amd64,linux/arm64",
+		"--output", "type=oci,dest="+dest+",tar=false")
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+	if result.OCILayoutDir != dest {
+		t.Fatalf("result.OCILayoutDir = %q, want %q", result.OCILayoutDir, dest)
+	}
+}
+
+// TestDevcontainerCLIBuildArgs_SingleArchByteIdentical proves the assembler emits
+// the exact same argv as before when Platforms is unset (no multi-arch tokens).
+func TestDevcontainerCLIBuildArgs_SingleArchByteIdentical(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	prefix := []string{"npx", "devcontainer"}
+	name, got, err := devcontainerCLIBuildArgs(prefix, dir, composition.Plan{Tier: composition.TierDevcontainer}, "img:tag", nil, "")
+	if err != nil {
+		t.Fatalf("devcontainerCLIBuildArgs: %v", err)
+	}
+	if name != "npx" {
+		t.Fatalf("name = %q, want npx", name)
+	}
+	want := []string{"devcontainer", "build", "--workspace-folder", dir, "--image-name", "img:tag"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("single-arch args = %#v, want byte-identical %#v", got, want)
+	}
+}
+
+// TestBaseBuildArgs_MultiArchSwitchesToBuildx proves the raw base assembler
+// switches the `build` verb to `buildx build` and appends the OCI-output tokens
+// when platforms are requested, and stays plain `build` otherwise.
+func TestBaseBuildArgs_MultiArchSwitchesToBuildx(t *testing.T) {
+	t.Setenv("AILERON_SANDBOX_BASE_CONTEXT", t.TempDir())
+	dest := filepath.Join(t.TempDir(), "layout")
+	got, err := baseBuildArgs(t.TempDir(), "img:test", composition.MultiArchPlatforms, dest)
+	if err != nil {
+		t.Fatalf("baseBuildArgs: %v", err)
+	}
+	if len(got) < 2 || got[0] != "buildx" || got[1] != "build" {
+		t.Fatalf("multi-arch base argv must lead with `buildx build`, got %#v", got)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--platform linux/amd64,linux/arm64") ||
+		!strings.Contains(joined, "--output type=oci,dest="+dest+",tar=false") {
+		t.Fatalf("multi-arch base argv missing buildx tokens: %#v", got)
+	}
+	single, err := baseBuildArgs(t.TempDir(), "img:test", nil, "")
+	if err != nil {
+		t.Fatalf("baseBuildArgs single: %v", err)
+	}
+	if single[0] != "build" {
+		t.Fatalf("single-arch base argv must stay plain `build`, got %#v", single)
+	}
+}
+
+// TestCheckMultiArchBuild covers the three preflight outcomes over the Runner
+// seam (Docker-free): buildx missing, an arch missing from inspect, and both
+// arches present. On any miss the error must name the tonistiigi/binfmt remedy.
+func TestCheckMultiArchBuild(t *testing.T) {
+	const binfmt = "tonistiigi/binfmt"
+
+	t.Run("buildx missing", func(t *testing.T) {
+		fr := &scriptedRunner{fails: map[string]error{"buildx version": errors.New("unknown command")}}
+		err := CheckMultiArchBuild(context.Background(), fr, "docker")
+		if err == nil || !strings.Contains(err.Error(), "buildx") || !strings.Contains(err.Error(), binfmt) {
+			t.Fatalf("err = %v, want a buildx+binfmt remediation", err)
+		}
+	})
+
+	t.Run("arch missing", func(t *testing.T) {
+		fr := &scriptedRunner{outputs: map[string]string{
+			"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/386\n",
+		}}
+		err := CheckMultiArchBuild(context.Background(), fr, "docker")
+		if err == nil || !strings.Contains(err.Error(), "linux/arm64") || !strings.Contains(err.Error(), binfmt) {
+			t.Fatalf("err = %v, want a missing-arm64 remediation", err)
+		}
+	})
+
+	t.Run("both arches present", func(t *testing.T) {
+		fr := &scriptedRunner{outputs: map[string]string{
+			"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/arm64, linux/arm/v7\n",
+		}}
+		if err := CheckMultiArchBuild(context.Background(), fr, "docker"); err != nil {
+			t.Fatalf("both arches present must pass, got %v", err)
+		}
+	})
+
+	t.Run("bootstrap fails", func(t *testing.T) {
+		fr := &scriptedRunner{fails: map[string]error{"buildx inspect --bootstrap": errors.New("no builder")}}
+		err := CheckMultiArchBuild(context.Background(), fr, "docker")
+		if err == nil || !strings.Contains(err.Error(), binfmt) {
+			t.Fatalf("err = %v, want a bootstrap-failure remediation", err)
+		}
+	})
+}
+
+// scriptedRunner is a Runner whose Run is keyed on the joined args, writing the
+// mapped stdout and returning the mapped error, so preflight checks run Docker-free.
+type scriptedRunner struct {
+	outputs map[string]string
+	fails   map[string]error
+}
+
+func (s *scriptedRunner) Run(_ context.Context, _ string, args []string, stdout, _ io.Writer) error {
+	key := strings.Join(args, " ")
+	if err, ok := s.fails[key]; ok {
+		return err
+	}
+	if out, ok := s.outputs[key]; ok {
+		_, _ = stdout.Write([]byte(out))
+	}
+	return nil
+}
+
 func TestBuildDevcontainerWithFeaturesNoBuildArgs(t *testing.T) {
 	dir := t.TempDir()
 	writeFeaturesDevcontainer(t, dir)
@@ -982,7 +1123,7 @@ func TestExecRunnerRun(t *testing.T) {
 }
 
 func TestBaseBuildArgsReportsMissingContext(t *testing.T) {
-	_, err := baseBuildArgs(t.TempDir(), "aileron-sandbox-base:test")
+	_, err := baseBuildArgs(t.TempDir(), "aileron-sandbox-base:test", nil, "")
 	if err == nil {
 		t.Fatal("expected missing context error")
 	}

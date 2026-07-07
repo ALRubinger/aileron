@@ -86,10 +86,13 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	// CI must have pullable. newDigestResolver pulls+inspects that base for its
 	// registry digest; newFeatureComposer routes the environment tools through
 	// builderFeatureComposer -> container.Builder + composition.ToolsPlan, which
-	// BUILDS a genuine composed image in the local daemon and attests its
-	// serialization-agnostic config content digest (localImageContentDigest). The
-	// produced pin carries the bootable LocalTag and that content digest as its
-	// Digest.
+	// BUILDS a genuine multi-architecture composed image via docker buildx (both
+	// linux/amd64 and linux/arm64), reads the per-arch serialization-agnostic
+	// config content digests back from the built OCI layout, and loads the composed
+	// image into the local daemon under LocalTag. The produced pin carries the
+	// bootable LocalTag and a per-arch config-digest set. This path needs buildx +
+	// the QEMU emulators + the containerd image store on the CI host; provisioning
+	// that emulated build environment is owned by the S5 CI job (#2036).
 	raw, err := os.ReadFile(exampleManifestPath(t))
 	if err != nil {
 		t.Fatalf("read worked example: %v", err)

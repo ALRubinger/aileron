@@ -48,9 +48,9 @@ func TestResolveImages_EnvironmentImageResolvesToDigest(t *testing.T) {
 	m := parseM(t, []byte(envImageMD))
 	var gotRef string
 	composerHit := false
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
 		composerHit = true
-		return fakeDigest2, nil
+		return hostPD(fakeDigest2), nil
 	})
 	pins, capSet, err := resolveImages(context.Background(), m, resolverReturning(fakeDigest, &gotRef), fc, "")
 	if err != nil {
@@ -85,10 +85,10 @@ func TestResolveImages_ToolsComposeOntoDefaultBase(t *testing.T) {
 	var gotBaseRef string
 	var gotComposeBase string
 	var gotFeatures []string
-	fc := FeatureComposerFunc(func(_ context.Context, base string, features []string) (string, error) {
+	fc := FeatureComposerFunc(func(_ context.Context, base string, features []string) ([]PlatformDigest, error) {
 		gotComposeBase = base
 		gotFeatures = features
-		return fakeDigest2, nil
+		return hostPD(fakeDigest2), nil
 	})
 	pins, capSet, err := resolveImages(context.Background(), m, resolverReturning(fakeDigest, &gotBaseRef), fc, "dev")
 	if err != nil {
@@ -154,10 +154,10 @@ func TestResolveImages_ToolsComposeOntoCustomImage(t *testing.T) {
 	var gotBaseRef string
 	var gotComposeBase string
 	var gotFeatures []string
-	fc := FeatureComposerFunc(func(_ context.Context, base string, features []string) (string, error) {
+	fc := FeatureComposerFunc(func(_ context.Context, base string, features []string) ([]PlatformDigest, error) {
 		gotComposeBase = base
 		gotFeatures = features
-		return fakeDigest2, nil
+		return hostPD(fakeDigest2), nil
 	})
 	pins, capSet, err := resolveImages(context.Background(), m, resolverReturning(fakeDigest, &gotBaseRef), fc, "dev")
 	if err != nil {
@@ -188,6 +188,72 @@ func TestResolveImages_ToolsComposeOntoCustomImage(t *testing.T) {
 	}
 	if strings.Join(capSet, ",") != "gh@2,aws-cli@2.x" {
 		t.Errorf("resolved capability set = %v, want the declared tools verbatim", capSet)
+	}
+}
+
+// TestResolveImages_ThreadsPerArchSetIntoPin proves the per-arch producer
+// contract (#2036): a composer returning both linux/amd64 and linux/arm64 config
+// digests lands both, sorted by (os, arch), in the single composed pin's
+// ConfigDigests, so a plan can launch on either architecture.
+func TestResolveImages_ThreadsPerArchSetIntoPin(t *testing.T) {
+	m := parseM(t, exampleSkillMD(t))
+	amd := "sha256:" + strings.Repeat("a", 64)
+	arm := "sha256:" + strings.Repeat("b", 64)
+	// Return arm first to prove resolveImages sorts deterministically.
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return []PlatformDigest{
+			{OS: "linux", Arch: "arm64", Digest: arm},
+			{OS: "linux", Arch: "amd64", Digest: amd},
+		}, nil
+	})
+	pins, _, err := resolveImages(context.Background(), m, dummyResolver(), fc, "dev")
+	if err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("want one composed pin, got %+v", pins)
+	}
+	got := pins[0].ConfigDigests
+	if len(got) != 2 {
+		t.Fatalf("want two per-arch entries, got %+v", got)
+	}
+	// Sorted by (os, arch): amd64 before arm64.
+	if got[0].Arch != "amd64" || got[0].Digest != amd {
+		t.Errorf("first entry = %+v, want the amd64 digest first (sorted)", got[0])
+	}
+	if got[1].Arch != "arm64" || got[1].Digest != arm {
+		t.Errorf("second entry = %+v, want the arm64 digest", got[1])
+	}
+	if d, ok := pins[0].ConfigDigestFor("linux", "arm64"); !ok || d != arm {
+		t.Errorf("arm64 lookup = %q (ok=%v), want %q", d, ok, arm)
+	}
+}
+
+// TestResolveImages_PerArchTagRejected proves the pin-by-digest guard covers
+// every entry of the per-arch set: one arch resolving to a tag rather than a
+// digest is rejected.
+func TestResolveImages_PerArchTagRejected(t *testing.T) {
+	m := parseM(t, exampleSkillMD(t))
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return []PlatformDigest{
+			{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+			{OS: "linux", Arch: "arm64", Digest: "composed:latest"}, // a tag
+		}, nil
+	})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), fc, "dev"); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("err = %v, want a pin-by-digest rejection for the tag entry", err)
+	}
+}
+
+// TestResolveImages_EmptyPerArchSetRejected proves a composer returning an empty
+// set is a hard error rather than a pin with no bindable config digest.
+func TestResolveImages_EmptyPerArchSetRejected(t *testing.T) {
+	m := parseM(t, exampleSkillMD(t))
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return nil, nil
+	})
+	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), fc, "dev"); err == nil {
+		t.Fatal("an empty per-arch set must be rejected")
 	}
 }
 
@@ -247,9 +313,9 @@ func TestResolveImages_ToolsBaseTagNotDigestRejected(t *testing.T) {
 		return ref, nil // echo the tag, not a digest
 	})
 	composerHit := false
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
 		composerHit = true
-		return fakeDigest2, nil
+		return hostPD(fakeDigest2), nil
 	})
 	if _, _, err := resolveImages(context.Background(), m, dr, fc, "dev"); err == nil {
 		t.Fatal("a tag-resolved base must be rejected")
@@ -264,8 +330,8 @@ func TestResolveImages_ToolsBaseTagNotDigestRejected(t *testing.T) {
 // digest is rejected.
 func TestResolveImages_ToolsComposerTagRejected(t *testing.T) {
 	m := parseM(t, exampleSkillMD(t))
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
-		return "aileron-composed:latest", nil // a tag, not a digest
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return hostPD("aileron-composed:latest"), nil // a tag, not a digest
 	})
 	_, _, err := resolveImages(context.Background(), m, dummyResolver(), fc, "dev")
 	if err == nil {
@@ -303,8 +369,8 @@ func TestResolveImages_ToolsBaseResolverError(t *testing.T) {
 // an error rather than a silent empty pin set.
 func TestResolveImages_ToolsComposerError(t *testing.T) {
 	m := parseM(t, exampleSkillMD(t))
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
-		return "", errors.New("compose failed")
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return nil, errors.New("compose failed")
 	})
 	if _, _, err := resolveImages(context.Background(), m, dummyResolver(), fc, "dev"); err == nil {
 		t.Error("a failing composer must error")
@@ -346,9 +412,9 @@ func TestResolveImages_UnknownToolRejected(t *testing.T) {
 		resolverHit = true
 		return fakeDigest, nil
 	})
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
 		composerHit = true
-		return fakeDigest2, nil
+		return hostPD(fakeDigest2), nil
 	})
 	if _, _, err := resolveImages(context.Background(), m, dr, fc, "dev"); err == nil {
 		t.Fatal("an unknown tool name must be rejected")
@@ -380,8 +446,8 @@ func TestResolveImages_DistinctToolSetsDistinctPins(t *testing.T) {
 		"ghcr.io/alrubinger/aileron-features/aws-cli:0": fakeDigest,
 		"ghcr.io/alrubinger/aileron-features/gh:0":      fakeDigest2,
 	}
-	fc := FeatureComposerFunc(func(_ context.Context, _ string, features []string) (string, error) {
-		return digestFor[strings.Join(features, ",")], nil
+	fc := FeatureComposerFunc(func(_ context.Context, _ string, features []string) ([]PlatformDigest, error) {
+		return hostPD(digestFor[strings.Join(features, ",")]), nil
 	})
 
 	mWithTools := func(tools ...string) *manifest.Manifest {
