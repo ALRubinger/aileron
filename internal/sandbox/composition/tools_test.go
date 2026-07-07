@@ -178,10 +178,13 @@ func TestOCILayoutDir_SlugsTagSeparators(t *testing.T) {
 // TestOCILayoutDir_CacheDirError proves an unresolvable user cache dir surfaces as
 // a wrapped error rather than a bogus path.
 func TestOCILayoutDir_CacheDirError(t *testing.T) {
-	// Clear every var os.UserCacheDir consults on the supported platforms so it
-	// fails deterministically (no $HOME, no $XDG_CACHE_HOME).
+	// Clear every var os.UserCacheDir consults across the supported platforms so it
+	// fails deterministically: $XDG_CACHE_HOME and $HOME on Linux/macOS, and
+	// %LocalAppData% on Windows (where os.UserCacheDir does not read HOME at all).
+	// Missing the Windows var is why this previously passed on Unix but not Windows.
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("LocalAppData", "")
 	if _, err := OCILayoutDir("aileron/sandbox-tools:x"); err == nil {
 		t.Fatal("want an error when the user cache dir is unresolvable")
 	}
