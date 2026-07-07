@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -523,6 +524,31 @@ func TestRunComposedLayoutOpenError(t *testing.T) {
 	}
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "open composed image layout") {
 		t.Fatalf("err = %v, want an open-composed-image-layout error", err)
+	}
+}
+
+// TestRunComposedLayoutMissingSuggestsFreeze proves that when the composed
+// layout's cache dir is missing or evicted (the open fails with a not-exist
+// error), publish surfaces an actionable remediation naming `aileron skill
+// freeze <name>` rather than a bare generic open failure. This is the
+// missing/absent-layout-dir contract: the operator must be told how to rebuild.
+func TestRunComposedLayoutMissingSuggestsFreeze(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	layout := twoArch(t)
+	opts := composedOptions(target, layout)
+	opts.ComposedLayout = func(context.Context, freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+		return nil, ocispec.Descriptor{}, fmt.Errorf("open OCI layout /cache/missing: %w", os.ErrNotExist)
+	}
+	_, err := Run(ctx, opts)
+	if err == nil {
+		t.Fatal("err = nil, want a missing-composed-layout error")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("err = %v, want it to wrap fs.ErrNotExist", err)
+	}
+	if !strings.Contains(err.Error(), "aileron skill freeze demo") {
+		t.Fatalf("err = %v, want it to name the `aileron skill freeze demo` remediation", err)
 	}
 }
 
