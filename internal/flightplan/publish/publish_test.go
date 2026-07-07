@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -214,11 +215,18 @@ func testFrozen() store.FrozenVersion {
 
 // lockDigests returns the composed pin's per-arch ConfigDigests set derived from a
 // layout's attested content digests, so an honest lock matches the layout exactly.
+// The platform keys are sorted so the slice order is deterministic (map iteration
+// order is not), keeping every derived option value stable across runs.
 func lockDigests(layout composedLayout) []freeze.PlatformDigest {
-	out := make([]freeze.PlatformDigest, 0, len(layout.byPlat))
-	for plat, dig := range layout.byPlat {
+	plats := make([]string, 0, len(layout.byPlat))
+	for plat := range layout.byPlat {
+		plats = append(plats, plat)
+	}
+	sort.Strings(plats)
+	out := make([]freeze.PlatformDigest, 0, len(plats))
+	for _, plat := range plats {
 		os, arch, _ := strings.Cut(plat, "/")
-		out = append(out, freeze.PlatformDigest{OS: os, Arch: arch, Digest: dig})
+		out = append(out, freeze.PlatformDigest{OS: os, Arch: arch, Digest: layout.byPlat[plat]})
 	}
 	return out
 }
