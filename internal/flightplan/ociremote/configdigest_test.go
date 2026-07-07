@@ -248,6 +248,53 @@ func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 	}
 }
 
+// TestConfigContentDigest_ArchOverrideSelectsForeignChild pins the #2025 contract:
+// when hostArchOverrideEnv names a foreign arch, the single-child selection picks
+// THAT arch's manifest, not the runner's native arch. A cross-arch consumer's
+// per-arch verify reads the child it actually attests, matching
+// freeze.hostPlatform()'s arch vocabulary. Both children share the host GOOS
+// (composed images are linux-only) so only the arch distinguishes them.
+func TestConfigContentDigest_ArchOverrideSelectsForeignChild(t *testing.T) {
+	st := memory.New()
+	native, nativeBody := seedManifest(t, st, "native-arch")
+	native.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
+	const foreignArch = "s390x" // a stable arch distinct from any test runner's GOARCH
+	foreign, foreignBody := seedManifest(t, st, "foreign-arch")
+	foreign.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: foreignArch}
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, native, foreign)
+
+	t.Run("override selects the foreign child", func(t *testing.T) {
+		t.Setenv(hostArchOverrideEnv, foreignArch)
+		got, err := ConfigContentDigest(context.Background(), st, idx)
+		if err != nil {
+			t.Fatalf("ConfigContentDigest with %s override: %v", foreignArch, err)
+		}
+		if want := wantContentDigest(t, foreignBody); got != want {
+			t.Errorf("content digest = %q, want the foreign %s child's config %q", got, foreignArch, want)
+		}
+	})
+	t.Run("unset selects the native child", func(t *testing.T) {
+		t.Setenv(hostArchOverrideEnv, "")
+		got, err := ConfigContentDigest(context.Background(), st, idx)
+		if err != nil {
+			t.Fatalf("ConfigContentDigest without override: %v", err)
+		}
+		if want := wantContentDigest(t, nativeBody); got != want {
+			t.Errorf("content digest = %q, want the native child's config %q", got, want)
+		}
+	})
+	t.Run("override to an arch absent from the index fails closed", func(t *testing.T) {
+		t.Setenv(hostArchOverrideEnv, "ppc64le")
+		_, err := ConfigContentDigest(context.Background(), st, idx)
+		if err == nil {
+			t.Fatal("want an error when the override arch is not in the index")
+		}
+		if !strings.Contains(err.Error(), "ppc64le") {
+			t.Errorf("err = %v, want the override arch named in the fail-closed message", err)
+		}
+	})
+}
+
 func TestConfigContentDigest_MultiPlatformNoHostMatchErrors(t *testing.T) {
 	st := memory.New()
 	a, _ := seedManifest(t, st, "arch-a")

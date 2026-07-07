@@ -15,8 +15,10 @@
 // that child's serialization-agnostic config content digest, and match it to the
 // signed lock's per-arch entry. On a single-arch (amd64) runner the publisher
 // arch is always amd64, so the consumer is driven to the FOREIGN arch (arm64) via
-// the freeze.hostPlatform() override seam AILERON_FLIGHTPLAN_HOST_ARCH (#2038's
-// only production change). Running an arm64 aileron binary under QEMU is out of
+// the AILERON_FLIGHTPLAN_HOST_ARCH override seam. That seam is honored in two
+// places that MUST agree on the arch: freeze.hostPlatform() (which lock per-arch
+// entry to attest) and ociremote's manifest-list child selection (which published
+// child to read config from). Running an arm64 aileron binary under QEMU is out of
 // scope; selection + boot re-check SUCCESS is the assertion, not running the
 // arm64 workload to completion.
 //
