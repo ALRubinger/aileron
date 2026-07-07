@@ -1,7 +1,19 @@
-//go:build integration_sandbox
+//go:build integration_sandbox_multiarch
 
 // Real-container end-to-end coverage for the composed-tools boot linkage and
 // the boot-time Id-vs-Digest guard (#1863).
+//
+// Build tag: this test moved from `integration_sandbox` to
+// `integration_sandbox_multiarch` in #2036. The composed-tools freeze path now
+// builds a REAL multi-architecture image (linux/amd64 + linux/arm64) via docker
+// buildx, so running it needs a docker-container buildx builder, the QEMU binfmt
+// emulators, and a multi-arch runner base on the registry. Provisioning that
+// emulated build environment and the multi-arch base is owned by the S5 CI job
+// (the last sub-issue of #2034); this test is gated behind the dedicated tag so
+// the base `integration_sandbox` job does not run it before that environment
+// exists. It stays FAIL-FAST (no t.Skip): once the S5 job wires buildx + QEMU +
+// the multi-arch base and runs `-tags=integration_sandbox_multiarch`, an absent
+// prerequisite is a job-config failure.
 //
 // This test proves the load-bearing #1863 contract end to end on a real daemon:
 // freeze a tools-plan unit through the REAL freeze path (the CLI's production
