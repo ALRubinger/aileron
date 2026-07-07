@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -79,6 +80,25 @@ var containerImageMetadataLabel = func(ctx context.Context, runtimeName, image s
 	return sandboxcontainer.ImageMetadataLabel(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
 }
 
+// containerEnsureImageLocal materializes image into the local container daemon
+// before launch-time code reads daemon-local image labels. The registry resolver
+// verifies the signed pin through ORAS and returns a content-addressed boot ref,
+// but that does not load the image into Docker; a later docker run would
+// auto-pull it after this label read. Pulling here closes that cold-cache race.
+var containerEnsureImageLocal = func(ctx context.Context, runtimeName, image string) error {
+	return ensureImageLocal(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
+}
+
+func ensureImageLocal(ctx context.Context, runner sandboxcontainer.Runner, runtimeName, image string) error {
+	if err := runner.Run(ctx, runtimeName, []string{"image", "inspect", image}, io.Discard, io.Discard); err == nil {
+		return nil
+	}
+	if err := runner.Run(ctx, runtimeName, []string{"pull", image}, os.Stdout, os.Stderr); err != nil {
+		return fmt.Errorf("%s pull %s: %w", runtimeName, image, err)
+	}
+	return nil
+}
+
 // daemonPlanProxyBootstrapper is the production planProxyBootstrapper. It
 // resolves the daemon base URL, auth token, and state dir WITHOUT triggering a
 // daemon spawn (it reads env/discovery only), so a launch with no running
@@ -109,6 +129,14 @@ func (daemonPlanProxyBootstrapper) Prepare(ctx context.Context, runtimeName, ima
 	token, ok := resolveDaemonProxyToken(stateDir)
 	if !ok {
 		return planProxyBootstrap{}, nil, false, nil
+	}
+
+	// Registry-origin launches may have only resolved the signed image through
+	// ORAS. Materialize it into the local daemon before reading
+	// devcontainer.metadata so first launch sees the same labels as a warm-cache
+	// retry. No-daemon passthrough launches intentionally skip this block.
+	if err := containerEnsureImageLocal(ctx, runtimeName, image); err != nil {
+		return planProxyBootstrap{}, nil, false, fmt.Errorf("skill launch: materialize pinned image %q for credential metadata: %w", image, err)
 	}
 
 	// Mint a UNIQUE session id per boot so no two boots (and no agent launch)

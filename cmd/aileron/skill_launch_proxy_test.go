@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -52,6 +54,13 @@ func setMetadataLabel(t *testing.T, label string) {
 	t.Cleanup(func() { containerImageMetadataLabel = prev })
 }
 
+func stubEnsureImageLocal(t *testing.T, fn func(context.Context, string, string) error) {
+	t.Helper()
+	prev := containerEnsureImageLocal
+	containerEnsureImageLocal = fn
+	t.Cleanup(func() { containerEnsureImageLocal = prev })
+}
+
 // twoToolMetadata is a devcontainer.metadata label carrying the aws-cli and gh
 // credential conventions, the multi-tool union the boot must plant.
 const twoToolMetadata = `[
@@ -63,6 +72,7 @@ func TestDaemonPlanProxyBootstrapper_AssemblesExactEnvAndCAFromDiscovery(t *test
 	stateDir := withHomeAndEnv(t)
 	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
 	setMetadataLabel(t, twoToolMetadata)
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "example.com/plan@sha256:abc", "myplan")
 	if err != nil {
@@ -141,6 +151,7 @@ func TestDaemonPlanProxyBootstrapper_PrefersEnvOverDiscovery(t *testing.T) {
 	t.Setenv("AILERON_API_URL", "http://127.0.0.1:55555/v1")
 	t.Setenv("AILERON_TOKEN", "env-token")
 	setMetadataLabel(t, "")
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err != nil {
@@ -167,6 +178,7 @@ func TestDaemonPlanProxyBootstrapper_EmptyMetadataLabelYieldsNoPlaceholders(t *t
 	stateDir := withHomeAndEnv(t)
 	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
 	setMetadataLabel(t, "") // unlabeled / uninspectable image
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err != nil {
@@ -194,6 +206,7 @@ func TestDaemonPlanProxyBootstrapper_MalformedMetadataFailsClosed(t *testing.T) 
 	// A present-but-invalid credential block (unknown scheme) must refuse the
 	// boot rather than silently ship no placeholders.
 	setMetadataLabel(t, `[{"customizations":{"aileron":{"credential":{"scheme":"nope","placeholders":[{"env":"X","value":"y"}]}}}}]`)
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	_, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err == nil {
@@ -224,6 +237,7 @@ func TestDaemonPlanProxyBootstrapper_ReservedKeysWinOverPlaceholders(t *testing.
     {"env":"GH_TOKEN","value":"ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"}
   ]}}}}
 ]`)
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err != nil {
@@ -258,6 +272,7 @@ func TestDaemonPlanProxyBootstrapper_ConflictingPlaceholdersFailClosed(t *testin
   {"customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[{"env":"GH_TOKEN","value":"ghp_a"}]}}}},
   {"customizations":{"aileron":{"credential":{"scheme":"bearer","placeholders":[{"env":"GH_TOKEN","value":"ghp_b"}]}}}}
 ]`)
+	stubEnsureImageLocal(t, func(context.Context, string, string) error { return nil })
 
 	_, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "img", "p")
 	if err == nil {
@@ -310,6 +325,134 @@ func TestDaemonPlanProxyBootstrapper_PassthroughWhenConfigAbsent(t *testing.T) {
 			t.Fatal("Prepare must be passthrough when the daemon URL is absent")
 		}
 	})
+}
+
+func TestDaemonPlanProxyBootstrapper_MaterializesImageBeforeReadingMetadata(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+
+	var calls []string
+	stubEnsureImageLocal(t, func(_ context.Context, runtimeName, image string) error {
+		calls = append(calls, "ensure:"+runtimeName+":"+image)
+		return nil
+	})
+	prevLabel := containerImageMetadataLabel
+	containerImageMetadataLabel = func(_ context.Context, runtimeName, image string) string {
+		calls = append(calls, "metadata:"+runtimeName+":"+image)
+		return twoToolMetadata
+	}
+	t.Cleanup(func() { containerImageMetadataLabel = prevLabel })
+
+	bootstrap, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "registry.example.com/plan@sha256:abc", "p")
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if !ok {
+		t.Fatal("Prepare must resolve")
+	}
+	t.Cleanup(cleanup)
+	if bootstrap.Env["AWS_ACCESS_KEY_ID"] == "" {
+		t.Fatal("placeholder env must be derived after the image is materialized")
+	}
+	want := []string{
+		"ensure:docker:registry.example.com/plan@sha256:abc",
+		"metadata:docker:registry.example.com/plan@sha256:abc",
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("call order = %#v, want %#v", calls, want)
+	}
+}
+
+func TestDaemonPlanProxyBootstrapper_MaterializeFailureFailsBeforeCA(t *testing.T) {
+	stateDir := withHomeAndEnv(t)
+	writeDiscovery(t, stateDir, "http://127.0.0.1:48123", "daemon-token")
+
+	metadataRead := false
+	prevLabel := containerImageMetadataLabel
+	containerImageMetadataLabel = func(context.Context, string, string) string {
+		metadataRead = true
+		return twoToolMetadata
+	}
+	t.Cleanup(func() { containerImageMetadataLabel = prevLabel })
+	stubEnsureImageLocal(t, func(context.Context, string, string) error {
+		return errors.New("pull denied")
+	})
+
+	_, cleanup, ok, err := daemonPlanProxyBootstrapper{}.Prepare(context.Background(), "docker", "registry.example.com/plan@sha256:abc", "p")
+	if err == nil {
+		t.Fatal("Prepare must fail when the pinned image cannot be materialized")
+	}
+	if ok {
+		t.Fatal("Prepare must not report ok on materialize failure")
+	}
+	if cleanup != nil {
+		t.Fatal("materialize failure happens before CA provisioning, so no cleanup is needed")
+	}
+	if metadataRead {
+		t.Fatal("metadata must not be read after materialize failure")
+	}
+	for _, want := range []string{"materialize pinned image", "registry.example.com/plan@sha256:abc", "pull denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestEnsureImageLocal_SkipsPullWhenInspectFindsImage(t *testing.T) {
+	var calls []string
+	runner := runnerFunc(func(_ context.Context, name string, args []string, _, _ io.Writer) error {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil
+	})
+
+	if err := ensureImageLocal(context.Background(), runner, "docker", "registry.example.com/plan@sha256:abc"); err != nil {
+		t.Fatalf("ensureImageLocal: %v", err)
+	}
+	want := []string{"docker image inspect registry.example.com/plan@sha256:abc"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestEnsureImageLocal_PullsWhenInspectMisses(t *testing.T) {
+	var calls []string
+	runner := runnerFunc(func(_ context.Context, name string, args []string, _, _ io.Writer) error {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if args[0] == "image" {
+			return errors.New("not local")
+		}
+		return nil
+	})
+
+	if err := ensureImageLocal(context.Background(), runner, "docker", "registry.example.com/plan@sha256:abc"); err != nil {
+		t.Fatalf("ensureImageLocal: %v", err)
+	}
+	want := []string{
+		"docker image inspect registry.example.com/plan@sha256:abc",
+		"docker pull registry.example.com/plan@sha256:abc",
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestEnsureImageLocal_PullFailureNamesRuntimeAndImage(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, args []string, _, _ io.Writer) error {
+		if args[0] == "image" {
+			return errors.New("not local")
+		}
+		return errors.New("denied")
+	})
+
+	err := ensureImageLocal(context.Background(), runner, "docker", "registry.example.com/plan@sha256:abc")
+	if err == nil {
+		t.Fatal("ensureImageLocal must return the pull error")
+	}
+	for _, want := range []string{"docker pull", "registry.example.com/plan@sha256:abc", "denied"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err.Error(), want)
+		}
+	}
 }
 
 func TestStripV1Suffix(t *testing.T) {
