@@ -31,6 +31,12 @@ var hostPlatform = func() string { return stdruntime.GOOS + "/" + stdruntime.GOA
 // bounded prefix reliably contains the classification signal while keeping
 // memory bounded on long successful runs. Writes always pass through to w in
 // full; only the recorded copy is capped.
+//
+// Correctness depends on that create-time emission ordering: a future change
+// that streams pull/progress output ahead of the container-create failure
+// could push the "no matching manifest for" signal past the bounded prefix
+// (crossArchStderrCaptureMax) and silently defeat cross-arch detection. If such
+// output is added, raise the cap or classify against the full stream.
 type prefixCaptureWriter struct {
 	w   io.Writer
 	max int
@@ -367,6 +373,12 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// error, so the specific signal lives in the captured text, not the error.
 	// Pass-through to os.Stderr is preserved in full; only the recorded prefix
 	// is bounded.
+	//
+	// Manifest-miss classification stays here at the CLI boundary rather than
+	// moving into Builder.Run: it keeps the classification dependency-free and
+	// leaves runtime.go untouched (unlike runtime.go's own tee-and-classify
+	// precedents at runBuildStep/StopContainer/Validate, which classify inside
+	// the runtime layer because their signals originate there).
 	stderrCapture := &prefixCaptureWriter{w: os.Stderr, max: crossArchStderrCaptureMax}
 	if _, err := containerRunFlightPlan(ctx, runtimeName, os.Stdout, stderrCapture, opts); err != nil {
 		if msg, ok := crossArchManifestMessage(spec.Image, stderrCapture.captured(), hostPlatform()); ok {
