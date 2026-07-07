@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"regexp"
 	"strings"
 
@@ -279,6 +280,13 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 	}
 	store, root, err := openLayout(ctx, pin)
 	if err != nil {
+		// The composed layout is produced by `aileron skill freeze` into a
+		// tag-keyed OCI-layout cache dir. If that dir is missing or was evicted,
+		// the open fails with a not-exist error that names no remedy on its own;
+		// point the operator at the command that rebuilds it.
+		if errors.Is(err, fs.ErrNotExist) {
+			return ocispec.Descriptor{}, "", fmt.Errorf("publish: composed image layout for %q not found (run `aileron skill freeze %s` to rebuild it): %w", pin.LocalTag, opts.Name, err)
+		}
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: open composed image layout for %q: %w", pin.LocalTag, err)
 	}
 
