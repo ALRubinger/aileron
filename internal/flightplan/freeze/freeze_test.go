@@ -8,9 +8,19 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 )
 
+// hostPD wraps a single digest as a host-platform per-arch set, the shape an
+// inline test composer returns when it only needs one entry.
+func hostPD(digest string) []PlatformDigest {
+	os, arch := hostPlatform()
+	return []PlatformDigest{{OS: os, Arch: arch, Digest: digest}}
+}
+
+// fakeComposer returns a composer that yields a single host-platform config
+// digest, so callers that only care that a composed pin is produced keep their
+// external signature unchanged after the producer became per-arch (#2036).
 func fakeComposer(digest string) FeatureComposer {
-	return FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
-		return digest, nil
+	return FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		return hostPD(digest), nil
 	})
 }
 
@@ -406,9 +416,9 @@ aileron:
 	_, err := Run(context.Background(), []byte(strings.Replace(badMD, "kind: action-call", "kind: not-a-kind", 1)), Options{
 		SigningKeyPath: keyPath,
 		Resolver:       dummyResolver(),
-		Composer: FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (string, error) {
+		Composer: FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
 			composerHit = true
-			return fakeDigest, nil
+			return hostPD(fakeDigest), nil
 		}),
 	})
 	if err == nil {

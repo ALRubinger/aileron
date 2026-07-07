@@ -1,7 +1,19 @@
-//go:build integration_sandbox
+//go:build integration_sandbox_multiarch
 
 // Real-container end-to-end coverage for the composed-tools boot linkage and
 // the boot-time Id-vs-Digest guard (#1863).
+//
+// Build tag: this test moved from `integration_sandbox` to
+// `integration_sandbox_multiarch` in #2036. The composed-tools freeze path now
+// builds a REAL multi-architecture image (linux/amd64 + linux/arm64) via docker
+// buildx, so running it needs a docker-container buildx builder, the QEMU binfmt
+// emulators, and a multi-arch runner base on the registry. Provisioning that
+// emulated build environment and the multi-arch base is owned by the S5 CI job
+// (the last sub-issue of #2034); this test is gated behind the dedicated tag so
+// the base `integration_sandbox` job does not run it before that environment
+// exists. It stays FAIL-FAST (no t.Skip): once the S5 job wires buildx + QEMU +
+// the multi-arch base and runs `-tags=integration_sandbox_multiarch`, an absent
+// prerequisite is a job-config failure.
 //
 // This test proves the load-bearing #1863 contract end to end on a real daemon:
 // freeze a tools-plan unit through the REAL freeze path (the CLI's production
@@ -86,10 +98,13 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	// CI must have pullable. newDigestResolver pulls+inspects that base for its
 	// registry digest; newFeatureComposer routes the environment tools through
 	// builderFeatureComposer -> container.Builder + composition.ToolsPlan, which
-	// BUILDS a genuine composed image in the local daemon and attests its
-	// serialization-agnostic config content digest (localImageContentDigest). The
-	// produced pin carries the bootable LocalTag and that content digest as its
-	// Digest.
+	// BUILDS a genuine multi-architecture composed image via docker buildx (both
+	// linux/amd64 and linux/arm64), reads the per-arch serialization-agnostic
+	// config content digests back from the built OCI layout, and loads the composed
+	// image into the local daemon under LocalTag. The produced pin carries the
+	// bootable LocalTag and a per-arch config-digest set. This path needs buildx +
+	// the QEMU emulators + the containerd image store on the CI host; provisioning
+	// that emulated build environment is owned by the S5 CI job (#2036).
 	raw, err := os.ReadFile(exampleManifestPath(t))
 	if err != nil {
 		t.Fatalf("read worked example: %v", err)

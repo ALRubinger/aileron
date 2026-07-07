@@ -14,6 +14,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 	"github.com/ALRubinger/aileron/internal/sandbox/container"
@@ -277,18 +278,45 @@ func repoOfRef(ref string) string {
 	return ref
 }
 
-// builderFeatureComposer composes catalog-resolved Feature references onto
-// the digest-pinned base image through the container Builder (the #1454
-// build pipeline) and returns the built image's digest. It routes the
-// environment-tools composition through the same Builder / composition path
-// the sandbox uses (composition.ToolsPlan's synthesized devcontainer), not a
-// bespoke build.
+// builderFeatureComposer composes catalog-resolved Feature references onto the
+// digest-pinned base image through the container Builder (the #1454 build
+// pipeline) for every supported architecture and returns the per-arch set of
+// serialization-agnostic config content digests. It routes the environment-tools
+// composition through the same Builder / composition path the sandbox uses
+// (composition.ToolsPlan's synthesized devcontainer), not a bespoke build
+// (issue #2036).
 type builderFeatureComposer struct{}
 
-func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) (string, error) {
+// freezeOCILayoutDir returns the deterministic directory a multi-arch composed
+// build writes its OCI image layout to, keyed by the composed image's local tag
+// (never an ephemeral temp dir), so the layout is a stable artifact the S4
+// publish path can consume. It is a package var so tests redirect it at a
+// pre-staged synthetic layout.
+var freezeOCILayoutDir = func(tag string) (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve freeze OCI layout cache dir: %w", err)
+	}
+	repl := strings.NewReplacer("/", "_", ":", "_")
+	return filepath.Join(base, "aileron", "freeze-oci-layouts", repl.Replace(tag)), nil
+}
+
+// readOCILayoutConfigDigests is the seam over
+// ociremote.ConfigContentDigestsFromOCILayout so composer tests drive the
+// per-arch mapping and build orchestration without staging a real OCI layout on
+// disk; the layout read itself is covered in internal/flightplan/ociremote.
+var readOCILayoutConfigDigests = ociremote.ConfigContentDigestsFromOCILayout
+
+func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) ([]freeze.PlatformDigest, error) {
 	in, err := newImageInspector()
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	// Preflight the multi-arch toolchain BEFORE building. On a miss (no buildx, or
+	// the QEMU emulators are not registered) abort with an actionable remediation
+	// rather than silently producing a single-arch pin (Q2). No pin is emitted.
+	if err := container.CheckMultiArchBuild(ctx, in.runner, in.runtime); err != nil {
+		return nil, err
 	}
 	// Resolve the devcontainer toolchain from flag/env/default, mirroring the
 	// `aileron sandbox` and launch callers (freeze has no --toolchain flag, so
@@ -296,9 +324,6 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	// this the Builder sees an empty ToolchainMode (normalized to managed) with
 	// no provisioner and hard-errors, so freeze-with-tools never composes.
 	toolchainMode, nodeBinary, cliEntrypoint := container.ResolveToolchainSelection("", "", "", os.Getenv)
-	// Compose the Features onto the given base via the standard composition
-	// Plan, build through the Builder, then resolve the built image's digest
-	// with the same inspector the base-image resolver uses.
 	b := container.Builder{
 		Runtime: in.runtime,
 		Runner:  in.runner,
@@ -311,29 +336,78 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	if container.IsManagedToolchain(toolchainMode) {
 		b.Provisioner = sandboxtoolchain.Provisioner{}
 	}
-	result, err := b.Build(ctx, container.BuildOptions{
+
+	// The composed image's local tag is byte-identical to the LocalTag the freeze
+	// core records for the pin (both derive from the same base + feature refs), so
+	// the layout path is stable and the daemon-loaded image is addressable by it.
+	localTag := composition.LocalToolsImageTag(base, features)
+	dest, err := freezeOCILayoutDir(localTag)
+	if err != nil {
+		return nil, err
+	}
+	// The layout dir is a stable, tag-keyed path reused across freezes of the same
+	// composition, so clear any prior contents before the build: a crashed or
+	// interrupted earlier run could leave a partial index.json or stale blobs that
+	// the per-arch read would otherwise pick up. buildx writes a fresh layout into
+	// the emptied dir.
+	if err := os.RemoveAll(dest); err != nil {
+		return nil, fmt.Errorf("clear freeze OCI layout dir %q: %w", dest, err)
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return nil, fmt.Errorf("prepare freeze OCI layout dir %q: %w", dest, err)
+	}
+
+	// Build the composed image for both linux/amd64 and linux/arm64 to a persisted
+	// OCI image layout (no daemon load), then read the per-arch config content
+	// digests straight from that layout — no registry push, no registry auth.
+	buildOpts := container.BuildOptions{
 		Plan:                      composition.ToolsPlan(base, features),
+		Tag:                       localTag,
 		Policy:                    container.BuildPolicyAlways,
 		ToolchainMode:             toolchainMode,
 		NodeBinary:                nodeBinary,
 		DevcontainerCLIEntrypoint: cliEntrypoint,
-	})
-	if err != nil {
-		return "", fmt.Errorf("compose environment tools: %w", err)
+		Platforms:                 composition.MultiArchPlatforms,
+		OCILayoutDest:             dest,
 	}
-	// The built image is a local tag; attest its serialization-agnostic config
-	// content digest, the value publish and launch re-check against the lock.
-	return in.localImageContentDigest(ctx, result.Image)
+	result, err := b.Build(ctx, buildOpts)
+	if err != nil {
+		return nil, fmt.Errorf("compose environment tools (multi-arch): %w", err)
+	}
+	perArch, err := readOCILayoutConfigDigests(ctx, result.OCILayoutDir)
+	if err != nil {
+		return nil, fmt.Errorf("read composed per-arch config digests from %q: %w", result.OCILayoutDir, err)
+	}
+
+	// The multi-arch OCI-layout build does not load into the daemon, but publish's
+	// host-arch verify (`docker image inspect <LocalTag>`) still needs the image
+	// present locally between the S3 and S4 merges. Run the same composed build
+	// once more for the host architecture with a daemon load under LocalTag; buildx
+	// reuses the layer cache, so it is cheap. S4 turns publish into a manifest-list
+	// push that consumes the OCI layout directly and drops this second build.
+	loadOpts := buildOpts
+	loadOpts.Platforms = nil
+	loadOpts.OCILayoutDest = ""
+	if _, err := b.Build(ctx, loadOpts); err != nil {
+		return nil, fmt.Errorf("load composed image into the local daemon under %q: %w", localTag, err)
+	}
+
+	out := make([]freeze.PlatformDigest, 0, len(perArch))
+	for _, p := range perArch {
+		out = append(out, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: p.Digest})
+	}
+	return out, nil
 }
 
 // localImageContentDigest resolves a local image tag to its serialization-
 // agnostic config content digest (see internal/flightplan/imgconfig): a hash
 // over the parsed config's execution-relevant fields, not the config blob's own
-// sha256. It is the value freeze attests for a composed-tools pin and the value
-// launch re-checks the local daemon image against, so the two are apples-to-
-// apples by construction. Binding to the content digest (rather than the image
-// Id) is what makes publish survive the containerd store's push-time config
-// re-serialization (issue #2014).
+// sha256. The composed-tools freeze producer now reads the per-arch content
+// digests from the built OCI layout, but the launch/boot path still resolves the
+// host-daemon image under LocalTag to the same content digest so the boot-time
+// digest compare is apples-to-apples with the recorded per-arch pin. Binding to
+// the content digest (rather than the image Id) is what makes the check survive
+// the containerd store's push-time config re-serialization (issue #2014).
 func (in imageInspector) localImageContentDigest(ctx context.Context, image string) (string, error) {
 	raw, err := in.inspectFormat(ctx, image, "{{json .}}")
 	if err != nil {

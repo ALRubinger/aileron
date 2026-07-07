@@ -35,9 +35,14 @@ type DigestResolver interface {
 // catalog-resolved published Feature references (see
 // composition.ResolveToolFeatureRef), never raw `<name>@<version>` tool refs.
 type FeatureComposer interface {
-	// ComposeDigest builds the image composed from the given Features onto
-	// base and returns its `sha256:` digest.
-	ComposeDigest(ctx context.Context, base string, features []string) (string, error)
+	// ComposeDigest builds the image composed from the given Features onto base
+	// for every supported architecture and returns the per-arch set of
+	// serialization-agnostic config content digests (one PlatformDigest per built
+	// platform, e.g. linux/amd64 and linux/arm64). The freeze producer records the
+	// whole set as the composed pin's ConfigDigests, so a plan launches on either
+	// architecture (ADR-0027, issue #2036). Every entry's Digest MUST be a
+	// `sha256:` content digest; a tag is rejected.
+	ComposeDigest(ctx context.Context, base string, features []string) ([]PlatformDigest, error)
 }
 
 // DigestResolverFunc adapts a function to DigestResolver.
@@ -52,12 +57,12 @@ func (f DigestResolverFunc) ResolveDigest(ctx context.Context, ref string) (stri
 }
 
 // FeatureComposerFunc adapts a function to FeatureComposer.
-type FeatureComposerFunc func(ctx context.Context, base string, features []string) (string, error)
+type FeatureComposerFunc func(ctx context.Context, base string, features []string) ([]PlatformDigest, error)
 
 // ComposeDigest calls f, or errors when f is nil (a zero-valued adapter).
-func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, base string, features []string) (string, error) {
+func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, base string, features []string) ([]PlatformDigest, error) {
 	if f == nil {
-		return "", fmt.Errorf("freeze: nil feature composer")
+		return nil, fmt.Errorf("freeze: nil feature composer")
 	}
 	return f(ctx, base, features)
 }
@@ -143,32 +148,37 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 	}
 
 	// Compose the catalog-resolved Feature references onto the digest-pinned
-	// base.
+	// base for every supported architecture.
 	pinnedBase := base + "@" + baseDigest
-	digest, err := fc.ComposeDigest(ctx, pinnedBase, featureRefs)
+	configDigests, err := fc.ComposeDigest(ctx, pinnedBase, featureRefs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("freeze: compose environment tools: %w", err)
 	}
-	if err := requireDigest("environment:"+strings.Join(tools, ","), digest); err != nil {
-		return nil, nil, err
+	if len(configDigests) == 0 {
+		return nil, nil, fmt.Errorf("freeze: compose environment tools: composer returned no per-arch config digests")
+	}
+	// Every per-arch entry must pin by content digest, never a tag; a drifting
+	// entry is rejected before the pin is recorded.
+	for _, cd := range configDigests {
+		if err := requireDigest("environment:"+strings.Join(tools, ",")+" ("+cd.OS+"/"+cd.Arch+")", cd.Digest); err != nil {
+			return nil, nil, err
+		}
 	}
 	// The composed pin carries three identities: the descriptive Ref (what was
-	// composed onto which pinned base, for errors/audit), the attesting
-	// per-arch ConfigDigests set (the composed image's serialization-agnostic
-	// config content digest, keyed by platform), and the bootable LocalTag (the
+	// composed onto which pinned base, for errors/audit), the attesting per-arch
+	// ConfigDigests set (the composed image's serialization-agnostic config
+	// content digest, keyed by platform), and the bootable LocalTag (the
 	// local-daemon tag the composed image actually carries, so the runtime can
-	// boot it). For S2 the composer builds one native-arch image, so the set has
-	// exactly one entry keyed by hostPlatform() (native build ⇒ image arch ==
-	// runtime.GOARCH, os == linux); S3 replaces ComposeDigest with a per-arch
-	// producer that fills the set from a real multi-arch build. LocalTag is
+	// boot it). The composer builds a real multi-arch image and returns one entry
+	// per built platform (linux/amd64 and linux/arm64); the whole set is recorded
+	// so a plan launches on either host architecture (ADR-0027). LocalTag is
 	// computed from the SAME pinnedBase and catalog-resolved featureRefs the
 	// composer received, so it is byte-identical to
 	// composition.ToolsPlan(pinnedBase, featureRefs).Image; LocalToolsImageTag
 	// sorts internally, so declaration order does not matter.
-	os, arch := hostPlatform()
 	return []ImagePin{{
 		Ref:           composedToolsRef(pinnedBase, tools),
-		ConfigDigests: sortedConfigDigests([]PlatformDigest{{OS: os, Arch: arch, Digest: digest}}),
+		ConfigDigests: sortedConfigDigests(configDigests),
 		LocalTag:      composition.LocalToolsImageTag(pinnedBase, featureRefs),
 	}}, tools, nil
 }

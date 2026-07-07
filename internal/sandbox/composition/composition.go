@@ -36,6 +36,14 @@ const (
 	DefaultFeatureRepository = "ghcr.io/alrubinger/aileron-features"
 )
 
+// MultiArchPlatforms is the default set of platforms a composed-tools Flight Plan
+// image is built for at freeze. v4 sandboxes run on `linux` containers regardless
+// of host OS, and the two supported CPU architectures are amd64 and arm64, so the
+// freeze producer builds both and records a per-arch config-digest pin for each so
+// a plan launches on either an amd64 or an arm64 host (ADR-0027). It is a var (not
+// a const) because Go cannot declare a const slice; treat it as read-only.
+var MultiArchPlatforms = []string{"linux/amd64", "linux/arm64"}
+
 // Tier describes how a sandbox image should be composed.
 type Tier string
 
