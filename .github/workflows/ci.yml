@@ -923,13 +923,24 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      # The cross-arch multi-arch freeze -> publish -> launch e2e (#2038): a real
+      # The multi-arch Flight Plan freeze -> publish -> launch e2e (#2038): a real
       # buildx+QEMU linux/amd64+linux/arm64 freeze, a real manifest-list push to
-      # the local registry, and a real cross-arch pull+verify where an amd64
-      # runner is overridden to consume the arm64 child (the #2025 repro). This
-      # mirrors `task test:integration:multiarch` but runs through gotestsum so the
-      # JUnit report backs the anti-silent-skip guard below. The test drives the
-      # AILERON_FLIGHTPLAN_HOST_ARCH override itself and needs no daemon.
+      # the local registry, and a real host-arch pull+verify. This runs HOST-NATIVE
+      # (amd64), NOT under QEMU: the freeze shells out to native amd64 host tooling
+      # (@devcontainers/cli via node, docker, buildx), which an arm64-emulated
+      # process cannot exec (missing arm64 ELF interpreter). The buildx builder +
+      # binfmt/QEMU registered above are still required — they emulate the arm64 leg
+      # of the multi-arch BUILD — but the test process stays native so it can drive
+      # that build. The test asserts the composed pin carries BOTH linux/amd64 and
+      # linux/arm64 config digests (the multi-arch BUILD proof), that the manifest
+      # list publishes both children, and that the host consumer selects+verifies
+      # its own (amd64) child plus fails closed on a tampered config.
+      #
+      # The genuinely-FOREIGN consumer selection (an arm64 host picking the arm64
+      # child, failing closed on an unbuilt arch) is covered deterministically by
+      # the freeze/ociremote hostGOARCH seam unit tests, which drive any arch
+      # without emulation. A full foreign-arch consumer BOOT needs real arm64
+      # hardware and is a documented limitation, not a silent skip.
       #
       # KNOWN GAP (documented, not a silent skip): the pre-existing host-arch boot
       # guard TestFlightPlanComposedToolsBootGuard shares this build tag but is NOT
@@ -938,13 +949,13 @@ jobs:
       # + in-container networking is a separate lift with no established CI
       # pattern. It stays runnable via `task test:integration:multiarch` where a
       # daemon is available; wiring it into CI is a follow-up.
-      - name: Run cross-arch multi-arch e2e (#2038)
-        run: gotestsum --junitfile junit-multiarch.xml -- -tags=integration_sandbox_multiarch -run 'TestFlightPlanCrossArchMultiArchE2E' .
+      - name: Run multi-arch e2e (host-native, #2038)
         working-directory: cmd/aileron
         env:
           AILERON_TEST_REGISTRY: localhost:5000
           AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
           AILERON_SANDBOX_FEATURES_CONTEXT: ${{ github.workspace }}/images/sandbox-features
+        run: gotestsum --junitfile junit-multiarch.xml -- -tags=integration_sandbox_multiarch -run 'TestFlightPlanCrossArchMultiArchE2E' .
 
       # Anti-silent-skip guard (mirrors test-ui/test-webapp): a green result must
       # mean the emulated test actually ran. A missing report or zero executed
