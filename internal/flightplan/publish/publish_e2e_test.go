@@ -76,11 +76,12 @@ func buildLocalImage(t *testing.T, tag string) string {
 }
 
 // buildOCILayout builds a single-arch image as a real OCI image layout with
-// `docker buildx build --output type=oci,dest=<dir>` (no QEMU, no daemon load),
-// exactly the artifact shape freeze's multi-arch build writes and publish's
-// ComposedLayout seam opens. It returns the layout dir and the per-arch config
-// content digests read back from it (the values the signed lock attests).
-func buildOCILayout(t *testing.T, dir string) []ociremote.PlatformConfigDigest {
+// `docker buildx build --output type=oci,dest=<dir>,tar=false` (no QEMU, no daemon
+// load) — byte-for-byte the exporter flags freeze's multi-arch build uses (see
+// container.BuildOptions.OCILayoutDest), so the e2e opens exactly the artifact
+// shape production writes. It returns the per-arch config content digests read
+// back from the layout (the values the signed lock attests).
+func buildOCILayout(t *testing.T, layoutDir string) []ociremote.PlatformConfigDigest {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -94,19 +95,11 @@ func buildOCILayout(t *testing.T, dir string) []ociremote.PlatformConfigDigest {
 	out, err := exec.CommandContext(ctx, "docker", "buildx", "build",
 		"--platform", "linux/"+goarch(),
 		"--provenance=false",
-		"--output", "type=oci,dest="+filepath.Join(dir, "layout.tar"),
+		"--output", "type=oci,dest="+layoutDir+",tar=false",
 		src,
 	).CombinedOutput()
 	if err != nil {
 		t.Fatalf("buildx build oci layout: %v\n%s", err, out)
-	}
-	// Unpack the OCI tar into a directory the layout opener can read.
-	layoutDir := filepath.Join(dir, "layout")
-	if err := os.MkdirAll(layoutDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if o, err := exec.CommandContext(ctx, "tar", "-xf", filepath.Join(dir, "layout.tar"), "-C", layoutDir).CombinedOutput(); err != nil {
-		t.Fatalf("untar oci layout: %v\n%s", err, o)
 	}
 	digs, err := ociremote.ConfigContentDigestsFromOCILayout(ctx, layoutDir)
 	if err != nil {
@@ -138,7 +131,7 @@ func TestPublishE2EComposed(t *testing.T) {
 		Lock:   freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}},
 		// Point the layout seam at the just-built single-arch OCI layout.
 		ComposedLayout: func(ctx context.Context, _ freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
-			return ociremote.OpenOCILayout(ctx, filepath.Join(layoutDir, "layout"))
+			return ociremote.OpenOCILayout(ctx, layoutDir)
 		},
 	}
 	res, err := Run(ctx, opts)
