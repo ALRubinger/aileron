@@ -345,6 +345,14 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	if err != nil {
 		return nil, err
 	}
+	// The layout dir is a stable, tag-keyed path reused across freezes of the same
+	// composition, so clear any prior contents before the build: a crashed or
+	// interrupted earlier run could leave a partial index.json or stale blobs that
+	// the per-arch read would otherwise pick up. buildx writes a fresh layout into
+	// the emptied dir.
+	if err := os.RemoveAll(dest); err != nil {
+		return nil, fmt.Errorf("clear freeze OCI layout dir %q: %w", dest, err)
+	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return nil, fmt.Errorf("prepare freeze OCI layout dir %q: %w", dest, err)
 	}

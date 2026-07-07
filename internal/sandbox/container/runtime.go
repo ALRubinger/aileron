@@ -423,6 +423,17 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		stderr = io.Discard
 	}
 
+	// A multi-arch build and its OCI-layout output are one atomic request: the
+	// `--output type=oci,dest=<dir>` token is only emitted when both are set, so a
+	// half-configured pairing would silently drop the multi-arch intent or emit an
+	// empty dest. Fail fast rather than deferring to a confusing buildx error.
+	if len(opts.Platforms) > 0 && strings.TrimSpace(opts.OCILayoutDest) == "" {
+		return BuildResult{}, fmt.Errorf("multi-arch build requested (platforms %s) without an OCILayoutDest", strings.Join(opts.Platforms, ","))
+	}
+	if strings.TrimSpace(opts.OCILayoutDest) != "" && len(opts.Platforms) == 0 {
+		return BuildResult{}, fmt.Errorf("OCILayoutDest %q set without any Platforms; the OCI-layout output only applies to a multi-arch build", opts.OCILayoutDest)
+	}
+
 	image := opts.Tag
 	if image == "" {
 		image = opts.Plan.Image
@@ -1223,11 +1234,13 @@ func multiArchLayoutDir(opts BuildOptions) string {
 // single-arch pin (issue #2036, Q2). It shells out through the Runner seam so it
 // is unit-testable without Docker.
 //
-// Two checks: `docker buildx version` must succeed (buildx present), and `docker
-// buildx inspect --bootstrap` must report both required platforms (the QEMU
-// emulators are installed and registered). A miss on either returns an error
-// naming the concrete fix: install/enable buildx, and register the QEMU emulators
-// with `docker run --privileged --rm tonistiigi/binfmt --install all`.
+// Three checks: `docker buildx version` must succeed (buildx present); `docker
+// buildx inspect --bootstrap` must succeed; and the active builder must both use
+// a driver that can export a multi-platform OCI layout (the default `docker`
+// driver cannot) and advertise every default freeze platform (the QEMU emulators
+// are installed and registered). A miss returns an error naming the concrete fix:
+// create a docker-container builder, and/or register the QEMU emulators with
+// `docker run --privileged --rm tonistiigi/binfmt --install all`.
 func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string) error {
 	if runner == nil {
 		runner = execRunner{}
@@ -1240,8 +1253,15 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 		return fmt.Errorf("multi-arch freeze build could not bootstrap the buildx builder (%w); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
 	}
 	inspect := out.String()
+	// The default `docker` buildx driver cannot export a multi-platform image to
+	// an OCI layout (`--output type=oci`); only a container/remote/k8s driver can.
+	// Catch it here so the operator gets an actionable "create a docker-container
+	// builder" hint rather than a mid-build buildx export error.
+	if driver := buildxInspectDriver(inspect); driver == "docker" {
+		return fmt.Errorf("the active docker buildx builder uses the `docker` driver, which cannot export a multi-arch OCI layout (needed for a multi-arch freeze); create and select a container builder with `docker buildx create --driver docker-container --use`")
+	}
 	var missing []string
-	for _, want := range []string{"linux/amd64", "linux/arm64"} {
+	for _, want := range composition.MultiArchPlatforms {
 		if !buildxInspectHasPlatform(inspect, want) {
 			missing = append(missing, want)
 		}
@@ -1250,6 +1270,20 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 		return fmt.Errorf("the active docker buildx builder cannot build %s (needed for a multi-arch freeze); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`, or select a builder that supports these platforms with `docker buildx create --use`", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// buildxInspectDriver returns the lowercased driver name from a `docker buildx
+// inspect` output (the value on the `Driver:` line), or "" when no such line is
+// present. It parses the exact token so `docker` is not confused with
+// `docker-container`.
+func buildxInspectDriver(inspect string) string {
+	for _, line := range strings.Split(inspect, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "Driver:" {
+			return strings.ToLower(fields[1])
+		}
+	}
+	return ""
 }
 
 // buildxInspectHasPlatform reports whether `docker buildx inspect` output

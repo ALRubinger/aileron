@@ -211,6 +211,33 @@ func TestBuildDevcontainerWithFeaturesMultiArchEmitsOCILayout(t *testing.T) {
 	}
 }
 
+// TestBuild_MultiArchPairingValidated proves Build fails fast on a half-configured
+// multi-arch request rather than emitting a broken `--output type=oci,dest=` token.
+func TestBuild_MultiArchPairingValidated(t *testing.T) {
+	base := BuildOptions{
+		Plan:   composition.Plan{Tier: composition.TierDevcontainer, Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")}},
+		Policy: BuildPolicyAlways,
+	}
+
+	t.Run("platforms without dest", func(t *testing.T) {
+		opts := base
+		opts.Platforms = composition.MultiArchPlatforms
+		_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Build(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "OCILayoutDest") {
+			t.Fatalf("err = %v, want a missing-OCILayoutDest error", err)
+		}
+	})
+
+	t.Run("dest without platforms", func(t *testing.T) {
+		opts := base
+		opts.OCILayoutDest = filepath.Join(t.TempDir(), "layout")
+		_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Build(context.Background(), opts)
+		if err == nil || !strings.Contains(err.Error(), "without any Platforms") {
+			t.Fatalf("err = %v, want a dest-without-platforms error", err)
+		}
+	})
+}
+
 // TestDevcontainerCLIBuildArgs_SingleArchByteIdentical proves the assembler emits
 // the exact same argv as before when Platforms is unset (no multi-arch tokens).
 func TestDevcontainerCLIBuildArgs_SingleArchByteIdentical(t *testing.T) {
@@ -283,10 +310,23 @@ func TestCheckMultiArchBuild(t *testing.T) {
 
 	t.Run("both arches present", func(t *testing.T) {
 		fr := &scriptedRunner{outputs: map[string]string{
-			"buildx inspect --bootstrap": "Platforms: linux/amd64, linux/arm64, linux/arm/v7\n",
+			"buildx inspect --bootstrap": "Driver: docker-container\nPlatforms: linux/amd64, linux/arm64, linux/arm/v7\n",
 		}}
 		if err := CheckMultiArchBuild(context.Background(), fr, "docker"); err != nil {
 			t.Fatalf("both arches present must pass, got %v", err)
+		}
+	})
+
+	t.Run("default docker driver rejected", func(t *testing.T) {
+		// The default `docker` driver advertises both platforms but cannot export a
+		// multi-arch OCI layout; the preflight must reject it with a docker-container
+		// hint rather than let the build fail mid-flight.
+		fr := &scriptedRunner{outputs: map[string]string{
+			"buildx inspect --bootstrap": "Name: default\nDriver: docker\nPlatforms: linux/amd64, linux/arm64\n",
+		}}
+		err := CheckMultiArchBuild(context.Background(), fr, "docker")
+		if err == nil || !strings.Contains(err.Error(), "docker-container") {
+			t.Fatalf("err = %v, want a docker-container driver remediation", err)
 		}
 	})
 
