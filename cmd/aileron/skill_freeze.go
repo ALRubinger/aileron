@@ -373,12 +373,14 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		return nil, fmt.Errorf("read composed per-arch config digests from %q: %w", result.OCILayoutDir, err)
 	}
 
-	// The multi-arch OCI-layout build does not load into the daemon, but publish's
-	// host-arch verify (`docker image inspect <LocalTag>`) still needs the image
-	// present locally between the S3 and S4 merges. Run the same composed build
-	// once more for the host architecture with a daemon load under LocalTag; buildx
-	// reuses the layer cache, so it is cheap. S4 turns publish into a manifest-list
-	// push that consumes the OCI layout directly and drops this second build.
+	// The multi-arch OCI-layout build does not load into the daemon. Run the same
+	// composed build once more for the host architecture with a daemon load under
+	// LocalTag; buildx reuses the layer cache, so it is cheap. This host-arch daemon
+	// image is intentionally retained: local `launch` of an un-published Flight Plan
+	// resolves the composed image straight from the daemon under LocalTag, with no
+	// publish step in between. (Publish itself no longer needs it — as of S4 (#2047)
+	// it consumes the OCI layout directly.) Dropping this second build is a documented
+	// launch-side follow-up, not done here.
 	loadOpts := buildOpts
 	loadOpts.Platforms = nil
 	loadOpts.OCILayoutDest = ""
