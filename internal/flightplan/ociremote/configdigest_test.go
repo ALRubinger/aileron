@@ -501,6 +501,56 @@ func TestAllPlatformConfigContentDigests_OnlyAttestationErrors(t *testing.T) {
 	}
 }
 
+// TestAllPlatformConfigContentDigests_RootIndexFetchError proves a failure
+// fetching the root manifest list propagates rather than yielding a partial set.
+func TestAllPlatformConfigContentDigests_RootIndexFetchError(t *testing.T) {
+	boom := errors.New("index read reset")
+	st := fetchFailStore{Store: memory.New(), err: boom}
+	idx := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, []byte("{}"))
+	if _, err := AllPlatformConfigContentDigests(context.Background(), st, idx); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want the root index fetch error", err)
+	}
+}
+
+// TestAllPlatformConfigContentDigests_ChildManifestFetchError proves a child
+// manifest fetch failure surfaces with the platform-image-manifest context.
+func TestAllPlatformConfigContentDigests_ChildManifestFetchError(t *testing.T) {
+	inner := memory.New()
+	amd, _ := seedArchManifest(t, inner, "linux", "amd64", "amd")
+	arm, _ := seedArchManifest(t, inner, "linux", "arm64", "arm")
+	idx := pushIndex(t, inner, ocispec.MediaTypeImageIndex, amd, arm)
+	boom := errors.New("child read reset")
+	st := indexFetchFailStore{Store: inner, failDigest: arm.Digest.String(), err: boom}
+	_, err := AllPlatformConfigContentDigests(context.Background(), st, idx)
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "platform image manifest") {
+		t.Fatalf("err = %v, want a platform-image-manifest fetch error", err)
+	}
+}
+
+// TestAllPlatformConfigContentDigests_InvalidChildConfigErrors proves a child
+// whose config blob is not valid image-config JSON fails closed.
+func TestAllPlatformConfigContentDigests_InvalidChildConfigErrors(t *testing.T) {
+	st := memory.New()
+	badCfg := pushBytes(t, st, ocispec.MediaTypeImageConfig, []byte("not json"))
+	layer := pushBytes(t, st, ocispec.MediaTypeImageLayerGzip, []byte("layer"))
+	m := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    badCfg,
+		Layers:    []ocispec.Descriptor{layer},
+	}
+	mb, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	md := pushBytes(t, st, ocispec.MediaTypeImageManifest, mb)
+	md.Platform = &ocispec.Platform{OS: "linux", Architecture: "amd64"}
+	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, md)
+	if _, err := AllPlatformConfigContentDigests(context.Background(), st, idx); err == nil || !strings.Contains(err.Error(), "image config") {
+		t.Fatalf("err = %v, want an image-config decode error", err)
+	}
+}
+
 // TestSelectPlatformManifest_HostOnlyUnchanged is the regression guard that
 // refactoring selectPlatformManifest into a thin wrapper over
 // enumeratePlatformManifests kept the host-only single-pick behavior: a two-arch

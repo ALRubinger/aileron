@@ -853,6 +853,41 @@ func TestRuntimeDigestResolver_InspectorError(t *testing.T) {
 	}
 }
 
+// failLoadBuildRunner passes the buildx preflight and the multi-arch OCI build
+// (which carries `--output`) but fails the subsequent host-arch daemon-load build
+// (which carries `--image-name` without `--output`), so the composer's daemon-load
+// error path is exercised.
+type failLoadBuildRunner struct{ *fakeRunner }
+
+func (r failLoadBuildRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--image-name") && !strings.Contains(joined, "--output") {
+		return errors.New("daemon load failed")
+	}
+	return r.fakeRunner.Run(ctx, name, args, stdout, stderr)
+}
+
+// TestBuilderFeatureComposer_DaemonLoadErrorPropagates proves a failure loading
+// the host-arch composed image into the daemon under LocalTag surfaces as an error
+// (publish's host-arch verify would otherwise break silently).
+func TestBuilderFeatureComposer_DaemonLoadErrorPropagates(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	fr := failLoadBuildRunner{fakeRunner: &fakeRunner{outputs: buildxPreflightOK()}}
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{runner: fr, runtime: "docker"}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err == nil || !strings.Contains(err.Error(), "load composed image") {
+		t.Fatalf("err = %v, want a daemon-load failure", err)
+	}
+}
+
 // TestBuilderFeatureComposer_LayoutReadErrorPropagates proves a failure reading
 // the per-arch config digests back from the built OCI layout surfaces as an error
 // (freeze must not seal a pin it could not attest).

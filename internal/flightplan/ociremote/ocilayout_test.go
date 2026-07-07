@@ -177,3 +177,90 @@ func TestConfigContentDigestsFromOCILayout_MissingLayoutErrors(t *testing.T) {
 		t.Fatal("want an error for a directory that is not an OCI layout")
 	}
 }
+
+// TestConfigContentDigestsFromOCILayout_MultiRootErrors proves the public reader
+// rejects a layout whose index.json carries more than one root through the same
+// error path (a valid OCI layout, so NewFromFS succeeds and the root check fires).
+func TestConfigContentDigestsFromOCILayout_MultiRootErrors(t *testing.T) {
+	dir := t.TempDir()
+	amd, _ := archImageManifest(t, dir, "linux", "amd64", "amd")
+	arm, _ := archImageManifest(t, dir, "linux", "arm64", "arm")
+	layout, err := json.Marshal(ocispec.ImageLayout{Version: ocispec.ImageLayoutVersion})
+	if err != nil {
+		t.Fatalf("marshal oci-layout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageLayoutFile), layout, 0o644); err != nil {
+		t.Fatalf("write oci-layout: %v", err)
+	}
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{amd, arm},
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+		t.Fatalf("write index.json: %v", err)
+	}
+	if _, err := ConfigContentDigestsFromOCILayout(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "want exactly 1") {
+		t.Fatalf("err = %v, want a multi-root rejection", err)
+	}
+}
+
+// TestOCILayoutRootDescriptor_Branches covers the root-descriptor resolution
+// error paths directly (the helper is reachable independent of NewFromFS): a
+// missing index.json, a malformed index.json, a multi-root index, and the happy
+// single-root case.
+func TestOCILayoutRootDescriptor_Branches(t *testing.T) {
+	t.Run("missing index.json", func(t *testing.T) {
+		if _, err := ociLayoutRootDescriptor(t.TempDir()); err == nil || !strings.Contains(err.Error(), ocispec.ImageIndexFile) {
+			t.Fatalf("err = %v, want a read error naming index.json", err)
+		}
+	})
+
+	t.Run("malformed index.json", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), []byte("not json"), 0o644); err != nil {
+			t.Fatalf("write index.json: %v", err)
+		}
+		if _, err := ociLayoutRootDescriptor(dir); err == nil || !strings.Contains(err.Error(), "decode") {
+			t.Fatalf("err = %v, want a decode error", err)
+		}
+	})
+
+	t.Run("multiple roots", func(t *testing.T) {
+		dir := t.TempDir()
+		amd, _ := archImageManifest(t, dir, "linux", "amd64", "amd")
+		arm, _ := archImageManifest(t, dir, "linux", "arm64", "arm")
+		idx := ocispec.Index{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: ocispec.MediaTypeImageIndex,
+			Manifests: []ocispec.Descriptor{amd, arm},
+		}
+		ib, err := json.Marshal(idx)
+		if err != nil {
+			t.Fatalf("marshal index.json: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+			t.Fatalf("write index.json: %v", err)
+		}
+		if _, err := ociLayoutRootDescriptor(dir); err == nil || !strings.Contains(err.Error(), "want exactly 1") {
+			t.Fatalf("err = %v, want a multi-root rejection", err)
+		}
+	})
+
+	t.Run("single root", func(t *testing.T) {
+		dir := t.TempDir()
+		amd, _ := archImageManifest(t, dir, "linux", "amd64", "amd")
+		writeOCILayoutRoot(t, dir, amd)
+		root, err := ociLayoutRootDescriptor(dir)
+		if err != nil {
+			t.Fatalf("ociLayoutRootDescriptor: %v", err)
+		}
+		if root.Digest != amd.Digest {
+			t.Errorf("root = %s, want %s", root.Digest, amd.Digest)
+		}
+	})
+}
