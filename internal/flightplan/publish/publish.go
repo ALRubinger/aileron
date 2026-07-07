@@ -12,20 +12,25 @@
 // the signed lock branches by pin type (see freeze.BindingKind):
 //
 //   - Composed-tools pins (LocalTag set): the image is built locally at freeze
-//     and pinned by its serialization-agnostic config CONTENT digest (see
-//     internal/flightplan/imgconfig). Publish verifies the local image's config
-//     content digest against the signed lock and HARD-ERRORS on a mismatch
-//     BEFORE pushing, then pushes the image with docker push and re-verifies the
-//     pushed config content digest. The content digest survives the config-blob
-//     re-serialization the containerd image store performs on push (issue
-//     #2014), unlike the raw config-blob sha256. Binding: config-content-digest.
+//     for every supported architecture into an OCI image-layout directory and
+//     pinned by a per-arch set of serialization-agnostic config CONTENT digests
+//     (see internal/flightplan/imgconfig, ADR-0027). Publish opens that layout
+//     (never the docker daemon, which cannot hold a manifest list), verifies
+//     EVERY arch's config content digest against the signed lock and HARD-ERRORS
+//     on any mismatch or missing arch BEFORE pushing, then copies the whole
+//     manifest-list graph into the destination registry with oras and re-verifies
+//     every pushed arch's config content digest. The content digest survives the
+//     benign config-blob re-serialization a registry may perform (issue #2014),
+//     unlike the raw config-blob sha256, so a genuine per-arch field substitution
+//     is caught on both sides while a re-encode passes. Binding:
+//     config-content-digest.
 //   - Image-only / custom-base pins (no LocalTag): the signed-lock Digest is
 //     the base image's registry manifest digest. Publish copies the exact
 //     bytes from the SOURCE registry with oras.Copy (which preserves the
 //     manifest digest) into the target registry. Copying a docker-re-encoded
 //     export would change the manifest digest and defeat the binding, so the
-//     foreign-base path never routes through the docker-save ImageSource.
-//     Binding: manifest-digest.
+//     foreign-base path copies registry bytes directly and never round-trips
+//     through the docker daemon. Binding: manifest-digest.
 //
 // All oras/registry construction lives here so cmd/aileron stays oras-free.
 package publish
@@ -57,23 +62,6 @@ import (
 // A zero epoch signals "reproducible, not a real build time."
 const reproducibleCreated = "1970-01-01T00:00:00Z"
 
-// ImageSource pushes a locally-built composed-tools image to the destination
-// registry. Only the composed (config-content-digest) branch uses it;
-// foreign-base pins copy from their source registry instead. Splitting inspect
-// from push lets publish verify the config content digest against the signed
-// lock BEFORE any bytes leave the machine.
-type ImageSource interface {
-	// ConfigContentDigest returns the local composed image's serialization-
-	// agnostic config content digest (see internal/flightplan/imgconfig), so
-	// publish can fail closed before pushing a mismatched image.
-	ConfigContentDigest(ctx context.Context, localTag string) (string, error)
-	// Push tags the local image into registry under imageTag and pushes it, so
-	// the image is resolvable in the destination repository afterward. The
-	// content digest (unlike the config-blob digest) is preserved across the
-	// containerd store's push-time re-serialization by construction.
-	Push(ctx context.Context, localTag, registry, imageTag string) error
-}
-
 // Options configures a publish run.
 type Options struct {
 	// Name and VersionID identify the frozen version being published; VersionID
@@ -90,9 +78,14 @@ type Options struct {
 	Frozen store.FrozenVersion
 	Lock   freeze.Lockfile
 
-	// ImageSource exports the composed image for the config-digest branch. Nil
-	// selects the production docker-save source.
-	ImageSource ImageSource
+	// ComposedLayout opens the freeze-produced multi-arch OCI image layout for a
+	// composed pin, returning a read-only store to copy/verify from and its root
+	// manifest-list descriptor. Nil selects the production opener, which derives
+	// the layout dir from the pin's LocalTag (composition.OCILayoutDir) and opens
+	// it (ociremote.OpenOCILayout). Tests inject a synthetic multi-arch index in an
+	// in-memory store, so the push + per-arch verify contract is exercised with no
+	// docker daemon and no cross-arch emulation. Mirrors the SourceRepo seam.
+	ComposedLayout func(ctx context.Context, pin freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error)
 	// Target is the destination content store. Nil builds a remote.Repository
 	// from Registry over the operator's docker credentials. Tests inject an
 	// in-memory store.
@@ -128,12 +121,14 @@ var (
 	// ErrNoImage is returned when the frozen version has no resolved image pin
 	// to publish (an instruction-only plan).
 	ErrNoImage = errors.New("publish: frozen version has no resolved image to publish")
-	// ErrConfigContentDigestMismatch is returned when a composed pin's local or
-	// pushed image config CONTENT digest does not equal the signed-lock digest (a
-	// mislabeled or tampered composed image). It fails closed rather than shipping
-	// a binding #1903 would reject. Because the check is content-based, the
-	// benign config-blob re-serialization the containerd store performs on push
-	// does not trigger it; only a genuine execution-relevant field change does.
+	// ErrConfigContentDigestMismatch is returned when a composed pin's per-arch
+	// config content digest set does not match the signed lock, on either the
+	// local layout (pre-push) or the pushed manifest list (post-push): a
+	// mismatched arch, an arch the lock does not attest, or a lock-pinned arch the
+	// artifact is missing. It fails closed rather than shipping a binding #1903
+	// would reject. Because the check is content-based, the benign config-blob
+	// re-serialization a registry may perform does not trigger it; only a genuine
+	// execution-relevant field change does.
 	ErrConfigContentDigestMismatch = errors.New("publish: composed image config content digest does not match the signed lock")
 )
 
@@ -270,57 +265,92 @@ func publishImage(ctx context.Context, opts Options, pin freeze.ImagePin, target
 	}
 }
 
-// publishComposed verifies the local composed image's config content digest
-// against the signed lock, pushes it into the destination repository, and
-// returns the pushed image descriptor. The content digest is checked BEFORE the
-// push, so a mismatched (tampered/mislabeled) image never reaches the registry.
+// publishComposed opens the composed pin's multi-arch OCI image layout, verifies
+// every architecture's config content digest against the signed lock, copies the
+// whole manifest-list graph into the destination repository, and re-verifies each
+// pushed arch. Verification runs BEFORE any bytes leave the machine, so a
+// mismatched, missing, or extra arch never reaches the registry; it runs again
+// after the push as defense in depth against a registry that serves substituted
+// bytes. The pushed tag is a manifest list a differing-arch consumer can pull.
 func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, target oras.Target) (ocispec.Descriptor, string, error) {
-	// Select the host platform's config content digest from the composed pin's
-	// per-arch set. Single-arch publish verifies against the entry for this host;
-	// a plan not built for this host's platform fails closed rather than pushing
-	// an image it cannot verify (multi-arch push is S4).
-	want, platform, ok := pin.HostConfigDigest()
-	if !ok {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: this artifact was not published for %s", ErrConfigContentDigestMismatch, platform)
+	openLayout := opts.ComposedLayout
+	if openLayout == nil {
+		openLayout = composedLayoutOpener
 	}
-
-	src := opts.ImageSource
-	if src == nil {
-		src = dockerImageSource{}
-	}
-	localConfig, err := src.ConfigContentDigest(ctx, pin.LocalTag)
+	store, root, err := openLayout(ctx, pin)
 	if err != nil {
-		return ocispec.Descriptor{}, "", fmt.Errorf("publish: inspect composed image %q: %w", pin.LocalTag, err)
-	}
-	if localConfig != want {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: local config %s, lock attested %s", ErrConfigContentDigestMismatch, localConfig, want)
+		return ocispec.Descriptor{}, "", fmt.Errorf("publish: open composed image layout for %q: %w", pin.LocalTag, err)
 	}
 
+	// Pre-push per-arch verify: read every runnable platform's config content
+	// digest straight from the local layout and require it to match the signed
+	// lock exactly (each local arch attested and equal, each lock arch present).
+	// AllPlatformConfigContentDigests already filters buildkit attestation /
+	// unknown-platform children, so a provenance-laden index verifies cleanly.
+	localDigests, err := ociremote.AllPlatformConfigContentDigests(ctx, store, root)
+	if err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("publish: read composed layout config digests: %w", err)
+	}
+	if err := verifyPerArch(pin, localDigests, "local"); err != nil {
+		return ocispec.Descriptor{}, "", err
+	}
+
+	// Copy the full manifest-list graph (index + both platform children + any
+	// buildkit attestation manifests) into the destination, then tag it. oras
+	// copies the bytes exactly, so the manifest digest is preserved.
 	imageTag := freeze.ComposedImageTag(opts.VersionID)
-	if err := src.Push(ctx, pin.LocalTag, opts.Registry, imageTag); err != nil {
+	if err := oras.CopyGraph(ctx, store, target, root, oras.DefaultCopyGraphOptions); err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: push composed image: %w", err)
+	}
+	if err := target.Tag(ctx, root, imageTag); err != nil {
+		return ocispec.Descriptor{}, "", fmt.Errorf("publish: tag composed image %s: %w", imageTag, err)
 	}
 	desc, err := target.Resolve(ctx, imageTag)
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: resolve pushed composed image: %w", err)
 	}
-	// Defense in depth: the pushed image's config CONTENT digest must still equal
-	// the signed lock. ociremote.ConfigContentDigest fetches the pushed config
-	// blob and canonicalizes it, so the containerd image store's benign push-time
-	// re-serialization (a different config-blob sha256 for byte-identical runtime
-	// fields, issue #2014) passes while a genuine field substitution is still
-	// caught. It also unwraps an OCI image index (the shape `docker push` emits
-	// on the containerd store: the single-platform image manifest plus a buildkit
-	// attestation) so the read-back succeeds on both the classic and containerd
-	// stores.
-	pushedConfig, err := ociremote.ConfigContentDigest(ctx, target, desc)
+
+	// Post-push per-arch re-verify: resolve the pushed manifest list and re-read
+	// every arch's config content digest from the destination, comparing back to
+	// the signed lock. Because the check is content-based, a benign config-blob
+	// re-serialization (issue #2014) passes while a genuine per-arch field
+	// substitution fails closed.
+	pushedDigests, err := ociremote.AllPlatformConfigContentDigests(ctx, target, desc)
 	if err != nil {
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: read pushed image config: %w", err)
 	}
-	if pushedConfig != want {
-		return ocispec.Descriptor{}, "", fmt.Errorf("%w: pushed config %s, lock attested %s", ErrConfigContentDigestMismatch, pushedConfig, want)
+	if err := verifyPerArch(pin, pushedDigests, "pushed"); err != nil {
+		return ocispec.Descriptor{}, "", err
 	}
 	return desc, freeze.BindingConfigContentDigest, nil
+}
+
+// verifyPerArch fails closed unless the per-arch config content digests in have
+// match the composed pin's signed set exactly: every platform present in have
+// must carry a lock entry with an equal digest, and every arch the lock pins must
+// be present in have. The set equality (not just "host arch matches") is what a
+// multi-arch push needs: a substituted, mislabeled, extra, or dropped arch is all
+// caught. stage names the artifact under check ("local" pre-push, "pushed"
+// post-push) so the fail-closed message points at the offending side and arch.
+func verifyPerArch(pin freeze.ImagePin, have []ociremote.PlatformConfigDigest, stage string) error {
+	seen := make(map[string]bool, len(have))
+	for _, pc := range have {
+		key := pc.OS + "/" + pc.Arch
+		seen[key] = true
+		want, ok := pin.ConfigDigestFor(pc.OS, pc.Arch)
+		if !ok {
+			return fmt.Errorf("%w: %s image carries arch %s not attested by the signed lock", ErrConfigContentDigestMismatch, stage, key)
+		}
+		if pc.Digest != want {
+			return fmt.Errorf("%w: %s %s config %s, lock attested %s", ErrConfigContentDigestMismatch, stage, key, pc.Digest, want)
+		}
+	}
+	for _, cd := range pin.ConfigDigests {
+		if !seen[cd.OS+"/"+cd.Arch] {
+			return fmt.Errorf("%w: %s image is missing arch %s/%s the signed lock pins", ErrConfigContentDigestMismatch, stage, cd.OS, cd.Arch)
+		}
+	}
+	return nil
 }
 
 // publishForeignBase copies the exact source-registry bytes for an image-only

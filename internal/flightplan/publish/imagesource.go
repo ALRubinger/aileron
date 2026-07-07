@@ -2,49 +2,28 @@ package publish
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
-	"strings"
 
-	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	oras "oras.land/oras-go/v2"
 )
 
-// dockerImageSource is the production ImageSource. It works entirely through
-// the docker CLI and the operator's existing registry auth:
-//
-//   - ConfigContentDigest reads the local composed image's serialization-
-//     agnostic config content digest (see internal/flightplan/imgconfig) from
-//     `docker image inspect`, so publish can verify it against the signed lock
-//     BEFORE pushing.
-//   - Push tags the local image into the destination repository and pushes it.
-//
-// It deliberately does not use `docker save`: a docker export re-encodes the
-// image (and older/newer docker CLIs differ on the OCI-layout flag), whereas a
-// plain `docker push` is universally available. The composed binding no longer
-// depends on the config-blob digest being preserved byte-for-byte across push:
-// it binds to the config CONTENT digest, which is stable across the containerd
-// store's push-time re-serialization (issue #2014).
-type dockerImageSource struct{}
-
-func (dockerImageSource) ConfigContentDigest(ctx context.Context, localTag string) (string, error) {
-	out, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{json .}}", localTag).CombinedOutput()
+// composedLayoutOpener is the production ComposedLayout seam. The composed image
+// is built at freeze for every supported architecture into a deterministic,
+// tag-keyed OCI image-layout directory (composition.OCILayoutDir over the pin's
+// LocalTag), never loaded through the docker daemon (the classic docker store
+// cannot even hold a manifest list). This opens that layout as a read-only oras
+// store and returns it with its root manifest-list descriptor, so publish both
+// verifies every arch's config content digest against the signed lock and copies
+// the full manifest-list graph into the destination registry straight from the
+// layout, with no daemon round-trip and no config-blob re-serialization.
+func composedLayoutOpener(ctx context.Context, pin freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+	dir, err := composition.OCILayoutDir(pin.LocalTag)
 	if err != nil {
-		return "", fmt.Errorf("docker image inspect %s: %w: %s", localTag, err, strings.TrimSpace(string(out)))
+		return nil, ocispec.Descriptor{}, err
 	}
-	cc, err := imgconfig.FromDockerInspect(out)
-	if err != nil {
-		return "", fmt.Errorf("docker image inspect %s: %w", localTag, err)
-	}
-	return cc.ContentDigest()
-}
-
-func (dockerImageSource) Push(ctx context.Context, localTag, registry, imageTag string) error {
-	ref := registry + ":" + imageTag
-	if out, err := exec.CommandContext(ctx, "docker", "tag", localTag, ref).CombinedOutput(); err != nil {
-		return fmt.Errorf("docker tag %s %s: %w: %s", localTag, ref, err, strings.TrimSpace(string(out)))
-	}
-	if out, err := exec.CommandContext(ctx, "docker", "push", ref).CombinedOutput(); err != nil {
-		return fmt.Errorf("docker push %s: %w: %s", ref, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return ociremote.OpenOCILayout(ctx, dir)
 }

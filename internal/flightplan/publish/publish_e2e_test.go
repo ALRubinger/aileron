@@ -15,14 +15,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
-	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 )
 
@@ -57,10 +59,9 @@ func docker(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// buildLocalImage builds a tiny scratch image locally and returns its tag and
-// serialization-agnostic config content digest, mirroring how freeze pins a
-// composed image (localImageContentDigest).
-func buildLocalImage(t *testing.T, tag string) (string, string) {
+// buildLocalImage builds a tiny scratch image locally and returns its tag,
+// mirroring how a foreign base is seeded into the registry.
+func buildLocalImage(t *testing.T, tag string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("aileron-e2e\n"), 0o644); err != nil {
@@ -71,36 +72,74 @@ func buildLocalImage(t *testing.T, tag string) (string, string) {
 		t.Fatal(err)
 	}
 	docker(t, "build", "-t", tag, dir)
-	return tag, localContentDigest(t, tag)
+	return tag
 }
 
-// localContentDigest computes the config content digest of a local image the
-// same way the production ImageSource does (docker inspect -> imgconfig).
-func localContentDigest(t *testing.T, ref string) string {
+// buildOCILayout builds a single-arch image as a real OCI image layout with
+// `docker buildx build --output type=oci,dest=<dir>` (no QEMU, no daemon load),
+// exactly the artifact shape freeze's multi-arch build writes and publish's
+// ComposedLayout seam opens. It returns the layout dir and the per-arch config
+// content digests read back from it (the values the signed lock attests).
+func buildOCILayout(t *testing.T, dir string) []ociremote.PlatformConfigDigest {
 	t.Helper()
-	inspect := docker(t, "image", "inspect", "--format", "{{json .}}", ref)
-	cc, err := imgconfig.FromDockerInspect([]byte(inspect))
-	if err != nil {
-		t.Fatalf("canonicalize %s config: %v", ref, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "hello.txt"), []byte("aileron-e2e-layout\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	d, err := cc.ContentDigest()
-	if err != nil {
-		t.Fatalf("content digest %s: %v", ref, err)
+	if err := os.WriteFile(filepath.Join(src, "Dockerfile"), []byte("FROM scratch\nADD hello.txt /hello.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	return d
+	out, err := exec.CommandContext(ctx, "docker", "buildx", "build",
+		"--platform", "linux/"+goarch(),
+		"--provenance=false",
+		"--output", "type=oci,dest="+filepath.Join(dir, "layout.tar"),
+		src,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("buildx build oci layout: %v\n%s", err, out)
+	}
+	// Unpack the OCI tar into a directory the layout opener can read.
+	layoutDir := filepath.Join(dir, "layout")
+	if err := os.MkdirAll(layoutDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := exec.CommandContext(ctx, "tar", "-xf", filepath.Join(dir, "layout.tar"), "-C", layoutDir).CombinedOutput(); err != nil {
+		t.Fatalf("untar oci layout: %v\n%s", err, o)
+	}
+	digs, err := ociremote.ConfigContentDigestsFromOCILayout(ctx, layoutDir)
+	if err != nil {
+		t.Fatalf("read layout per-arch digests: %v", err)
+	}
+	return digs
 }
+
+// goarch returns the host arch in the linux/<arch> vocabulary the layout is built
+// for, so the e2e never emulates a foreign architecture.
+func goarch() string { return runtime.GOARCH }
 
 func TestPublishE2EComposed(t *testing.T) {
 	ctx := e2eContext(t)
 	host := registryHost(t)
-	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-composed")
 	registry := host + "/e2e/composed-plan"
 
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
+	layoutDir := t.TempDir()
+	perArch := buildOCILayout(t, layoutDir)
+	cds := make([]freeze.PlatformDigest, 0, len(perArch))
+	for _, p := range perArch {
+		cds = append(cds, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: p.Digest})
+	}
+
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: cds, LocalTag: "aileron/sandbox-tools:e2e"}
 	opts := Options{
 		Name: "e2e", VersionID: "v1", Registry: registry,
 		Frozen: testFrozen(),
 		Lock:   freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}},
+		// Point the layout seam at the just-built single-arch OCI layout.
+		ComposedLayout: func(ctx context.Context, _ freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+			return ociremote.OpenOCILayout(ctx, filepath.Join(layoutDir, "layout"))
+		},
 	}
 	res, err := Run(ctx, opts)
 	if err != nil {
@@ -126,7 +165,7 @@ func TestPublishE2EForeignBase(t *testing.T) {
 
 	// Seed a "foreign base" in the registry: build locally and push it, then
 	// read back its manifest digest — the digest a freeze foreign-base pin holds.
-	srcTag, _ := buildLocalImage(t, "aileron/sandbox-tools:e2e-base")
+	srcTag := buildLocalImage(t, "aileron/sandbox-tools:e2e-base")
 	srcRef := host + "/e2e/base"
 	docker(t, "tag", srcTag, srcRef+":latest")
 	docker(t, "push", srcRef+":latest")

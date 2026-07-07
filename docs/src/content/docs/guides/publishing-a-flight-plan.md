@@ -20,7 +20,7 @@ A consumer follows the single reference, verifies the signature and the publishe
 
 - A frozen version in your store (`aileron skill freeze <name>` first; see `aileron skill list`).
 - Push access to the destination OCI repository. Publish uses your existing Docker/OCI credentials (the ones `docker login` writes), so authenticate to the registry the usual way before publishing.
-- A working Docker daemon. A composed-tools plan is pushed straight from your local image with `docker push`. A composed image is built for both `linux/amd64` and `linux/arm64` at freeze, so pushing it needs Docker's containerd image store enabled to carry the multi-architecture manifest list (Docker Desktop: Settings, then General, then "Use containerd for pulling and storing images"). The same store requirement applies to the local daemon load freeze performs, so a plan that froze successfully is already push-ready.
+- A composed-tools plan built at freeze. A composed image is built for both `linux/amd64` and `linux/arm64` at freeze into a local OCI image-layout directory. Publish reads that layout and pushes the whole multi-architecture manifest list to the registry directly, so it does not go through `docker push` and does not need Docker's containerd image store. A plan that froze successfully is already push-ready.
 
 ## Publishing
 
@@ -49,7 +49,7 @@ If the semver label carries build metadata (a `+build` suffix) or any other char
 
 The digest that lets launch verify the pulled image against the signed lock depends on the plan's pin type. Publish branches automatically.
 
-- **Composed-tools plans.** The image is built locally at freeze and pinned by its config digest. Publish verifies the local image's config digest against the signed lock, then pushes it with `docker push`, and fails closed on any mismatch before the image leaves your machine. This is the `config-digest` binding.
+- **Composed-tools plans.** The image is built locally at freeze for every supported architecture and pinned by a per-architecture set of config content digests. Publish verifies every architecture's config content digest against the signed lock before any bytes leave your machine, pushes the whole multi-architecture manifest list to the registry, then re-verifies every pushed architecture against the lock. Any mismatched, missing, or unattested architecture fails closed. This is the `config-digest` binding.
 - **Image-only or custom-base plans.** The signed lock pins the base image's registry manifest digest. Publish copies the exact bytes from the source registry into your destination registry, preserving that manifest digest. It does not route these through a local re-export, because re-encoding would change the manifest digest and break verification. This is the `manifest-digest` binding.
 
 The binding kind is derived from the signed lock, not from any registry annotation, so a tampered annotation cannot change what launch verifies.

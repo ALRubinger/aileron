@@ -290,16 +290,10 @@ type builderFeatureComposer struct{}
 // freezeOCILayoutDir returns the deterministic directory a multi-arch composed
 // build writes its OCI image layout to, keyed by the composed image's local tag
 // (never an ephemeral temp dir), so the layout is a stable artifact the S4
-// publish path can consume. It is a package var so tests redirect it at a
-// pre-staged synthetic layout.
-var freezeOCILayoutDir = func(tag string) (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve freeze OCI layout cache dir: %w", err)
-	}
-	repl := strings.NewReplacer("/", "_", ":", "_")
-	return filepath.Join(base, "aileron", "freeze-oci-layouts", repl.Replace(tag)), nil
-}
+// publish path can consume. It delegates to composition.OCILayoutDir so freeze
+// (write) and publish (read) map a tag to the same path from one source; it stays
+// a package var so freeze tests redirect it at a pre-staged synthetic layout.
+var freezeOCILayoutDir = composition.OCILayoutDir
 
 // readOCILayoutConfigDigests is the seam over
 // ociremote.ConfigContentDigestsFromOCILayout so composer tests drive the

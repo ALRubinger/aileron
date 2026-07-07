@@ -6,37 +6,36 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
+	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
+	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 
 	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	oras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
+	"oras.land/oras-go/v2/content/oci"
 	"oras.land/oras-go/v2/errdef"
 )
 
-// hostConfigDigests builds a one-entry per-arch config-digest set keyed by the
-// host platform (linux/GOARCH), so a composed pin's HostConfigDigest selects it
-// on whatever arch the test runs on. Mirrors freeze.resolveImages's S2 producer.
-func hostConfigDigests(digest string) []freeze.PlatformDigest {
-	return []freeze.PlatformDigest{{OS: "linux", Arch: runtime.GOARCH, Digest: digest}}
-}
-
-// ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
-// the given marker, so distinct markers yield distinct content digests. A
-// composed pin binds by the serialization-agnostic config CONTENT digest of
-// this blob, not the blob's own sha256.
-func ociConfigBody(t *testing.T, marker string) []byte {
+// ociConfigBody builds a valid OCI image config blob for (os, arch) whose
+// Entrypoint carries the given marker, so distinct markers yield distinct content
+// digests and the config's own os/architecture drive the platform key
+// AllPlatformConfigContentDigests reads. A composed pin binds by the
+// serialization-agnostic config CONTENT digest of this blob, not the blob's sha256.
+func ociConfigBody(t *testing.T, os, arch, marker string) []byte {
 	t.Helper()
 	img := ocispec.Image{
-		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+		Platform: ocispec.Platform{OS: os, Architecture: arch},
 		Config: ocispec.ImageConfig{
 			Env:        []string{"PATH=/usr/bin"},
 			Entrypoint: []string{"/entry", marker},
@@ -69,8 +68,8 @@ func contentDigest(t *testing.T, configBody []byte) string {
 
 // reserialize returns config bytes that add serialization-only noise
 // (author/history) to configBody while preserving every execution-relevant
-// field, mimicking the containerd store's push-time config re-encode. Its
-// content digest equals configBody's; its raw sha256 differs.
+// field, mimicking a registry's push-time config re-encode. Its content digest
+// equals configBody's; its raw sha256 differs.
 func reserialize(t *testing.T, configBody []byte) []byte {
 	t.Helper()
 	var img ocispec.Image
@@ -90,7 +89,8 @@ func reserialize(t *testing.T, configBody []byte) []byte {
 }
 
 // tamper returns config bytes with a changed Entrypoint (an execution-relevant
-// field), so its content digest differs from configBody's.
+// field) while keeping os/architecture, so its content digest differs from
+// configBody's but its platform key is unchanged.
 func tamper(t *testing.T, configBody []byte) []byte {
 	t.Helper()
 	var img ocispec.Image
@@ -139,32 +139,68 @@ func mustPush(t *testing.T, st content.Storage, desc ocispec.Descriptor, data []
 	}
 }
 
-// fakeImageSource stands in for the docker CLI: ConfigContentDigest returns a
-// controllable local config content digest, and Push is a no-op (composed tests
-// pre-seed the target with the "pushed" image tagged as freeze.ComposedImageTag).
-type fakeImageSource struct {
-	configContentDigest string
-	configErr           error
-	pushErr             error
+// layoutArch names one platform child of a synthetic composed layout: the (os,
+// arch) to stamp on the manifest and the config blob to embed.
+type layoutArch struct {
+	os, arch string
+	body     []byte
 }
 
-func (f fakeImageSource) ConfigContentDigest(ctx context.Context, localTag string) (string, error) {
-	return f.configContentDigest, f.configErr
+// composedLayout is a synthetic stand-in for the freeze-produced OCI image layout
+// the ComposedLayout seam opens: an in-memory oras store holding an OCI index over
+// the given platform children (each a real image manifest) plus, optionally, a
+// buildkit attestation child. byPlat maps "os/arch" to the config CONTENT digest
+// the signed lock attests for that child.
+type composedLayout struct {
+	store  *memory.Store
+	index  ocispec.Descriptor
+	byPlat map[string]string
 }
 
-func (f fakeImageSource) Push(ctx context.Context, localTag, registry, imageTag string) error {
-	return f.pushErr
-}
-
-// seedComposedTarget seeds target with a composed image (config blob = configBody)
-// tagged where publishComposed resolves it, returning the manifest descriptor.
-func seedComposedTarget(t *testing.T, target *memory.Store, versionID string, configBody []byte) ocispec.Descriptor {
+// buildComposedLayout stages arches (and an optional attestation child) as an OCI
+// index in an in-memory store. The attestation child is a real, fetchable image
+// manifest stamped unknown/unknown so oras.CopyGraph can copy it while the
+// per-arch verify filters it out — exactly what a buildx-provenance index looks
+// like on both sides.
+func buildComposedLayout(t *testing.T, arches []layoutArch, withAttestation bool) composedLayout {
 	t.Helper()
-	manifest := seedImage(t, target, configBody)
-	if err := target.Tag(context.Background(), manifest, freeze.ComposedImageTag(versionID)); err != nil {
-		t.Fatalf("tag composed image: %v", err)
+	st := memory.New()
+	byPlat := make(map[string]string, len(arches))
+	children := make([]ocispec.Descriptor, 0, len(arches)+1)
+	for _, a := range arches {
+		md := seedImage(t, st, a.body)
+		md.Platform = &ocispec.Platform{OS: a.os, Architecture: a.arch}
+		children = append(children, md)
+		byPlat[a.os+"/"+a.arch] = contentDigest(t, a.body)
 	}
-	return manifest
+	if withAttestation {
+		att := seedImage(t, st, ociConfigBody(t, "unknown", "unknown", "attestation"))
+		att.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
+		att.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
+		children = append(children, att)
+	}
+	idx := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: children,
+	}
+	ib, err := json.Marshal(idx)
+	if err != nil {
+		t.Fatalf("marshal index: %v", err)
+	}
+	id := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, ib)
+	mustPush(t, st, id, ib)
+	return composedLayout{store: st, index: id, byPlat: byPlat}
+}
+
+// twoArch is the standard multi-arch composition: honest linux/amd64 +
+// linux/arm64 children and a buildkit attestation child.
+func twoArch(t *testing.T) composedLayout {
+	t.Helper()
+	return buildComposedLayout(t, []layoutArch{
+		{"linux", "amd64", ociConfigBody(t, "linux", "amd64", "amd")},
+		{"linux", "arm64", ociConfigBody(t, "linux", "arm64", "arm")},
+	}, true)
 }
 
 func testFrozen() store.FrozenVersion {
@@ -176,233 +212,458 @@ func testFrozen() store.FrozenVersion {
 	}
 }
 
-// composedOptions builds publish options for a composed pin whose attested
-// Digest is the content digest of configBody, with a fake image source that
-// reports the same local content digest (an honest local image).
-func composedOptions(target *memory.Store, configBody []byte) Options {
-	cd := contentDigestNoT(configBody)
+// lockDigests returns the composed pin's per-arch ConfigDigests set derived from a
+// layout's attested content digests, so an honest lock matches the layout exactly.
+func lockDigests(layout composedLayout) []freeze.PlatformDigest {
+	out := make([]freeze.PlatformDigest, 0, len(layout.byPlat))
+	for plat, dig := range layout.byPlat {
+		os, arch, _ := strings.Cut(plat, "/")
+		out = append(out, freeze.PlatformDigest{OS: os, Arch: arch, Digest: dig})
+	}
+	return out
+}
+
+// composedOptions builds publish options for a composed pin whose per-arch set is
+// the layout's attested digests, with the ComposedLayout seam returning that
+// layout. target is the destination store.
+func composedOptions(target oras.Target, layout composedLayout) Options {
 	return Options{
 		Name:      "demo",
 		VersionID: "v1",
 		Registry:  "example.com/demo",
 		Frozen:    testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(cd), LocalTag: "aileron/sandbox-tools:abc123"},
+			{Ref: "aileron/sandbox-tools", LocalTag: "aileron/sandbox-tools:abc123", ConfigDigests: lockDigests(layout)},
 		}},
-		ImageSource: fakeImageSource{configContentDigest: cd},
-		Target:      target,
+		ComposedLayout: func(context.Context, freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+			return layout.store, layout.index, nil
+		},
+		Target: target,
 	}
 }
 
-// contentDigestNoT computes the content digest outside a *testing.T context (for
-// option construction); it panics on a malformed body, which only a test bug
-// produces.
-func contentDigestNoT(configBody []byte) string {
-	cc, err := imgconfig.FromOCIImageConfig(configBody)
+// resolvePlatformChildren resolves the pushed image tag in target to an index and
+// returns the runnable (os/arch) platforms it carries, so a test can assert the
+// pushed manifest list is per-arch resolvable.
+func resolvePlatformChildren(t *testing.T, target *memory.Store, tag string) map[string]bool {
+	t.Helper()
+	ctx := context.Background()
+	desc, err := target.Resolve(ctx, tag)
 	if err != nil {
-		panic(err)
+		t.Fatalf("resolve %q: %v", tag, err)
 	}
-	d, err := cc.ContentDigest()
+	if desc.MediaType != ocispec.MediaTypeImageIndex {
+		t.Fatalf("pushed %q media type = %q, want an image index (manifest list)", tag, desc.MediaType)
+	}
+	raw, err := content.FetchAll(ctx, target, desc)
 	if err != nil {
-		panic(err)
+		t.Fatalf("fetch pushed index: %v", err)
 	}
-	return d
+	var idx ocispec.Index
+	if err := json.Unmarshal(raw, &idx); err != nil {
+		t.Fatalf("decode pushed index: %v", err)
+	}
+	got := map[string]bool{}
+	for _, m := range idx.Manifests {
+		if m.Platform != nil && m.Platform.OS != "unknown" {
+			got[m.Platform.OS+"/"+m.Platform.Architecture] = true
+		}
+	}
+	return got
 }
 
-func TestRunComposedContentDigestBinding(t *testing.T) {
+// TestRunComposedMultiArchPublishesManifestList proves a composed publish pushes a
+// manifest list a differing-arch consumer can pull: the pushed tag resolves to an
+// OCI index carrying both platform children, and the signed artifact's subject is
+// that index.
+func TestRunComposedMultiArchPublishesManifestList(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	manifest := seedComposedTarget(t, target, "v1", body)
+	layout := twoArch(t)
 
-	res, err := Run(ctx, composedOptions(target, body))
+	res, err := Run(ctx, composedOptions(target, layout))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.BindingKind != freeze.BindingConfigContentDigest {
 		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
 	}
-	if res.ImageDigest != manifest.Digest.String() {
-		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
+	if res.ImageDigest != layout.index.Digest.String() {
+		t.Errorf("image digest = %q, want the manifest-list digest %q", res.ImageDigest, layout.index.Digest)
 	}
-	assertReferrerAttached(t, target, res, manifest.Digest.String(), freeze.BindingConfigContentDigest)
+	children := resolvePlatformChildren(t, target, freeze.ComposedImageTag("v1"))
+	for _, plat := range []string{"linux/amd64", "linux/arm64"} {
+		if !children[plat] {
+			t.Errorf("pushed manifest list is missing %s (got %v)", plat, children)
+		}
+	}
+	assertReferrerAttached(t, target, res, layout.index.Digest.String(), freeze.BindingConfigContentDigest)
 }
 
-// TestRunComposedHostArchAbsentFailsClosed proves publish fails closed when the
-// composed pin's per-arch config-digest set carries no entry for the host
-// platform: single-arch publish can only verify the image it built for this
-// host, so a pin built for other arches only is refused before any bytes leave.
-func TestRunComposedHostArchAbsentFailsClosed(t *testing.T) {
+// TestRunComposedPerArchPostPushVerifyPasses proves the post-push re-verify passes
+// when both archs match the lock's ConfigDigests set (the happy multi-arch path).
+func TestRunComposedPerArchPostPushVerifyPasses(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, target, "v1", body)
-
-	opts := composedOptions(target, body)
-	// Re-key the config-digest set to a bogus arch that never equals the host.
-	opts.Lock.ResolvedImages[0].ConfigDigests = []freeze.PlatformDigest{
-		{OS: "linux", Arch: "no-such-arch", Digest: contentDigestNoT(body)},
-	}
-
-	_, err := Run(ctx, opts)
-	if !errors.Is(err, ErrConfigContentDigestMismatch) {
-		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch for a host-arch-absent pin", err)
-	}
-	if !strings.Contains(err.Error(), "not published for") {
-		t.Errorf("err = %v, want a 'not published for <host platform>' message", err)
+	layout := twoArch(t)
+	if _, err := Run(ctx, composedOptions(target, layout)); err != nil {
+		t.Fatalf("Run over a matching two-arch layout must pass pre- and post-push verify: %v", err)
 	}
 }
 
-// TestRunComposedReserializedConfigPublishes is the #2014 core regression: a
-// composed image whose PUSHED config blob was re-serialized (byte-different
-// config blob, identical runtime fields, as the containerd store produces)
-// publishes successfully because the binding is content-based, not blob-digest.
+// TestRunComposedSingleArchPublishes proves a single-entry ConfigDigests set flows
+// through the same generalized verify (the single-arch/foreign-base parity).
+func TestRunComposedSingleArchPublishes(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	layout := buildComposedLayout(t, []layoutArch{
+		{"linux", runtime.GOARCH, ociConfigBody(t, "linux", runtime.GOARCH, "solo")},
+	}, false)
+	res, err := Run(ctx, composedOptions(target, layout))
+	if err != nil {
+		t.Fatalf("Run single-arch: %v", err)
+	}
+	if res.BindingKind != freeze.BindingConfigContentDigest {
+		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
+	}
+}
+
+// TestRunComposedReserializedConfigPublishes is the #2014 core regression at
+// multi-arch shape: an arch whose layout config blob is re-serialized (byte-
+// different blob, identical runtime fields) still publishes because the binding is
+// content-based, not blob-digest.
 func TestRunComposedReserializedConfigPublishes(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	honest := ociConfigBody(t, "composed")
-	// The registry holds the re-serialized config (what containerd `docker push`
-	// emits); the local image reports the honest content digest.
-	pushed := reserialize(t, honest)
-	manifest := seedComposedTarget(t, target, "v1", pushed)
-
-	// The lock attests the honest content digest; the fake local source reports it.
-	opts := composedOptions(target, honest)
+	honestArm := ociConfigBody(t, "linux", "arm64", "arm")
+	layout := buildComposedLayout(t, []layoutArch{
+		{"linux", "amd64", ociConfigBody(t, "linux", "amd64", "amd")},
+		{"linux", "arm64", reserialize(t, honestArm)}, // blob re-encoded, content preserved
+	}, true)
+	// Attest the honest content digest for arm64; it equals the re-serialized one.
+	opts := composedOptions(target, layout)
+	setLockArch(opts, "linux", "arm64", contentDigest(t, honestArm))
 
 	res, err := Run(ctx, opts)
 	if err != nil {
-		t.Fatalf("Run over a re-serialized pushed config must succeed: %v", err)
+		t.Fatalf("Run over a re-serialized child config must succeed: %v", err)
 	}
 	if res.BindingKind != freeze.BindingConfigContentDigest {
 		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
 	}
-	if res.ImageDigest != manifest.Digest.String() {
-		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
-	}
 }
 
-// TestRunComposedTamperedPushedConfigFailsClosed proves the integrity guarantee
-// is preserved: if the registry serves a composed image whose config has a
-// changed execution-relevant field, the post-push content-digest check refuses
-// it even though the local pre-push check passed.
-func TestRunComposedTamperedPushedConfigFailsClosed(t *testing.T) {
+// TestRunComposedContentDigestBindingOverOCIIndex is the #2012+#2014 regression:
+// the composed artifact is an OCI index wrapping the platform image manifests plus
+// a buildkit attestation. Publish's per-arch verify must unwrap the index and
+// verify each runnable child against the signed lock rather than hard-erroring on
+// the attestation entry.
+func TestRunComposedContentDigestBindingOverOCIIndex(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	honest := ociConfigBody(t, "composed")
-	tampered := tamper(t, honest)
-	seedComposedTarget(t, target, "v1", tampered)
+	layout := twoArch(t) // carries a buildkit attestation child
+	res, err := Run(ctx, composedOptions(target, layout))
+	if err != nil {
+		t.Fatalf("Run over an attestation-laden index: %v", err)
+	}
+	if res.ImageDigest != layout.index.Digest.String() {
+		t.Errorf("image digest = %q, want the index digest %q", res.ImageDigest, layout.index.Digest)
+	}
+	assertReferrerAttached(t, target, res, layout.index.Digest.String(), freeze.BindingConfigContentDigest)
+}
 
-	opts := composedOptions(target, honest) // local honest, pushed tampered
+// setLockArch overwrites the composed pin's attested digest for one platform,
+// leaving the layout untouched — a lock/artifact divergence for the fail-closed
+// tests.
+func setLockArch(opts Options, os, arch, digest string) {
+	cds := opts.Lock.ResolvedImages[0].ConfigDigests
+	for i := range cds {
+		if cds[i].OS == os && cds[i].Arch == arch {
+			cds[i].Digest = digest
+			return
+		}
+	}
+	opts.Lock.ResolvedImages[0].ConfigDigests = append(cds, freeze.PlatformDigest{OS: os, Arch: arch, Digest: digest})
+}
+
+// TestRunComposedTamperedArchFailsClosedPrePush proves a pre-push local tamper (an
+// arch whose layout config content digest differs from its lock entry) fails
+// closed BEFORE any bytes leave the machine.
+func TestRunComposedTamperedArchFailsClosedPrePush(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	layout := twoArch(t)
+	opts := composedOptions(target, layout)
+	// The lock now attests a digest the layout's arm64 child does not carry.
+	setLockArch(opts, "linux", "arm64", "sha256:"+strings.Repeat("0", 64))
+
 	_, err := Run(ctx, opts)
 	if !errors.Is(err, ErrConfigContentDigestMismatch) {
 		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch", err)
 	}
-	if !strings.Contains(err.Error(), "pushed config") {
-		t.Errorf("err = %v, want a pushed-config mismatch message", err)
+	if !strings.Contains(err.Error(), "local") || !strings.Contains(err.Error(), "arm64") {
+		t.Errorf("err = %v, want a local arm64 mismatch message", err)
 	}
-}
-
-// seedComposedIndexTarget seeds target with the composed image published as an
-// OCI image index (the shape `docker push` emits on Docker Desktop's containerd
-// image store): the single-platform image manifest plus a buildkit attestation
-// manifest, tagged where publishComposed resolves it. It returns the index
-// descriptor. The content-digest read-back must unwrap the index.
-func seedComposedIndexTarget(t *testing.T, target *memory.Store, versionID string, configBody []byte) ocispec.Descriptor {
-	t.Helper()
-	ctx := context.Background()
-	image := seedImage(t, target, configBody)
-	image.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
-
-	// A buildkit attestation entry: unknown/unknown platform + attestation type.
-	// Selection skips it, so its blobs are never fetched and need not be pushed.
-	attManifest := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, []byte("attestation-"+string(image.Digest)))
-	attManifest.Platform = &ocispec.Platform{OS: "unknown", Architecture: "unknown"}
-	attManifest.Annotations = map[string]string{"vnd.docker.reference.type": "attestation-manifest"}
-
-	idx := ocispec.Index{
-		Versioned: specs.Versioned{SchemaVersion: 2},
-		MediaType: ocispec.MediaTypeImageIndex,
-		Manifests: []ocispec.Descriptor{image, attManifest},
-	}
-	ib, err := json.Marshal(idx)
-	if err != nil {
-		t.Fatalf("marshal index: %v", err)
-	}
-	id := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, ib)
-	mustPush(t, target, id, ib)
-	if err := target.Tag(ctx, id, freeze.ComposedImageTag(versionID)); err != nil {
-		t.Fatalf("tag composed index: %v", err)
-	}
-	return id
-}
-
-// TestRunComposedContentDigestBindingOverOCIIndex is the #2012+#2014 regression:
-// the containerd image store makes the pushed composed ref an OCI index wrapping
-// the image manifest plus a buildkit attestation. Publish's post-push
-// content-digest read-back must unwrap the index and verify against the signed
-// lock rather than hard-erroring.
-func TestRunComposedContentDigestBindingOverOCIIndex(t *testing.T) {
-	ctx := context.Background()
-	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	index := seedComposedIndexTarget(t, target, "v1", body)
-
-	res, err := Run(ctx, composedOptions(target, body))
-	if err != nil {
-		t.Fatalf("Run over an OCI-index composed image: %v", err)
-	}
-	if res.BindingKind != freeze.BindingConfigContentDigest {
-		t.Errorf("binding = %q, want %q", res.BindingKind, freeze.BindingConfigContentDigest)
-	}
-	// The subject/image digest is the resolved INDEX digest (what Docker/containerd
-	// boot correctly); the content-digest binding was verified from the unwrapped
-	// image manifest.
-	if res.ImageDigest != index.Digest.String() {
-		t.Errorf("image digest = %q, want the resolved index digest %q", res.ImageDigest, index.Digest)
-	}
-	assertReferrerAttached(t, target, res, index.Digest.String(), freeze.BindingConfigContentDigest)
-}
-
-func TestRunComposedContentDigestMismatchFailsClosed(t *testing.T) {
-	ctx := context.Background()
-	target := memory.New()
-
-	// The local image's config content digest differs from what the signed lock
-	// attests, so publish must fail BEFORE pushing anything (no image seeded).
-	opts := Options{
-		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
-		Frozen: testFrozen(),
-		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("0", 64)), LocalTag: "t"},
-		}},
-		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("1", 64)},
-		Target:      target,
-	}
-	if _, err := Run(ctx, opts); !errors.Is(err, ErrConfigContentDigestMismatch) {
-		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch", err)
-	}
-	// Nothing must have been published on the mismatch path.
+	// Nothing must have been published on the pre-push mismatch path.
 	if _, err := target.Resolve(ctx, "v1"); err == nil {
-		t.Error("artifact was tagged despite a config-content mismatch")
+		t.Error("artifact was tagged despite a pre-push config-content mismatch")
 	}
 }
 
+// resolveOverrideTarget serves overrideDesc for overrideTag on Resolve while
+// pushing/fetching through the embedded store, standing in for a registry that
+// substitutes the manifest a tag points at after the honest push landed.
+type resolveOverrideTarget struct {
+	*memory.Store
+	overrideTag  string
+	overrideDesc ocispec.Descriptor
+}
+
+func (r resolveOverrideTarget) Resolve(ctx context.Context, ref string) (ocispec.Descriptor, error) {
+	if ref == r.overrideTag {
+		return r.overrideDesc, nil
+	}
+	return r.Store.Resolve(ctx, ref)
+}
+
+// TestRunComposedTamperedArchFailsClosedPostPush proves a post-push registry
+// tamper is caught: the honest graph copies fine, but the tag resolves to a
+// substituted manifest list whose arm64 child config differs from the lock, so the
+// post-push re-verify fails closed.
+func TestRunComposedTamperedArchFailsClosedPostPush(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	honest := twoArch(t)
+
+	// Pre-seed a tampered manifest list into the destination: arm64 child carries a
+	// changed execution field (self-consistent digests, so it is not a corruption
+	// but a substitution).
+	tamperedArm := tamper(t, ociConfigBody(t, "linux", "arm64", "arm"))
+	tampered := buildComposedLayout(t, []layoutArch{
+		{"linux", "amd64", ociConfigBody(t, "linux", "amd64", "amd")},
+		{"linux", "arm64", tamperedArm},
+	}, true)
+	// Copy the tampered graph into inner so its children are fetchable there.
+	if err := oras.CopyGraph(ctx, tampered.store, inner, tampered.index, oras.DefaultCopyGraphOptions); err != nil {
+		t.Fatalf("seed tampered graph: %v", err)
+	}
+
+	target := resolveOverrideTarget{Store: inner, overrideTag: freeze.ComposedImageTag("v1"), overrideDesc: tampered.index}
+	opts := composedOptions(target, honest) // lock + layout are honest; the registry lies
+
+	_, err := Run(ctx, opts)
+	if !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch on a post-push tamper", err)
+	}
+	if !strings.Contains(err.Error(), "pushed") {
+		t.Errorf("err = %v, want a pushed-side mismatch message", err)
+	}
+}
+
+// TestRunComposedMissingLockArchFailsClosed proves a layout that carries fewer
+// archs than the lock pins fails closed (the artifact cannot satisfy every arch a
+// consumer might launch on).
+func TestRunComposedMissingLockArchFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	// Layout has only amd64; lock pins amd64 + arm64.
+	layout := buildComposedLayout(t, []layoutArch{
+		{"linux", "amd64", ociConfigBody(t, "linux", "amd64", "amd")},
+	}, false)
+	opts := composedOptions(target, layout)
+	setLockArch(opts, "linux", "arm64", "sha256:"+strings.Repeat("b", 64))
+
+	_, err := Run(ctx, opts)
+	if !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch for a missing lock arch", err)
+	}
+	if !strings.Contains(err.Error(), "missing arch") || !strings.Contains(err.Error(), "arm64") {
+		t.Errorf("err = %v, want a missing-arm64 message", err)
+	}
+}
+
+// TestRunComposedUnattestedLayoutArchFailsClosed proves a layout carrying an arch
+// the lock does NOT attest fails closed (an image the signed lock never vouched
+// for must not ship under this plan's tag).
+func TestRunComposedUnattestedLayoutArchFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	layout := twoArch(t) // amd64 + arm64
+	opts := composedOptions(target, layout)
+	// Drop arm64 from the lock, leaving only amd64 attested; the layout still has arm64.
+	opts.Lock.ResolvedImages[0].ConfigDigests = []freeze.PlatformDigest{
+		{OS: "linux", Arch: "amd64", Digest: layout.byPlat["linux/amd64"]},
+	}
+	_, err := Run(ctx, opts)
+	if !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch for an unattested layout arch", err)
+	}
+	if !strings.Contains(err.Error(), "not attested") || !strings.Contains(err.Error(), "arm64") {
+		t.Errorf("err = %v, want an unattested-arm64 message", err)
+	}
+}
+
+// TestRunComposedLayoutOpenError proves a ComposedLayout seam failure surfaces as
+// a publish error rather than a panic.
+func TestRunComposedLayoutOpenError(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	layout := twoArch(t)
+	opts := composedOptions(target, layout)
+	opts.ComposedLayout = func(context.Context, freeze.ImagePin) (oras.ReadOnlyTarget, ocispec.Descriptor, error) {
+		return nil, ocispec.Descriptor{}, errors.New("layout dir gone")
+	}
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "open composed image layout") {
+		t.Fatalf("err = %v, want an open-composed-image-layout error", err)
+	}
+}
+
+// pushFailTarget wraps a memory store but rejects Push for one media type,
+// standing in for a registry that refuses a specific write.
+type pushFailTarget struct {
+	*memory.Store
+	failMediaType string
+}
+
+func (p pushFailTarget) Push(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error {
+	if desc.MediaType == p.failMediaType {
+		return errors.New("registry rejected write")
+	}
+	return p.Store.Push(ctx, desc, r)
+}
+
+// TestRunComposedPushError proves a failure copying the manifest-list graph into
+// the destination surfaces as a push-composed-image error.
 func TestRunComposedPushError(t *testing.T) {
 	ctx := context.Background()
-	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, target, "v1", body)
-	opts := composedOptions(target, body)
-	opts.ImageSource = fakeImageSource{configContentDigest: contentDigest(t, body), pushErr: errors.New("registry unauthorized")}
+	inner := memory.New()
+	layout := twoArch(t)
+	// Reject the index write so oras.CopyGraph fails on the root manifest.
+	target := pushFailTarget{Store: inner, failMediaType: ocispec.MediaTypeImageIndex}
+	opts := composedOptions(target, layout)
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push composed image") {
 		t.Fatalf("err = %v, want a push-composed-image error", err)
+	}
+}
+
+// TestRunComposedTagError proves a failure tagging the pushed manifest list
+// surfaces as a tag-composed-image error.
+func TestRunComposedTagError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	layout := twoArch(t)
+	target := tagFailTarget{Store: inner, failOn: freeze.ComposedImageTag("v1")}
+	opts := composedOptions(target, layout)
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "tag composed image") {
+		t.Fatalf("err = %v, want a tag-composed-image error", err)
+	}
+}
+
+func TestRunComposedPushBlobError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	layout := twoArch(t)
+	// Let the image graph push through but reject the first artifact blob.
+	opts := composedOptions(pushFailTarget{Store: inner, failMediaType: freeze.MediaTypeSkillMD}, layout)
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push artifact blob") {
+		t.Fatalf("err = %v, want a push-artifact-blob error", err)
+	}
+}
+
+// resolveFailTarget wraps a memory store but errors on Resolve of failOn, standing
+// in for a registry whose tag read fails right after the push.
+type resolveFailTarget struct {
+	*memory.Store
+	failOn string
+}
+
+func (r resolveFailTarget) Resolve(ctx context.Context, ref string) (ocispec.Descriptor, error) {
+	if ref == r.failOn {
+		return ocispec.Descriptor{}, errors.New("registry resolve failed")
+	}
+	return r.Store.Resolve(ctx, ref)
+}
+
+func TestRunComposedResolveError(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	layout := twoArch(t)
+	target := resolveFailTarget{Store: inner, failOn: freeze.ComposedImageTag("v1")}
+	opts := composedOptions(target, layout)
+	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "resolve pushed composed image") {
+		t.Fatalf("err = %v, want a resolve-pushed-image error", err)
+	}
+}
+
+// stageProductionLayout writes a composed layout to the deterministic on-disk
+// path composition.OCILayoutDir(tag) resolves — exactly where freeze writes and
+// the production ComposedLayout opener reads. It copies every blob via an
+// oci.Store, then overwrites index.json with the single manifest-list root buildx
+// `type=oci` emits (oci.Store would otherwise digest-tag every manifest, leaving a
+// multi-root index the opener rejects).
+func stageProductionLayout(t *testing.T, tag string, layout composedLayout) {
+	t.Helper()
+	ctx := context.Background()
+	dir, err := composition.OCILayoutDir(tag)
+	if err != nil {
+		t.Fatalf("OCILayoutDir: %v", err)
+	}
+	st, err := oci.New(dir)
+	if err != nil {
+		t.Fatalf("oci.New: %v", err)
+	}
+	if err := oras.CopyGraph(ctx, layout.store, st, layout.index, oras.DefaultCopyGraphOptions); err != nil {
+		t.Fatalf("stage graph on disk: %v", err)
+	}
+	singleRoot := ocispec.Index{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageIndex,
+		Manifests: []ocispec.Descriptor{layout.index},
+	}
+	ib, err := json.Marshal(singleRoot)
+	if err != nil {
+		t.Fatalf("marshal single-root index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ocispec.ImageIndexFile), ib, 0o644); err != nil {
+		t.Fatalf("write single-root index.json: %v", err)
+	}
+}
+
+// TestComposedLayoutOpenerReadsProductionLayout exercises the production
+// ComposedLayout seam (composedLayoutOpener -> composition.OCILayoutDir ->
+// ociremote.OpenOCILayout) end to end against a real on-disk layout, no docker: it
+// derives the layout dir from the pin's LocalTag, opens it, and yields the
+// manifest-list root plus both per-arch config digests.
+func TestComposedLayoutOpenerReadsProductionLayout(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", base)
+	t.Setenv("HOME", base)
+
+	tag := "aileron/sandbox-tools:opener"
+	layout := twoArch(t)
+	stageProductionLayout(t, tag, layout)
+
+	ctx := context.Background()
+	store, root, err := composedLayoutOpener(ctx, freeze.ImagePin{LocalTag: tag})
+	if err != nil {
+		t.Fatalf("composedLayoutOpener: %v", err)
+	}
+	if root.Digest != layout.index.Digest {
+		t.Errorf("root = %s, want the manifest-list digest %s", root.Digest, layout.index.Digest)
+	}
+	digs, err := ociremote.AllPlatformConfigContentDigests(ctx, store, root)
+	if err != nil {
+		t.Fatalf("read per-arch digests through the opener: %v", err)
+	}
+	if len(digs) != 2 {
+		t.Fatalf("want 2 per-arch digests, got %d: %+v", len(digs), digs)
 	}
 }
 
 func TestRunForeignBaseManifestDigestBinding(t *testing.T) {
 	ctx := context.Background()
 	src := memory.New()
-	manifest := seedImage(t, src, ociConfigBody(t, "base"))
+	manifest := seedImage(t, src, ociConfigBody(t, "linux", "amd64", "base"))
 	// The source registry resolves the pin's manifest digest as a reference.
 	if err := src.Tag(ctx, manifest, manifest.Digest.String()); err != nil {
 		t.Fatalf("tag source: %v", err)
@@ -433,11 +694,9 @@ func TestRunForeignBaseManifestDigestBinding(t *testing.T) {
 
 func TestRunIdempotentReferrerDigest(t *testing.T) {
 	ctx := context.Background()
-	body := ociConfigBody(t, "composed")
 	run := func() Result {
 		target := memory.New()
-		seedComposedTarget(t, target, "v1", body)
-		res, err := Run(ctx, composedOptions(target, body))
+		res, err := Run(ctx, composedOptions(target, twoArch(t)))
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
@@ -455,10 +714,7 @@ func TestRunIdempotentReferrerDigest(t *testing.T) {
 func TestRunTagsLatestAndSemver(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, target, "v1", body)
-
-	opts := composedOptions(target, body)
+	opts := composedOptions(target, twoArch(t))
 	opts.Lock.Version = "1.2.3" // a legal OCI tag
 	res, err := Run(ctx, opts)
 	if err != nil {
@@ -480,10 +736,7 @@ func TestRunTagsLatestAndSemver(t *testing.T) {
 func TestRunNoSemverLabelTagsLatestOnly(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, target, "v1", body)
-
-	res, err := Run(ctx, composedOptions(target, body)) // Lock.Version is empty
+	res, err := Run(ctx, composedOptions(target, twoArch(t))) // Lock.Version is empty
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -504,10 +757,7 @@ func TestRunNoSemverLabelTagsLatestOnly(t *testing.T) {
 func TestRunInvalidSemverLabelWarnsAndSkips(t *testing.T) {
 	ctx := context.Background()
 	target := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, target, "v1", body)
-
-	opts := composedOptions(target, body)
+	opts := composedOptions(target, twoArch(t))
 	opts.Lock.Version = "1.2.3+build.5" // '+' is outside the OCI tag grammar
 	var errb bytes.Buffer
 	opts.Stderr = &errb
@@ -516,11 +766,9 @@ func TestRunInvalidSemverLabelWarnsAndSkips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an invalid semver label must not fail publish: %v", err)
 	}
-	// The illegal label must NOT have been tagged.
 	if _, err := target.Resolve(ctx, "1.2.3+build.5"); err == nil {
 		t.Error("the invalid semver label was tagged; want it skipped")
 	}
-	// The valid tags still resolve.
 	for _, tag := range []string{"v1", "latest"} {
 		desc, err := target.Resolve(ctx, tag)
 		if err != nil {
@@ -554,10 +802,7 @@ func (t tagFailTarget) Tag(ctx context.Context, desc ocispec.Descriptor, ref str
 func TestRunLatestTagError(t *testing.T) {
 	ctx := context.Background()
 	inner := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, inner, "v1", body)
-	opts := composedOptions(inner, body)
-	opts.Target = tagFailTarget{Store: inner, failOn: "latest"}
+	opts := composedOptions(tagFailTarget{Store: inner, failOn: "latest"}, twoArch(t))
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "tag artifact latest") {
 		t.Fatalf("err = %v, want a tag-artifact-latest error", err)
 	}
@@ -568,11 +813,8 @@ func TestRunLatestTagError(t *testing.T) {
 func TestRunSemverTagError(t *testing.T) {
 	ctx := context.Background()
 	inner := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, inner, "v1", body)
-	opts := composedOptions(inner, body)
+	opts := composedOptions(tagFailTarget{Store: inner, failOn: "1.2.3"}, twoArch(t))
 	opts.Lock.Version = "1.2.3"
-	opts.Target = tagFailTarget{Store: inner, failOn: "1.2.3"}
 	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "tag artifact 1.2.3") {
 		t.Fatalf("err = %v, want a tag-artifact-1.2.3 error", err)
 	}
@@ -743,43 +985,6 @@ func TestRunForeignBaseNoDigest(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no digest") {
 		t.Fatalf("err = %v, want a no-digest error", err)
-	}
-}
-
-// pushFailTarget wraps a memory store but rejects every Push, standing in for a
-// registry that refuses a write (unauthenticated / quota / transient).
-type pushFailTarget struct{ *memory.Store }
-
-func (pushFailTarget) Push(context.Context, ocispec.Descriptor, io.Reader) error {
-	return errors.New("registry rejected write")
-}
-
-func TestRunPushBlobError(t *testing.T) {
-	ctx := context.Background()
-	inner := memory.New()
-	body := ociConfigBody(t, "composed")
-	seedComposedTarget(t, inner, "v1", body) // image pre-seeded, no push needed
-	opts := composedOptions(inner, body)
-	opts.Target = pushFailTarget{inner}
-	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "push artifact blob") {
-		t.Fatalf("err = %v, want a push-artifact-blob error", err)
-	}
-}
-
-func TestRunComposedResolveError(t *testing.T) {
-	ctx := context.Background()
-	target := memory.New() // NOT seeded: the "pushed" image is absent, so resolve fails
-	opts := Options{
-		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
-		Frozen: testFrozen(),
-		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)), LocalTag: "t"},
-		}},
-		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("a", 64)},
-		Target:      target,
-	}
-	if _, err := Run(ctx, opts); err == nil || !strings.Contains(err.Error(), "resolve pushed composed image") {
-		t.Fatalf("err = %v, want a resolve-pushed-image error", err)
 	}
 }
 
