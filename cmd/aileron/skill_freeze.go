@@ -363,6 +363,11 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		DevcontainerCLIEntrypoint: cliEntrypoint,
 		Platforms:                 composition.MultiArchPlatforms,
 		OCILayoutDest:             dest,
+		// Scope the multi-arch build to the dedicated docker-container builder the
+		// preflight provisioned (CheckMultiArchBuild). The single-arch daemon-load
+		// build below intentionally omits this so it stays on the default `docker`
+		// driver and lands the image in the local daemon (issue #2054).
+		BuildxBuilder: container.FreezeBuilderName,
 	}
 	result, err := b.Build(ctx, buildOpts)
 	if err != nil {
