@@ -958,9 +958,12 @@ jobs:
             exit 1
           fi
           cases="$(grep -o '<testcase' "$report" | wc -l | tr -d ' ')"
-          echo "multi-arch e2e executed $cases test(s)"
-          if [ "$cases" -eq 0 ]; then
-            echo "::error::multi-arch e2e executed 0 tests; refusing to pass on a silent skip" >&2
+          skipped="$(grep -o '<skipped' "$report" | wc -l | tr -d ' ')"
+          echo "multi-arch e2e executed $cases test(s), $skipped skipped"
+          # The e2e uses t.Fatalf (never t.Skip), so a skipped testcase is itself a
+          # regression: a run that skipped every case must not pass as "green".
+          if [ "$cases" -eq 0 ] || [ "$cases" -eq "$skipped" ]; then
+            echo "::error::multi-arch e2e ran 0 non-skipped tests; refusing to pass on a silent skip" >&2
             exit 1
           fi
 
