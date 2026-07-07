@@ -18,6 +18,17 @@ import (
 	"oras.land/oras-go/v2/content/memory"
 )
 
+// withHostGOARCH overrides the hostGOARCH selection seam for the duration of the
+// test, so a test can exercise the foreign-arch child-selection branch
+// deterministically regardless of the arch the test binary runs on. It mirrors
+// freeze's withHostGOARCH helper.
+func withHostGOARCH(t *testing.T, arch string) {
+	t.Helper()
+	prev := hostGOARCH
+	hostGOARCH = arch
+	t.Cleanup(func() { hostGOARCH = prev })
+}
+
 // ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
 // the given marker, so distinct markers yield distinct content digests. The
 // returned bytes are what a registry serves as the config blob.
@@ -248,13 +259,15 @@ func TestConfigContentDigest_MultiPlatformMatchesHost(t *testing.T) {
 	}
 }
 
-// TestConfigContentDigest_ArchOverrideSelectsForeignChild pins the #2025 contract:
-// when hostArchOverrideEnv names a foreign arch, the single-child selection picks
-// THAT arch's manifest, not the runner's native arch. A cross-arch consumer's
-// per-arch verify reads the child it actually attests, matching
-// freeze.hostPlatform()'s arch vocabulary. Both children share the host GOOS
-// (composed images are linux-only) so only the arch distinguishes them.
-func TestConfigContentDigest_ArchOverrideSelectsForeignChild(t *testing.T) {
+// TestConfigContentDigest_SelectsForeignArchChild pins the #2025 contract: the
+// single-child selection picks the manifest for the running arch (the hostGOARCH
+// seam), not some other child. A cross-arch consumer's per-arch verify reads the
+// child it actually attests, matching freeze.hostPlatform()'s arch vocabulary.
+// Both children share the host GOOS (composed images are linux-only) so only the
+// arch distinguishes them. Production sets hostGOARCH from runtime.GOARCH; a
+// genuinely foreign consumer (an arm64 binary under QEMU) selects its own child
+// naturally — the seam drives that branch deterministically here.
+func TestConfigContentDigest_SelectsForeignArchChild(t *testing.T) {
 	st := memory.New()
 	native, nativeBody := seedManifest(t, st, "native-arch")
 	native.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: runtime.GOARCH}
@@ -263,34 +276,34 @@ func TestConfigContentDigest_ArchOverrideSelectsForeignChild(t *testing.T) {
 	foreign.Platform = &ocispec.Platform{OS: runtime.GOOS, Architecture: foreignArch}
 	idx := pushIndex(t, st, ocispec.MediaTypeImageIndex, native, foreign)
 
-	t.Run("override selects the foreign child", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, foreignArch)
+	t.Run("a foreign-arch consumer selects the foreign child", func(t *testing.T) {
+		withHostGOARCH(t, foreignArch)
 		got, err := ConfigContentDigest(context.Background(), st, idx)
 		if err != nil {
-			t.Fatalf("ConfigContentDigest with %s override: %v", foreignArch, err)
+			t.Fatalf("ConfigContentDigest as %s: %v", foreignArch, err)
 		}
 		if want := wantContentDigest(t, foreignBody); got != want {
 			t.Errorf("content digest = %q, want the foreign %s child's config %q", got, foreignArch, want)
 		}
 	})
-	t.Run("unset selects the native child", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "")
+	t.Run("the native-arch consumer selects the native child", func(t *testing.T) {
+		withHostGOARCH(t, runtime.GOARCH)
 		got, err := ConfigContentDigest(context.Background(), st, idx)
 		if err != nil {
-			t.Fatalf("ConfigContentDigest without override: %v", err)
+			t.Fatalf("ConfigContentDigest as the native arch: %v", err)
 		}
 		if want := wantContentDigest(t, nativeBody); got != want {
 			t.Errorf("content digest = %q, want the native child's config %q", got, want)
 		}
 	})
-	t.Run("override to an arch absent from the index fails closed", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "ppc64le")
+	t.Run("an arch absent from the index fails closed", func(t *testing.T) {
+		withHostGOARCH(t, "ppc64le")
 		_, err := ConfigContentDigest(context.Background(), st, idx)
 		if err == nil {
-			t.Fatal("want an error when the override arch is not in the index")
+			t.Fatal("want an error when the running arch is not in the index")
 		}
 		if !strings.Contains(err.Error(), "ppc64le") {
-			t.Errorf("err = %v, want the override arch named in the fail-closed message", err)
+			t.Errorf("err = %v, want the running arch named in the fail-closed message", err)
 		}
 	})
 }

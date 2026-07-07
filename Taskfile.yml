@@ -529,9 +529,11 @@ tasks:
       @devcontainers/cli for the composer; a reachable OCI registry in
       AILERON_TEST_REGISTRY (e.g. localhost:5000); the multi-arch runner base on
       that registry/ghcr; and, for the boot guard, a live host daemon via
-      AILERON_API_URL/AILERON_TOKEN. The cross-arch test drives the consumer-arch
-      override (AILERON_FLIGHTPLAN_HOST_ARCH) itself, so it need not be set in the
-      environment. No self-skip: an absent prerequisite is a hard failure.
+      AILERON_API_URL/AILERON_TOKEN. Run natively here the cross-arch test consumes
+      the host's own arch (a same-arch e2e); the GENUINE foreign-arch (#2025) case
+      is the CI job compiling this test binary for linux/arm64 and running it under
+      binfmt/QEMU so runtime.GOARCH is authentically arm64 (no env override). No
+      self-skip: an absent prerequisite is a hard failure.
     dir: cmd/aileron
     cmds:
       - go test -tags=integration_sandbox_multiarch -run 'TestFlightPlanComposedToolsBootGuard|TestFlightPlanCrossArchMultiArchE2E' .

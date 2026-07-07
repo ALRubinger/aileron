@@ -13,28 +13,35 @@
 // The #2025 bug is a publisher on one arch and a consumer on another: the
 // consumer must select ITS arch's child from the published manifest list, read
 // that child's serialization-agnostic config content digest, and match it to the
-// signed lock's per-arch entry. On a single-arch (amd64) runner the publisher
-// arch is always amd64, so the consumer is driven to the FOREIGN arch (arm64) via
-// the AILERON_FLIGHTPLAN_HOST_ARCH override seam. That seam is honored in two
-// places that MUST agree on the arch: freeze.hostPlatform() (which lock per-arch
-// entry to attest) and ociremote's manifest-list child selection (which published
-// child to read config from). Running an arm64 aileron binary under QEMU is out of
-// scope; selection + boot re-check SUCCESS is the assertion, not running the
-// arm64 workload to completion.
+// signed lock's per-arch entry. The cross-arch consumer is made GENUINE, not
+// simulated: the dedicated CI job COMPILES this test binary for linux/arm64 and
+// runs it under the binfmt/QEMU emulators it provisions, so runtime.GOARCH is
+// authentically arm64 while the runner published both arches. There is no env
+// override; the arch the consumer selects is the arch it actually runs as, read
+// through freeze.hostPlatform() and ociremote's manifest-list child selection
+// (both keyed on the same hostGOARCH = runtime.GOARCH seam). Run natively (amd64)
+// the same test proves same-arch selection; run emulated (arm64) it proves the
+// foreign-arch #2025 path. Running the arm64 workload to completion is out of
+// scope; selection + boot re-check SUCCESS is the assertion.
 //
 // Real path, no fakes: the genuine buildx+QEMU multi-arch freeze (through the
 // CLI's production newDigestResolver/newFeatureComposer), a real manifest-list
 // push (publishRun = publish.Run, reading the freeze-produced OCI layout via the
 // production composedLayoutOpener), and the real pull+verify (through the
 // production launchRegistryImageResolver -> pull.PullImage -> ConfigContentDigest
-// index-unwrap). Two negative guards prove the job catches regressions: an arch
-// the artifact was NOT built for fails closed, and a tampered per-arch config is
-// refused. Per repo policy this test is FAIL-FAST (no t.Skip): absent Docker,
-// buildx, QEMU, the registry, or the multi-arch base is a job-config FAILURE.
+// index-unwrap). A negative guard proves the job catches regressions: a tampered
+// per-arch config is refused. (The fail-closed behavior for an arch the artifact
+// was NOT built for is covered by the in-process arch-seam unit tests in freeze
+// and ociremote, which can drive an unbuilt arch deterministically; a genuine
+// runtime.GOARCH cannot be pointed at an arch no runner or emulator provides.)
+// Per repo policy this test is FAIL-FAST (no t.Skip): absent Docker, buildx,
+// QEMU, the registry, or the multi-arch base is a job-config FAILURE.
 //
-// Run with (in the provisioned job):
+// Run with (in the provisioned job, compiled for linux/arm64 and executed under
+// QEMU so runtime.GOARCH is arm64):
 //
-//	go test -tags=integration_sandbox_multiarch -run TestFlightPlanCrossArchMultiArchE2E ./cmd/aileron/...
+//	GOOS=linux GOARCH=arm64 go test -c -tags=integration_sandbox_multiarch -o multiarch-arm64.test ./cmd/aileron
+//	./multiarch-arm64.test -test.run TestFlightPlanCrossArchMultiArchE2E
 package main
 
 import (
@@ -42,6 +49,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,10 +61,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
 )
-
-// hostArchOverrideEnv mirrors freeze's unexported const: the consumer-arch
-// override the e2e drives so an amd64 runner selects the foreign arm64 child.
-const hostArchOverrideEnv = "AILERON_FLIGHTPLAN_HOST_ARCH"
 
 // recordingImageRunner is a runtime.ImageRunner that records the boot spec and
 // never boots, so the registry-origin boot re-check path runs end to end (load ->
@@ -94,9 +98,11 @@ func requireMultiArchToolchain(t *testing.T) string {
 
 // TestFlightPlanCrossArchMultiArchE2E freezes a composed-tools plan as a genuine
 // linux/amd64+linux/arm64 image, publishes it as a manifest list to a real
-// registry, installs it as a registry-origin plan, and proves an amd64 consumer
-// overridden to arm64 selects, verifies, and would boot the arm64 child (#2025),
-// plus two fail-closed negative guards.
+// registry, installs it as a registry-origin plan, and proves the consumer
+// selects, verifies, and would boot the child matching its own runtime.GOARCH
+// (#2025). Compiled for arm64 and run under QEMU in the dedicated job, that is the
+// genuine cross-arch case; run natively it is same-arch. A fail-closed negative
+// guard (a tampered per-arch config) proves the job catches regressions.
 func TestFlightPlanCrossArchMultiArchE2E(t *testing.T) {
 	registryHost := requireMultiArchToolchain(t)
 	registry := registryHost + "/e2e/multiarch-plan"
@@ -143,6 +149,16 @@ func TestFlightPlanCrossArchMultiArchE2E(t *testing.T) {
 	}
 	if amdDigest == armDigest {
 		t.Fatalf("the two arches must have distinct config content digests (a real per-arch build); both were %q", amdDigest)
+	}
+
+	// The consumer selects the child matching its own genuine runtime.GOARCH: arm64
+	// when this binary is the arm64 build run under QEMU (the cross-arch #2025 case),
+	// amd64 when run natively. The build produced both arches above, so the running
+	// arch must be present in the pin.
+	hostArch := goruntime.GOARCH
+	wantArchDigest, wantArchOK := pin.ConfigDigestFor("linux", hostArch)
+	if !wantArchOK {
+		t.Fatalf("the multi-arch build did not include the runner arch linux/%s; got %+v", hostArch, pin.ConfigDigests)
 	}
 
 	// Persist the signed frozen version.
@@ -213,26 +229,22 @@ func TestFlightPlanCrossArchMultiArchE2E(t *testing.T) {
 	// content-addressed to the index so the runner cannot boot a repointed tag.
 	wantBootRef := registry + "@" + indexDesc.Digest.String()
 
-	// --- POSITIVE: foreign-arch selection + verify --------------------------
-	t.Run("amd64 consumer overridden to arm64 selects and verifies the arm64 child", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "arm64")
-
+	// --- POSITIVE: running-arch selection + verify --------------------------
+	t.Run("the consumer selects and verifies its own arch's child", func(t *testing.T) {
 		// Drive pull.PullImage directly (the seam launchRegistryImageResolver wraps)
 		// so the per-arch selection is assertable: it must resolve the manifest list,
-		// unwrap to the arm64 child, read its config content digest, and match the
-		// lock's arm64 entry — never the amd64 entry the publisher ran on.
+		// unwrap to the running arch's child, read its config content digest, and
+		// match the lock's entry for that arch. Under QEMU (arm64) this is the arm64
+		// child, never the amd64 entry — the #2025 cross-arch case.
 		imgRes, err := pull.PullImage(ctx, pull.ImagePullOptions{Registry: registry, VersionTag: versionID, Pin: pin})
 		if err != nil {
-			t.Fatalf("cross-arch pull+verify (arm64 consumer of an amd64-published plan): %v", err)
+			t.Fatalf("pull+verify for the running arch linux/%s: %v", hostArch, err)
 		}
 		if imgRes.BindingKind != freeze.BindingConfigContentDigest {
 			t.Errorf("binding = %q, want %q", imgRes.BindingKind, freeze.BindingConfigContentDigest)
 		}
-		if imgRes.ImageDigest != armDigest {
-			t.Errorf("verified config digest = %q, want the lock's arm64 entry %q (the arm64 child was selected)", imgRes.ImageDigest, armDigest)
-		}
-		if imgRes.ImageDigest == amdDigest {
-			t.Errorf("verified config digest is the amd64 entry %q; the consumer wrongly selected the publisher arch", amdDigest)
+		if imgRes.ImageDigest != wantArchDigest {
+			t.Errorf("verified config digest = %q, want the lock's linux/%s entry %q (the running arch's child was selected)", imgRes.ImageDigest, hostArch, wantArchDigest)
 		}
 		if imgRes.BootRef != wantBootRef {
 			t.Errorf("boot ref = %q, want the index-anchored %q", imgRes.BootRef, wantBootRef)
@@ -248,9 +260,8 @@ func TestFlightPlanCrossArchMultiArchE2E(t *testing.T) {
 		}
 	})
 
-	// --- POSITIVE: the registry-origin boot re-check selects the arm64 child --
-	t.Run("registry-origin boot re-check reaches the pull path and resolves the arm64 boot ref", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "arm64")
+	// --- POSITIVE: the registry-origin boot re-check selects the running-arch child
+	t.Run("registry-origin boot re-check reaches the pull path and resolves the boot ref", func(t *testing.T) {
 		rec := &recordingImageRunner{}
 		if _, err := runtime.Run(ctx, runtime.Options{
 			Store:                 s,
@@ -259,44 +270,29 @@ func TestFlightPlanCrossArchMultiArchE2E(t *testing.T) {
 			ImageRunner:           rec,
 			RegistryImageResolver: launchRegistryImageResolver{},
 		}); err != nil {
-			t.Fatalf("boot the registry-origin plan (must pull+verify the arm64 child): %v", err)
+			t.Fatalf("boot the registry-origin plan (must pull+verify the linux/%s child): %v", hostArch, err)
 		}
 		if rec.spec.Image != wantBootRef {
-			t.Errorf("boot spec image = %q, want the verified arm64 boot ref %q", rec.spec.Image, wantBootRef)
+			t.Errorf("boot spec image = %q, want the verified boot ref %q", rec.spec.Image, wantBootRef)
 		}
 	})
 
-	// --- NEGATIVE (a): an arch the artifact was NOT built for fails closed ---
-	t.Run("a consumer arch absent from the artifact fails closed", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "ppc64le")
-		_, err := pull.PullImage(ctx, pull.ImagePullOptions{Registry: registry, VersionTag: versionID, Pin: pin})
-		if err == nil {
-			t.Fatal("pulling for an unbuilt arch must fail closed, never boot an unattested image")
-		}
-		if !errors.Is(err, pull.ErrImageDigestMismatch) {
-			t.Fatalf("err = %v, want ErrImageDigestMismatch", err)
-		}
-		if !strings.Contains(err.Error(), "not published for") {
-			t.Errorf("err = %q, want the 'not published for' fail-closed message", err.Error())
-		}
-	})
-
-	// --- NEGATIVE (b): a tampered per-arch config is refused ----------------
-	t.Run("a tampered arm64 config digest is refused", func(t *testing.T) {
-		t.Setenv(hostArchOverrideEnv, "arm64")
+	// --- NEGATIVE: a tampered per-arch config is refused --------------------
+	t.Run("a tampered config digest for the running arch is refused", func(t *testing.T) {
 		tampered := pin
-		// Replace the arm64 entry with a digest the published image does not carry;
-		// the registry serves the honest image, but the (signed-lock) attestation
-		// for the selected arch no longer matches, so the per-arch verify must refuse.
+		// Replace the running arch's entry with a digest the published image does not
+		// carry; the registry serves the honest image, but the (signed-lock)
+		// attestation for the selected arch no longer matches, so the per-arch verify
+		// must refuse.
 		tampered.ConfigDigests = append([]freeze.PlatformDigest(nil), pin.ConfigDigests...)
 		for i := range tampered.ConfigDigests {
-			if tampered.ConfigDigests[i].Arch == "arm64" {
+			if tampered.ConfigDigests[i].Arch == hostArch {
 				tampered.ConfigDigests[i].Digest = "sha256:" + strings.Repeat("f", 64)
 			}
 		}
 		_, err := pull.PullImage(ctx, pull.ImagePullOptions{Registry: registry, VersionTag: versionID, Pin: tampered})
 		if err == nil {
-			t.Fatal("a pin attesting a different arm64 config digest must be refused")
+			t.Fatalf("a pin attesting a different linux/%s config digest must be refused", hostArch)
 		}
 		if !errors.Is(err, pull.ErrImageDigestMismatch) {
 			t.Fatalf("err = %v, want ErrImageDigestMismatch", err)

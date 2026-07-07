@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"runtime"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
@@ -13,28 +12,15 @@ import (
 	"oras.land/oras-go/v2/content"
 )
 
-// hostArchOverrideEnv names the architecture a consumer selects a platform child
-// for, overriding the runner's native runtime.GOARCH. It is the SAME env var
-// freeze.hostPlatform() honors when it selects the lock's per-arch pin entry; the
-// two selectors MUST agree on the arch or a consumer's per-arch verify compares
-// the wrong child's config against the pin (the exact cross-arch mismatch #2025
-// guards). Honoring it here lets a consumer running on one arch faithfully select
-// AND verify a foreign arch's child of a multi-arch artifact — an amd64 operator
-// validating an arm64 plan, or the cross-arch launch path (#2025/#2039) — the way
-// a genuine host of that arch would. Empty (the default) selects runtime.GOARCH,
-// so production behavior on a native host is unchanged. The string is duplicated
-// (not imported) from freeze to avoid coupling the two leaf packages; both
-// document it as one public contract and both carry contract tests.
-const hostArchOverrideEnv = "AILERON_FLIGHTPLAN_HOST_ARCH"
-
-// hostArch is the architecture a single-child platform selection targets: the
-// hostArchOverrideEnv value when set, else the runner's runtime.GOARCH.
-func hostArch() string {
-	if a := os.Getenv(hostArchOverrideEnv); a != "" {
-		return a
-	}
-	return runtime.GOARCH
-}
+// hostGOARCH is the architecture a single-child platform selection targets. It
+// mirrors freeze's hostGOARCH seam: a package var (not a direct runtime.GOARCH
+// read) so tests can exercise the foreign-arch child-selection branch
+// deterministically regardless of the arch the test binary runs on, matching
+// freeze.hostPlatform()'s arch vocabulary so a consumer verifies the child it
+// actually attests (#2025). Production initializes it to runtime.GOARCH; a
+// genuinely foreign consumer (e.g. an arm64 binary under QEMU) reports its own
+// arch here naturally.
+var hostGOARCH = runtime.GOARCH
 
 // Docker media type / annotation constants not exported by image-spec. A
 // containerd-backed `docker push` (Docker Desktop's default image store) emits
@@ -229,10 +215,11 @@ func selectPlatformManifest(raw []byte) (ocispec.Descriptor, error) {
 	if len(candidates) == 1 {
 		return candidates[0], nil
 	}
-	// Select the child for the consumer's target arch (hostArchOverrideEnv or the
-	// runner's native arch), matching freeze.hostPlatform()'s arch vocabulary so a
-	// cross-arch consumer verifies the child it actually attests (#2025).
-	wantArch := hostArch()
+	// Select the child for the consumer's target arch (the hostGOARCH seam,
+	// runtime.GOARCH in production), matching freeze.hostPlatform()'s arch
+	// vocabulary so a cross-arch consumer verifies the child it actually attests
+	// (#2025).
+	wantArch := hostGOARCH
 	for _, m := range candidates {
 		if m.Platform != nil && m.Platform.OS == runtime.GOOS && m.Platform.Architecture == wantArch {
 			return m, nil
