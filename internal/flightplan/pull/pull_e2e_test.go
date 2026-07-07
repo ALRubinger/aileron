@@ -141,7 +141,7 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-pull")
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/pull-plan"
-	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
+	pin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
 
 	if _, err := publish.Run(ctx, publish.Options{
 		Name: "e2e-plan", VersionID: versionID, Registry: registry,
@@ -235,8 +235,8 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	if imgRes.BootRef != wantRef {
 		t.Errorf("boot ref = %q, want the content-addressed manifest ref %q", imgRes.BootRef, wantRef)
 	}
-	if imgRes.ImageDigest != pin.Digest {
-		t.Errorf("verified image digest = %q, want the config content digest %q", imgRes.ImageDigest, pin.Digest)
+	if imgRes.ImageDigest != configContentDigest {
+		t.Errorf("verified image digest = %q, want the config content digest %q", imgRes.ImageDigest, configContentDigest)
 	}
 	// The daemon must be able to boot the returned reference: pull it and confirm
 	// the local config CONTENT digest still equals the attested pin (the same
@@ -246,8 +246,8 @@ func TestPullE2ERoundTrip(t *testing.T) {
 	docker(t, "pull", imgRes.BootRef)
 	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", imgRes.BootRef).Run() })
 	pulledContentDigest := localContentDigest(t, imgRes.BootRef)
-	if pulledContentDigest != pin.Digest {
-		t.Errorf("pulled image content digest = %q, want the attested config content digest %q", pulledContentDigest, pin.Digest)
+	if pulledContentDigest != configContentDigest {
+		t.Errorf("pulled image content digest = %q, want the attested config content digest %q", pulledContentDigest, configContentDigest)
 	}
 }
 
@@ -267,7 +267,7 @@ func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
 	tag, configContentDigest := buildLocalImage(t, "aileron/sandbox-tools:e2e-tamper")
 	res, versionID := e2eFrozen(t)
 	registry := host + "/e2e/tamper-plan"
-	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", Digest: configContentDigest, LocalTag: tag}
+	honestPin := freeze.ImagePin{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(configContentDigest), LocalTag: tag}
 
 	if _, err := publish.Run(ctx, publish.Options{
 		Name: "e2e-plan", VersionID: versionID, Registry: registry,
@@ -284,7 +284,7 @@ func TestPullImageE2ERefusesTamperedImage(t *testing.T) {
 	}
 
 	tamperedPin := honestPin
-	tamperedPin.Digest = "sha256:" + strings.Repeat("f", 64)
+	tamperedPin.ConfigDigests = hostConfigDigests("sha256:" + strings.Repeat("f", 64))
 	_, err := PullImage(ctx, ImagePullOptions{
 		Registry:   registry,
 		VersionTag: versionID,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestRunSkillPublishHappyPath(t *testing.T) {
 	if got.Name != "demo" || got.VersionID != "v1" || got.Registry != "ghcr.io/acme/demo" {
 		t.Errorf("options = %+v, want name=demo version=v1 registry=ghcr.io/acme/demo", got)
 	}
-	if len(got.Lock.ResolvedImages) != 1 || got.Lock.ResolvedImages[0] != pin {
+	if len(got.Lock.ResolvedImages) != 1 || !reflect.DeepEqual(got.Lock.ResolvedImages[0], pin) {
 		t.Errorf("lock pin = %+v, want %+v", got.Lock.ResolvedImages, pin)
 	}
 }
@@ -92,7 +93,7 @@ func TestRunSkillPublishMismatchMapped(t *testing.T) {
 	dir := t.TempDir()
 	skillStoreDir = dir
 	t.Cleanup(func() { skillStoreDir = "" })
-	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{{Ref: "r", Digest: "sha256:abc", LocalTag: "t"}}})
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{{Ref: "r", ConfigDigests: []freeze.PlatformDigest{{OS: "linux", Arch: "amd64", Digest: "sha256:abc"}}, LocalTag: "t"}}})
 	withStubPublish(t, func(context.Context, publish.Options) (publish.Result, error) {
 		return publish.Result{}, publish.ErrConfigContentDigestMismatch
 	})

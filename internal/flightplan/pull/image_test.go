@@ -19,6 +19,13 @@ import (
 	"oras.land/oras-go/v2/content/memory"
 )
 
+// hostConfigDigests builds a one-entry per-arch config-digest set keyed by the
+// host platform (linux/GOARCH), so a composed pin's HostConfigDigest selects it
+// on whatever arch the test runs on. Mirrors freeze.resolveImages's S2 producer.
+func hostConfigDigests(digest string) []freeze.PlatformDigest {
+	return []freeze.PlatformDigest{{OS: "linux", Arch: runtime.GOARCH, Digest: digest}}
+}
+
 // ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
 // the given marker, so distinct markers yield distinct content digests. A
 // composed pin binds by the serialization-agnostic config CONTENT digest.
@@ -134,9 +141,9 @@ func seedComposed(t *testing.T, st *memory.Store, versionTag string, configBody 
 		t.Fatalf("tag composed image: %v", err)
 	}
 	pin := freeze.ImagePin{
-		Ref:      "aileron/sandbox-tools+tools(gh)",
-		Digest:   contentDigest(t, configBody),
-		LocalTag: "aileron/sandbox-tools:abc123",
+		Ref:           "aileron/sandbox-tools+tools(gh)",
+		ConfigDigests: hostConfigDigests(contentDigest(t, configBody)),
+		LocalTag:      "aileron/sandbox-tools:abc123",
 	}
 	return pin, manifest
 }
@@ -175,9 +182,9 @@ func seedComposedIndex(t *testing.T, st *memory.Store, versionTag string, config
 		t.Fatalf("tag composed index: %v", err)
 	}
 	pin := freeze.ImagePin{
-		Ref:      "aileron/sandbox-tools+tools(gh)",
-		Digest:   contentDigest(t, configBody),
-		LocalTag: "aileron/sandbox-tools:abc123",
+		Ref:           "aileron/sandbox-tools+tools(gh)",
+		ConfigDigests: hostConfigDigests(contentDigest(t, configBody)),
+		LocalTag:      "aileron/sandbox-tools:abc123",
 	}
 	return pin, id
 }
@@ -207,8 +214,8 @@ func TestPullImage_ComposedOverOCIIndex(t *testing.T) {
 	if got.BootRef != wantRef {
 		t.Errorf("boot ref = %q, want the content-addressed index ref %q", got.BootRef, wantRef)
 	}
-	if got.ImageDigest != pin.Digest {
-		t.Errorf("image digest = %q, want the config content digest %q", got.ImageDigest, pin.Digest)
+	if got.ImageDigest != pin.ConfigDigests[0].Digest {
+		t.Errorf("image digest = %q, want the config content digest %q", got.ImageDigest, pin.ConfigDigests[0].Digest)
 	}
 }
 
@@ -222,7 +229,7 @@ func TestPullImage_ComposedReserializedConfigInstalls(t *testing.T) {
 	// The registry serves the re-serialized config; the lock still attests the
 	// honest content digest.
 	pin, manifest := seedComposed(t, st, "v1abc", reserialize(t, honest))
-	pin.Digest = contentDigest(t, honest)
+	pin.ConfigDigests = hostConfigDigests(contentDigest(t, honest))
 
 	got, err := PullImage(context.Background(), ImagePullOptions{
 		Source:     st,
@@ -258,7 +265,7 @@ func TestPullImage_ComposedTamperedConfigRejected(t *testing.T) {
 		t.Fatalf("marshal tampered: %v", err)
 	}
 	pin, _ := seedComposed(t, st, "v1abc", tampered)
-	pin.Digest = contentDigest(t, honest)
+	pin.ConfigDigests = hostConfigDigests(contentDigest(t, honest))
 
 	got, err := PullImage(context.Background(), ImagePullOptions{
 		Source:     st,
@@ -299,7 +306,7 @@ func TestPullImage_ComposedIndexNoRunnableManifestFailsClosed(t *testing.T) {
 	if err := st.Tag(ctx, id, freeze.ComposedImageTag("v1abc")); err != nil {
 		t.Fatalf("tag: %v", err)
 	}
-	pin := freeze.ImagePin{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"}
+	pin := freeze.ImagePin{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)), LocalTag: "t"}
 	_, err = PullImage(ctx, ImagePullOptions{
 		Source: st, Registry: testRegistry, VersionTag: "v1abc", Pin: pin,
 	})
@@ -334,8 +341,8 @@ func TestPullImage_ComposedMatchReturnsBootableRef(t *testing.T) {
 	if got.BootRef != wantRef {
 		t.Errorf("boot ref = %q, want the content-addressed manifest ref %q", got.BootRef, wantRef)
 	}
-	if got.ImageDigest != pin.Digest {
-		t.Errorf("image digest = %q, want the config content digest %q", got.ImageDigest, pin.Digest)
+	if got.ImageDigest != pin.ConfigDigests[0].Digest {
+		t.Errorf("image digest = %q, want the config content digest %q", got.ImageDigest, pin.ConfigDigests[0].Digest)
 	}
 }
 
@@ -343,7 +350,7 @@ func TestPullImage_ComposedMismatchFailsClosed(t *testing.T) {
 	st := memory.New()
 	pin, _ := seedComposed(t, st, "v1abc", ociConfigBody(t, "composed"))
 	// The lock attests a DIFFERENT config content digest than the seeded image.
-	pin.Digest = "sha256:" + strings.Repeat("f", 64)
+	pin.ConfigDigests = hostConfigDigests("sha256:" + strings.Repeat("f", 64))
 
 	got, err := PullImage(context.Background(), ImagePullOptions{
 		Source:     st,
@@ -359,12 +366,36 @@ func TestPullImage_ComposedMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestPullImage_ComposedHostArchAbsentFailsClosed(t *testing.T) {
+	st := memory.New()
+	pin, _ := seedComposed(t, st, "v1abc", ociConfigBody(t, "composed"))
+	// The pin was built for a bogus arch that never equals the host, so the
+	// host-platform selection misses and the pull refuses before resolving.
+	pin.ConfigDigests = []freeze.PlatformDigest{{OS: "linux", Arch: "no-such-arch", Digest: "sha256:" + strings.Repeat("a", 64)}}
+
+	got, err := PullImage(context.Background(), ImagePullOptions{
+		Source:     st,
+		Registry:   testRegistry,
+		VersionTag: "v1abc",
+		Pin:        pin,
+	})
+	if !errors.Is(err, ErrImageDigestMismatch) {
+		t.Fatalf("err = %v, want ErrImageDigestMismatch for a host-arch-absent pin", err)
+	}
+	if !strings.Contains(err.Error(), "not published for") {
+		t.Errorf("err = %v, want a 'not published for <host platform>' message", err)
+	}
+	if got.BootRef != "" {
+		t.Errorf("a host-arch-absent pin must return no bootable ref, got %q", got.BootRef)
+	}
+}
+
 func TestPullImage_ComposedMissingIsErrImageMissing(t *testing.T) {
 	st := memory.New() // nothing seeded under the composed tag
 	pin := freeze.ImagePin{
-		Ref:      "aileron/sandbox-tools",
-		Digest:   "sha256:" + strings.Repeat("a", 64),
-		LocalTag: "aileron/sandbox-tools:abc",
+		Ref:           "aileron/sandbox-tools",
+		ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)),
+		LocalTag:      "aileron/sandbox-tools:abc",
 	}
 	_, err := PullImage(context.Background(), ImagePullOptions{
 		Source:     st,
@@ -466,7 +497,7 @@ func TestPullImage_NoDigestFailsClosed(t *testing.T) {
 		Source:     memory.New(),
 		Registry:   testRegistry,
 		VersionTag: "v1abc",
-		Pin:        freeze.ImagePin{Ref: "r", LocalTag: "t"}, // no Digest
+		Pin:        freeze.ImagePin{Ref: "r", LocalTag: "t"}, // composed pin, no configDigests
 	})
 	if !errors.Is(err, ErrImageDigestMismatch) {
 		t.Fatalf("err = %v, want ErrImageDigestMismatch for a digest-less pin", err)
@@ -499,7 +530,7 @@ func (r resolveErrTarget) Resolve(context.Context, string) (ocispec.Descriptor, 
 func TestPullImage_ComposedResolveErrorIsPullFailed(t *testing.T) {
 	boom := errors.New("dial tcp: connection refused")
 	src := resolveErrTarget{Store: memory.New(), err: boom}
-	pin := freeze.ImagePin{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"}
+	pin := freeze.ImagePin{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)), LocalTag: "t"}
 	_, err := PullImage(context.Background(), ImagePullOptions{
 		Source: src, Registry: testRegistry, VersionTag: "v1abc", Pin: pin,
 	})
@@ -564,7 +595,7 @@ func TestPullImage_ComposedManifestWithoutConfigDigestFailsClosed(t *testing.T) 
 	if err := st.Tag(ctx, md, freeze.ComposedImageTag("v1abc")); err != nil {
 		t.Fatalf("tag: %v", err)
 	}
-	pin := freeze.ImagePin{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"}
+	pin := freeze.ImagePin{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)), LocalTag: "t"}
 	_, err = PullImage(ctx, ImagePullOptions{
 		Source: st, Registry: testRegistry, VersionTag: "v1abc", Pin: pin,
 	})

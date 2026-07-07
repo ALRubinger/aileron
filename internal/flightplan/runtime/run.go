@@ -46,14 +46,16 @@ type Options struct {
 	// attestation).
 	ImageRunner ImageRunner
 	// ImageDigestResolver re-checks, at boot time, that a composed-tools pin's
-	// LocalTag still resolves in the local daemon to the pin's attested Digest
-	// (#1863). It is consulted ONLY on the composed boot path (pin.LocalTag !=
-	// ""): a composed image is booted by its mutable local tag (its recorded
-	// Digest is a locally-built image Id, not a registry digest, so `ref@digest`
-	// would not resolve), and nothing else re-checks that the daemon image behind
-	// that tag is still the attested one. When this seam is wired and the pin is
-	// composed, the resolved digest MUST equal pin.Digest or the boot fails closed
-	// (no ImageRunner.Run call); a resolve error is likewise fail-closed (the
+	// LocalTag still resolves in the local daemon to the host platform's attested
+	// config content digest (#1863). It is consulted ONLY on the composed boot
+	// path (pin.LocalTag != ""): a composed image is booted by its mutable local
+	// tag (its recorded content digest is a locally-built image Id, not a registry
+	// digest, so `ref@digest` would not resolve), and nothing else re-checks that
+	// the daemon image behind that tag is still the attested one. When this seam is
+	// wired and the pin is composed, the resolved digest MUST equal the host
+	// platform's entry from the pin's per-arch configDigests set or the boot fails
+	// closed (no ImageRunner.Run call); a plan not built for this host's platform is
+	// likewise fail-closed, as is a resolve error (the
 	// attested image is absent). Nil (the zero value) skips the guard and boots as
 	// before (backward-compatible), mirroring the ImageRunner nil-guard discipline.
 	ImageDigestResolver LocalImageDigestResolver

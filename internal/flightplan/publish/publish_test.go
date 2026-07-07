@@ -22,6 +22,13 @@ import (
 	"oras.land/oras-go/v2/errdef"
 )
 
+// hostConfigDigests builds a one-entry per-arch config-digest set keyed by the
+// host platform (linux/GOARCH), so a composed pin's HostConfigDigest selects it
+// on whatever arch the test runs on. Mirrors freeze.resolveImages's S2 producer.
+func hostConfigDigests(digest string) []freeze.PlatformDigest {
+	return []freeze.PlatformDigest{{OS: "linux", Arch: runtime.GOARCH, Digest: digest}}
+}
+
 // ociConfigBody builds a valid OCI image config blob whose Entrypoint carries
 // the given marker, so distinct markers yield distinct content digests. A
 // composed pin binds by the serialization-agnostic config CONTENT digest of
@@ -180,7 +187,7 @@ func composedOptions(target *memory.Store, configBody []byte) Options {
 		Registry:  "example.com/demo",
 		Frozen:    testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "aileron/sandbox-tools", Digest: cd, LocalTag: "aileron/sandbox-tools:abc123"},
+			{Ref: "aileron/sandbox-tools", ConfigDigests: hostConfigDigests(cd), LocalTag: "aileron/sandbox-tools:abc123"},
 		}},
 		ImageSource: fakeImageSource{configContentDigest: cd},
 		Target:      target,
@@ -219,6 +226,31 @@ func TestRunComposedContentDigestBinding(t *testing.T) {
 		t.Errorf("image digest = %q, want %q", res.ImageDigest, manifest.Digest)
 	}
 	assertReferrerAttached(t, target, res, manifest.Digest.String(), freeze.BindingConfigContentDigest)
+}
+
+// TestRunComposedHostArchAbsentFailsClosed proves publish fails closed when the
+// composed pin's per-arch config-digest set carries no entry for the host
+// platform: single-arch publish can only verify the image it built for this
+// host, so a pin built for other arches only is refused before any bytes leave.
+func TestRunComposedHostArchAbsentFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	target := memory.New()
+	body := ociConfigBody(t, "composed")
+	seedComposedTarget(t, target, "v1", body)
+
+	opts := composedOptions(target, body)
+	// Re-key the config-digest set to a bogus arch that never equals the host.
+	opts.Lock.ResolvedImages[0].ConfigDigests = []freeze.PlatformDigest{
+		{OS: "linux", Arch: "no-such-arch", Digest: contentDigestNoT(body)},
+	}
+
+	_, err := Run(ctx, opts)
+	if !errors.Is(err, ErrConfigContentDigestMismatch) {
+		t.Fatalf("err = %v, want ErrConfigContentDigestMismatch for a host-arch-absent pin", err)
+	}
+	if !strings.Contains(err.Error(), "not published for") {
+		t.Errorf("err = %v, want a 'not published for <host platform>' message", err)
+	}
 }
 
 // TestRunComposedReserializedConfigPublishes is the #2014 core regression: a
@@ -341,7 +373,7 @@ func TestRunComposedContentDigestMismatchFailsClosed(t *testing.T) {
 		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
 		Frozen: testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "r", Digest: "sha256:" + strings.Repeat("0", 64), LocalTag: "t"},
+			{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("0", 64)), LocalTag: "t"},
 		}},
 		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("1", 64)},
 		Target:      target,
@@ -741,7 +773,7 @@ func TestRunComposedResolveError(t *testing.T) {
 		Name: "demo", VersionID: "v1", Registry: "example.com/demo",
 		Frozen: testFrozen(),
 		Lock: freeze.Lockfile{ResolvedImages: []freeze.ImagePin{
-			{Ref: "r", Digest: "sha256:" + strings.Repeat("a", 64), LocalTag: "t"},
+			{Ref: "r", ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("a", 64)), LocalTag: "t"},
 		}},
 		ImageSource: fakeImageSource{configContentDigest: "sha256:" + strings.Repeat("a", 64)},
 		Target:      target,

@@ -306,16 +306,25 @@ aileron:
 const lockTestDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // TestLockResolvedImagesSinglePinShape locks the one-pin model at the schema
-// boundary (#1827): a resolvedImages item is exactly {ref, digest}. The
-// retired per-pin `id` and `hosts` keys (the rung-3 stepId-on-pin linkage) are
-// rejected outright; the step-keyed sealed reach lives in the sibling
-// stepTrust section instead.
+// boundary (#1827/#2035): a resolvedImages item is a foreign-base pin
+// {ref, digest} or a composed pin {ref, localTag, configDigests}. The schema
+// conditional requires configDigests when localTag is present and digest
+// otherwise. The retired per-pin `id` and `hosts` keys (the rung-3 stepId-on-pin
+// linkage) are rejected outright; the step-keyed sealed reach lives in the
+// sibling stepTrust section instead.
 func TestLockResolvedImagesSinglePinShape(t *testing.T) {
+	// item builds a foreign-base pin (ref + digest) plus any extra lines.
 	item := func(extra string) string {
 		return "    resolvedImages:\n      - ref: registry.example.com/runner:1.4\n        digest: " + lockTestDigest + extra
 	}
+	const configDigests = "\n        configDigests:\n          - os: linux\n            arch: amd64\n            digest: " + lockTestDigest
+	// composedItem builds a composed pin (ref + localTag + configDigests) plus
+	// any extra lines: the shape freeze emits for an environment-with-tools unit.
+	composedItem := func(extra string) string {
+		return "    resolvedImages:\n      - ref: aileron/sandbox-tools\n        localTag: aileron/sandbox-tools:0123456789abcdef" + configDigests + extra
+	}
 
-	t.Run("valid/ref and digest only", func(t *testing.T) {
+	t.Run("valid/foreign-base ref and digest only", func(t *testing.T) {
 		if err := validateFrontmatter(lockFrontmatter(item(""))); err != nil {
 			t.Fatalf("a ref+digest pin must validate, got: %v", err)
 		}
@@ -335,14 +344,33 @@ func TestLockResolvedImagesSinglePinShape(t *testing.T) {
 			t.Fatal("an unknown key on a resolvedImages item must be rejected")
 		}
 	})
-	t.Run("valid/composed pin carries localTag", func(t *testing.T) {
-		if err := validateFrontmatter(lockFrontmatter(item("\n        localTag: aileron/sandbox-tools:0123456789abcdef"))); err != nil {
-			t.Fatalf("a pin carrying a bootable localTag must validate, got: %v", err)
+	t.Run("valid/composed pin carries localTag and configDigests", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(composedItem(""))); err != nil {
+			t.Fatalf("a composed pin with localTag + configDigests must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/composed pin missing configDigests", func(t *testing.T) {
+		bad := "    resolvedImages:\n      - ref: aileron/sandbox-tools\n        localTag: aileron/sandbox-tools:0123456789abcdef"
+		if err := validateFrontmatter(lockFrontmatter(bad)); err == nil {
+			t.Fatal("a composed pin (localTag set) without configDigests must be rejected")
+		}
+	})
+	t.Run("invalid/foreign-base pin missing digest", func(t *testing.T) {
+		bad := "    resolvedImages:\n      - ref: registry.example.com/runner:1.4"
+		if err := validateFrontmatter(lockFrontmatter(bad)); err == nil {
+			t.Fatal("a foreign-base pin (no localTag) without digest must be rejected")
 		}
 	})
 	t.Run("invalid/empty localTag rejected", func(t *testing.T) {
 		if err := validateFrontmatter(lockFrontmatter(item("\n        localTag: \"\""))); err == nil {
 			t.Fatal("an empty-string localTag must be rejected by minLength: 1")
+		}
+	})
+	t.Run("invalid/configDigests entry missing arch", func(t *testing.T) {
+		bad := "    resolvedImages:\n      - ref: aileron/sandbox-tools\n        localTag: aileron/sandbox-tools:0123456789abcdef" +
+			"\n        configDigests:\n          - os: linux\n            digest: " + lockTestDigest
+		if err := validateFrontmatter(lockFrontmatter(bad)); err == nil {
+			t.Fatal("a configDigests entry missing arch must be rejected")
 		}
 	})
 }

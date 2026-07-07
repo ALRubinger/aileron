@@ -38,15 +38,17 @@ const (
 	AnnotationVersion = "ai.aileron.flightplan.version"
 
 	// BindingConfigContentDigest marks a composed-tools image whose signed-lock
-	// Digest is the image's serialization-agnostic config CONTENT digest (see
+	// per-arch configDigests set carries the image's serialization-agnostic
+	// config CONTENT digest for each built platform (see
 	// internal/flightplan/imgconfig): a hash over the parsed config's
 	// execution-relevant fields (rootfs.diff_ids plus Env/Entrypoint/Cmd/User/
 	// WorkingDir/Volumes/ExposedPorts/Labels/StopSignal and os/arch), not the
 	// config blob's own sha256. The image is built at freeze, so its attested
 	// identity is this content digest, which is stable across the config-blob
 	// re-serialization the containerd image store performs on `docker push`
-	// (issue #2014). Publish and launch verify the pushed image's config content
-	// digest == lock Digest.
+	// (issue #2014). Publish and launch select the host platform's entry from
+	// the configDigests set and verify the pushed image's config content digest
+	// == that entry.
 	BindingConfigContentDigest = "config-content-digest"
 	// BindingManifestDigest marks an image-only/custom-base image whose
 	// signed-lock Digest is the base image's registry manifest digest. Publish
@@ -69,10 +71,11 @@ func ComposedImageTag(versionID string) string { return versionID + "-image" }
 // BindingKind reports how a resolved image pin's signed-lock Digest binds to
 // the published/pulled image, derived purely from the signature-covered pin:
 //
-//   - A composed-tools pin carries a LocalTag and a config-content-digest Digest
+//   - A composed-tools pin carries a LocalTag and a per-arch configDigests set
 //     (freeze builds the image locally and pins its serialization-agnostic
-//     config content digest; see skill_freeze.go localImageContentDigest and
-//     ADR-0027), so it binds by config content digest.
+//     config content digest per platform; see skill_freeze.go
+//     localImageContentDigest and ADR-0027), so it binds by config content
+//     digest.
 //   - An image-only or custom-base pin has no LocalTag and a registry
 //     manifest-digest Digest, so it binds by manifest digest.
 //

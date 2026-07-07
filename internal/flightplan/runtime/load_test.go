@@ -181,9 +181,16 @@ func TestLoadVerified_PropagatesResolvedImages(t *testing.T) {
 	if len(lp.ResolvedImages) != 1 {
 		t.Fatalf("ResolvedImages = %+v, want exactly one pin", lp.ResolvedImages)
 	}
+	// The worked example composes tools, so freeze pins a composed image by its
+	// per-arch config-digest set; the host platform's entry must select to the
+	// composer's digest.
 	wantDigest := "sha256:" + strings.Repeat("a", 64)
-	if lp.ResolvedImages[0].Digest != wantDigest {
-		t.Errorf("ResolvedImages[0].Digest = %q, want %q", lp.ResolvedImages[0].Digest, wantDigest)
+	got, _, ok := lp.ResolvedImages[0].HostConfigDigest()
+	if !ok {
+		t.Fatalf("ResolvedImages[0] carries no config digest for the host platform: %+v", lp.ResolvedImages[0])
+	}
+	if got != wantDigest {
+		t.Errorf("host config digest = %q, want %q", got, wantDigest)
 	}
 	if lp.ResolvedImages[0].Ref == "" {
 		t.Error("ResolvedImages[0].Ref must carry the pre-freeze reference")

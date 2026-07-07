@@ -175,6 +175,14 @@ func VerifyFrozen(skillMD, lockfile, signature, pubPEM []byte) (VerifiedFrozen, 
 	var pins []ImagePin
 	if len(manifestLock.ResolvedImages) > 0 {
 		pins = append([]ImagePin(nil), manifestLock.ResolvedImages...)
+		// Each pin now carries a ConfigDigests slice; deep-copy it (like the
+		// StepTrust hosts below) so a later mutation of manifestLock's backing
+		// arrays can never change what a caller reads off the verified path.
+		for i := range pins {
+			if len(pins[i].ConfigDigests) > 0 {
+				pins[i].ConfigDigests = append([]PlatformDigest(nil), pins[i].ConfigDigests...)
+			}
+		}
 	}
 	// The step-keyed sealed reach is copied from the manifest's own verified
 	// lock block exactly like the pins, with the hosts slices defensively

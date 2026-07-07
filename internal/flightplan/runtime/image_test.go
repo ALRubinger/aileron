@@ -71,7 +71,7 @@ func TestRunInImage_BootsComposedLocalTag(t *testing.T) {
 	lp := LoadedPlan{
 		ContentHash: "sha256:content",
 		ResolvedImages: []freeze.ImagePin{
-			{Ref: descriptiveRef, Digest: imageID, LocalTag: localTag},
+			{Ref: descriptiveRef, ConfigDigests: hostConfigDigests(imageID), LocalTag: localTag},
 		},
 	}
 	fake := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
@@ -200,9 +200,9 @@ func registryOriginPlan() LoadedPlan {
 	return LoadedPlan{
 		ContentHash: "sha256:content",
 		ResolvedImages: []freeze.ImagePin{{
-			Ref:      "aileron/sandbox-tools+tools(gh)",
-			Digest:   "sha256:" + strings.Repeat("c", 64),
-			LocalTag: "aileron/sandbox-tools:abc123",
+			Ref:           "aileron/sandbox-tools+tools(gh)",
+			ConfigDigests: hostConfigDigests("sha256:" + strings.Repeat("c", 64)),
+			LocalTag:      "aileron/sandbox-tools:abc123",
 		}},
 		ImageOrigin: RegistryImageOrigin{
 			Registry:   "ghcr.io/acme/plan",
@@ -240,8 +240,8 @@ func TestRunInImage_RegistryOriginBootsResolvedRef(t *testing.T) {
 	if resolver.gotOrigin.Registry != "ghcr.io/acme/plan" || resolver.gotOrigin.VersionTag != "v1abc" {
 		t.Errorf("resolver origin = %+v, want the recorded install origin", resolver.gotOrigin)
 	}
-	if resolver.gotPin.Digest != lp.ResolvedImages[0].Digest {
-		t.Errorf("resolver pin digest = %q, want the signed lock pin", resolver.gotPin.Digest)
+	if resolver.gotPin.ConfigDigests[0].Digest != lp.ResolvedImages[0].ConfigDigests[0].Digest {
+		t.Errorf("resolver pin digest = %q, want the signed lock pin", resolver.gotPin.ConfigDigests[0].Digest)
 	}
 	if localGuard.called {
 		t.Error("the local-tag #1863 guard must NOT run on the registry-origin path")

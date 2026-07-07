@@ -2,18 +2,46 @@ package freeze
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// ImagePin pairs a pre-freeze image reference with the content-addressed
-// digest freeze resolved it to. The schema `$defs.lock.resolvedImages[]` item
-// admits {ref, digest, localTag?}: the plan runs in one container, so freeze
-// emits at most one pin and no per-pin step linkage.
-type ImagePin struct {
-	Ref    string `yaml:"ref" json:"ref"`
+// PlatformDigest is one entry in a composed pin's per-arch config-content-digest
+// set: the `(os, arch)` platform key plus the serialization-agnostic config
+// CONTENT digest freeze pinned for the image built for that platform. It mirrors
+// a schema `$defs.lock.resolvedImages[].configDigests[]` item exactly.
+type PlatformDigest struct {
+	OS     string `yaml:"os" json:"os"`
+	Arch   string `yaml:"arch" json:"arch"`
 	Digest string `yaml:"digest" json:"digest"`
+}
+
+// ImagePin pairs a pre-freeze image reference with the content-addressed
+// digest(s) freeze resolved it to. The schema `$defs.lock.resolvedImages[]`
+// item admits {ref, digest?, configDigests?, localTag?}: the plan runs in one
+// container, so freeze emits at most one pin and no per-pin step linkage. The
+// two digest fields are mutually exclusive by binding kind:
+//
+//   - A composed-tools pin (LocalTag set) carries ConfigDigests: a per-arch set
+//     of serialization-agnostic config CONTENT digests, one entry per platform
+//     the composed image was built for. Launch/publish/pull select the host
+//     platform's entry from the set. A composed pin leaves Digest empty.
+//   - An image-only / foreign-base pin (no LocalTag) carries the single Digest:
+//     the base image's registry manifest digest. It has no ConfigDigests.
+type ImagePin struct {
+	Ref string `yaml:"ref" json:"ref"`
+	// Digest is the foreign-base pin's registry manifest digest. Empty on a
+	// composed pin, which binds by the per-arch ConfigDigests set instead.
+	// omitempty keeps a composed pin's serialized form free of an empty digest.
+	Digest string `yaml:"digest,omitempty" json:"digest,omitempty"`
+	// ConfigDigests is the composed pin's per-arch set of serialization-agnostic
+	// config content digests, keyed by `(os, arch)`. Set only on a composed-tools
+	// pin; empty on a foreign-base pin (which binds by Digest). Sorted by
+	// `(os, arch)` in withoutContentHash so the content hash and signature are
+	// order-independent.
+	ConfigDigests []PlatformDigest `yaml:"configDigests,omitempty" json:"configDigests,omitempty"`
 	// LocalTag is the bootable local-daemon tag for a composed-tools pin
 	// (`aileron/sandbox-tools:<hex>`), the identity the composed image carries
 	// in the local daemon. It is set only on the composed-tools pin: an
@@ -70,11 +98,44 @@ type Lockfile struct {
 }
 
 // withoutContentHash returns a copy of the lockfile with ContentHash
-// cleared. The content hash cannot reference its own value, so the bytes it
-// is taken over must omit it (see content.go).
+// cleared and every pin's ConfigDigests sorted by `(os, arch)`. The content
+// hash cannot reference its own value, so the bytes it is taken over must omit
+// it (see content.go). The canonical config-digest sort makes the content hash
+// and ed25519 signature order-independent: because VerifyFrozen re-marshals
+// from the parsed struct, a lock whose configDigests were reordered on disk
+// re-hashes to the identical value. The pins slice and each pin's
+// ConfigDigests slice are copied before sorting so the caller's original value
+// is never mutated under it.
 func (l Lockfile) withoutContentHash() Lockfile {
 	l.ContentHash = ""
+	if len(l.ResolvedImages) > 0 {
+		pins := make([]ImagePin, len(l.ResolvedImages))
+		copy(pins, l.ResolvedImages)
+		for i := range pins {
+			pins[i].ConfigDigests = sortedConfigDigests(pins[i].ConfigDigests)
+		}
+		l.ResolvedImages = pins
+	}
 	return l
+}
+
+// sortedConfigDigests returns a copy of the config-digest set sorted by
+// `(os, arch)` so the canonical lock bytes are order-independent. It returns
+// the input unchanged (nil or empty) when there is nothing to sort, and never
+// mutates the caller's slice.
+func sortedConfigDigests(in []PlatformDigest) []PlatformDigest {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]PlatformDigest, len(in))
+	copy(out, in)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OS != out[j].OS {
+			return out[i].OS < out[j].OS
+		}
+		return out[i].Arch < out[j].Arch
+	})
+	return out
 }
 
 // MarshalLockfile renders the lockfile as the standalone `aileron.lock`

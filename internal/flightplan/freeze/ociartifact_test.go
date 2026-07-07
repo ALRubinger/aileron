@@ -1,6 +1,9 @@
 package freeze
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestBindingKind(t *testing.T) {
 	cases := []struct {
@@ -8,7 +11,7 @@ func TestBindingKind(t *testing.T) {
 		pin  ImagePin
 		want string
 	}{
-		{"composed pin binds by config content digest", ImagePin{Digest: "sha256:aa", LocalTag: "aileron/sandbox-tools:x"}, BindingConfigContentDigest},
+		{"composed pin binds by config content digest", ImagePin{ConfigDigests: []PlatformDigest{{OS: "linux", Arch: "amd64", Digest: "sha256:aa"}}, LocalTag: "aileron/sandbox-tools:x"}, BindingConfigContentDigest},
 		{"image-only pin binds by manifest digest", ImagePin{Ref: "docker.io/library/python", Digest: "sha256:bb"}, BindingManifestDigest},
 	}
 	for _, tc := range cases {
@@ -22,10 +25,14 @@ func TestBindingKind(t *testing.T) {
 
 func TestParseLockfileRoundTrip(t *testing.T) {
 	in := Lockfile{
-		ResolvedImages: []ImagePin{{Ref: "aileron/sandbox-tools", Digest: "sha256:abc", LocalTag: "aileron/sandbox-tools:x"}},
-		Publisher:      "github://acme",
-		ContentHash:    "sha256:deadbeef",
-		Version:        "1.2.3",
+		ResolvedImages: []ImagePin{{
+			Ref:           "aileron/sandbox-tools",
+			ConfigDigests: []PlatformDigest{{OS: "linux", Arch: "amd64", Digest: "sha256:abc"}},
+			LocalTag:      "aileron/sandbox-tools:x",
+		}},
+		Publisher:   "github://acme",
+		ContentHash: "sha256:deadbeef",
+		Version:     "1.2.3",
 	}
 	data, err := MarshalLockfile(in)
 	if err != nil {
@@ -35,7 +42,7 @@ func TestParseLockfileRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseLockfile: %v", err)
 	}
-	if len(got.ResolvedImages) != 1 || got.ResolvedImages[0] != in.ResolvedImages[0] {
+	if len(got.ResolvedImages) != 1 || !reflect.DeepEqual(got.ResolvedImages[0], in.ResolvedImages[0]) {
 		t.Errorf("ResolvedImages round-trip = %+v, want %+v", got.ResolvedImages, in.ResolvedImages)
 	}
 	if got.Publisher != in.Publisher || got.Version != in.Version || got.ContentHash != in.ContentHash {
