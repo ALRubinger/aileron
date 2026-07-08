@@ -12,18 +12,54 @@ import (
 	"oras.land/oras-go/v2/content"
 )
 
+// dockerMediaTypeForeignLayer is the Docker foreign (non-distributable) layer
+// media type. oras references it as docker.MediaTypeForeignLayer, but that lives
+// in oras's internal/docker package and is not importable, so the constant is
+// mirrored here. Keep it byte-identical to oras's value; the drift-guard test
+// TestSumSubDAGSizeFiltersForeignLayers pins the whole foreign set so this stays
+// in sync with oras's internal/descriptor.IsForeignLayer.
+const dockerMediaTypeForeignLayer = "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"
+
+// isForeignLayer reports whether desc describes a foreign (non-distributable)
+// layer that oras never copies. It mirrors oras's internal
+// descriptor.IsForeignLayer set exactly: the three OCI non-distributable layer
+// media types plus the Docker foreign layer type. oras strips these via
+// removeForeignLayers (copy.go) before CopyGraph, so the determinate progress
+// total must exclude their bytes or a push carrying a foreign layer can never
+// settle the bar to 100%.
+func isForeignLayer(desc ocispec.Descriptor) bool {
+	switch desc.MediaType {
+	case ocispec.MediaTypeImageLayerNonDistributable, //nolint:staticcheck // mirrors oras's IsForeignLayer set; the type is deprecated upstream but oras still filters it
+		ocispec.MediaTypeImageLayerNonDistributableGzip, //nolint:staticcheck // see above
+		ocispec.MediaTypeImageLayerNonDistributableZstd, //nolint:staticcheck // see above
+		dockerMediaTypeForeignLayer:
+		return true
+	default:
+		return false
+	}
+}
+
 // sumSubDAGSize returns the total byte weight of the sub-DAG rooted at root:
 // root.Size plus the Size of every transitive successor reachable via
-// content.Successors, counting each distinct digest exactly once. An OCI graph
-// is a DAG (a shared config or layer blob can be pointed at by several
-// manifests), so deduping by digest is required to avoid double-counting a
-// shared child. It is the precomputed determinate `total` a push settles
-// against: a fully-fresh push settles it via PostCopy, a fully-already-present
-// push via OnCopySkipped, and both land at exactly this value (100%).
+// content.Successors, counting each distinct digest exactly once and skipping
+// foreign/non-distributable layers oras never copies. An OCI graph is a DAG (a
+// shared config or layer blob can be pointed at by several manifests), so
+// deduping by digest is required to avoid double-counting a shared child. It is
+// the precomputed determinate `total` a push settles against: a fully-fresh push
+// settles it via PostCopy, a fully-already-present push via OnCopySkipped, and
+// both land at exactly this value (100%). Foreign layers are excluded because
+// oras strips them via removeForeignLayers before copying, so their bytes are
+// never settled and counting them would leave the bar short of 100%.
 func sumSubDAGSize(ctx context.Context, fetcher content.Fetcher, root ocispec.Descriptor) (int64, error) {
 	seen := make(map[string]bool)
 	var walk func(desc ocispec.Descriptor) (int64, error)
 	walk = func(desc ocispec.Descriptor) (int64, error) {
+		// A foreign layer is never copied by oras, so it contributes no settled
+		// bytes and is excluded from the total. Foreign layers are leaf blobs
+		// with no successors, so there is nothing further to descend into.
+		if isForeignLayer(desc) {
+			return 0, nil
+		}
 		key := desc.Digest.String()
 		if seen[key] {
 			return 0, nil

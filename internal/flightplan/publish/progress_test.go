@@ -3,7 +3,9 @@ package publish
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,8 +13,10 @@ import (
 	"github.com/ALRubinger/aileron/internal/cli/progress"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 
+	specs "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	oras "oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
 )
 
@@ -315,5 +319,168 @@ func TestPublishProgressImagePushErrorFails(t *testing.T) {
 	// The Fail path must not have written a false success line.
 	if strings.Contains(out.String(), "Pushed image to registry") {
 		t.Errorf("failed push emitted a success completion line; output:\n%s", out.String())
+	}
+}
+
+// authFailTarget wraps a memory store but rejects Push for one media type with
+// an auth/scope-shaped error message, standing in for a registry that refuses a
+// write because the caller lacks push credentials/scope (e.g. ghcr.io's
+// "permission_denied" or a 403). annotateRegistryAuthError must recognize this
+// shape and annotate the returned error.
+type authFailTarget struct {
+	*memory.Store
+	failMediaType string
+}
+
+func (a authFailTarget) Push(ctx context.Context, desc ocispec.Descriptor, r io.Reader) error {
+	if desc.MediaType == a.failMediaType {
+		return errors.New("permission_denied: 403 Forbidden: requested access to the resource is denied")
+	}
+	return a.Store.Push(ctx, desc, r)
+}
+
+// TestPublishProgressImagePushAuthErrorAnnotated proves an auth/scope-shaped
+// push failure surviving the ind.Fail path still reaches the operator carrying
+// the annotateRegistryAuthError hint (the registry host and `docker login`
+// guidance), rather than the Fail path swallowing the annotation. This guards
+// the seam between the determinate progress indicator's Fail and the Run-level
+// error wrapping: the wrap must not be lost when a push fails under progress.
+func TestPublishProgressImagePushAuthErrorAnnotated(t *testing.T) {
+	ctx := context.Background()
+	inner := memory.New()
+	layout := twoArch(t)
+	var out bytes.Buffer
+	opts := composedOptions(authFailTarget{Store: inner, failMediaType: ocispec.MediaTypeImageIndex}, layout)
+	opts.Stdout = &out
+	_, err := Run(ctx, opts)
+	if err == nil {
+		t.Fatalf("err = nil, want an annotated auth push failure")
+	}
+	msg := err.Error()
+	// The push-composed-image wrap survives.
+	if !strings.Contains(msg, "push composed image") {
+		t.Errorf("err = %v, want it to still name the push-composed-image failure", err)
+	}
+	// The auth annotation (registry host + docker login guidance) survives the
+	// Fail path and reaches the operator.
+	if !strings.Contains(msg, "docker login example.com") {
+		t.Errorf("err = %v, want the annotateRegistryAuthError docker-login hint to survive the Fail path", err)
+	}
+	if !strings.Contains(msg, "authentication/authorization") {
+		t.Errorf("err = %v, want the annotateRegistryAuthError auth hint to survive the Fail path", err)
+	}
+	// The raw registry rejection is preserved via %w in the chain.
+	if !strings.Contains(msg, "permission_denied") {
+		t.Errorf("err = %v, want the raw registry rejection preserved in the chain", err)
+	}
+	// The Fail path must not have written a false success line.
+	if strings.Contains(out.String(), "Pushed image to registry") {
+		t.Errorf("failed auth push emitted a success completion line; output:\n%s", out.String())
+	}
+}
+
+// TestSumSubDAGSizeFiltersForeignLayers is the drift-guard that keeps
+// isForeignLayer in sync with oras's internal descriptor.IsForeignLayer set: it
+// asserts each of the four foreign/non-distributable media types oras strips via
+// removeForeignLayers is filtered by the local helper. If oras widens or renames
+// its set, this test flags that the local mirror needs updating so sumSubDAGSize
+// does not over-count a foreign layer oras never copies.
+func TestSumSubDAGSizeFiltersForeignLayers(t *testing.T) {
+	foreign := []struct {
+		name      string
+		mediaType string
+	}{
+		{"oci non-distributable", "application/vnd.oci.image.layer.nondistributable.v1.tar"},
+		{"oci non-distributable gzip", "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip"},
+		{"oci non-distributable zstd", "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd"},
+		{"docker foreign layer", "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"},
+	}
+	for _, tc := range foreign {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isForeignLayer(ocispec.Descriptor{MediaType: tc.mediaType}) {
+				t.Errorf("isForeignLayer(%q) = false, want true (must mirror oras's IsForeignLayer set)", tc.mediaType)
+			}
+		})
+	}
+	// A regular distributable layer and a config are NOT foreign and must count.
+	for _, mt := range []string{
+		ocispec.MediaTypeImageLayer,
+		ocispec.MediaTypeImageLayerGzip,
+		ocispec.MediaTypeImageConfig,
+		ocispec.MediaTypeImageManifest,
+		ocispec.MediaTypeImageIndex,
+	} {
+		if isForeignLayer(ocispec.Descriptor{MediaType: mt}) {
+			t.Errorf("isForeignLayer(%q) = true, want false (a distributable descriptor must count toward the total)", mt)
+		}
+	}
+}
+
+// TestSumSubDAGSizeExcludesForeignLayerWeight proves sumSubDAGSize omits a
+// foreign layer's bytes from the walked total: a manifest that references a
+// foreign layer (which oras strips before copy) must yield the same total as the
+// same manifest without it, so the determinate bar can still reach 100%.
+func TestSumSubDAGSizeExcludesForeignLayerWeight(t *testing.T) {
+	ctx := context.Background()
+	st := memory.New()
+
+	// config blob.
+	cfg := ociConfigBody(t, "linux", "amd64", "base")
+	cfgDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageConfig, cfg)
+	mustPush(t, st, cfgDesc, cfg)
+
+	// a real distributable layer.
+	layer := []byte("distributable-layer-bytes")
+	layerDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageLayerGzip, layer)
+	mustPush(t, st, layerDesc, layer)
+
+	// a foreign layer descriptor. Its Size is large and NON-zero; if it were
+	// counted, the total would be inflated and the bar could never settle.
+	foreignDesc := ocispec.Descriptor{
+		MediaType: "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip",
+		Digest:    layerDesc.Digest, // any digest; it is never fetched
+		Size:      1 << 30,          // 1 GiB of bytes oras never copies
+	}
+
+	buildManifest := func(layers []ocispec.Descriptor) ocispec.Descriptor {
+		m := ocispec.Manifest{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: ocispec.MediaTypeImageManifest,
+			Config:    cfgDesc,
+			Layers:    layers,
+		}
+		body, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		d := content.NewDescriptorFromBytes(ocispec.MediaTypeImageManifest, body)
+		mustPush(t, st, d, body)
+		return d
+	}
+
+	withoutForeign := buildManifest([]ocispec.Descriptor{layerDesc})
+	withForeign := buildManifest([]ocispec.Descriptor{layerDesc, foreignDesc})
+
+	base, err := sumSubDAGSize(ctx, st, withoutForeign)
+	if err != nil {
+		t.Fatalf("sumSubDAGSize(withoutForeign): %v", err)
+	}
+	withF, err := sumSubDAGSize(ctx, st, withForeign)
+	if err != nil {
+		t.Fatalf("sumSubDAGSize(withForeign): %v", err)
+	}
+	// The manifest that references the foreign layer is a slightly larger blob
+	// (its JSON now carries the extra layer descriptor), so the two totals are
+	// not byte-equal. The load-bearing invariant is that the foreign layer's own
+	// 1 GiB Size did NOT leak into the total: the delta between the two must be
+	// the manifest JSON growth (a few hundred bytes), never the foreign bytes.
+	delta := withF - base
+	if delta < 0 || delta >= foreignDesc.Size {
+		t.Errorf("foreign layer inflated the total: with-foreign=%d, without-foreign=%d, delta=%d, foreign Size=%d (foreign bytes must be excluded)", withF, base, delta, foreignDesc.Size)
+	}
+	// A tighter bound: the delta is only the manifest re-serialization, which is
+	// far smaller than a kilobyte for a single extra descriptor.
+	if delta > 4096 {
+		t.Errorf("delta=%d is too large to be manifest JSON growth alone; foreign bytes likely leaked into the total", delta)
 	}
 }
