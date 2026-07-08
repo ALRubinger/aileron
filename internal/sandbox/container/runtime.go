@@ -354,6 +354,19 @@ type BuildOptions struct {
 	// The freeze producer sets it to the dedicated `aileron-freeze`
 	// docker-container builder (issue #2054). Ignored when Platforms is empty.
 	BuildxBuilder string
+	// ProgressRawJSON requests structured buildkit progress from the build
+	// subprocess by exporting BUILDKIT_PROGRESS=rawjson in its environment. buildx
+	// (whether invoked directly or under @devcontainers/cli, which inherits the
+	// environment and forwards it to its child buildx) then emits one JSON status
+	// object per line on stderr, which a progress parser turns into a determinate
+	// percentage. It is honored for BOTH the multi-arch build and the single-arch
+	// daemon-load build, independent of the Platforms/BuildxBuilder gating, so both
+	// build steps get determinate progress. The freeze producer sets it; every
+	// other caller leaves it false, keeping their build subprocess env byte-for-byte
+	// identical to before (issue #2084). Requesting rawjson is best-effort: an older
+	// buildx or a non-buildkit daemon that does not honor it simply emits its usual
+	// output and the parser degrades to indeterminate liveness.
+	ProgressRawJSON bool
 }
 
 // BuildResult reports the image selected or built for launch.
@@ -462,9 +475,11 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		stderr = io.Discard
 	}
 	// Per-invocation environment for the build subprocess. It carries a scoped
-	// BUILDX_BUILDER selection for a multi-arch build (issue #2054) and is nil for
-	// a single-arch build, keeping that argv+env byte-identical to before.
-	buildEnv := multiArchBuildEnv(opts)
+	// BUILDX_BUILDER selection for a multi-arch build (issue #2054) and, when
+	// ProgressRawJSON is set, BUILDKIT_PROGRESS=rawjson for determinate progress
+	// (issue #2084). It is nil for a single-arch build with neither requested,
+	// keeping that argv+env byte-identical to before.
+	buildEnv := buildStepEnv(opts)
 
 	// A multi-arch build and its OCI-layout output are one atomic request: the
 	// `--output type=oci,dest=<dir>` token is only emitted when both are set, so a
@@ -1279,21 +1294,33 @@ func multiArchLayoutDir(opts BuildOptions) string {
 	return opts.OCILayoutDest
 }
 
-// multiArchBuildEnv returns the extra environment entries a multi-arch build
-// subprocess needs to select a scoped buildx builder, or nil for a single-arch
-// build. When BuildxBuilder is set on a multi-arch build (Platforms non-empty) it
-// exports BUILDX_BUILDER=<name> so buildx — whether invoked as `docker buildx
-// build` (raw tiers) or under `@devcontainers/cli` (which inherits the
-// environment and shells out to buildx) — runs on that dedicated builder without
-// `docker buildx use` repointing the operator's default. It is gated on Platforms
-// so the single-arch daemon-load build never inherits the selection: that build
-// must stay on the default `docker` driver to land the image in the local daemon,
-// which a docker-container builder cannot do (issue #2054).
-func multiArchBuildEnv(opts BuildOptions) []string {
-	if len(opts.Platforms) == 0 || strings.TrimSpace(opts.BuildxBuilder) == "" {
-		return nil
+// buildStepEnv returns the extra environment entries a build subprocess needs
+// for this invocation, or nil when none apply (keeping that build's argv+env
+// byte-identical to before). Two independent entries are appended in a fixed
+// order so the result is deterministic for tests:
+//
+//   - BUILDX_BUILDER=<name>, ONLY for a multi-arch build (Platforms non-empty)
+//     with BuildxBuilder set, so buildx — whether invoked as `docker buildx
+//     build` (raw tiers) or under `@devcontainers/cli` (which inherits the
+//     environment and shells out to buildx) — runs on that dedicated builder
+//     without `docker buildx use` repointing the operator's default. It is gated
+//     on Platforms so the single-arch daemon-load build never inherits the
+//     selection: that build must stay on the default `docker` driver to land the
+//     image in the local daemon, which a docker-container builder cannot do
+//     (issue #2054).
+//   - BUILDKIT_PROGRESS=rawjson, whenever ProgressRawJSON is set, for BOTH the
+//     multi-arch and the single-arch daemon-load build, so both steps emit
+//     structured buildkit progress a parser turns into a determinate percentage
+//     (issue #2084). It is independent of the Platforms/BuildxBuilder gating.
+func buildStepEnv(opts BuildOptions) []string {
+	var env []string
+	if len(opts.Platforms) > 0 && strings.TrimSpace(opts.BuildxBuilder) != "" {
+		env = append(env, "BUILDX_BUILDER="+opts.BuildxBuilder)
 	}
-	return []string{"BUILDX_BUILDER=" + opts.BuildxBuilder}
+	if opts.ProgressRawJSON {
+		env = append(env, "BUILDKIT_PROGRESS=rawjson")
+	}
+	return env
 }
 
 // FreezeBuilderName is the name of the dedicated buildx builder `aileron skill
