@@ -27,6 +27,7 @@ func runSkillPublish(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.String("version", "", "frozen version id to publish (default: newest)")
 	registryRef := flags.String("registry", "", "destination OCI repository, e.g. ghcr.io/acme/plan")
+	quiet := flags.Bool("quiet", false, "Suppress the live push progress feedback (the publish summary still prints)")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
@@ -70,6 +71,7 @@ func runSkillPublish(args []string, stdout, stderr io.Writer) int {
 		Lock:      lock,
 		Stdout:    stdout,
 		Stderr:    stderr,
+		Quiet:     *quiet,
 	})
 	if err != nil {
 		switch {
