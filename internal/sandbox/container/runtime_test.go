@@ -270,6 +270,16 @@ func TestBuildMultiArchScopesBuildxBuilder(t *testing.T) {
 			t.Fatalf("multi-arch build must not `buildx use`, args = %#v", runner.args)
 		}
 	}
+	// The determinate BUILDKIT_PROGRESS=rawjson env is gone (issue #2093): the
+	// build subprocess env carries only the scoped builder selection.
+	for _, e := range runner.env {
+		if strings.HasPrefix(e, "BUILDKIT_PROGRESS=") {
+			t.Errorf("build env = %#v, must not carry BUILDKIT_PROGRESS (determinate progress removed)", runner.env)
+		}
+	}
+	if len(runner.env) != 1 {
+		t.Errorf("multi-arch build env = %#v, want exactly the BUILDX_BUILDER entry", runner.env)
+	}
 }
 
 // TestBuildSingleArchIgnoresBuildxBuilder proves BuildxBuilder is inert for a
@@ -295,125 +305,6 @@ func TestBuildSingleArchIgnoresBuildxBuilder(t *testing.T) {
 	if len(runner.env) != 0 {
 		t.Fatalf("single-arch build env = %#v, want no BUILDX_BUILDER (default driver must load into the daemon)", runner.env)
 	}
-}
-
-// hasEnv reports whether env contains want.
-func hasEnv(env []string, want string) bool {
-	for _, e := range env {
-		if e == want {
-			return true
-		}
-	}
-	return false
-}
-
-// TestBuildProgressRawJSONMultiArchExportsBoth proves a multi-arch build with
-// ProgressRawJSON set carries BOTH the scoped BUILDX_BUILDER selection and
-// BUILDKIT_PROGRESS=rawjson in the build subprocess env (issue #2084).
-func TestBuildProgressRawJSONMultiArchExportsBoth(t *testing.T) {
-	dir := t.TempDir()
-	writeFeaturesDevcontainer(t, dir)
-	dest := filepath.Join(t.TempDir(), "layout")
-	runner := &envRecordingRunner{}
-	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-		WorkDir:         dir,
-		ToolchainMode:   ToolchainModeHostNPX,
-		Platforms:       composition.MultiArchPlatforms,
-		OCILayoutDest:   dest,
-		BuildxBuilder:   FreezeBuilderName,
-		ProgressRawJSON: true,
-		Plan: composition.Plan{
-			Tier:     composition.TierDevcontainer,
-			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if !hasEnv(runner.env, "BUILDX_BUILDER="+FreezeBuilderName) {
-		t.Errorf("multi-arch build env = %#v, want BUILDX_BUILDER=%s", runner.env, FreezeBuilderName)
-	}
-	if !hasEnv(runner.env, "BUILDKIT_PROGRESS=rawjson") {
-		t.Errorf("multi-arch build env = %#v, want BUILDKIT_PROGRESS=rawjson", runner.env)
-	}
-}
-
-// TestBuildProgressRawJSONSingleArchExportsProgressOnly proves a single-arch
-// daemon-load build (Platforms nil) with ProgressRawJSON set carries
-// BUILDKIT_PROGRESS=rawjson and NO BUILDX_BUILDER, so it stays on the default
-// `docker` driver and still gets determinate progress (issue #2084).
-func TestBuildProgressRawJSONSingleArchExportsProgressOnly(t *testing.T) {
-	dir := t.TempDir()
-	writeFeaturesDevcontainer(t, dir)
-	runner := &envRecordingRunner{}
-	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-		WorkDir:         dir,
-		ToolchainMode:   ToolchainModeHostNPX,
-		BuildxBuilder:   FreezeBuilderName, // set but no Platforms -> must be ignored
-		ProgressRawJSON: true,
-		Plan: composition.Plan{
-			Tier:     composition.TierDevcontainer,
-			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if !hasEnv(runner.env, "BUILDKIT_PROGRESS=rawjson") {
-		t.Errorf("single-arch build env = %#v, want BUILDKIT_PROGRESS=rawjson", runner.env)
-	}
-	if hasEnv(runner.env, "BUILDX_BUILDER="+FreezeBuilderName) {
-		t.Errorf("single-arch build env = %#v, must NOT carry BUILDX_BUILDER (default driver must load into the daemon)", runner.env)
-	}
-}
-
-// TestBuildProgressRawJSONFalseLeavesEnvUnchanged proves that with
-// ProgressRawJSON false the env is byte-identical to before this change: nil for
-// a single-arch build, and BUILDX_BUILDER-only for a multi-arch build.
-func TestBuildProgressRawJSONFalseLeavesEnvUnchanged(t *testing.T) {
-	t.Run("single-arch has nil env", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFeaturesDevcontainer(t, dir)
-		runner := &envRecordingRunner{}
-		_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-			WorkDir:       dir,
-			ToolchainMode: ToolchainModeHostNPX,
-			Plan: composition.Plan{
-				Tier:     composition.TierDevcontainer,
-				Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
-			},
-		})
-		if err != nil {
-			t.Fatalf("Build: %v", err)
-		}
-		if len(runner.env) != 0 {
-			t.Errorf("single-arch build env = %#v, want empty with ProgressRawJSON=false", runner.env)
-		}
-	})
-
-	t.Run("multi-arch has BUILDX_BUILDER only", func(t *testing.T) {
-		dir := t.TempDir()
-		writeFeaturesDevcontainer(t, dir)
-		dest := filepath.Join(t.TempDir(), "layout")
-		runner := &envRecordingRunner{}
-		_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
-			WorkDir:       dir,
-			ToolchainMode: ToolchainModeHostNPX,
-			Platforms:     composition.MultiArchPlatforms,
-			OCILayoutDest: dest,
-			BuildxBuilder: FreezeBuilderName,
-			Plan: composition.Plan{
-				Tier:     composition.TierDevcontainer,
-				Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
-			},
-		})
-		if err != nil {
-			t.Fatalf("Build: %v", err)
-		}
-		if len(runner.env) != 1 || runner.env[0] != "BUILDX_BUILDER="+FreezeBuilderName {
-			t.Errorf("multi-arch build env = %#v, want exactly [BUILDX_BUILDER=%s]", runner.env, FreezeBuilderName)
-		}
-	})
 }
 
 // TestBuild_MultiArchPairingValidated proves Build fails fast on a half-configured

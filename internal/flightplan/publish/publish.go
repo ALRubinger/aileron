@@ -100,7 +100,7 @@ type Options struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	// Quiet suppresses the live push-progress feedback (spinner/percentage) on
+	// Quiet suppresses the live push-progress feedback (the liveness spinner) on
 	// both the TTY and non-TTY paths. The `published ...` summary and its
 	// install hint still print: they are the result, not progress output.
 	Quiet bool
@@ -200,11 +200,10 @@ func run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// 2. Push the four signed-artifact blobs as layers. Bracket the whole
-	//    artifact region (blob loop + pack + tags) with a liveness indicator: the
-	//    blob/pack/tag sizes are small and fixed, so a labeled spinner reads
-	//    better than a bar that would jump straight to 100%. artifactInd resolves
-	//    exactly once, so Fail must guard every error return in the region and
-	//    Done fires after the last tag but before the summary.
+	//    artifact region (blob loop + pack + tags) with a liveness indicator: a
+	//    labeled spinner shows the region is alive and advancing. artifactInd
+	//    resolves exactly once, so Fail must guard every error return in the
+	//    region and Done fires after the last tag but before the summary.
 	artifactInd := opts.newIndicator()
 	artifactInd.Start("Pushing signed artifact")
 	layers := make([]ocispec.Descriptor, 0, 4)
@@ -341,28 +340,18 @@ func publishComposed(ctx context.Context, opts Options, pin freeze.ImagePin, tar
 		return ocispec.Descriptor{}, "", err
 	}
 
-	// Bracket the image push with a determinate progress indicator: precompute the
-	// whole source sub-DAG's byte weight and settle against it via the oras copy
-	// hooks. A fully-fresh push settles via PostCopy, a fully-already-present push
-	// via OnCopySkipped, and both reach exactly total (100%). ind resolves once, so
-	// every error return below fails it; Done fires only after the push, tag, and
-	// post-push re-verify all succeed.
+	// Bracket the image push with a liveness indicator: a labeled spinner shows
+	// the push is alive and advancing without any byte accounting. ind resolves
+	// once, so every error return below fails it; Done fires only after the push,
+	// tag, and post-push re-verify all succeed.
 	ind := opts.newIndicator()
 	ind.Start("Pushing image to registry")
-	copyOpts := oras.DefaultCopyGraphOptions
-	if total, terr := sumSubDAGSize(ctx, store, root); terr == nil && total > 0 {
-		// Determinate: drive the bar off the settled-byte hooks over the source store.
-		copyOpts = pushProgress(store, ind, total)
-	}
-	// else: leave the indeterminate Start spinner running (a zero-weight or
-	// unwalkable graph, which the composed layout should never be) with the
-	// default hook-free copy options.
 
 	// Copy the full manifest-list graph (index + both platform children + any
 	// buildkit attestation manifests) into the destination, then tag it. oras
 	// copies the bytes exactly, so the manifest digest is preserved.
 	imageTag := freeze.ComposedImageTag(opts.VersionID)
-	if err := oras.CopyGraph(ctx, store, target, root, copyOpts); err != nil {
+	if err := oras.CopyGraph(ctx, store, target, root, oras.DefaultCopyGraphOptions); err != nil {
 		ind.Fail("Pushing image to registry")
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: push composed image: %w", err)
 	}
@@ -442,26 +431,13 @@ func publishForeignBase(ctx context.Context, opts Options, pin freeze.ImagePin, 
 		}
 		src = repo
 	}
-	// Bracket the copy with a progress indicator. Precompute the source sub-DAG's
-	// byte weight for a determinate bar: resolve the pin digest against the source
-	// and sum its sub-DAG. It is determinate only when Resolve succeeds AND the
-	// resolved root carries a real Size (>0); a failed Resolve or a zero-Size root
-	// falls back to the indeterminate liveness spinner. A single-manifest image
-	// with no children but a real size stays determinate. oras.Copy re-resolves
-	// internally, so this extra Resolve is purely for the precompute (cheap against
-	// the fake, acceptable against a real registry).
-	copyGraphOpts := oras.DefaultCopyGraphOptions
+	// Bracket the copy with a liveness indicator: a labeled spinner shows the
+	// push is alive and advancing without any byte accounting.
 	ind := opts.newIndicator()
 	ind.Start("Pushing image to registry")
-	if resolved, rerr := src.Resolve(ctx, pin.Digest); rerr == nil && resolved.Size > 0 {
-		if total, terr := sumSubDAGSize(ctx, src, resolved); terr == nil && total > 0 {
-			copyGraphOpts = pushProgress(src, ind, total)
-		}
-	}
-	// else: leave the indeterminate Start spinner running with hook-free options.
 
 	// Copy by the attested manifest digest; oras.Copy preserves it byte-for-byte.
-	root, err := oras.Copy(ctx, src, pin.Digest, target, "", oras.CopyOptions{CopyGraphOptions: copyGraphOpts})
+	root, err := oras.Copy(ctx, src, pin.Digest, target, "", oras.DefaultCopyOptions)
 	if err != nil {
 		ind.Fail("Pushing image to registry")
 		return ocispec.Descriptor{}, "", fmt.Errorf("publish: copy base image %s@%s: %w", pin.Ref, pin.Digest, err)

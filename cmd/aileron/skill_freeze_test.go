@@ -333,124 +333,17 @@ func TestRunSkillFreeze_IndicatorDrivenAcrossPullAndBuilds(t *testing.T) {
 	if strings.ContainsAny(out, "\x1b\r") {
 		t.Errorf("non-TTY progress output must contain no ESC or CR:\n%q", out)
 	}
+	// Scenario 3: spinner-only progress renders no percentage figure anywhere in
+	// freeze output (regression guard for the determinate-percentage removal).
+	if strings.Contains(out, "%") {
+		t.Errorf("spinner-only progress must not render a percentage:\n%s", out)
+	}
 	// Scenario 4: the freeze summary is preserved.
 	if !strings.Contains(out, "Froze skill \"weekly-metrics-digest\"") {
 		t.Errorf("stdout must still print the freeze summary:\n%s", out)
 	}
 	if !strings.Contains(out, "ContentHash: sha256:") {
 		t.Errorf("stdout must still print the ContentHash line:\n%s", out)
-	}
-}
-
-// rawjsonBuildRunner passes the buildx preflight and, for each build command,
-// writes a BUILDKIT_PROGRESS=rawjson vertex stream to the build's stderr sink
-// (where buildx emits rawjson) so the freeze build sink parses it into a
-// determinate percentage. It also records the env each build carried so a test
-// can assert BUILDKIT_PROGRESS=rawjson reached both build subprocesses. It
-// overrides both Run and RunWithEnv because every build now carries a
-// BUILDKIT_PROGRESS=rawjson env entry and routes through the envRunner path.
-type rawjsonBuildRunner struct {
-	*genericInspectRunner
-	mu        sync.Mutex
-	buildEnvs [][]string
-}
-
-func (r *rawjsonBuildRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
-	return r.RunWithEnv(ctx, name, args, nil, stdout, stderr)
-}
-
-func (r *rawjsonBuildRunner) RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
-	joined := strings.Join(args, " ")
-	if strings.Contains(joined, "build") && (strings.Contains(joined, "--output") || strings.Contains(joined, "--image-name")) {
-		r.mu.Lock()
-		r.buildEnvs = append(r.buildEnvs, append([]string(nil), env...))
-		r.mu.Unlock()
-		// Emit a three-vertex rawjson stream that reveals then completes every
-		// vertex, exactly as buildx does on stderr under BUILDKIT_PROGRESS=rawjson.
-		for _, d := range []string{"sha256:v1", "sha256:v2", "sha256:v3"} {
-			_, _ = stderr.Write([]byte(`{"vertexes":[{"digest":"` + d + `","name":"[stage] RUN"}]}` + "\n"))
-		}
-		for _, d := range []string{"sha256:v1", "sha256:v2", "sha256:v3"} {
-			_, _ = stderr.Write([]byte(`{"vertexes":[{"digest":"` + d + `","name":"[stage] RUN","completed":"2026-07-08T00:00:00Z"}]}` + "\n"))
-		}
-		return nil
-	}
-	return r.genericInspectRunner.RunWithEnv(ctx, name, args, env, stdout, stderr)
-}
-
-func (r *rawjsonBuildRunner) recordedBuildEnvs() [][]string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([][]string(nil), r.buildEnvs...)
-}
-
-// TestRunSkillFreeze_DeterminateBuildProgress proves the determinate happy path:
-// when the build subprocess emits a BUILDKIT_PROGRESS=rawjson vertex stream on
-// stderr, freeze renders a determinate percentage (100% on the non-TTY path) for
-// the two build steps while still printing the completion labels, and both build
-// invocations carried BUILDKIT_PROGRESS=rawjson in their env (issue #2084).
-func TestRunSkillFreeze_DeterminateBuildProgress(t *testing.T) {
-	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
-	storeDir := withTempStore(t)
-	installExample(t, storeDir)
-	key := writeSigningKey(t)
-
-	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
-		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
-		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
-	})
-	gr := &rawjsonBuildRunner{
-		genericInspectRunner: &genericInspectRunner{
-			fakeRunner: &fakeRunner{outputs: buildxPreflightOK()},
-			repoDigest: "sha256:" + strings.Repeat("c", 64),
-		},
-	}
-
-	var stdout, stderr bytes.Buffer
-	orig := newImageInspector
-	newImageInspector = func() (imageInspector, error) {
-		return imageInspector{
-			runner:  gr,
-			runtime: "docker",
-			newProgress: func() *progress.Indicator {
-				return progress.New(&stdout, progress.WithForceTTY(false))
-			},
-		}, nil
-	}
-	t.Cleanup(func() { newImageInspector = orig })
-
-	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("freeze must succeed, exit=%d stderr=%s", code, stderr.String())
-	}
-
-	out := stdout.String()
-	// The determinate signal reached 100% (all vertexes completed) on the non-TTY
-	// path, which renders a plain `100%` line, for the build steps.
-	if !strings.Contains(out, "100%") {
-		t.Errorf("determinate build progress must render a percentage reaching 100%%:\n%s", out)
-	}
-	// The completion labels still print.
-	for _, want := range []string{"Built environment image", "Loaded image into local daemon"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("stdout must still print completion label %q:\n%s", want, out)
-		}
-	}
-	// Both build invocations carried BUILDKIT_PROGRESS=rawjson in their env,
-	// tying the freeze call site to the container-package env plumbing.
-	buildEnvs := gr.recordedBuildEnvs()
-	if len(buildEnvs) < 2 {
-		t.Fatalf("expected at least 2 build invocations (multi-arch + daemon-load), got %d", len(buildEnvs))
-	}
-	for i, env := range buildEnvs {
-		found := false
-		for _, e := range env {
-			if e == "BUILDKIT_PROGRESS=rawjson" {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("build invocation %d env = %#v, want BUILDKIT_PROGRESS=rawjson", i, env)
-		}
 	}
 }
 
@@ -1213,9 +1106,8 @@ func TestRuntimeDigestResolver_InspectorError(t *testing.T) {
 // failLoadBuildRunner passes the buildx preflight and the multi-arch OCI build
 // (which carries `--output`) but fails the subsequent host-arch daemon-load build
 // (which carries `--image-name` without `--output`), so the composer's daemon-load
-// error path is exercised. It overrides both Run and RunWithEnv because the
-// daemon-load build now carries a BUILDKIT_PROGRESS=rawjson env entry and thus
-// routes through the envRunner path (issue #2084).
+// error path is exercised. It overrides both Run and RunWithEnv so the build is
+// caught regardless of whether it routes through the plain or the env runner path.
 type failLoadBuildRunner struct{ *fakeRunner }
 
 func (r failLoadBuildRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
