@@ -45,10 +45,11 @@ const maxDefaultInlineLen = 256
 // starts from the caller's args (the `--input` overrides), leaves those inputs
 // untouched (rendering an "already set" line), prompts for every other literal,
 // and renders a read-only informational line for dynamic and source inputs
-// (never editable). The returned args carry a value for every literal: an
-// operator-typed entry as a string, an Enter-accepted default as its native
-// typed value. On EOF or a read error mid-walk it returns the error and the
-// launch fails, rather than spinning on a drained reader.
+// (never editable). The returned args carry a value only for a literal the
+// operator TYPED (entered as a string); an Enter-accepted default is left unset,
+// so the declared default resolves natively downstream (see the typing note in
+// the loop). On EOF or a read error mid-walk it returns the error and the launch
+// fails, rather than spinning on a drained reader.
 func (w launchInputWalker) Walk(inputs []runtime.Input, args runtime.LaunchArgs) (runtime.LaunchArgs, error) {
 	out := runtime.LaunchArgs{}
 	for k, v := range args {
@@ -77,37 +78,45 @@ func (w launchInputWalker) Walk(inputs []runtime.Input, args runtime.LaunchArgs)
 			fmt.Fprintln(w.stdout, w.advancedLine(in))
 			continue
 		}
-		val, err := w.walkLiteral(in)
+		val, typed, err := w.walkLiteral(in)
 		if err != nil {
 			return nil, err
 		}
-		// Typing asymmetry (#2063): an operator-typed entry enters the args as a
-		// string (walkLiteral returns the trimmed line); an Enter-accepted
-		// default enters as its NATIVE typed value (walkLiteral returns
-		// in.Resolution.Default verbatim). This is faithful because every
-		// downstream check compares via fmt.Sprintf("%v", v) (EnforceConstraint,
-		// host/command interpolation) and the container `--input` re-entry
-		// serializes both through %v, where every value is a string anyway.
-		out[in.Name] = val
+		// Launch-mode parity for an accepted default (#2063). An operator-typed
+		// entry is written into out as a string override. An Enter-accepted
+		// default is NOT written: leaving out[in.Name] unset makes resolveInputs
+		// apply the declared default NATIVELY downstream, exactly as the
+		// NoPrompt/advanced skip above and --accept-defaults do. Serializing the
+		// accepted default into the args instead would round-trip it through the
+		// sealed-image `--input` re-entry as a string, so an interactive Enter
+		// would diverge from the native-typed value --accept-defaults resolves on
+		// the same image path. Not serializing it keeps both paths identical.
+		if typed {
+			out[in.Name] = val
+		}
 	}
 	return out, nil
 }
 
 // walkLiteral prompts for one literal input, re-prompting until it reads a valid
-// value or an Enter-accepted default. It returns the native default value on an
-// Enter keypress against a defaulted input, the validated typed string on a
-// non-empty entry, and an error on EOF/read failure.
-func (w launchInputWalker) walkLiteral(in runtime.Input) (any, error) {
+// value or an Enter-accepted default. It returns (validatedTypedString, true,
+// nil) on a non-empty entry, (nil, false, nil) on an Enter keypress that accepts
+// a declared default (the caller then leaves the arg unset so the default
+// resolves natively downstream), and (nil, false, err) on EOF/read failure.
+func (w launchInputWalker) walkLiteral(in runtime.Input) (any, bool, error) {
 	prompt := w.literalPrompt(in)
 	for {
 		line, err := readPromptLine(w.stdin, w.stdout, prompt)
 		if err != nil {
-			return nil, fmt.Errorf("input %q: read value: %w", in.Name, err)
+			return nil, false, fmt.Errorf("input %q: read value: %w", in.Name, err)
 		}
 		if line == "" {
 			if in.Resolution.HasDefault {
-				// Enter accepts the declared default as its native typed value.
-				return in.Resolution.Default, nil
+				// Enter accepts the declared default. It is NOT returned as a typed
+				// value: the caller leaves the arg unset so the default resolves
+				// natively downstream, keeping the image path in parity with
+				// --accept-defaults (#2063).
+				return nil, false, nil
 			}
 			// Empty entry on a required-no-default literal: a value is required,
 			// so re-prompt. An empty string can never be entered for such an
@@ -128,7 +137,7 @@ func (w launchInputWalker) walkLiteral(in runtime.Input) (any, error) {
 				continue
 			}
 		}
-		return line, nil
+		return line, true, nil
 	}
 }
 

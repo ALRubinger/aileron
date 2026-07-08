@@ -43,6 +43,25 @@ func TestWalk_DeclarationOrder(t *testing.T) {
 	}
 }
 
+// A plan with zero declared inputs is a clean silent no-op: the walk writes
+// nothing to stdout (no banner, no prompts) and returns the caller's args
+// byte-stable, so a future refactor that emits a spurious walk header is caught
+// (#2063).
+func TestWalk_ZeroInputsSilentNoOp(t *testing.T) {
+	w, out := newWalker("") // no stdin may be read
+	args := runtime.LaunchArgs{"already": "set"}
+	got, err := w.Walk(nil, args)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if out.String() != "" {
+		t.Errorf("a zero-input walk must write nothing to stdout, got %q", out.String())
+	}
+	if len(got) != 1 || got["already"] != "set" {
+		t.Errorf("a zero-input walk must return the args unchanged, got %#v", got)
+	}
+}
+
 // A required input renders [required]; an optional (defaulted) input renders
 // [optional] with the default and an Enter-to-accept note.
 func TestWalk_RequiredOptionalMarkers(t *testing.T) {
@@ -63,8 +82,9 @@ func TestWalk_RequiredOptionalMarkers(t *testing.T) {
 	}
 }
 
-// Enter on an optional input injects the declared default as its NATIVE typed
-// value (a number stays a number); a typed entry enters as a string.
+// Enter on an optional input records NO override for it, so its declared default
+// resolves natively downstream (parity with --accept-defaults, #2063); a typed
+// entry enters as a string override.
 func TestWalk_EnterAcceptsTypedDefault(t *testing.T) {
 	w, _ := newWalker("\ncustom\n") // accept default, then type a value
 	inputs := []runtime.Input{
@@ -75,8 +95,8 @@ func TestWalk_EnterAcceptsTypedDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	if got["window_days"] != 7 {
-		t.Errorf("Enter-accepted default must inject the native typed value 7, got %#v", got["window_days"])
+	if _, ok := got["window_days"]; ok {
+		t.Errorf("an Enter-accepted default must not be written into the args (it resolves natively downstream), got %#v", got["window_days"])
 	}
 	if got["account"] != "custom" {
 		t.Errorf("typed entry must enter as a string, got %#v", got["account"])

@@ -260,16 +260,15 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// deterministic.
 	//
 	// Values serialize through fmt.Sprintf("%v", v) (#2063). CLI-path overrides
-	// arrive as strings via inputFlag.Set, but the host-side guided input walk
-	// injects an Enter-accepted default as its NATIVE typed value (a number, a
-	// bool), so spec.Inputs may now hold a non-string. The %v serialization is
-	// faithful: the inner re-entry re-parses every --input value as a string via
-	// the same inputFlag, and every downstream check (EnforceConstraint,
-	// host/command interpolation) already compares via %v, so a typed default and
-	// its %v string form are indistinguishable to the plan. See the walker's
-	// typing-asymmetry note in skill_launch_walk.go. This replaces the earlier
-	// refuse-non-string guard, which predated the walk and would have rejected an
-	// Enter-accepted typed default outright.
+	// arrive as strings via inputFlag.Set, and the host-side guided walk only
+	// writes an operator-TYPED entry (also a string); an Enter-accepted default
+	// is left unset by the walk so the declared default resolves natively inside
+	// the container, keeping this image path in parity with --accept-defaults.
+	// So spec.Inputs values are strings today, but %v stays as a defensive,
+	// faithful serialization: the inner re-entry re-parses every --input value as
+	// a string via the same inputFlag, and every downstream check
+	// (EnforceConstraint, host/command interpolation) already compares via %v.
+	// See the walker's parity note in skill_launch_walk.go.
 	if len(spec.Inputs) > 0 {
 		keys := make([]string, 0, len(spec.Inputs))
 		for k := range spec.Inputs {
