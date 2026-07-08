@@ -156,6 +156,63 @@ func TestResolveInputs_InteractivePrompterErrorPropagates(t *testing.T) {
 	}
 }
 
+// A NoPrompt (`prompt: false`) literal with no default is required on the
+// interactive in-process path: the wired prompter must be skipped so the guided
+// walk's decision to not ask for it holds through resolution. Without a --input
+// override it fails closed, exactly as it would on the sealed-image path.
+func TestResolveInputs_InteractiveNeverPromptsNoPromptLiteral(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "advanced", Type: "string", NoPrompt: true, Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+	pr := &fakePrompter{values: map[string]string{"advanced": "should-not-be-used"}}
+	_, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, pr)
+	if err == nil {
+		t.Fatal("a NoPrompt required literal with no default and no override must fail closed, not be prompted")
+	}
+	if !strings.Contains(err.Error(), "advanced") {
+		t.Errorf("error must name the input: %v", err)
+	}
+	if len(pr.asked) != 0 {
+		t.Errorf("a NoPrompt input must never be prompted, got %v", pr.asked)
+	}
+}
+
+// A NoPrompt (`prompt: false`) literal with no default resolves identically on
+// both launch paths when supplied via --input: the override wins and the
+// prompter (if any) is never consulted.
+func TestResolveInputs_NoPromptLiteralResolvesFromOverride(t *testing.T) {
+	p := planWithInputs([]Input{
+		{Name: "advanced", Type: "string", NoPrompt: true, Resolution: Resolution{Rule: ResolutionLiteral}},
+	}, nil)
+
+	// Sealed-image path (no prompter wired): fails closed without an override.
+	if _, err := resolveInputs(context.Background(), p, nil, FixedClock{}, &enforcer{}, nil); err == nil {
+		t.Fatal("a NoPrompt required literal must fail closed on the sealed-image path without --input")
+	}
+
+	// Both paths succeed when supplied via --input.
+	for _, tc := range []struct {
+		name     string
+		prompter InputPrompter
+	}{
+		{"sealed-image", nil},
+		{"interactive", &fakePrompter{values: map[string]string{"advanced": "should-not-be-used"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ri, err := resolveInputs(context.Background(), p, LaunchArgs{"advanced": "given"}, FixedClock{}, &enforcer{}, tc.prompter)
+			if err != nil {
+				t.Fatalf("resolveInputs: %v", err)
+			}
+			if ri.Values["advanced"] != "given" {
+				t.Errorf("override not applied: %v", ri.Values["advanced"])
+			}
+			if pr, ok := tc.prompter.(*fakePrompter); ok && len(pr.asked) != 0 {
+				t.Errorf("a NoPrompt input must never be prompted, got %v", pr.asked)
+			}
+		})
+	}
+}
+
 var errFakePrompt = errors.New("prompt failed")
 
 func TestResolveInputs_DynamicResolvedOnce(t *testing.T) {
