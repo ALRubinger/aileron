@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,5 +46,48 @@ func TestEmbeddedSchemaMatchesDoc(t *testing.T) {
 	if !bytes.Equal(want, EmbeddedSchema()) {
 		t.Fatalf("embedded schema has drifted from %s; refresh the copy at "+
 			"internal/flightplan/manifest/flight-plan-manifest.schema.json", docPath)
+	}
+}
+
+// TestSchemaDeclaresExampleAndPrompt is the positive counterpart to the
+// byte-identity guard: the schema-is-source-of-truth contract (#2064) requires
+// the input definition to declare the optional example and prompt fields. It
+// decodes the embedded schema and asserts both properties exist under
+// $defs/input.properties, so a regression that drops one fails here even though
+// the two copies would still be byte-identical.
+func TestSchemaDeclaresExampleAndPrompt(t *testing.T) {
+	var doc map[string]any
+	if err := json.Unmarshal(EmbeddedSchema(), &doc); err != nil {
+		t.Fatalf("embedded schema is not valid JSON: %v", err)
+	}
+	defs, ok := doc["$defs"].(map[string]any)
+	if !ok {
+		t.Fatal("schema has no $defs object")
+	}
+	input, ok := defs["input"].(map[string]any)
+	if !ok {
+		t.Fatal("$defs.input is not an object")
+	}
+	props, ok := input["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("$defs.input.properties is not an object")
+	}
+	if _, ok := props["example"]; !ok {
+		t.Error("$defs.input.properties must declare example (#2064)")
+	}
+	prompt, ok := props["prompt"].(map[string]any)
+	if !ok {
+		t.Fatal("$defs.input.properties must declare prompt as an object (#2064)")
+	}
+	if prompt["type"] != "boolean" {
+		t.Errorf("prompt must be typed boolean, got %v", prompt["type"])
+	}
+	// Neither optional field is required: required-ness stays derived from
+	// "no default", per the resolved decision.
+	req, _ := input["required"].([]any)
+	for _, r := range req {
+		if r == "example" || r == "prompt" {
+			t.Errorf("%v must not be in $defs.input.required (both fields are optional)", r)
+		}
 	}
 }

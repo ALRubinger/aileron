@@ -64,7 +64,17 @@ func (w launchInputWalker) Walk(inputs []runtime.Input, args runtime.LaunchArgs)
 		if _, ok := out[in.Name]; ok {
 			// A literal already supplied via --input keeps its value; show it as
 			// already set and skip the prompt so an override is never re-asked.
+			// This check sits BEFORE the NoPrompt skip so a `prompt: false` input
+			// stays --input-overridable: an explicit override still wins.
 			fmt.Fprintln(w.stdout, w.alreadySetLine(in))
+			continue
+		}
+		if in.NoPrompt {
+			// An advanced/non-interactive input (`prompt: false`) is skipped: its
+			// declared default applies silently downstream. Nothing is written into
+			// out[in.Name], so resolveInputs sees no override and applies the
+			// default. Rendered as an informational line so the walk stays legible.
+			fmt.Fprintln(w.stdout, w.advancedLine(in))
 			continue
 		}
 		val, err := w.walkLiteral(in)
@@ -137,10 +147,29 @@ func (w launchInputWalker) literalPrompt(in runtime.Input) string {
 	} else {
 		b.WriteString(" [required]")
 	}
+	if in.HasExample {
+		// A declared example is a first-class value; render it inline through the
+		// same capped renderer the default uses so a large example never floods
+		// the terminal.
+		fmt.Fprintf(&b, " (e.g. %s)", defaultDisplay(in.Example))
+	}
 	if hint := inputConstraintHint(in.Constraint); hint != "" {
 		fmt.Fprintf(&b, " %s", hint)
 	}
 	b.WriteString(": ")
+	return b.String()
+}
+
+// advancedLine renders the informational line for an input marked `prompt:
+// false`: it is skipped by the walk, so its declared default applies silently
+// downstream. It remains overridable via --input.
+func (w launchInputWalker) advancedLine(in runtime.Input) string {
+	var b strings.Builder
+	b.WriteString(in.Name)
+	if in.Description != "" {
+		fmt.Fprintf(&b, " (%s)", in.Description)
+	}
+	b.WriteString(" [advanced: using default, override with --input]")
 	return b.String()
 }
 

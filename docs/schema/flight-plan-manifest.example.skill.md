@@ -88,6 +88,7 @@ aileron:
     - name: window_days
       type: number
       description: How many days back the metrics window covers. A literal so one composition serves operators with different window sizes.
+      example: 30
       resolution:
         rule: literal
         default: 7

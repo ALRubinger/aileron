@@ -139,6 +139,21 @@ type Input struct {
 	// compiled Pattern; the launch/resolution boundary rejects a resolved
 	// value that falls outside it.
 	Constraint *Constraint
+	// HasExample records whether the manifest declared an example value. It
+	// mirrors the Resolution.HasDefault/Default pair so a declared example of a
+	// zero-ish value (empty string, false, 0) is still distinguishable from an
+	// absent one.
+	HasExample bool
+	// Example is the declared first-class example value the guided launch walk
+	// displays on the prompt line. It is deliberately untyped so an example may
+	// be a string, number, object, or array. Meaningful only when HasExample is
+	// true; it never affects resolution or required-ness.
+	Example any
+	// NoPrompt marks an advanced or non-interactive input the guided launch walk
+	// skips (the manifest's `prompt: false`). The zero value is promptable, so an
+	// input with no `prompt` key walks as usual. A skipped input's declared
+	// default applies silently and it stays overridable via --input.
+	NoPrompt bool
 }
 
 // Constraint bounds an input's resolved value. Exactly one field is set: Enum

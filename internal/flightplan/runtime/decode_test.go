@@ -666,3 +666,122 @@ func TestDecode_DuplicateStepOutputRefused(t *testing.T) {
 		t.Fatal("a step with duplicate output names must be refused")
 	}
 }
+
+// --- example + prompt input fields (#2064) ---
+
+// TestDecode_ExampleAndPromptAccepted asserts the strict KnownFields decoder
+// accepts the optional example and prompt fields on a literal input and maps
+// them onto the typed Input: a declared example sets HasExample+Example, and
+// prompt: false marks the input NoPrompt.
+func TestDecode_ExampleAndPromptAccepted(t *testing.T) {
+	m := rawManifest(
+		[]any{map[string]any{
+			"name": "region", "type": "string",
+			"resolution": map[string]any{"rule": "literal", "default": "us-east-1"},
+			"example":    "us-west-2",
+			"prompt":     false,
+		}},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode with example+prompt: %v", err)
+	}
+	in := p.Inputs[0]
+	if !in.HasExample {
+		t.Fatal("a declared example must set HasExample")
+	}
+	if in.Example != "us-west-2" {
+		t.Errorf("Example = %v, want us-west-2", in.Example)
+	}
+	if !in.NoPrompt {
+		t.Error("prompt: false must set NoPrompt")
+	}
+}
+
+// TestDecode_PromptTrueIsPromptable asserts prompt: true leaves the input
+// promptable (NoPrompt false), the same as an absent prompt key.
+func TestDecode_PromptTrueIsPromptable(t *testing.T) {
+	m := rawManifest(
+		[]any{map[string]any{
+			"name": "window", "type": "string",
+			"resolution": map[string]any{"rule": "literal"},
+			"prompt":     true,
+		}},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode with prompt: true: %v", err)
+	}
+	if p.Inputs[0].NoPrompt {
+		t.Error("prompt: true must leave the input promptable (NoPrompt false)")
+	}
+}
+
+// TestDecode_PromptAbsentIsPromptable asserts an input with no prompt key and
+// no example decodes to the promptable, no-example default (NoPrompt false,
+// HasExample false), so plans authored before these fields are unaffected.
+func TestDecode_PromptAbsentIsPromptable(t *testing.T) {
+	m := rawManifest(
+		[]any{map[string]any{
+			"name": "window", "type": "string",
+			"resolution": map[string]any{"rule": "literal"},
+		}},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode without prompt/example: %v", err)
+	}
+	in := p.Inputs[0]
+	if in.NoPrompt {
+		t.Error("an absent prompt key must leave the input promptable (NoPrompt false)")
+	}
+	if in.HasExample {
+		t.Error("an absent example must leave HasExample false")
+	}
+}
+
+// TestDecode_ExampleAcceptsNonStringValue asserts the example field is untyped:
+// a structured (object) example round-trips onto Input.Example intact, so an
+// example may be any JSON value, not only a string.
+func TestDecode_ExampleAcceptsNonStringValue(t *testing.T) {
+	m := rawManifest(
+		[]any{map[string]any{
+			"name": "shape", "type": "object",
+			"resolution": map[string]any{"rule": "literal"},
+			"example":    map[string]any{"k": "v"},
+		}},
+		nil, oneStep(),
+	)
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("Decode with object example: %v", err)
+	}
+	in := p.Inputs[0]
+	if !in.HasExample {
+		t.Fatal("an object example must set HasExample")
+	}
+	got, ok := in.Example.(map[string]any)
+	if !ok || got["k"] != "v" {
+		t.Errorf("Example = %v, want map[k:v]", in.Example)
+	}
+}
+
+// TestDecode_UnknownInputFieldRefused asserts the strict KnownFields decoder
+// still rejects an unknown sibling key under an input even now that example and
+// prompt are declared, so the closed-shape contract holds.
+func TestDecode_UnknownInputFieldRefused(t *testing.T) {
+	m := rawManifest(
+		[]any{map[string]any{
+			"name": "region", "type": "string",
+			"resolution":  map[string]any{"rule": "literal"},
+			"exampleTypo": "us-west-2",
+		}},
+		nil, oneStep(),
+	)
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an unknown sibling key under an input must be refused")
+	}
+}
