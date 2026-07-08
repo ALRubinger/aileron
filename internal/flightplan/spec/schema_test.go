@@ -627,6 +627,89 @@ func TestLLMSeamMarkAccepted(t *testing.T) {
 	}
 }
 
+// seamStep returns the single llm-seam step from the worked example, failing
+// the test if none is present. The #2099 prompt/model tests mutate it.
+func seamStep(t *testing.T, inst map[string]any) map[string]any {
+	t.Helper()
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "llm-seam" {
+			return s
+		}
+	}
+	t.Fatal("expected the worked example to carry an llm-seam step")
+	return nil
+}
+
+// TestLLMSeamPromptAndModelAccepted: the seam accepts a `prompt` template and a
+// `model` target (#2099). Both are first-class fields on kind: llm-seam. The
+// worked example already declares them; this test also proves a mutated seam
+// carrying fresh values still validates.
+func TestLLMSeamPromptAndModelAccepted(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	seam := seamStep(t, inst)
+	seam["prompt"] = "Summarize {{ steps.render_csv.csv }} for {{ inputs.window_days }} days."
+	seam["model"] = "anthropic:claude-haiku-4-5"
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("an llm-seam carrying prompt and model must validate:\n%v", err)
+	}
+}
+
+// TestSeamPromptEmptyRejected: an empty `prompt` on the seam is rejected. The
+// schema requires minLength:1, so a present-but-empty template is invalid.
+func TestSeamPromptEmptyRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	seam := seamStep(t, inst)
+	seam["prompt"] = ""
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("an empty prompt on the seam must be rejected (minLength:1)")
+	}
+}
+
+// TestPromptOnActionCallRejected: `prompt` on an action-call step is rejected.
+// The prompt field is permitted only on kind: llm-seam; every other kind is a
+// closed object that forbids it.
+func TestPromptOnActionCallRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	mutated := false
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "action-call" {
+			s["prompt"] = "reach an LLM here"
+			mutated = true
+			break
+		}
+	}
+	if !mutated {
+		t.Fatal("expected an action-call step in the worked example to mutate")
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("prompt on an action-call step must be rejected; it is llm-seam only")
+	}
+}
+
+// TestModelOnTransformRejected: `model` on a transform step is rejected. The
+// model field is permitted only on kind: llm-seam.
+func TestModelOnTransformRejected(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	mutated := false
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "transform" {
+			s["model"] = "anthropic:claude-haiku-4-5"
+			mutated = true
+			break
+		}
+	}
+	if !mutated {
+		t.Fatal("expected a transform step in the worked example to mutate")
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("model on a transform step must be rejected; it is llm-seam only")
+	}
+}
+
 // TestLLMSeamIsOnlySeam: the llm-seam kind is the single seam mark. No other
 // kind carries it, so the no-LLM guarantee is structurally checkable. Exactly
 // one step in the example is the marked seam, and the rest are deterministic.

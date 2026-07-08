@@ -70,6 +70,24 @@ func TestLint_AcceptsExplicitLLMSeam(t *testing.T) {
 	}
 }
 
+// TestLint_AcceptsSeamWithPromptAndModel pins the seam exemption (#2099): a
+// kind: llm-seam step carrying the first-class prompt and model fields lints
+// clean. The seam is the one permitted LLM reach, so it is exempt from the
+// llmMarkers set the non-seam kinds are rejected against.
+func TestLint_AcceptsSeamWithPromptAndModel(t *testing.T) {
+	m := manifestWithSteps([]any{
+		map[string]any{
+			"id": "summarize", "kind": "llm-seam",
+			"prompt":  "Summarize {{ steps.render.csv }}.",
+			"model":   "anthropic:claude-haiku-4-5",
+			"outputs": []any{"text"},
+		},
+	})
+	if err := Lint(m); err != nil {
+		t.Errorf("an llm-seam carrying prompt and model must lint clean: %v", err)
+	}
+}
+
 func TestLint_RejectsUnknownKind(t *testing.T) {
 	m := manifestWithSteps([]any{
 		map[string]any{"id": "weird", "kind": "magic-call"},

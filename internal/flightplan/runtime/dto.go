@@ -304,6 +304,14 @@ type stepDTO struct {
 	// declaring its network reach (hosts) and effect. Validated at decode via
 	// the same shared toContract body an action's contract uses.
 	TrustContract *trustContractDTO `yaml:"trustContract"`
+
+	// Prompt and Model mirror the schema's llmSeamStep shape (#2099) and are
+	// meaningful only for kind: llm-seam; toStep refuses them on any other
+	// kind. Both are audit-only: the runtime does not consume them (like
+	// trustContractDTO's OAuth/Verification), but modeling them keeps strict
+	// KnownFields decode from rejecting a valid seam that declares them.
+	Prompt string `yaml:"prompt"`
+	Model  string `yaml:"model"`
 }
 
 func (d stepDTO) toStep() (Step, error) {
@@ -381,6 +389,23 @@ func (d stepDTO) toStep() (Step, error) {
 		step.Transform = d.Transform
 	} else if d.Transform != "" {
 		return Step{}, decodeErrf("step %q: kind %q must not declare a transform (only a transform step names one)", d.ID, d.Kind)
+	}
+
+	// The seam surface (prompt/model, #2099) is closed to kind: llm-seam. Both
+	// are audit-only fields sealed into the signed frontmatter; the runtime does
+	// not consume them in v1 (#2100). Any other kind carrying one is a malformed
+	// step (the closed schema forbids it on non-seam kinds), refused rather than
+	// silently ignored, mirroring the tool-surface and transform refusals above.
+	if kind == KindLLMSeam {
+		step.Prompt = d.Prompt
+		step.Model = d.Model
+	} else {
+		if d.Prompt != "" {
+			return Step{}, decodeErrf("step %q: kind %q must not declare a prompt (only an llm-seam carries a sealed instruction template)", d.ID, d.Kind)
+		}
+		if d.Model != "" {
+			return Step{}, decodeErrf("step %q: kind %q must not declare a model (only an llm-seam records a model target)", d.ID, d.Kind)
+		}
 	}
 
 	if kind == KindTool {

@@ -623,6 +623,7 @@
     "llmSeamStep": {
       "type": "object",
       "description": "The single ADR-0027-permitted non-deterministic seam. The `kind: llm-seam` value is the first-class mark #1509 lint checks; by construction no other step kind reaches an LLM, so the no-LLM guarantee is structurally checkable because `kind` is a closed enum and only this one value reaches an LLM. Bindings reference resolved inputs or prior step outputs by name, never by value; the seam holds no credential and binds no secret.",
+      "$comment": "The `prompt` and `model` keys are the only exception to the freeze-lint `llmMarkers` set (llm, model, prompt, completion, inference): they are first-class fields ONLY on this llm-seam kind and remain forbidden on every other step kind by those defs' closed objects (additionalProperties:false). Both are audit-only: freeze content-hashes and signs the whole `aileron` frontmatter block, so these keys ride inside the already-signed bytes with no new sealing machinery and no runtime behavior (runtime consumption is #2100).",
       "additionalProperties": false,
       "required": ["id", "kind", "outputs"],
       "properties": {
@@ -639,6 +640,16 @@
           "type": "object",
           "description": "The named inputs to the seam. Each value is a binding REFERENCE to a resolved input or a prior step output, never a value.",
           "additionalProperties": { "$ref": "#/$defs/binding" }
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The sealed instruction template for the seam. It uses the same binding grammar as the rest of the plan (`{{ inputs.<name> }}` and `{{ steps.<id>.<output> }}` tokens reference resolved inputs and prior step outputs, never values). Sealed into the signed frontmatter at freeze; audit-only in v1 (the runtime does not consume it — that is #2100). Permitted ONLY on `kind: llm-seam`.",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "description": "The recorded model target for the seam, for example anthropic:claude-haiku-4-5. It is a request/hint recorded not enforced, never a pin: there is no output-schema field and no output validation beyond the existing declared-outputs-must-be-produced rule. Sealed into the signed frontmatter at freeze; audit-only in v1 (the runtime does not consume it — that is #2100). Permitted ONLY on `kind: llm-seam`.",
+          "minLength": 1
         },
         "outputs": { "$ref": "#/$defs/stepOutputs" },
         "materializesOutput": { "$ref": "#/$defs/materializesOutput" }

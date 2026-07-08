@@ -93,7 +93,15 @@ func Lint(m *manifest.Manifest) error {
 			}
 		}
 		if kind == llmSeamKind {
-			// The explicitly marked seam is the one permitted LLM reach.
+			// The explicitly marked seam is the one permitted LLM reach, and it
+			// now carries first-class `prompt` (a sealed instruction template) and
+			// `model` (a recorded target) fields (#2099). Both are audit-only,
+			// sealed by the signed frontmatter, so the seam is exempt from the
+			// whole llmMarkers set here: this single `continue` is the one
+			// exemption point. The schema's per-kind closed objects
+			// (additionalProperties:false) are the enforcing gate — they accept
+			// `prompt`/`model` only on this kind and reject them on every other —
+			// so the lint deliberately does not re-partition the seam's markers.
 			continue
 		}
 		if marker := llmMarkerIn(step); marker != "" {
@@ -129,16 +137,24 @@ func Lint(m *manifest.Manifest) error {
 }
 
 // llmMarkers are the top-level step keys that indicate a non-deterministic
-// LLM call. A deterministic step (action-call, transform) that carries one
-// of these is trying to reach an LLM outside the marked seam, which the
-// lint rejects.
+// LLM call. A deterministic step (action-call, transform, tool) that carries
+// one of these is trying to reach an LLM outside the marked seam, which the
+// lint rejects. `model` and `prompt` are in this set for exactly that
+// non-seam rejection: on `kind: llm-seam` they are first-class fields (#2099),
+// permitted only there. The seam is exempt from this whole set via the
+// `continue` in Lint; the schema's per-kind closed objects are the enforcing
+// gate that accepts `prompt`/`model` on the seam and rejects every marker on
+// every other kind.
 var llmMarkers = []string{"llm", "model", "prompt", "completion", "inference"}
 
 // llmMarkerIn reports the first LLM marker key present on a step mapping, or
-// "" when none is. The closed step schema (additionalProperties:false)
-// already forbids these keys on a valid action-call/transform; the lint is
-// the freeze-time backstop that names the offending marker rather than
-// relying on schema validation alone.
+// "" when none is. It is called only for non-seam kinds (Lint's `continue`
+// exempts the seam), so its job is to name a marker illegally present on an
+// action-call/transform/tool step. The closed step schema
+// (additionalProperties:false) already forbids these keys on those kinds and
+// permits `prompt`/`model` only on the seam (#2099); the lint is the
+// freeze-time backstop that names the offending marker rather than relying on
+// schema validation alone.
 func llmMarkerIn(step map[string]any) string {
 	for _, marker := range llmMarkers {
 		if _, ok := step[marker]; ok {
