@@ -254,6 +254,23 @@ func (i *Indicator) stopSpinnerLocked() {
 	i.mu.Lock()
 }
 
+// poke records subprocess liveness observed through a livenessWriter. It is
+// deliberately non-emitting: the visible spinner is advanced by the ticker in
+// Start's redraw goroutine, and writing here would either corrupt a captured
+// non-TTY buffer or race the ticker for the terminal line. It exists so a
+// livenessWriter has a real Indicator hook to call, and is a no-op once the
+// indicator is quiet, finished, or has no active indication, so a build's write
+// after Done can never emit anything. Safe for concurrent use.
+func (i *Indicator) poke() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.quiet || i.finished || !i.active {
+		return
+	}
+	// No render here on purpose. The ticker owns the animation; poke only marks
+	// that liveness was observed, leaving the non-TTY and quiet paths silent.
+}
+
 // percentOf returns current*100/total as an integer percentage without
 // overflowing when the counts are near the int64 ceiling. It assumes total > 0
 // and 0 <= current <= total, which Update guarantees, so the result is in

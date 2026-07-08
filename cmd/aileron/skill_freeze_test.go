@@ -13,8 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/cli/progress"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
 	"github.com/ALRubinger/aileron/internal/flightplan/ociremote"
@@ -232,6 +234,227 @@ func TestRunSkillFreeze_MultiArchRecordsBothArchesInLock(t *testing.T) {
 			t.Errorf("lockfile must record %q for the multi-arch pin:\n%s", want, lf)
 		}
 	}
+}
+
+// genericInspectRunner wraps a fakeRunner and answers any `image inspect
+// --format {{json .RepoDigests}} <ref>` with a single RepoDigests entry under
+// the requested ref's repository, so the REAL runtimeDigestResolver resolves a
+// digest for whatever default base ref the version maps to without the test
+// scripting the exact tag. Every other command falls through to the fakeRunner,
+// so the buildx preflight and both builds behave as scripted. It also records
+// whether a `pull` command was seen, so a test can prove the pull step ran.
+type genericInspectRunner struct {
+	*fakeRunner
+	pulledMu   sync.Mutex
+	pulled     bool
+	repoDigest string
+}
+
+func (r *genericInspectRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return r.RunWithEnv(ctx, name, args, nil, stdout, stderr)
+}
+
+func (r *genericInspectRunner) RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
+	joined := strings.Join(args, " ")
+	if len(args) > 0 && args[0] == "pull" {
+		r.pulledMu.Lock()
+		r.pulled = true
+		r.pulledMu.Unlock()
+		return nil
+	}
+	if strings.Contains(joined, "image inspect") && strings.Contains(joined, "RepoDigests") {
+		ref := args[len(args)-1]
+		repo := repoOfRef(ref)
+		_, _ = stdout.Write([]byte(`["` + repo + `@` + r.repoDigest + `"]`))
+		return nil
+	}
+	return r.fakeRunner.RunWithEnv(ctx, name, args, env, stdout, stderr)
+}
+
+func (r *genericInspectRunner) sawPull() bool {
+	r.pulledMu.Lock()
+	defer r.pulledMu.Unlock()
+	return r.pulled
+}
+
+// TestRunSkillFreeze_IndicatorDrivenAcrossPullAndBuilds proves the acceptance
+// bar: a full freeze of a tools-declaring skill drives the progress indicator
+// across the base-image pull and BOTH composed builds, and on the non-TTY path
+// the captured stdout carries the plain start/done lines for each step with no
+// control characters. It runs the REAL runtimeDigestResolver (so pull fires) and
+// the REAL builderFeatureComposer (so both builds fire) through a fake runner.
+func TestRunSkillFreeze_IndicatorDrivenAcrossPullAndBuilds(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	key := writeSigningKey(t)
+
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	gr := &genericInspectRunner{
+		fakeRunner: &fakeRunner{outputs: buildxPreflightOK()},
+		repoDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+
+	var stdout, stderr bytes.Buffer
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{
+			runner:  gr,
+			runtime: "docker",
+			newProgress: func() *progress.Indicator {
+				return progress.New(&stdout, progress.WithForceTTY(false))
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	if code := runSkillFreeze([]string{"--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("freeze must succeed, exit=%d stderr=%s", code, stderr.String())
+	}
+	if !gr.sawPull() {
+		t.Error("the base-image pull step must have run")
+	}
+
+	out := stdout.String()
+	// Scenario 1: the indicator was driven across pull and both builds.
+	for _, want := range []string{
+		"Pulling base image", "Pulled base image",
+		"Building environment image", "Built environment image",
+		"Loading image into local daemon", "Loaded image into local daemon",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout must contain progress label %q:\n%s", want, out)
+		}
+	}
+	// Scenario 2: non-TTY output is plain (no ESC, no carriage return).
+	if strings.ContainsAny(out, "\x1b\r") {
+		t.Errorf("non-TTY progress output must contain no ESC or CR:\n%q", out)
+	}
+	// Scenario 4: the freeze summary is preserved.
+	if !strings.Contains(out, "Froze skill \"weekly-metrics-digest\"") {
+		t.Errorf("stdout must still print the freeze summary:\n%s", out)
+	}
+	if !strings.Contains(out, "ContentHash: sha256:") {
+		t.Errorf("stdout must still print the ContentHash line:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_QuietSuppressesProgress proves --quiet suppresses every
+// progress label while the freeze summary still prints. It runs the same real
+// pull + build path with a quiet indicator factory.
+func TestRunSkillFreeze_QuietSuppressesProgress(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	key := writeSigningKey(t)
+
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	gr := &genericInspectRunner{
+		fakeRunner: &fakeRunner{outputs: buildxPreflightOK()},
+		repoDigest: "sha256:" + strings.Repeat("c", 64),
+	}
+
+	var stdout, stderr bytes.Buffer
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{
+			runner:  gr,
+			runtime: "docker",
+			newProgress: func() *progress.Indicator {
+				return progress.New(&stdout, progress.WithForceTTY(false), progress.WithQuiet(true))
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	if code := runSkillFreeze([]string{"--quiet", "--signing-key", key, "--version", "1.0.0", "weekly-metrics-digest"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("quiet freeze must succeed, exit=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, label := range []string{
+		"Pulling base image", "Building environment image", "Loading image into local daemon",
+	} {
+		if strings.Contains(out, label) {
+			t.Errorf("--quiet must suppress progress label %q:\n%s", label, out)
+		}
+	}
+	// The summary still prints under --quiet.
+	if !strings.Contains(out, "Froze skill \"weekly-metrics-digest\"") {
+		t.Errorf("--quiet must not suppress the freeze summary:\n%s", out)
+	}
+}
+
+// TestBuilderFeatureComposer_DaemonUnreachableTeeIntact proves the liveness
+// writer freeze installs as Builder.Stderr does not displace runBuildStep's
+// stderr capture buffer: a build whose stderr emits the docker-daemon-unreachable
+// marker still yields the translated error. This is the must-not-break tee
+// requirement, asserted at the composer level through the real ComposeDigest and
+// the real container.Builder.
+func TestBuilderFeatureComposer_DaemonUnreachableTeeIntact(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+	})
+	// A runner that passes the buildx preflight but emits the daemon-unreachable
+	// marker to stderr and fails the multi-arch build.
+	fr := daemonDownBuildRunner{fakeRunner: &fakeRunner{outputs: buildxPreflightOK()}}
+
+	var stdout bytes.Buffer
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{
+			runner:  fr,
+			runtime: "docker",
+			newProgress: func() *progress.Indicator {
+				return progress.New(&stdout, progress.WithForceTTY(false))
+			},
+		}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	_, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
+	if err == nil {
+		t.Fatal("a daemon-unreachable build must surface an error")
+	}
+	// The container package translates the captured daemon-unreachable stderr; the
+	// liveness writer sitting as the outer MultiWriter arg must not have consumed
+	// it. The composer wraps the build error with its compose message.
+	if !strings.Contains(err.Error(), "compose environment tools") {
+		t.Errorf("err = %v, want the composer's multi-arch wrap", err)
+	}
+	// The container package only emits this headline when its stderr capture
+	// buffer observed the daemon-unreachable marker, so its presence proves the
+	// liveness writer sitting as the outer MultiWriter arg did not consume the
+	// stream out from under the capture buffer.
+	if !strings.Contains(err.Error(), "Docker isn't reachable") {
+		t.Errorf("err = %v, want the daemon-unreachable translation to survive the tee", err)
+	}
+}
+
+// daemonDownBuildRunner passes the buildx preflight but emits the
+// docker-daemon-unreachable marker to stderr and fails any build command, so the
+// composer's stderr tee + daemon-unreachable translation is exercised end to end.
+// It overrides both Run and RunWithEnv because the multi-arch build carries a
+// scoped BUILDX_BUILDER env and thus routes through the envRunner path.
+type daemonDownBuildRunner struct{ *fakeRunner }
+
+func (r daemonDownBuildRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return r.RunWithEnv(ctx, name, args, nil, stdout, stderr)
+}
+
+func (r daemonDownBuildRunner) RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "build") && (strings.Contains(joined, "--output") || strings.Contains(joined, "--image-name")) {
+		_, _ = stderr.Write([]byte("cannot connect to the docker daemon at unix:///var/run/docker.sock"))
+		return errors.New("build failed")
+	}
+	return r.fakeRunner.RunWithEnv(ctx, name, args, env, stdout, stderr)
 }
 
 // TestRunSkillFreeze_MissingBuildxAbortsWithNoPin proves the freeze aborts with the
