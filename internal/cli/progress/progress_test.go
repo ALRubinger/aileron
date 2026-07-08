@@ -136,6 +136,53 @@ func TestStartThenUpdateStopsSpinner(t *testing.T) {
 	}
 }
 
+func TestStartThenDoneStopsSpinner(t *testing.T) {
+	// Done on a running spinner must join the redraw goroutine before it
+	// returns, so the goroutine cannot keep consuming ticks (a leak) or draw a
+	// spinner frame after the resolved "✓" line. Drive one tick, resolve with
+	// Done, then prove nothing is listening on the tick channel.
+	var buf syncBuffer
+	tick := make(chan time.Time)
+	ind := New(&buf, WithForceTTY(true), WithTicker(tick))
+
+	ind.Start("copy")
+	tick <- time.Now() // one spinner frame
+	ind.Done("copy")
+
+	// resolve() joins the redraw goroutine synchronously, so after Done the
+	// goroutine has exited and a non-blocking send must hit the default branch.
+	select {
+	case tick <- time.Now():
+		t.Fatal("redraw goroutine still consuming ticks after Done")
+	default:
+	}
+	if !strings.HasSuffix(buf.String(), "✓ copy\n") {
+		t.Errorf("expected resolved done line after Start->Done, got %q", buf.String())
+	}
+}
+
+func TestStartThenFailStopsSpinner(t *testing.T) {
+	// Fail has the same stop-and-join semantics as Done: it must terminate the
+	// redraw goroutine before returning so no tick is consumed and no spinner
+	// frame is drawn after the resolved "✗" line.
+	var buf syncBuffer
+	tick := make(chan time.Time)
+	ind := New(&buf, WithForceTTY(true), WithTicker(tick))
+
+	ind.Start("deploy")
+	tick <- time.Now() // one spinner frame
+	ind.Fail("deploy")
+
+	select {
+	case tick <- time.Now():
+		t.Fatal("redraw goroutine still consuming ticks after Fail")
+	default:
+	}
+	if !strings.HasSuffix(buf.String(), "✗ deploy\n") {
+		t.Errorf("expected resolved fail line after Start->Fail, got %q", buf.String())
+	}
+}
+
 func TestUpdateLargeByteCountsNoOverflow(t *testing.T) {
 	var buf bytes.Buffer
 	ind := New(&buf, WithForceTTY(true))
