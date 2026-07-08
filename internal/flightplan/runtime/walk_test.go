@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/store"
@@ -106,6 +107,36 @@ func TestRun_InPinnedImageReentrySkipsWalker(t *testing.T) {
 	}
 	if walker.called {
 		t.Fatal("the image-boot re-entry (InPinnedImage) must never invoke the walker")
+	}
+}
+
+// A tool-step plan with no pinned environment refuses BEFORE the interactive
+// input walk runs (#2063). The fail-closed no-environment refusal (#1829) is
+// unconditional for such a plan, so dragging the operator through a guided walk
+// whose result can only be discarded is wasted work: the refusal must precede
+// the walk. The walker must never be called.
+func TestRun_ToolStepNoImageRefusesBeforeWalk(t *testing.T) {
+	fv := frozenToolStep(t, false)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("tool-step-plan", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	walker := &fakeWalker{collected: map[string]any{"window_days": 7}}
+	_, err := Run(context.Background(), Options{
+		Store:       s,
+		Name:        "tool-step-plan",
+		Version:     "test",
+		ToolRunner:  &fakeToolStepRunner{},
+		InputWalker: walker,
+	})
+	if err == nil {
+		t.Fatal("a tool-step plan with no pinned environment must refuse")
+	}
+	if !strings.Contains(err.Error(), "pins no environment image") {
+		t.Errorf("error = %v, want the no-environment refusal", err)
+	}
+	if walker.called {
+		t.Fatal("the no-environment refusal must fire BEFORE the interactive walk; the walker must never run")
 	}
 }
 

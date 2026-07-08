@@ -177,6 +177,20 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	if err := gatePublisher(opts.PublisherVerifier, lp); err != nil {
 		return RunResult{}, err
 	}
+	// A tool step requires the plan's declared environment: its argv is
+	// signed against the composed image the lock pinned, so executing it
+	// anywhere else (the operator's host, an unpinned in-process run) would
+	// enter an environment the attestation never certified. Refuse a
+	// tool-step plan with no pinned environment unless this run is ALREADY
+	// inside the booted pin (#1829). This fail-closed check precedes the
+	// interactive input walk below so a doomed tool-step run refuses BEFORE
+	// dragging the operator through a guided walk it can only discard; the
+	// refusal never reads opts.Inputs, so ordering it first is behavior-
+	// preserving for every run that does proceed.
+	if planHasToolSteps(lp.Plan) && len(lp.ResolvedImages) == 0 && !opts.InPinnedImage {
+		return RunResult{}, fmt.Errorf(
+			"flightplan: plan declares tool steps but pins no environment image; tool steps run only inside the declared environment")
+	}
 	// Host-side interactive input walk (#2063). It runs BEFORE the image-boot /
 	// in-process branch so the guided walk reaches the sealed-image mainline: a
 	// whole-plan-pinned unit short-circuits to runInImage before resolveInputs
@@ -193,16 +207,6 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 			return RunResult{}, err
 		}
 		opts.Inputs = walked
-	}
-	// A tool step requires the plan's declared environment: its argv is
-	// signed against the composed image the lock pinned, so executing it
-	// anywhere else (the operator's host, an unpinned in-process run) would
-	// enter an environment the attestation never certified. Refuse a
-	// tool-step plan with no pinned environment unless this run is ALREADY
-	// inside the booted pin (#1829).
-	if planHasToolSteps(lp.Plan) && len(lp.ResolvedImages) == 0 && !opts.InPinnedImage {
-		return RunResult{}, fmt.Errorf(
-			"flightplan: plan declares tool steps but pins no environment image; tool steps run only inside the declared environment")
 	}
 	// When the verified lock pins a WHOLE-PLAN image, boot that exact image
 	// and run the plan inside it (#1731). The image-boot re-entry
