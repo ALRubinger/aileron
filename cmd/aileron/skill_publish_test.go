@@ -75,6 +75,40 @@ func TestRunSkillPublishHappyPath(t *testing.T) {
 	}
 }
 
+// TestRunSkillPublishQuietPlumbed proves the --quiet flag threads through into
+// publish.Options.Quiet, and that its absence leaves Quiet false.
+func TestRunSkillPublishQuietPlumbed(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	pin := freeze.ImagePin{Ref: "docker.io/library/python", Digest: "sha256:abc"}
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}})
+
+	var got publish.Options
+	withStubPublish(t, func(_ context.Context, o publish.Options) (publish.Result, error) {
+		got = o
+		return publish.Result{}, nil
+	})
+
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo", "--quiet"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, errBuf.String())
+	}
+	if !got.Quiet {
+		t.Errorf("Quiet = false, want true when --quiet is passed")
+	}
+
+	got = publish.Options{}
+	out.Reset()
+	errBuf.Reset()
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, errBuf.String())
+	}
+	if got.Quiet {
+		t.Errorf("Quiet = true, want false when --quiet is omitted")
+	}
+}
+
 func TestRunSkillPublishUnfrozen(t *testing.T) {
 	dir := t.TempDir()
 	skillStoreDir = dir
