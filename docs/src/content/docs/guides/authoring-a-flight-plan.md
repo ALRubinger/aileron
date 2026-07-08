@@ -122,6 +122,8 @@ Every input the plan depends on is declared in `inputs[]`, each with a resolutio
 - `name` is the input name, unique within the manifest.
 - `type` is one of `string`, `number`, `boolean`, `timestamp`, `object`, `array`.
 - `description` is optional human-readable semantics.
+- `example` is an optional first-class example value.
+- `prompt` is an optional guided-walk visibility marker.
 - `resolution` is the resolution rule, discriminated by its `rule` field.
 - `constraint` is an optional bound on the resolved value.
 
@@ -132,6 +134,10 @@ There are three resolution rules.
 - `source` reads from a live source. Its `source.actionRef` names the action whose result resolves the input, with an optional `source.select`.
 
 Inputs resolve once, at the launch boundary, into a concrete resolved-input set. Two steps that read the same dynamic input see one value. A `source` read happens in the resolution phase, before the step graph walks, so it is not a graph edge.
+
+An input can carry an optional `example`, a first-class example value the guided launch walk displays on the prompt line. This keeps example values out of the `description`, where they used to be jammed. Any value type is allowed, so an example may be a string, a number, or a structured object. A large example is shown as a compact type and size summary so it never floods the terminal. The example is display-only and never affects resolution or whether the input is required.
+
+An input can also carry `prompt: false` to mark it as advanced or non-interactive. The guided launch walk skips such an input and its declared default applies silently, so an operator is not asked to hand-type a value nobody edits, such as a large inlined template. The input stays overridable via `--input`, and an explicit override still wins and is shown as already set. An absent `prompt` key, or `prompt: true`, means the walk prompts for the input as usual.
 
 An input can carry an optional `constraint` that bounds its resolved value. A constraint holds exactly one of two forms. An `enum` is a non-empty array of allowed string values, and the resolved value's string form must equal one entry. A `pattern` is a non-empty author-anchored Go RE2 regexp, and the resolved value's string form must match it. Declaring both forms at once, an empty `enum`, an empty `pattern`, or a pattern that does not compile is a bad shape rejected at freeze and at decode. A resolved value that falls outside its constraint is rejected at launch and the launch fails closed. The constraint applies to any resolution rule, and the check is over the value's string form, so a number or timestamp input stays bounded. A constraint is meaningful only on a scalar-typed input, meaning `string`, `number`, `boolean`, or `timestamp`. An `enum` or `pattern` on an `object` or `array` input is effectively unusable, because it would only ever match Go's rendering of a map or slice.
 

@@ -328,6 +328,13 @@
           "type": "string",
           "description": "Human-readable semantics of the input."
         },
+        "example": {
+          "description": "OPTIONAL first-class example value for the input. The guided launch walk displays it on the prompt line so an example never has to be jammed into the description. Any JSON value is allowed (string, number, object, array). Does not affect resolution or required-ness."
+        },
+        "prompt": {
+          "type": "boolean",
+          "description": "OPTIONAL guided-walk visibility marker. When false, the input is advanced or non-interactive and the guided launch walk SKIPS it, so its declared default applies silently. The input remains overridable via --input. Absent (or true) means the walk prompts for it as usual."
+        },
         "resolution": { "$ref": "#/$defs/resolution" },
         "constraint": { "$ref": "#/$defs/inputConstraint" }
       }

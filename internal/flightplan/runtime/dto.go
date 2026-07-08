@@ -123,6 +123,15 @@ type inputDTO struct {
 		Enum    []string `yaml:"enum"`
 		Pattern string   `yaml:"pattern"`
 	} `yaml:"constraint"`
+	// Example is the optional first-class example value the guided walk displays.
+	// Untyped so an example may be any JSON value; presence (non-nil after
+	// remarshal) sets Input.HasExample. The strict KnownFields decoder requires
+	// the field to exist on the DTO or a manifest carrying it is refused.
+	Example any `yaml:"example"`
+	// Prompt is the optional guided-walk visibility marker. A pointer
+	// distinguishes an absent key (promptable) from an explicit `prompt: false`
+	// (skipped); a plain bool's zero value would wrongly default to "skip".
+	Prompt *bool `yaml:"prompt"`
 }
 
 var validInputTypes = map[string]InputType{
@@ -166,7 +175,16 @@ func (d inputDTO) toInput() (Input, error) {
 	if err != nil {
 		return Input{}, err
 	}
-	return Input{Name: d.Name, Type: it, Description: d.Description, Resolution: res, Constraint: con}, nil
+	in := Input{Name: d.Name, Type: it, Description: d.Description, Resolution: res, Constraint: con}
+	if d.Example != nil {
+		in.HasExample = true
+		in.Example = d.Example
+	}
+	// A pointer distinguishes an absent `prompt` (promptable) from an explicit
+	// `prompt: false` (skipped). Only an explicit false marks the input NoPrompt;
+	// absent or `prompt: true` walks as usual.
+	in.NoPrompt = d.Prompt != nil && !*d.Prompt
+	return in, nil
 }
 
 // toConstraint validates the optional input constraint and compiles a pattern

@@ -136,6 +136,8 @@ The closed `audit.fields` set is `connector-hash`, `action-manifest-version`, `c
 | `name` | string | Yes | The input name, unique within the manifest. |
 | `type` | string | Yes | One of `string`, `number`, `boolean`, `timestamp`, `object`, `array`. |
 | `description` | string | No | Human-readable semantics. |
+| `example` | any | No | A first-class example value the guided launch walk displays on the prompt line. Any JSON value is allowed. It does not affect resolution or required-ness. |
+| `prompt` | boolean | No | When `false`, the guided launch walk skips this input. It only skips the prompt; it changes neither validation nor required-ness. A declared default applies silently, but a required input with no default still fails at resolution unless supplied via `--input`. The input stays overridable via `--input`. Absent (or `true`) means the walk prompts for it. |
 | `resolution` | object | Yes | The resolution rule. One of `literal`, `dynamic`, or `source`. |
 | `constraint` | object | No | An optional bound on the resolved value. Exactly one of `enum` or `pattern`. |
 

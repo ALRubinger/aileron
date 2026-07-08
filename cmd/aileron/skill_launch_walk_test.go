@@ -206,3 +206,98 @@ func TestWalk_ConstraintHintShown(t *testing.T) {
 		t.Errorf("prompt must carry the pattern hint:\n%s", out.String())
 	}
 }
+
+// --- example + prompt: false fields (#2064) ---
+
+// A declared example renders inline on the prompt line so an example never has
+// to be jammed into the description.
+func TestWalk_ExampleRenderedInPrompt(t *testing.T) {
+	w, out := newWalker("\n") // accept the default
+	in := litDefault("region", "the AWS region", "us-east-1")
+	in.HasExample = true
+	in.Example = "us-west-2"
+	if _, err := w.Walk([]runtime.Input{in}, nil); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if !strings.Contains(out.String(), "e.g. us-west-2") {
+		t.Errorf("a declared example must render inline on the prompt line:\n%s", out.String())
+	}
+}
+
+// A large example is capped through the same type+size summary the default
+// uses, so a big example never floods the terminal.
+func TestWalk_LargeExampleSummarized(t *testing.T) {
+	big := strings.Repeat("y", maxDefaultInlineLen+1)
+	w, out := newWalker("\n")
+	in := litDefault("blob", "a big one", "small-default")
+	in.HasExample = true
+	in.Example = big
+	if _, err := w.Walk([]runtime.Input{in}, nil); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	s := out.String()
+	if strings.Contains(s, big) {
+		t.Errorf("a large example must not be rendered raw:\n%s", s)
+	}
+	if !strings.Contains(s, "e.g. <string,") {
+		t.Errorf("a large example must render as a type+size summary:\n%s", s)
+	}
+}
+
+// An input marked prompt: false is skipped by the walk: no prompt is emitted,
+// no stdin line is consumed, and no value is written so the declared default
+// applies silently downstream.
+func TestWalk_NoPromptSkipsAndKeepsDefault(t *testing.T) {
+	// The scripted stdin carries exactly one line for the promptable input. If
+	// the skipped input wrongly consumed a line, the second prompt would read the
+	// wrong value.
+	w, out := newWalker("visible-value\n")
+	skipped := litDefault("dashboard_template", "big inlined template", "BIG-DEFAULT")
+	skipped.NoPrompt = true
+	inputs := []runtime.Input{
+		skipped,
+		litRequired("account", "the account"),
+	}
+	got, err := w.Walk(inputs, nil)
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if _, ok := got["dashboard_template"]; ok {
+		t.Error("a prompt: false input must not be written into the walk args, so its declared default applies downstream")
+	}
+	if got["account"] != "visible-value" {
+		t.Errorf("the skipped input must not consume the promptable input's stdin line, got account=%#v", got["account"])
+	}
+	s := out.String()
+	if !strings.Contains(s, "advanced") {
+		t.Errorf("a skipped input must render an informational advanced line:\n%s", s)
+	}
+	// The skip must be non-interactive: its default value is not solicited, so
+	// the big default never appears as an Enter-to-accept prompt.
+	if strings.Contains(s, "Enter to accept") && strings.Contains(s, "dashboard_template") {
+		t.Errorf("a prompt: false input must not render an interactive default prompt:\n%s", s)
+	}
+}
+
+// A prompt: false input supplied via --input is shown as already set and keeps
+// the override: the skip check sits after the already-set check, so an explicit
+// override still wins and stays --input-overridable.
+func TestWalk_NoPromptStillOverridable(t *testing.T) {
+	w, out := newWalker("") // no stdin: the only input is pre-set
+	in := litDefault("dashboard_template", "big inlined template", "BIG-DEFAULT")
+	in.NoPrompt = true
+	got, err := w.Walk([]runtime.Input{in}, runtime.LaunchArgs{"dashboard_template": "OVERRIDE"})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if got["dashboard_template"] != "OVERRIDE" {
+		t.Errorf("a prompt: false input supplied via --input must keep the override, got %#v", got["dashboard_template"])
+	}
+	s := out.String()
+	if !strings.Contains(s, "already set") {
+		t.Errorf("an overridden prompt: false input must render an already-set line:\n%s", s)
+	}
+	if strings.Contains(s, "advanced") {
+		t.Errorf("an overridden input must not also render the advanced skip line:\n%s", s)
+	}
+}
