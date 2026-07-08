@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -49,10 +50,12 @@ func usePassthroughImageRunner(t *testing.T) {
 
 // TestRunSkillLaunch_TTYWalkFeedsSealedBoot is the contract-level proof the
 // guided walk is LIVE on the image-pinned mainline (#2063): on a faked TTY the
-// host-side walk runs before container boot, and its Enter-accepted typed
-// default (window_days=7, a native number) reaches the recorded boot command as
-// --input window_days=7. The in-container prompter is never consulted for a
-// sealed plan, so only the host-side walk can feed this input.
+// host-side walk runs before container boot. An Enter-accepted default records
+// NO override, so the recorded boot command carries no --input for window_days
+// and the sealed plan resolves the declared default natively inside the
+// container, in parity with --accept-defaults. The walk running is proven by the
+// walked flag; the absence of a serialized accepted-default proves it does not
+// round-trip the default through --input.
 func TestRunSkillLaunch_TTYWalkFeedsSealedBoot(t *testing.T) {
 	storeDir := withTempStore(t)
 	freezeExampleForLaunch(t, storeDir)
@@ -73,8 +76,62 @@ func TestRunSkillLaunch_TTYWalkFeedsSealedBoot(t *testing.T) {
 		t.Fatal("an interactive TTY launch must run the guided walk")
 	}
 	joined := strings.Join(got.Command, " ")
-	if !strings.Contains(joined, "--input window_days=7") {
-		t.Errorf("boot command must carry the walk's Enter-accepted typed default, got %v", got.Command)
+	if strings.Contains(joined, "window_days") {
+		t.Errorf("an Enter-accepted default must not be serialized onto the boot command (it resolves natively inside the container), got %v", got.Command)
+	}
+}
+
+// bootInputArgs runs a launch through the passthrough image runner and returns
+// the --input name=value pairs the recorded boot command carries, so a test can
+// compare how two launch modes serialize inputs onto the sealed-image re-entry.
+func bootInputArgs(t *testing.T, args []string, script string, tty bool) []string {
+	t.Helper()
+	storeDir := withTempStore(t)
+	freezeExampleForLaunch(t, storeDir)
+	stubLaunchSeams(t, &fakeLaunchDispatcher{results: map[string]map[string]any{}})
+	usePassthroughImageRunner(t)
+
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
+	stubLaunchTTY(t, tty)
+	stubLaunchWalkerStdin(t, script)
+
+	var stdout, stderr bytes.Buffer
+	if code := runSkillLaunch(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("launch exit = %d, stderr=%s", code, stderr.String())
+	}
+	var inputs []string
+	for i := 0; i+1 < len(got.Command); i++ {
+		if got.Command[i] == "--input" {
+			inputs = append(inputs, got.Command[i+1])
+		}
+	}
+	return inputs
+}
+
+// TestRunSkillLaunch_EnterDefaultParityWithAcceptDefaults is the parity
+// regression for #2063: accepting a declared default with Enter on an
+// interactive TTY and launching with --accept-defaults must serialize inputs
+// onto the sealed-image boot command identically, so both modes resolve the same
+// value and type for the accepted default natively inside the container. Before
+// the fix the interactive Enter round-tripped window_days through
+// --input window_days=7 (re-parsed as a string), while --accept-defaults left it
+// to resolve as the native int, diverging by launch mode on the image path.
+func TestRunSkillLaunch_EnterDefaultParityWithAcceptDefaults(t *testing.T) {
+	outDir := t.TempDir()
+	interactive := bootInputArgs(t,
+		[]string{"--out-dir", outDir, "weekly-metrics-digest"},
+		"\n", // Enter-accept the window_days default on a TTY
+		true)
+	defaulted := bootInputArgs(t,
+		[]string{"--accept-defaults", "--out-dir", outDir, "weekly-metrics-digest"},
+		"should-not-be-read\n",
+		true)
+	if len(interactive) != 0 {
+		t.Errorf("interactive Enter-accept must serialize no --input for an accepted default, got %v", interactive)
+	}
+	if !reflect.DeepEqual(interactive, defaulted) {
+		t.Errorf("interactive Enter-accept and --accept-defaults must serialize inputs identically on the image path: interactive=%v, --accept-defaults=%v", interactive, defaulted)
 	}
 }
 
