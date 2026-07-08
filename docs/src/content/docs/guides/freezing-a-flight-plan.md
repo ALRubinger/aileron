@@ -43,6 +43,8 @@ The signing key is a PEM-encoded ed25519 private key. Pass it with `--signing-ke
 
 The `--version` flag records a human-facing semver label in the lock. It is optional.
 
+Freeze can pull a base image and run a multi-architecture build, so it shows live progress for each long-running step: pulling the base image, building the environment image, and loading it into the local daemon. On an interactive terminal the progress advances in place. When the output is piped or captured it degrades to plain lines with no control characters. Pass `--quiet` to suppress the progress feedback entirely. The freeze summary always prints.
+
 Freeze prints the skill name, the version label, the content hash, and the on-disk location of the frozen version.
 
 ## The frozen version

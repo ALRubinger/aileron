@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ALRubinger/aileron/internal/cli/progress"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
 	"github.com/ALRubinger/aileron/internal/flightplan/imgconfig"
@@ -29,12 +30,27 @@ import (
 var newDigestResolver = func() freeze.DigestResolver { return runtimeDigestResolver{} }
 var newFeatureComposer = func() freeze.FeatureComposer { return builderFeatureComposer{} }
 
+// freezeProgress carries a factory that mints a fresh progress.Indicator for a
+// single bracketed step in the in-flight freeze run. It exists because a
+// progress.Indicator is single-shot (the first Done/Fail marks it finished and
+// inert), so pull, the multi-arch build, and the daemon-load build each need
+// their own indicator over the same destination and quiet setting. The
+// production newImageInspector (a no-arg package var reached from inside the
+// stateless runtimeDigestResolver / builderFeatureComposer) reads this factory
+// and installs it on the inspector it builds. runSkillFreeze sets it before
+// freeze.Run and resets it on return. It is nil outside a run and in tests that
+// do not opt in, so every inspector method nil-guards it and stays a no-op.
+// This keeps runtimeDigestResolver{} / builderFeatureComposer{} zero-value
+// constructible and leaves the runtime-free freeze core untouched.
+var freezeProgress func() *progress.Indicator
+
 func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("skill freeze", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	signingKey := flags.String("signing-key", "", "Path to the PEM ed25519 signing key (falls back to $"+freeze.SigningKeyEnv+")")
 	version := flags.String("version", "", "Semver label recorded in the lock (for example 1.0.0)")
 	publisher := flags.String("publisher", "", "Publisher authority to attribute the plan to (github://owner/repo or github://owner). When set, launch enforces publisher trust against the keyring.")
+	quiet := flags.Bool("quiet", false, "Suppress the live build and pull progress feedback (the freeze summary still prints)")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
@@ -63,6 +79,21 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
+	// Install a progress-indicator factory over stdout for the whole run. Each
+	// bracketed step (pull, multi-arch build, daemon-load build) mints its own
+	// indicator because an indicator is single-shot. TTY autodetection fires only
+	// when stdout is an *os.File attached to a terminal (animated spinner); a
+	// captured bytes.Buffer is non-*os.File, so it degrades to plain,
+	// control-character-free lines with no force flag. --quiet suppresses output
+	// on both paths. The factory is threaded to the pull/build sites through
+	// freezeProgress so the runtime-free freeze core and the zero-value
+	// resolver/composer stay untouched.
+	prev := freezeProgress
+	freezeProgress = func() *progress.Indicator {
+		return progress.New(stdout, progress.WithQuiet(*quiet))
+	}
+	defer func() { freezeProgress = prev }()
 
 	res, err := freeze.Run(context.Background(), raw, freeze.Options{
 		Version:        *version,
@@ -167,6 +198,12 @@ func frozenVersionID(contentHash string) string {
 type imageInspector struct {
 	runner  container.Runner
 	runtime string
+	// newProgress mints a fresh single-shot progress indicator for one bracketed
+	// step. The production newImageInspector installs freezeProgress here, so the
+	// pull and both build sites can each bracket their blocking step with liveness
+	// feedback. It is nil in tests that do not opt in and in the zero-value
+	// inspector, so every call site nil-guards it.
+	newProgress func() *progress.Indicator
 }
 
 // newImageInspector builds an inspector over the real container runtime,
@@ -178,14 +215,25 @@ var newImageInspector = func() (imageInspector, error) {
 	if err != nil {
 		return imageInspector{}, fmt.Errorf("resolve container runtime: %w", err)
 	}
-	return imageInspector{runner: container.DefaultRunner(), runtime: runtimeName}, nil
+	return imageInspector{runner: container.DefaultRunner(), runtime: runtimeName, newProgress: freezeProgress}, nil
 }
 
 // pull best-effort pulls ref. A failure is intentionally non-fatal: the
 // image may already be local, in which case the inspect still yields a
 // digest.
 func (in imageInspector) pull(ctx context.Context, ref string) {
+	var ind *progress.Indicator
+	if in.newProgress != nil {
+		ind = in.newProgress()
+		ind.Start("Pulling base image")
+	}
 	_ = in.runner.Run(ctx, in.runtime, []string{"pull", ref}, io.Discard, io.Discard)
+	// Resolve to done even on a pull error: the pull is best-effort and the
+	// image may already be local, so inspect still proceeds. A Fail here would
+	// mislead, since the freeze is not failing at this step.
+	if ind != nil {
+		ind.Done("Pulled base image")
+	}
 }
 
 // inspectFormat runs `image inspect --format <format> <image>` and returns
@@ -324,6 +372,21 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		Stdout:  io.Discard,
 		Stderr:  io.Discard,
 	}
+	// setBuildSinks points the Builder's stdout/stderr at the liveness sink for
+	// the given indicator (falling back to io.Discard when no indicator is
+	// active). The stderr sink stays the OUTER argument of runBuildStep's
+	// io.MultiWriter(stderr, &buf) tee, so the daemon-unreachable capture buffer
+	// still sees every byte and the sink never consumes the stream. It emits no
+	// bytes itself, so the non-TTY/quiet plain-line contract holds.
+	setBuildSinks := func(ind *progress.Indicator) {
+		if ind == nil {
+			b.Stdout = io.Discard
+			b.Stderr = io.Discard
+			return
+		}
+		b.Stdout = progress.NewLivenessWriter(ind)
+		b.Stderr = progress.NewLivenessWriter(ind)
+	}
 	// Wire the managed provisioner only on the managed branch; the host-npx
 	// opt-out must never carry a provisioner (its no-network/no-provision
 	// contract), matching the sandbox and launch callers.
@@ -369,9 +432,21 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		// driver and lands the image in the local daemon (issue #2054).
 		BuildxBuilder: container.FreezeBuilderName,
 	}
+	var buildInd *progress.Indicator
+	if in.newProgress != nil {
+		buildInd = in.newProgress()
+		buildInd.Start("Building environment image")
+	}
+	setBuildSinks(buildInd)
 	result, err := b.Build(ctx, buildOpts)
 	if err != nil {
+		if buildInd != nil {
+			buildInd.Fail("Building environment image")
+		}
 		return nil, fmt.Errorf("compose environment tools (multi-arch): %w", err)
+	}
+	if buildInd != nil {
+		buildInd.Done("Built environment image")
 	}
 	perArch, err := readOCILayoutConfigDigests(ctx, result.OCILayoutDir)
 	if err != nil {
@@ -389,8 +464,20 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	loadOpts := buildOpts
 	loadOpts.Platforms = nil
 	loadOpts.OCILayoutDest = ""
+	var loadInd *progress.Indicator
+	if in.newProgress != nil {
+		loadInd = in.newProgress()
+		loadInd.Start("Loading image into local daemon")
+	}
+	setBuildSinks(loadInd)
 	if _, err := b.Build(ctx, loadOpts); err != nil {
+		if loadInd != nil {
+			loadInd.Fail("Loading image into local daemon")
+		}
 		return nil, fmt.Errorf("load composed image into the local daemon under %q: %w", localTag, err)
+	}
+	if loadInd != nil {
+		loadInd.Done("Loaded image into local daemon")
 	}
 
 	out := make([]freeze.PlatformDigest, 0, len(perArch))
