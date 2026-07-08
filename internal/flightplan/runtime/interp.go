@@ -23,7 +23,7 @@ func commandInputRefs(s string) ([]string, error) {
 // instantiateCommand resolves a tool step's TEMPLATE argv into the argv the
 // runner execs, substituting each `{{ inputs.<name> }}` token with the string
 // form of the resolved plan input (fmt.Sprintf("%v", v), matching the constraint
-// enforcement in enforceConstraint). It returns the resolved argv plus the
+// enforcement in EnforceConstraint). It returns the resolved argv plus the
 // sorted-by-appearance indices of the elements that carried a token (the
 // input-derived marker the audit records).
 //
@@ -77,7 +77,7 @@ var hostShapePattern = regexp.MustCompile(`^[a-zA-Z0-9.-]+(:[0-9]+)?$`)
 // concrete hosts the step-scope mint enforces (#1959), substituting each
 // `{{ inputs.<name> }}` token with the string form of the resolved plan input
 // (fmt.Sprintf("%v", v), matching instantiateCommand and the constraint
-// enforcement in enforceConstraint). Host tokens reference PLAN inputs, so the
+// enforcement in EnforceConstraint). Host tokens reference PLAN inputs, so the
 // lookup is against values (ResolvedInputs.Values), the same source
 // instantiateCommand uses.
 //

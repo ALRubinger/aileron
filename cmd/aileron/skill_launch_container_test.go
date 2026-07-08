@@ -219,41 +219,43 @@ func TestContainerImageRunner_NoOverridesLeavesCommandUnchanged(t *testing.T) {
 	}
 }
 
-// TestContainerImageRunner_NonStringOverrideRefusesBoot proves a non-string value
-// in the map[string]any seam type has no exact name=value round-trip, so the
-// runner refuses the boot with an explicit error rather than coercing or dropping
-// it (#1802's never-silently-drop requirement). The boot must not fire.
-func TestContainerImageRunner_NonStringOverrideRefusesBoot(t *testing.T) {
+// TestContainerImageRunner_TypedOverrideSerializesViaSprintf proves a non-string
+// value in the map[string]any seam type (a typed default the host-side input walk
+// injects on Enter-accept, #2063) serializes to --input k=<%v> and the boot
+// FIRES. The %v round-trip is faithful: the inner re-entry re-parses it as a
+// string and every downstream check compares via %v, so a typed default and its
+// string form are indistinguishable to the plan. This replaces the earlier
+// refuse-non-string guard, which predated the walk.
+func TestContainerImageRunner_TypedOverrideSerializesViaSprintf(t *testing.T) {
 	storeDir := t.TempDir()
 	origStore := skillStoreDir
 	skillStoreDir = storeDir
 	t.Cleanup(func() { skillStoreDir = origStore })
 
-	booted := false
-	orig := containerRunFlightPlan
-	stubBakedCLIVersion(t, "")
-	containerRunFlightPlan = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
-		booted = true
-		return sandboxcontainer.RunResult{}, nil
-	}
-	t.Cleanup(func() { containerRunFlightPlan = orig })
+	var got sandboxcontainer.RunOptions
+	stubContainerBoot(t, &got, nil)
 
 	spec := runtime.ImageRunSpec{
 		Image: "registry.example.com/runner:1.4@sha256:abc",
 		Name:  "weekly-metrics-digest",
 		Inputs: runtime.LaunchArgs{
-			"window_days": 7, // non-string: no exact CLI round-trip
+			"window_days": 7,      // number: an Enter-accepted typed default
+			"enabled":     true,   // bool: another native typed value
+			"account":     "acme", // string: the CLI-override case still works
 		},
 	}
-	_, err := (containerImageRunner{}).Run(context.Background(), spec)
-	if err == nil {
-		t.Fatal("a non-string override must refuse the boot with an error")
+	if _, err := (containerImageRunner{}).Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(err.Error(), "window_days") {
-		t.Errorf("error must name the offending input, got %v", err)
-	}
-	if booted {
-		t.Error("the image must NOT boot when an override cannot be passed exactly")
+	joined := strings.Join(got.Command, " ")
+	for _, want := range []string{
+		"--input account=acme",
+		"--input enabled=true",
+		"--input window_days=7",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("command %v must carry %q (typed value serialized via %%v)", got.Command, want)
+		}
 	}
 }
 

@@ -52,6 +52,19 @@ func TestLinePrompter_PromptInput(t *testing.T) {
 	}
 }
 
+// A drained stdin makes PromptInput propagate a read error rather than silently
+// returning an empty string: the shared promptLine collapses EOF to "", but the
+// interactive prompter uses the EOF-aware readPromptLine so a closed or drained
+// terminal fails the launch instead of resolving a required input to "" (#2063).
+func TestLinePrompter_EOFPropagatesError(t *testing.T) {
+	var out bytes.Buffer
+	p := linePrompter{stdin: strings.NewReader(""), stdout: &out} // immediate EOF
+	in := runtime.Input{Name: "req", Description: "a required value"}
+	if _, err := p.PromptInput(in); err == nil {
+		t.Fatal("a drained stdin must propagate a read error, not a silent empty string")
+	}
+}
+
 func TestInputConstraintHint(t *testing.T) {
 	cases := []struct {
 		name string

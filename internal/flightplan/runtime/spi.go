@@ -168,6 +168,26 @@ type InputPrompter interface {
 	PromptInput(in Input) (string, error)
 }
 
+// InputWalker resolves EVERY declared literal input into a launch-args set by
+// walking the declared inputs in declaration order, one interactive prompt each
+// (#2063). Unlike InputPrompter (which the runtime consults only for a missing
+// required literal), the walker is a host-side pre-pass Run runs BEFORE the
+// image-boot / in-process branch, so it reaches the sealed-image (frozen-plan)
+// mainline where the in-container prompter is never consulted. The runtime hands
+// it the plan's declared inputs and the launch args parsed from `--input`, and
+// the walker returns a merged LaunchArgs carrying a value for every literal:
+// an operator-typed entry as a string, an Enter-accepted default as its native
+// typed value. Both downstream paths then consume the merged args identically
+// (the image path serializes them onto the `--input` container re-entry, the
+// in-process path resolves them as overrides in resolveInputs). Dynamic and
+// source inputs are never editable; the walker renders a read-only line and
+// resolves them normally at the boundary. Nil (the default) skips the walk, so a
+// non-interactive launch keeps today's silent-default one-shot behavior. The CLI
+// wires it only on an interactive TTY that did not pass `--accept-defaults`.
+type InputWalker interface {
+	Walk(inputs []Input, args LaunchArgs) (LaunchArgs, error)
+}
+
 // ImageRunSpec is the input to the ImageRunner seam. It carries the verified
 // pinned image (the `ref@digest` string the runtime booted from the signed
 // lock) plus everything the in-container launch needs to run the plan to

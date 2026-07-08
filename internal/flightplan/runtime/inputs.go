@@ -88,7 +88,7 @@ func resolveInputs(ctx context.Context, p *Plan, args LaunchArgs, clk Clock, e *
 		if in.Constraint == nil {
 			continue
 		}
-		if err := enforceConstraint(in.Name, ri.Values[in.Name], in.Constraint); err != nil {
+		if err := EnforceConstraint(in.Name, ri.Values[in.Name], in.Constraint); err != nil {
 			return ResolvedInputs{}, err
 		}
 	}
@@ -112,13 +112,17 @@ func capResolvedValue(s string) string {
 	return s[:maxResolvedValueInError] + "...(truncated)"
 }
 
-// enforceConstraint checks a resolved value against its declared constraint.
+// EnforceConstraint checks a resolved value against its declared constraint.
 // The comparison is over the value's string form (fmt.Sprintf("%v", v)), so a
 // number or timestamp input stays checkable: enum requires equality with one
 // allowed string, pattern requires the compiled regexp to match. A violation
 // names the input, the (capped) value, and the constraint so the failure is
 // actionable without echoing an unbounded resolved value back to the operator.
-func enforceConstraint(name string, v any, c *Constraint) error {
+//
+// It is exported so the CLI's interactive input walk validates a typed entry
+// against the SAME authoritative constraint pass the final resolveInputs check
+// runs (#2063), rather than mirroring the logic and risking drift.
+func EnforceConstraint(name string, v any, c *Constraint) error {
 	s := fmt.Sprintf("%v", v)
 	capped := capResolvedValue(s)
 	if c.Pattern != nil {

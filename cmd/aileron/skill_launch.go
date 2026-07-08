@@ -220,7 +220,10 @@ func (p linePrompter) PromptInput(in runtime.Input) (string, error) {
 		fmt.Fprintf(&b, " %s", hint)
 	}
 	b.WriteString(": ")
-	return promptLine(p.stdin, p.stdout, b.String()), nil
+	// Use the EOF-aware helper (not the shared promptLine, which collapses EOF
+	// to "" and swallows the error) so a drained or closed stdin propagates a
+	// read error to the launch instead of silently resolving to an empty value.
+	return readPromptLine(p.stdin, p.stdout, b.String())
 }
 
 // inputConstraintHint renders a short, parenthesized hint for a declared input
@@ -284,6 +287,12 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	// (#1888). -v is an alias.
 	verbose := flags.Bool("verbose", false, "Print full resolved input values instead of a type+size summary")
 	flags.BoolVar(verbose, "v", false, "Shorthand for --verbose")
+	// acceptDefaults reproduces today's silent-default one-shot launch: it skips
+	// the interactive guided input walk that is otherwise the default on a TTY,
+	// resolving every literal to its --input override or declared default without
+	// prompting (#2063). A non-TTY launch (piped stdin, CI) implies it: the walk
+	// only wires on an interactive terminal, so a scripted launch is unaffected.
+	acceptDefaults := flags.Bool("accept-defaults", false, "Skip the interactive input walk; resolve every input to its override or declared default")
 	positionals, err := parseInterspersedFlags(flags, args)
 	if err != nil {
 		return 1
@@ -299,6 +308,21 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+
+	// The launch is interactive when stdin is a TTY and --accept-defaults was
+	// not passed (#2063). Only then are BOTH interactive seams wired: the
+	// InputWalker (the host-side guided walk that reaches the sealed-image
+	// mainline) and the InputPrompter (retained but preempted by the walk). When
+	// not interactive (piped/CI stdin, or --accept-defaults on a TTY) BOTH stay
+	// nil, so resolveInputs fail-fasts on a missing-required-no-default literal
+	// without prompting, exactly as a scripted launch does today.
+	interactive := isTTYFn() && !*acceptDefaults
+	var inputWalker runtime.InputWalker
+	var inputPrompter runtime.InputPrompter
+	if interactive {
+		inputWalker = newLaunchInputWalker(bufio.NewReader(os.Stdin), stdout)
+		inputPrompter = newLaunchInputPrompter(stdout)
 	}
 
 	res, err := runtime.Run(context.Background(), runtime.Options{
@@ -350,11 +374,18 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// the current (pinned) environment (#1829). No sibling container is
 		// ever dispatched.
 		ToolRunner: newLaunchToolStepRunner(),
+		// InputWalker is the host-side guided input walk (#2063). It runs before
+		// the image-boot / in-process branch and collects a value for every
+		// declared literal, so the walk reaches the sealed-image mainline the
+		// in-container prompter never sees. Nil unless the launch is interactive.
+		InputWalker: inputWalker,
 		// InputPrompter resolves a missing required literal input (no --input
-		// override, no declared default) interactively when stdin is a TTY, and
-		// is nil for a piped or CI launch so the runtime keeps its fail-fast
-		// error. Dynamic and source inputs are never prompted.
-		InputPrompter: newLaunchInputPrompter(stdout),
+		// override, no declared default) interactively. It is retained but
+		// preempted on the interactive path: the walker resolves every literal
+		// into Inputs first, so a still-wired prompter is never consulted. Nil
+		// unless the launch is interactive, so a piped/CI or --accept-defaults
+		// launch keeps the runtime's fail-fast error.
+		InputPrompter: inputPrompter,
 		OutDir:        *outDir,
 	})
 	if err != nil {

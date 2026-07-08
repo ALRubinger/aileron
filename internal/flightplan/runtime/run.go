@@ -115,7 +115,27 @@ type Options struct {
 	// treated identically to a `--input name=value` override: it is deep-copied
 	// into the frozen resolved set and validated by the same final constraint
 	// pass.
+	//
+	// On the interactive path the InputWalker (below) resolves every literal into
+	// Inputs before either branch runs, so a still-wired InputPrompter is never
+	// consulted there; the seam is retained for the non-walk path and its own
+	// tests.
 	InputPrompter InputPrompter
+
+	// InputWalker runs a host-side interactive pass over every declared literal
+	// input BEFORE the image-boot / in-process branch (#2063), collecting a value
+	// for each into Inputs. It is the only interactive seam that reaches the
+	// sealed-image mainline: the in-container prompter is never consulted for a
+	// whole-plan-pinned unit (Run short-circuits to the boot before resolveInputs
+	// runs), so wiring only InputPrompter would ship the guided walk inert on the
+	// primary path. Run consults it only when it is non-nil AND this run is NOT
+	// the in-container image-boot re-entry (InPinnedImage): the re-entry runs
+	// non-TTY and must never re-walk, so gating on InPinnedImage makes
+	// no-recursion structural rather than dependent on the container's TTY state.
+	// Nil (the default) skips the walk and keeps today's silent-default one-shot
+	// launch. The CLI wires it only on an interactive TTY without
+	// `--accept-defaults`.
+	InputWalker InputWalker
 
 	// OutDir is the directory file-target artifacts are written to. Empty
 	// skips writing (artifacts are still recorded in the result).
@@ -156,6 +176,23 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	// verifier on the image-boot re-entry, where the host already gated).
 	if err := gatePublisher(opts.PublisherVerifier, lp); err != nil {
 		return RunResult{}, err
+	}
+	// Host-side interactive input walk (#2063). It runs BEFORE the image-boot /
+	// in-process branch so the guided walk reaches the sealed-image mainline: a
+	// whole-plan-pinned unit short-circuits to runInImage before resolveInputs
+	// (the InputPrompter caller) ever runs, so the walk is the only interactive
+	// surface that can collect inputs on the boot path. The collected values are
+	// merged into opts.Inputs, and BOTH downstream branches then consume them
+	// identically (the image path threads them onto the container `--input`
+	// re-entry; the in-process path resolves them as overrides). Gated on
+	// !InPinnedImage so the in-container re-entry never re-walks (structural
+	// no-recursion, not dependent on the container's non-TTY state).
+	if opts.InputWalker != nil && !opts.InPinnedImage {
+		walked, err := opts.InputWalker.Walk(lp.Plan.Inputs, opts.Inputs)
+		if err != nil {
+			return RunResult{}, err
+		}
+		opts.Inputs = walked
 	}
 	// A tool step requires the plan's declared environment: its argv is
 	// signed against the composed image the lock pinned, so executing it
