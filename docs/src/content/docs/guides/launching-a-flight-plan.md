@@ -17,7 +17,19 @@ aileron skill launch weekly-metrics-digest --out-dir ./run
 
 The runtime loads the most recent frozen version of that skill from the canonical store. Pass `--version` to launch a specific version id. Pass `--input name=value` once per literal input you want to override. File-target outputs are written under `--out-dir`.
 
-When you run an interactive launch from a terminal and a required literal input has no `--input` override and no declared default, the launch prompts you for its value instead of failing. The prompt shows the input name, its declared description, and any enum or pattern constraint so you know the accepted shape. The value you type is validated by the same constraint check as an `--input` override, so an out-of-constraint answer still fails the launch closed. A non-interactive launch, one with piped stdin or a launch run in CI, never prompts. There, a missing required literal fails fast with the same error as before, so a scripted launch never blocks waiting on input.
+## The guided input walk
+
+When you launch from a terminal, the runtime walks every declared input with you before it boots the plan. This guided walk is the default on an interactive terminal. It runs host-side, before any container boots, so it works the same for a plan that pins a sealed environment image as for one that runs in process.
+
+The walk visits each input in declaration order and prompts once per literal input. Each prompt shows the input name, its declared description, a `[required]` or `[optional]` marker, and any enum or pattern constraint hint so you know the accepted shape. An optional input also shows its current default and accepts it when you press Enter. Enter on an optional input keeps the declared default as its native typed value, so a number default stays a number.
+
+A value you type is validated against the input's declared constraint using the same check the final resolution pass runs. An out-of-constraint entry prints the reason and re-prompts, so you correct it in place rather than failing the whole launch. A default whose text form is large renders as a compact `<type, size>` summary instead of flooding the terminal.
+
+An input you already set with `--input name=value` is shown as already set and is not re-prompted. Dynamic and source inputs are never editable. The walk renders a read-only line explaining how each one resolves and moves on.
+
+A required literal that declares no default has no default to accept. Pressing Enter on it prints `a value is required` and re-prompts. You cannot enter an empty string for such an input; this routing is intentional, so a required value is always supplied deliberately.
+
+Pass `--accept-defaults` to skip the walk and reproduce the silent one-shot launch. Every input then resolves to its `--input` override or its declared default with no prompting, and a required literal with neither fails fast with a clear error. A non-interactive launch, one with piped stdin or a launch run in CI, implies `--accept-defaults`: the walk only runs on an interactive terminal, so a scripted launch never blocks waiting on input.
 
 The launch prints a result summary: the version, the content hash, the written artifacts, and the audit-record count. The resolved inputs are listed by name with a compact `<type, size>` summary rather than their full values, so a plan that passes a large input (such as an inlined document) does not bury the result under a wall of text. Pass `--verbose` (or `-v`) to print the full resolved-input values.
 
@@ -42,7 +54,7 @@ The single marked seam is the `llm-seam` step. It is the only kind that may reac
 
 ## Input resolution at the launch boundary
 
-Every declared input resolves once, at the launch boundary, into a concrete value. The resolution rule decides how. A `literal` input takes its launch override, then its declared default. A required literal with neither is prompted for interactively when the launch runs from a terminal, and is an error otherwise. A `dynamic` input reads the launch clock once. `now` resolves to the launch timestamp and `today` resolves to the launch date. The runtime reads the clock a single time and reuses that value for every dynamic input, so two steps that read the same dynamic input always see one value. A `source` input is read live from a declared action through the sealed boundary. The runtime records the read by its resolved binding, the action ref and the selector, never the dataset inline.
+Every declared input resolves once, at the launch boundary, into a concrete value. The resolution rule decides how. A `literal` input takes its launch override, then a value collected by the guided walk, then its declared default. A required literal with none of these is an error under `--accept-defaults` or a non-interactive launch, and is collected by the walk on an interactive terminal. A `dynamic` input reads the launch clock once. `now` resolves to the launch timestamp and `today` resolves to the launch date. The runtime reads the clock a single time and reuses that value for every dynamic input, so two steps that read the same dynamic input always see one value. A `source` input is read live from a declared action through the sealed boundary. The runtime records the read by its resolved binding, the action ref and the selector, never the dataset inline.
 
 A `source` input that reads from the same action a step calls is not a step and not a graph edge. The acyclicity check covers `steps.*` edges only. The source read happens in the resolution phase, before the step graph walks.
 

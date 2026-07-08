@@ -256,12 +256,20 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 	// re-entry (#1802). Without this the inner binary sees no overrides and every
 	// input silently resolves to its default, while the runner still echoes
 	// spec.Inputs as ResolvedInputs, falsely telling the operator the overrides
-	// applied. CLI-path values arrive as strings via inputFlag.Set, and the inner
-	// re-entry parses them with the same inputFlag, so the string round-trip is
-	// exact. Keys are appended in sorted order so the emitted command is
-	// deterministic. A non-string value in the map[string]any seam type has no
-	// exact name=value round-trip, so refuse the boot with an explicit error
-	// rather than coerce or drop it (the issue's never-silently-drop requirement).
+	// applied. Keys are appended in sorted order so the emitted command is
+	// deterministic.
+	//
+	// Values serialize through fmt.Sprintf("%v", v) (#2063). CLI-path overrides
+	// arrive as strings via inputFlag.Set, but the host-side guided input walk
+	// injects an Enter-accepted default as its NATIVE typed value (a number, a
+	// bool), so spec.Inputs may now hold a non-string. The %v serialization is
+	// faithful: the inner re-entry re-parses every --input value as a string via
+	// the same inputFlag, and every downstream check (EnforceConstraint,
+	// host/command interpolation) already compares via %v, so a typed default and
+	// its %v string form are indistinguishable to the plan. See the walker's
+	// typing-asymmetry note in skill_launch_walk.go. This replaces the earlier
+	// refuse-non-string guard, which predated the walk and would have rejected an
+	// Enter-accepted typed default outright.
 	if len(spec.Inputs) > 0 {
 		keys := make([]string, 0, len(spec.Inputs))
 		for k := range spec.Inputs {
@@ -269,11 +277,7 @@ func (r containerImageRunner) Run(ctx context.Context, spec runtime.ImageRunSpec
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			s, ok := spec.Inputs[k].(string)
-			if !ok {
-				return runtime.ImageRunResult{}, fmt.Errorf("skill launch: image-boot re-entry cannot pass non-string override for input %q (got %T): refusing to boot rather than drop or coerce it", k, spec.Inputs[k])
-			}
-			command = append(command, "--input", k+"="+s)
+			command = append(command, "--input", k+"="+fmt.Sprintf("%v", spec.Inputs[k]))
 		}
 	}
 

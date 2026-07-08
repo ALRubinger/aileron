@@ -61,7 +61,7 @@ func TestInstantiateCommand_TokenFreePassthrough(t *testing.T) {
 }
 
 // TestInstantiateCommand_NonStringValue proves a non-string resolved value is
-// substituted via its %v string form, matching enforceConstraint.
+// substituted via its %v string form, matching EnforceConstraint.
 func TestInstantiateCommand_NonStringValue(t *testing.T) {
 	resolved, _, err := instantiateCommand(
 		[]string{"--limit={{inputs.n}}"},
