@@ -1,25 +1,23 @@
 // Package progress provides a small, self-contained CLI progress-indicator
-// helper for long-running commands. It renders live liveness (indeterminate
-// spinner) and percentage (determinate) feedback on an interactive terminal,
-// and degrades to plain, control-character-free lines when the destination is
-// not a TTY (a pipe, a file, or a captured buffer).
+// helper for long-running commands. It renders live liveness (an indeterminate
+// spinner) feedback on an interactive terminal, and degrades to plain,
+// control-character-free lines when the destination is not a TTY (a pipe, a
+// file, or a captured buffer).
 //
 // The package intentionally has no command wiring. It exposes a writer-backed
-// Indicator plus a driver adapter so copy/stream paths can push updates into
+// Indicator plus a driver adapter so copy/stream paths can push liveness into
 // it, leaving the choice of caller to the consumer.
 //
 // Concurrency: an Indicator is safe for concurrent use. Start launches a
-// redraw goroutine driven by a ticker; Update, Done, and Fail may be called
-// from other goroutines. All shared render state is guarded by a mutex, and a
-// resolve (Done/Fail) is idempotent and never writes after the line is
-// resolved.
+// redraw goroutine driven by a ticker; Done and Fail may be called from other
+// goroutines. All shared render state is guarded by a mutex, and a resolve
+// (Done/Fail) is idempotent and never writes after the line is resolved.
 package progress
 
 import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,10 +36,6 @@ var spinnerFrames = []rune{'|', '/', '-', '\\'}
 // ticker is injected via WithTicker.
 const tickInterval = 120 * time.Millisecond
 
-// throttleInterval bounds how often the non-TTY determinate path emits a plain
-// percentage line, so a fast Update loop does not flood a log.
-const throttleInterval = 500 * time.Millisecond
-
 // Indicator renders progress feedback to a writer. Construct one with New.
 type Indicator struct {
 	w         io.Writer
@@ -58,8 +52,8 @@ type Indicator struct {
 	// active is true between Start and Done/Fail on the indeterminate path.
 	active bool
 	// finished is set by the first Done/Fail and makes the indicator inert:
-	// every subsequent output method (Start, Update, Done, Fail) is a no-op, so
-	// nothing can ever be written after the resolved completion line.
+	// every subsequent output method (Start, Done, Fail) is a no-op, so nothing
+	// can ever be written after the resolved completion line.
 	finished bool
 	label    string
 	frame    int
@@ -67,10 +61,6 @@ type Indicator struct {
 	// goroutine once it has returned so Done/Fail can join it.
 	stop chan struct{}
 	done chan struct{}
-
-	// determinate tracking.
-	lastEmit    time.Time
-	lastPercent int
 }
 
 // Option configures an Indicator at construction time.
@@ -188,10 +178,9 @@ func (i *Indicator) Start(label string) {
 }
 
 // Done resolves the indicator as successful, drawing "✓ <label>" on a fresh
-// line. It stops any redraw goroutine and marks the indicator finished, whether
-// the preceding feedback was an indeterminate spinner or a determinate bar. A
-// second call, a later Fail, a later Update, or a later Start is a no-op, so the
-// resolved line is the last thing the indicator ever writes.
+// line. It stops any redraw goroutine and marks the indicator finished. A
+// second call, a later Fail, or a later Start is a no-op, so the resolved line
+// is the last thing the indicator ever writes.
 func (i *Indicator) Done(label string) {
 	i.resolve('✓', label)
 }
@@ -211,11 +200,11 @@ func (i *Indicator) resolve(mark rune, label string) {
 		i.mu.Unlock()
 		return
 	}
-	// Mark finished and inactive first, under the lock, so a tick or a
-	// concurrent Update blocked on the mutex observes both and returns without
-	// writing anything after the resolved completion line. This resolves the
-	// indicator whether or not a spinner was active, so a determinate-only flow
-	// (Update... then Done) still emits a completion line and becomes inert.
+	// Mark finished and inactive first, under the lock, so a tick blocked on the
+	// mutex observes both and returns without writing anything after the resolved
+	// completion line. This resolves the indicator whether or not a spinner was
+	// active, so a Start-then-Done flow still emits a completion line and becomes
+	// inert.
 	i.finished = true
 	i.active = false
 	// Signal and join the redraw goroutine (TTY path only) before writing the
@@ -271,85 +260,9 @@ func (i *Indicator) poke() {
 	// that liveness was observed, leaving the non-TTY and quiet paths silent.
 }
 
-// percentOf returns current*100/total as an integer percentage without
-// overflowing when the counts are near the int64 ceiling. It assumes total > 0
-// and 0 <= current <= total, which Update guarantees, so the result is in
-// [0, 100].
-func percentOf(current, total int64) int {
-	// The direct multiply is exact and cheapest for realistic byte counts; fall
-	// back to divide-first only when current*100 would overflow int64.
-	const maxBeforeOverflow = (1<<63 - 1) / 100
-	if current <= maxBeforeOverflow {
-		return int(current * 100 / total)
-	}
-	return int(current / (total / 100))
-}
-
 // drawLocked renders the current spinner frame with a carriage return. The
 // caller must hold i.mu and must have verified the TTY path.
 func (i *Indicator) drawLocked() {
 	frame := spinnerFrames[i.frame%len(spinnerFrames)]
 	fmt.Fprintf(i.w, "\r\x1b[K%c %s", frame, i.label)
-}
-
-// barWidth is the number of cells in the determinate bar drawn on the TTY.
-const barWidth = 20
-
-// Update reports determinate progress: current of total units complete. On the
-// TTY path it redraws a percentage bar in place; on the non-TTY path it emits
-// throttled plain percentage lines. A total of zero renders 0% without
-// dividing by zero. Update does not require a prior Start, and is a no-op once
-// the indicator has been resolved by Done or Fail.
-func (i *Indicator) Update(current, total int64) {
-	i.mu.Lock()
-	if i.quiet || i.finished {
-		i.mu.Unlock()
-		return
-	}
-	// A determinate Update supersedes an indeterminate spinner: mark it inactive
-	// and stop the redraw goroutine (if Start launched one) before rendering the
-	// bar so the two do not race for the same line. stopSpinnerLocked releases
-	// and reacquires the lock to join the goroutine, so all shared state is read
-	// after it returns.
-	i.active = false
-	i.stopSpinnerLocked()
-	defer i.mu.Unlock()
-	if i.finished {
-		return
-	}
-
-	percent := 0
-	if total > 0 {
-		if current > total {
-			current = total
-		}
-		if current < 0 {
-			current = 0
-		}
-		percent = percentOf(current, total)
-	}
-
-	if i.tty {
-		filled := percent * barWidth / 100
-		if filled > barWidth {
-			filled = barWidth
-		}
-		bar := strings.Repeat("#", filled) + strings.Repeat("-", barWidth-filled)
-		fmt.Fprintf(i.w, "\r\x1b[K[%s] %3d%%", bar, percent)
-		return
-	}
-
-	// Non-TTY: throttle plain lines and only emit on a changed percentage so a
-	// tight Update loop does not flood a log.
-	now := time.Now()
-	first := i.lastEmit.IsZero()
-	if !first && percent == i.lastPercent {
-		return
-	}
-	if !first && percent != 100 && now.Sub(i.lastEmit) < throttleInterval {
-		return
-	}
-	fmt.Fprintf(i.w, "%d%%\n", percent)
-	i.lastEmit = now
-	i.lastPercent = percent
 }

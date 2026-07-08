@@ -43,23 +43,6 @@ func TestNonTTYIndeterminateHasNoControlChars(t *testing.T) {
 	}
 }
 
-func TestNonTTYDeterminateHasNoControlChars(t *testing.T) {
-	var buf bytes.Buffer
-	ind := New(&buf, WithForceTTY(false))
-
-	ind.Update(0, 100)
-	ind.Update(50, 100)
-	ind.Update(100, 100)
-
-	out := buf.String()
-	if hasControlChars(out) {
-		t.Fatalf("non-TTY determinate output contains control chars: %q", out)
-	}
-	if !strings.Contains(out, "0%") || !strings.Contains(out, "100%") {
-		t.Errorf("expected plain percentage lines, got %q", out)
-	}
-}
-
 func TestTTYAdvancesFrames(t *testing.T) {
 	var buf bytes.Buffer
 	tick := make(chan time.Time)
@@ -84,55 +67,6 @@ func TestTTYAdvancesFrames(t *testing.T) {
 	}
 	if !strings.HasSuffix(out, "✓ working\n") {
 		t.Errorf("expected resolved done line at end, got %q", out)
-	}
-}
-
-func TestTTYDeterminateRedraws(t *testing.T) {
-	var buf bytes.Buffer
-	ind := New(&buf, WithForceTTY(true))
-
-	ind.Update(50, 100)
-	out := buf.String()
-	if !strings.Contains(out, "\r") {
-		t.Errorf("expected carriage return on TTY determinate, got %q", out)
-	}
-	if !strings.Contains(out, "50%") {
-		t.Errorf("expected 50%% rendered, got %q", out)
-	}
-	// A half-full bar: exactly half of the cells filled.
-	if !strings.Contains(out, strings.Repeat("#", barWidth/2)) {
-		t.Errorf("expected half-filled bar, got %q", out)
-	}
-}
-
-func TestStartThenUpdateStopsSpinner(t *testing.T) {
-	// A determinate Update after Start must stop the spinner goroutine so it
-	// cannot keep redrawing over the bar. Drive a tick before Update, then
-	// assert no further spinner frame is written after the bar even if we try
-	// to tick again.
-	var buf syncBuffer
-	tick := make(chan time.Time)
-	ind := New(&buf, WithForceTTY(true), WithTicker(tick))
-
-	ind.Start("copy")
-	tick <- time.Now() // one spinner frame
-	ind.Update(50, 100)
-
-	afterUpdate := buf.String()
-	// The spinner goroutine should be stopped; a send on tick must not block
-	// forever waiting to be received and must not add a spinner frame. Use a
-	// non-blocking send to prove nothing is listening.
-	select {
-	case tick <- time.Now():
-		t.Fatal("spinner goroutine still consuming ticks after Update")
-	default:
-	}
-	if !strings.Contains(afterUpdate, "50%") {
-		t.Errorf("expected bar rendered, got %q", afterUpdate)
-	}
-	ind.Done("copy")
-	if !strings.HasSuffix(buf.String(), "✓ copy\n") {
-		t.Errorf("expected clean resolve after Start->Update, got %q", buf.String())
 	}
 }
 
@@ -183,49 +117,6 @@ func TestStartThenFailStopsSpinner(t *testing.T) {
 	}
 }
 
-func TestUpdateLargeByteCountsNoOverflow(t *testing.T) {
-	var buf bytes.Buffer
-	ind := New(&buf, WithForceTTY(true))
-	// Counts far beyond int64max/100 (~92 PB) must not overflow into a bogus
-	// percentage or a giant strings.Repeat.
-	const huge = int64(1) << 60 // ~1.15 EB
-	ind.Update(huge/2, huge)
-	out := buf.String()
-	if !strings.Contains(out, "50%") {
-		t.Errorf("expected 50%% for half of a huge total, got %q", out)
-	}
-	buf.Reset()
-	ind.Update(huge, huge)
-	if !strings.Contains(buf.String(), "100%") {
-		t.Errorf("expected 100%% for full huge total, got %q", buf.String())
-	}
-}
-
-func TestUpdateTotalZeroNoPanic(t *testing.T) {
-	var buf bytes.Buffer
-	ind := New(&buf, WithForceTTY(true))
-	// Must not divide by zero.
-	ind.Update(5, 0)
-	if !strings.Contains(buf.String(), "0%") {
-		t.Errorf("expected 0%% for zero total, got %q", buf.String())
-	}
-}
-
-func TestUpdateClampsOverAndUnder(t *testing.T) {
-	var buf bytes.Buffer
-	ind := New(&buf, WithForceTTY(true))
-	buf.Reset()
-	ind.Update(200, 100) // over 100%
-	if !strings.Contains(buf.String(), "100%") {
-		t.Errorf("expected clamp to 100%%, got %q", buf.String())
-	}
-	buf.Reset()
-	ind.Update(-5, 100) // negative
-	if !strings.Contains(buf.String(), "0%") {
-		t.Errorf("expected clamp to 0%%, got %q", buf.String())
-	}
-}
-
 func TestFailResolvesFailedState(t *testing.T) {
 	var buf bytes.Buffer
 	ind := New(&buf, WithForceTTY(false))
@@ -258,11 +149,9 @@ func TestNoWriteAfterResolve(t *testing.T) {
 		var buf bytes.Buffer
 		ind := New(&buf, WithForceTTY(tty))
 		ind.Start("job")
-		ind.Update(50, 100)
 		ind.Done("job")
 		resolved := buf.String()
 		// Post-resolve calls must be inert.
-		ind.Update(75, 100)
 		ind.Start("job2")
 		ind.Fail("job")
 		ind.Done("job")
@@ -292,8 +181,6 @@ func TestQuietSuppressesAllOutput(t *testing.T) {
 		var buf bytes.Buffer
 		ind := New(&buf, WithForceTTY(tty), WithQuiet(true))
 		ind.Start("work")
-		ind.Update(50, 100)
-		ind.Update(100, 100)
 		ind.Done("work")
 		ind.Fail("work")
 		if buf.Len() != 0 {
@@ -322,7 +209,12 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func TestConcurrentUpdatesAndDone(t *testing.T) {
+// TestConcurrentPokesAndDone drives concurrent ticks (the spinner goroutine)
+// and concurrent liveness pokes (a subprocess writing through a livenessWriter)
+// while another goroutine resolves the indicator with Done. The resolve must
+// still win the race and leave the "✓" line as the last thing written, with no
+// data race on shared render state (run under -race).
+func TestConcurrentPokesAndDone(t *testing.T) {
 	var buf syncBuffer
 	tick := make(chan time.Time)
 	ind := New(&buf, WithForceTTY(true), WithTicker(tick))
@@ -343,12 +235,13 @@ func TestConcurrentUpdatesAndDone(t *testing.T) {
 			}
 		}
 	}()
-	// Concurrent updates.
+	// Concurrent liveness pokes via the writer seam.
+	lw := NewLivenessWriter(ind)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := int64(0); i <= 100; i += 10 {
-			ind.Update(i, 100)
+		for i := 0; i < 50; i++ {
+			_, _ = lw.Write([]byte("chunk"))
 		}
 	}()
 

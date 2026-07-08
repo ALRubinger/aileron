@@ -372,12 +372,11 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		Stdout:  io.Discard,
 		Stderr:  io.Discard,
 	}
-	// setBuildSinks points the Builder's stdout/stderr at the buildkit-progress
-	// sink for the given indicator (falling back to io.Discard when no indicator
-	// is active). The sink parses the BUILDKIT_PROGRESS=rawjson stream buildx emits
-	// on stderr into a determinate percentage, and degrades to indeterminate
-	// liveness on any non-rawjson output, so it never regresses today's behavior.
-	// The stderr sink stays the OUTER argument of runBuildStep's
+	// setBuildSinks points the Builder's stdout/stderr at a liveness sink for the
+	// given indicator (falling back to io.Discard when no indicator is active).
+	// The sink swallows every build byte and pokes the indicator's ticker-driven
+	// liveness spinner, so the step shows it is alive and advancing without any
+	// byte accounting. The stderr sink stays the OUTER argument of runBuildStep's
 	// io.MultiWriter(stderr, &buf) tee, so the daemon-unreachable capture buffer
 	// still sees every byte and the sink never consumes the stream. It emits no
 	// bytes itself, so the non-TTY/quiet plain-line contract holds.
@@ -387,8 +386,8 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 			b.Stderr = io.Discard
 			return
 		}
-		b.Stdout = progress.NewBuildkitProgressWriter(ind)
-		b.Stderr = progress.NewBuildkitProgressWriter(ind)
+		b.Stdout = progress.NewLivenessWriter(ind)
+		b.Stderr = progress.NewLivenessWriter(ind)
 	}
 	// Wire the managed provisioner only on the managed branch; the host-npx
 	// opt-out must never carry a provisioner (its no-network/no-provision
@@ -434,10 +433,6 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		// build below intentionally omits this so it stays on the default `docker`
 		// driver and lands the image in the local daemon (issue #2054).
 		BuildxBuilder: container.FreezeBuilderName,
-		// Request structured buildkit progress so the build sink can render a
-		// determinate percentage; it carries into loadOpts below too, so both build
-		// steps get it (issue #2084).
-		ProgressRawJSON: true,
 	}
 	var buildInd *progress.Indicator
 	if in.newProgress != nil {
@@ -471,10 +466,10 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	loadOpts := buildOpts
 	loadOpts.Platforms = nil
 	loadOpts.OCILayoutDest = ""
-	// loadOpts inherits ProgressRawJSON=true from buildOpts (only Platforms and
-	// OCILayoutDest are zeroed), so this single-arch daemon-load build also emits
-	// determinate buildkit progress; BuildxBuilder is inert here because Platforms
-	// is nil, so the build stays on the default `docker` driver (issue #2084).
+	// loadOpts inherits the same liveness-only progress wiring from buildOpts
+	// (only Platforms and OCILayoutDest are zeroed); BuildxBuilder is inert here
+	// because Platforms is nil, so the build stays on the default `docker` driver
+	// (issue #2054).
 	var loadInd *progress.Indicator
 	if in.newProgress != nil {
 		loadInd = in.newProgress()
