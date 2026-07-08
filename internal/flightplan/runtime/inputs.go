@@ -146,6 +146,13 @@ func EnforceConstraint(name string, v any, c *Constraint) error {
 // constraint-enforcement passes as a `--input name=value` override. When no
 // prompter is wired (a piped or CI launch), the missing input fails fast, as
 // before.
+//
+// A NoPrompt input (`prompt: false`) is never prompted, even on an interactive
+// launch: the guided walk deliberately skips it, so re-prompting here would
+// diverge from the sealed-image path (which has no prompter) and re-ask an
+// input the operator was told is advanced/non-interactive. With no default and
+// no override such an input fails closed as required on BOTH paths, matching
+// the shipped schema docs.
 func resolveLiteral(in Input, args LaunchArgs, prompter InputPrompter) (any, error) {
 	if v, ok := args[in.Name]; ok {
 		return v, nil
@@ -153,7 +160,7 @@ func resolveLiteral(in Input, args LaunchArgs, prompter InputPrompter) (any, err
 	if in.Resolution.HasDefault {
 		return in.Resolution.Default, nil
 	}
-	if prompter != nil {
+	if prompter != nil && !in.NoPrompt {
 		v, err := prompter.PromptInput(in)
 		if err != nil {
 			return nil, fmt.Errorf("input %q: prompt for value: %w", in.Name, err)
