@@ -270,10 +270,13 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	//     the gate is inert there — including the in-container image-boot
 	//     re-entry, where the agent passes a real Seam and in-process IS the
 	//     certified environment).
-	//   - !opts.Suspendable: this surface cannot suspend/resume. The daemon HTTP
+	//   - not suspendable: this surface cannot suspend/resume. The daemon HTTP
 	//     handler sets Suspendable, so a seam plan there SUSPENDS (SuspendKindSeam)
 	//     for the agent, and the gate stays inert — that surface fulfills the seam
-	//     out of band, it does not fail closed.
+	//     out of band, it does not fail closed. "Suspendable" mirrors runPlan's own
+	//     definition (opts.Suspendable OR a non-nil resume memo), so a resume can
+	//     never be preempted by this gate even if a caller supplies ResumeOutputs
+	//     without the explicit Suspendable flag.
 	//
 	// Placement is deliberate: this guards only the in-process runPlan branch,
 	// AFTER the image-boot branch. An image-pinning plan (the committed worked
@@ -282,7 +285,8 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	// unaffected. The daemon caller is internal/app/handlers_flightplans.go; it
 	// is a governed runtime.Run caller, but because it runs Suspendable the gate
 	// is inert for it and a seam plan suspends rather than failing closed.
-	if planHasSeamSteps(lp.Plan) && opts.Seam == nil && !opts.Suspendable {
+	suspendable := opts.Suspendable || opts.ResumeOutputs != nil
+	if planHasSeamSteps(lp.Plan) && opts.Seam == nil && !suspendable {
 		return RunResult{}, fmt.Errorf(
 			"flightplan: plan %q contains an llm-seam step; it can only be launched from an interactive agent context (aileron launch), not this surface",
 			lp.Plan.Name)
