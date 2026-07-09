@@ -671,6 +671,18 @@ func (s daemonAuditSink) Record(ctx context.Context, rec runtime.AuditRecord) st
 			// empty record posts an object payload rather than a JSON null.
 			payload = map[string]any{}
 		}
+	case runtime.RecordKindSeam:
+		// A seam record (#2119) carries the same flat `aileron.*` payload
+		// treatment as an output/reach/launch record: the seam step id, the
+		// recorded model hint, the seam's non-source bindings, and the plan
+		// provenance surface as top-level keys. It is constructed daemon-side (the
+		// runtime never emits this kind); this branch only keeps the CLI/daemon
+		// translation byte-equivalent for the shared record shape.
+		eventType = string(model.EventTypeFlightPlanLaunchSeam)
+		payload = rec.Fields
+		if payload == nil {
+			payload = map[string]any{}
+		}
 	case runtime.RecordKindLaunch:
 		// A launch record (#1928) carries the same flat `aileron.*` payload
 		// treatment as an output/reach record: the per-launch summary fields

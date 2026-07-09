@@ -59,6 +59,14 @@ type flightPlanRunRecord struct {
 	// recorded decision (approved → replay the action; denied → fail closed)
 	// without re-registering. Nil until the run first suspends on an approval.
 	Approvals map[string]string
+	// AuditedSeams records the seam step ids already written to the
+	// flightplan.launch.seam audit trail in THIS run (#2119). The daemon emits
+	// one seam record per distinct seam step at the suspend point and stamps the
+	// step id here, so an empty-body re-suspend of the same still-unfulfilled seam
+	// (which re-walks and re-suspends the same step) does not double-audit. A
+	// fulfilled seam is memoized and never re-suspends. Nil until the run first
+	// suspends on a seam.
+	AuditedSeams map[string]bool
 	// touched is the last time the record was created/updated/read, driving lazy
 	// TTL expiry so an abandoned suspended run is eventually reaped.
 	touched time.Time
@@ -111,6 +119,9 @@ func (r *flightPlanRunRegistry) Put(runID string, rec *flightPlanRunRecord) {
 	}
 	if rec.Approvals == nil {
 		rec.Approvals = map[string]string{}
+	}
+	if rec.AuditedSeams == nil {
+		rec.AuditedSeams = map[string]bool{}
 	}
 	nowT := r.clock()
 	rec.touched = nowT

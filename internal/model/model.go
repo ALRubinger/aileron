@@ -424,6 +424,24 @@ const (
 	// "<user>@<host>"}, the operator who ran the launch (#1875).
 	EventTypeFlightPlanLaunchReach EventType = "flightplan.launch.reach"
 
+	// EventTypeFlightPlanLaunchSeam is one per-distinct-seam-step record
+	// emitted daemon-side when a launch/resume SUSPENDS at a marked llm-seam
+	// step (#2119). The daemon owns the run record and is the only layer that
+	// can dedupe across suspend/resume calls, so it (not the stateless runtime)
+	// writes this record and stamps the seam step id to guard against a
+	// double-audit on an empty-body re-suspend. The flat `aileron.*` payload
+	// carries the seam step id (`aileron.seam.step_id`), the recorded model
+	// target hint when the seam declares one (`aileron.seam.model`, omitted
+	// when empty), and the seam's NON-SOURCE resolved bindings
+	// (`aileron.seam.bindings`) — a source-input binding's inline dataset is
+	// excluded per the ADR-0027 audit boundary even though the full bindings
+	// still ride the seam_pending envelope to the agent. It also stamps the
+	// plan provenance the daemon derives from the verified plan
+	// (`aileron.plan.skill`, `aileron.plan.content_hash`). Actor is {type:
+	// service, id: "flightplan-launch"}, the daemon service that suspended the
+	// run.
+	EventTypeFlightPlanLaunchSeam EventType = "flightplan.launch.seam"
+
 	// EventTypeOutputMaterialized is one per-output-per-step provenance event
 	// (#1752). The in-process launch runtime emits exactly one such record for
 	// each materialized artifact, whether the materializing step is an

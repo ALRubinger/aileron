@@ -120,6 +120,16 @@ const (
 	// step declared a contract but no sealed reach existed (a
 	// directly-constructed plan outside the verified load path).
 	RecordKindReach
+	// RecordKindSeam is one per-distinct-seam-step record (#2119). It is
+	// constructed daemon-side (not emitted by the runtime's emitStepAudit) when a
+	// launch/resume suspends at a marked llm-seam step: the runtime is stateless
+	// across suspend/resume calls, so only the daemon (which owns the run record)
+	// can dedupe a re-suspend. This kind exists so both audit sinks translate the
+	// daemon-constructed record onto model.EventTypeFlightPlanLaunchSeam
+	// uniformly. Its flat `aileron.*` payload carries the seam step id, the
+	// recorded model hint, and the seam's non-source bindings (the source-input
+	// inline dataset is excluded per the ADR-0027 audit boundary).
+	RecordKindSeam
 )
 
 // AuditRecord is one customer-owned audit entry. Fields holds exactly the
@@ -129,7 +139,8 @@ type AuditRecord struct {
 	// Kind is the record's kind, the explicit discriminator the CLI sink maps
 	// to a model.EventType (RecordKindAction → flightplan.launch.action,
 	// RecordKindLaunch → flightplan.launch, RecordKindOutput →
-	// output.materialized, RecordKindReach → flightplan.launch.reach).
+	// output.materialized, RecordKindReach → flightplan.launch.reach,
+	// RecordKindSeam → flightplan.launch.seam).
 	Kind AuditRecordKind
 	// ActionRef is the action the record describes, or "" for a per-launch
 	// summary or per-output record.
