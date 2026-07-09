@@ -3345,6 +3345,33 @@ paths:
               schema:
                 $ref: "#/components/schemas/FailureEnvelope"
 
+  /v1/flightplans:
+    get:
+      tags: [FlightPlans]
+      summary: List installed Flight Plans
+      description: |
+        Lists installed, frozen Flight Plans in the user's skill store
+        (`~/.aileron/skills/`). Each entry carries the plan's latest frozen
+        version id, its declared input interface, and its declared output
+        interface — enough for `aileron-mcp` to expose one MCP tool per plan
+        with a derived input schema, mirroring the one-tool-per-action model.
+
+        Per ADR-0010, a plan whose latest frozen version fails to verify or
+        parse is not silently dropped: it surfaces under `load_errors` with a
+        structured error, so a broken plan is observable rather than invisible.
+      operationId: listFlightPlans
+      responses:
+        "200":
+          description: Installed Flight Plans plus any per-plan load errors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlightPlanListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/flightplans/{name}/launch:
     post:
       tags: [FlightPlans]
@@ -3409,15 +3436,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FlightPlanLaunchResponse"
-        "202":
-          description: |
-            A constituent action requires user approval; the launch was
-            not run. Approve the action via `POST /v1/actions/{name}/run`
-            and re-launch. Reuses the action-run pending-approval shape.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -7261,6 +7279,133 @@ components:
           description: |
             Content digest of the materialized bytes (`sha256:<hex>`), the
             content-addressed handle for the artifact.
+
+    FlightPlanInput:
+      type: object
+      description: |
+        One declared input of a Flight Plan, projected from the plan
+        manifest for the MCP tool input-schema derivation. `required` is
+        computed daemon-side: an input resolved by a literal rule with no
+        declared default is caller-required; a dynamic, source, or defaulted
+        input auto-resolves at launch and is not caller-required.
+      required: [name, type, required]
+      properties:
+        name:
+          type: string
+          description: Declared input identifier.
+        type:
+          type: string
+          enum: [string, number, boolean, timestamp, object, array]
+          description: |
+            The raw declared manifest input type. `timestamp` is carried
+            verbatim here; the MCP side projects it to JSON Schema `string`
+            (JSON Schema has no timestamp type) when deriving the tool
+            input schema.
+        items_type:
+          type: string
+          enum: [string, number, boolean, object]
+          description: |
+            Element type of an array input, mirroring `ActionInput.items_type`.
+            Only meaningful when `type` is `array`. Reserved for future use;
+            plan inputs do not yet carry array element typing, so this is
+            typically unset and the MCP side emits the permissive `items: {}`.
+        description:
+          type: string
+          description: Field-level prose surfaced to the LLM in the tool schema.
+        required:
+          type: boolean
+          description: |
+            Whether the caller must supply this input. True for a literal-rule
+            input with no declared default; false for dynamic, source, or
+            defaulted inputs that auto-resolve at launch.
+
+    FlightPlanOutput:
+      type: object
+      description: |
+        One declared output artifact of a Flight Plan. Used to enrich the
+        MCP tool description; it does not enter the input schema.
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Declared output name.
+        mime_type:
+          type: string
+          description: Declared MIME type of the output content.
+        description:
+          type: string
+          description: Field-level prose describing the output.
+
+    FlightPlanSummary:
+      type: object
+      description: |
+        Identity and declared interface of one installed frozen Flight Plan,
+        enough for `aileron-mcp` to expose one MCP tool per plan.
+      required: [name, version]
+      properties:
+        name:
+          type: string
+          description: Plan name from the manifest frontmatter (the store handle).
+        version:
+          type: string
+          description: |
+            The latest frozen version id of the plan (what `LatestFrozen`
+            returns). This is the version launched when the plan tool is
+            called with no explicit version.
+        description:
+          type: string
+          description: |
+            Plan description from the manifest frontmatter (empty when the
+            manifest declares none).
+        inputs:
+          type: array
+          description: The plan's declared inputs, in declaration order.
+          items:
+            $ref: "#/components/schemas/FlightPlanInput"
+        outputs:
+          type: array
+          description: The plan's declared output artifacts.
+          items:
+            $ref: "#/components/schemas/FlightPlanOutput"
+
+    FlightPlanLoadError:
+      type: object
+      description: |
+        A structured error describing one installed Flight Plan whose latest
+        frozen version failed to verify or parse, per ADR-0010. Loading is
+        non-fatal — plans that load successfully appear in `items`; failed
+        plans appear here so a broken plan is observable rather than dropped.
+      required: [class, message, file]
+      properties:
+        class:
+          type: string
+          description: Canonical failure class (e.g. parse_error, verification_error).
+        message:
+          type: string
+        file:
+          type: string
+          description: Path of the offending frozen version directory.
+        line:
+          type: integer
+          description: Line within the manifest where the error was detected; 0 when unknown.
+        boundary:
+          type: string
+          description: Which layer produced the error (always "flightplan" for load failures).
+
+    FlightPlanListResponse:
+      type: object
+      description: |
+        Response for `GET /v1/flightplans`: the installed frozen Flight Plans
+        and any per-plan load errors. Mirrors `ActionListResponse`.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FlightPlanSummary"
+        load_errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/FlightPlanLoadError"
 
     ActionApprovalResult:
       type: object

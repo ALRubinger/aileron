@@ -606,3 +606,263 @@ func TestLaunchFlightPlan_ApprovalGatedActionRefused(t *testing.T) {
 		t.Errorf("body is not an ADR-0010 FailureEnvelope: %v", env)
 	}
 }
+
+// listInputsPlanMD is a plan whose inputs exercise the ListFlightPlans input
+// projection: a required literal-no-default input, a defaulted literal input, a
+// dynamic timestamp input, and an object input. It reaches a single read
+// action-call so it decodes as a valid step graph.
+const listInputsPlanMD = `---
+name: list-fixture
+description: A plan exercising input projection for the list surface.
+license: Apache-2.0
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:reporter.build_report
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+            idempotencyKey: false
+          audit:
+            fields:
+              - operation-effect
+              - approval-decision
+              - result
+            sink: audit/reads
+  inputs:
+    - name: query
+      type: string
+      description: The required search query.
+      resolution:
+        rule: literal
+    - name: window_days
+      type: number
+      description: How many days back.
+      resolution:
+        rule: literal
+        default: 7
+    - name: as_of
+      type: timestamp
+      description: The report as-of moment.
+      resolution:
+        rule: dynamic
+        value: now
+    - name: filters
+      type: object
+      description: Structured filters.
+      resolution:
+        rule: literal
+  outputs:
+    - name: report.json
+      mimeType: application/json
+      encoding: utf-8
+      publish:
+        target: file
+        path: report.json
+  steps:
+    - id: build
+      kind: action-call
+      actionRef: aileron:reporter.build_report
+      args:
+        window_days: inputs.window_days
+      outputs:
+        - report
+      materializesOutput: report.json
+---
+
+# List Fixture
+
+A plan used by the ListFlightPlans tests.
+`
+
+// newFlightPlanListServer builds an apiServer wired to a temp store into which
+// each named plan's frozen version is written. Returns the server.
+func newFlightPlanListServer(t *testing.T, plans map[string]fpstore.FrozenVersion) *apiServer {
+	t.Helper()
+	dir := t.TempDir()
+	s := fpstore.New(dir)
+	for name, fv := range plans {
+		if err := s.WriteFrozen(name, fv); err != nil {
+			t.Fatalf("WriteFrozen %q: %v", name, err)
+		}
+	}
+	return &apiServer{
+		log:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		flightPlanStore: s,
+	}
+}
+
+// listFlightPlans invokes the handler and decodes the response body.
+func listFlightPlans(t *testing.T, srv *apiServer) (*httptest.ResponseRecorder, api.FlightPlanListResponse) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/flightplans", nil)
+	rec := httptest.NewRecorder()
+	srv.ListFlightPlans(rec, req)
+	var resp api.FlightPlanListResponse
+	if rec.Code == http.StatusOK {
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode list body: %v", err)
+		}
+	}
+	return rec, resp
+}
+
+func summaryByName(items []api.FlightPlanSummary, name string) (api.FlightPlanSummary, bool) {
+	for _, it := range items {
+		if it.Name == name {
+			return it, true
+		}
+	}
+	return api.FlightPlanSummary{}, false
+}
+
+func inputByName(inputs []api.FlightPlanInput, name string) (api.FlightPlanInput, bool) {
+	for _, in := range inputs {
+		if in.Name == name {
+			return in, true
+		}
+	}
+	return api.FlightPlanInput{}, false
+}
+
+func TestListFlightPlans_HappyPathTwoPlans(t *testing.T) {
+	srv := newFlightPlanListServer(t, map[string]fpstore.FrozenVersion{
+		"daemon-launch-fixture": freezeFixture(t, deterministicPlanMD),
+		"list-fixture":          freezeFixture(t, listInputsPlanMD),
+	})
+	rec, resp := listFlightPlans(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if resp.Items == nil || len(*resp.Items) != 2 {
+		t.Fatalf("items = %v, want 2", resp.Items)
+	}
+	// Sorted by name: daemon-launch-fixture then list-fixture.
+	items := *resp.Items
+	if items[0].Name != "daemon-launch-fixture" || items[1].Name != "list-fixture" {
+		t.Errorf("items not sorted by name: %q, %q", items[0].Name, items[1].Name)
+	}
+	// version is the latest-frozen id (the fixture id "test").
+	if items[0].Version != "test" {
+		t.Errorf("version = %q, want test", items[0].Version)
+	}
+	// description sourced from the manifest frontmatter.
+	lf, _ := summaryByName(items, "list-fixture")
+	if lf.Description == nil || *lf.Description != "A plan exercising input projection for the list surface." {
+		t.Errorf("description = %v, want manifest frontmatter", lf.Description)
+	}
+	// outputs are projected.
+	if lf.Outputs == nil || len(*lf.Outputs) != 1 || (*lf.Outputs)[0].Name != "report.json" {
+		t.Errorf("outputs = %v, want [report.json]", lf.Outputs)
+	}
+}
+
+func TestListFlightPlans_InputProjection(t *testing.T) {
+	srv := newFlightPlanListServer(t, map[string]fpstore.FrozenVersion{
+		"list-fixture": freezeFixture(t, listInputsPlanMD),
+	})
+	_, resp := listFlightPlans(t, srv)
+	lf, ok := summaryByName(*resp.Items, "list-fixture")
+	if !ok || lf.Inputs == nil {
+		t.Fatalf("list-fixture inputs missing: %v", resp.Items)
+	}
+	inputs := *lf.Inputs
+
+	// Required literal-no-default input.
+	if q, ok := inputByName(inputs, "query"); !ok {
+		t.Fatal("query input missing")
+	} else if !q.Required {
+		t.Errorf("query.required = false, want true (literal, no default)")
+	} else if q.Type != api.FlightPlanInputTypeString {
+		t.Errorf("query.type = %q, want string", q.Type)
+	}
+
+	// Defaulted literal input is NOT caller-required.
+	if wd, ok := inputByName(inputs, "window_days"); !ok {
+		t.Fatal("window_days input missing")
+	} else if wd.Required {
+		t.Errorf("window_days.required = true, want false (defaulted)")
+	}
+
+	// Dynamic timestamp input: raw type carried verbatim, not caller-required.
+	if a, ok := inputByName(inputs, "as_of"); !ok {
+		t.Fatal("as_of input missing")
+	} else if a.Type != api.FlightPlanInputTypeTimestamp {
+		t.Errorf("as_of.type = %q, want timestamp (raw, MCP projects it)", a.Type)
+	} else if a.Required {
+		t.Errorf("as_of.required = true, want false (dynamic auto-resolves)")
+	}
+
+	// Object input type passes through.
+	if f, ok := inputByName(inputs, "filters"); !ok {
+		t.Fatal("filters input missing")
+	} else if f.Type != api.FlightPlanInputTypeObject {
+		t.Errorf("filters.type = %q, want object", f.Type)
+	}
+}
+
+func TestListFlightPlans_NilStore200Empty(t *testing.T) {
+	srv := &apiServer{log: slog.New(slog.NewJSONHandler(io.Discard, nil))}
+	rec, resp := listFlightPlans(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if resp.Items != nil && len(*resp.Items) != 0 {
+		t.Errorf("items = %v, want empty", resp.Items)
+	}
+}
+
+func TestListFlightPlans_EmptyStoreDir200Empty(t *testing.T) {
+	srv := newFlightPlanListServer(t, nil)
+	rec, resp := listFlightPlans(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if resp.Items != nil && len(*resp.Items) != 0 {
+		t.Errorf("items = %v, want empty", resp.Items)
+	}
+	if resp.LoadErrors != nil {
+		t.Errorf("load_errors = %v, want none", resp.LoadErrors)
+	}
+}
+
+func TestListFlightPlans_TamperedVersionSurfacesLoadError(t *testing.T) {
+	// A plan whose frozen SKILL.md bytes are tampered fails VerifyFrozen and
+	// surfaces under load_errors, without aborting the list: the healthy plan
+	// still appears in items.
+	good := freezeFixture(t, deterministicPlanMD)
+	bad := freezeFixture(t, listInputsPlanMD)
+	// Tamper the frozen manifest so VerifyFrozen refuses.
+	bad.SkillMD = []byte(strings.Replace(string(bad.SkillMD),
+		"A plan exercising input projection", "A plan exercising TAMPERED projection", 1))
+
+	srv := newFlightPlanListServer(t, map[string]fpstore.FrozenVersion{
+		"daemon-launch-fixture": good,
+		"list-fixture":          bad,
+	})
+	rec, resp := listFlightPlans(t, srv)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// The healthy plan still appears.
+	if resp.Items == nil || len(*resp.Items) != 1 || (*resp.Items)[0].Name != "daemon-launch-fixture" {
+		t.Errorf("items = %v, want only daemon-launch-fixture", resp.Items)
+	}
+	// The tampered plan is under load_errors.
+	if resp.LoadErrors == nil || len(*resp.LoadErrors) != 1 {
+		t.Fatalf("load_errors = %v, want 1", resp.LoadErrors)
+	}
+	le := (*resp.LoadErrors)[0]
+	if le.Boundary == nil || *le.Boundary != "flightplan" {
+		t.Errorf("load_error boundary = %v, want flightplan", le.Boundary)
+	}
+	if le.Class == "" || le.File == "" {
+		t.Errorf("load_error missing class/file: %+v", le)
+	}
+}
