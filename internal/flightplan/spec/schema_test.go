@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -975,7 +976,12 @@ func TestStrippedManifestDropsSteps(t *testing.T) {
 }
 
 // stepBindings returns every binding reference a step carries, across the
-// kind-specific args/bindings maps.
+// kind-specific args/bindings maps AND the `steps.<id>.<output>` /
+// `inputs.<name>` refs embedded in an llm-seam's `prompt` template (#2120). A
+// prompt-only dependency on a prior step is otherwise invisible to the
+// resolve-existence and acyclicity graph walks; collecting its refs here makes
+// those edges participate. Malformed tokens are dropped (the freeze lint owns
+// malformed rejection; this walk is an existence/acyclicity contract check).
 func stepBindings(s map[string]any) []string {
 	var out []string
 	collect := func(key string) {
@@ -989,6 +995,19 @@ func stepBindings(s map[string]any) []string {
 	}
 	collect("args")
 	collect("bindings")
+	if prompt, ok := s["prompt"].(string); ok {
+		refs, err := manifest.PromptBindingRefs(prompt)
+		if err == nil {
+			for _, ref := range refs {
+				switch ref.Kind {
+				case manifest.PromptRefInput:
+					out = append(out, "inputs."+ref.Input)
+				case manifest.PromptRefStep:
+					out = append(out, "steps."+ref.StepID+"."+ref.Output)
+				}
+			}
+		}
+	}
 	return out
 }
 

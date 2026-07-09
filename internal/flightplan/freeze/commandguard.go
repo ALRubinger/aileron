@@ -183,6 +183,115 @@ func lintActionHostLiterals(m *manifest.Manifest) error {
 	return nil
 }
 
+// lintPromptBindings is the freeze-time BINDING-EXISTENCE guard over the
+// `{{ inputs.<name> }}` and `{{ steps.<id>.<output> }}` tokens embedded in a
+// `kind: llm-seam` step's `prompt` template (#2120). #2099 sealed the prompt
+// into the signed frontmatter and #2101 sends the resolved prompt to the agent,
+// so a typo'd token currently seals clean and reaches the model as a literal
+// `{{ … }}` or faults mid-run. This guard closes that gap by rejecting, at
+// freeze, any token that references something the plan does not define.
+//
+// It is DELIBERATELY existence-only and carries NO constrained-input clause,
+// which is the load-bearing difference from lintCommandInterpolation and
+// lintHostInterpolation. Those two reject a declared-but-UNCONSTRAINED input
+// because a command argv / trustContract host is an injection surface. A prompt
+// is natural language handed to an LLM, not a shell or host injection surface,
+// so a declared-but-unconstrained input is ALLOWED inside a prompt. This guard
+// must never consult inputDeclaresConstraint / the constrained set.
+//
+// Unlike command/host (which interpolate only `{{ inputs.<name> }}` via
+// CommandInputRefs, whose grammar rejects `steps.…`), a prompt uses the plan's
+// full binding grammar, so it uses manifest.PromptBindingRefs, which recognizes
+// both forms. Existence is checked against the WHOLE step graph's declared
+// outputs and ids: ordering/acyclicity is already covered by
+// TestStepGraphIsAcyclic, so this guard is scoped to existence only.
+//
+// The reject set (each a distinct error naming the offending token):
+//   - malformed token grammar (surfaced from the extractor);
+//   - a token naming an undeclared input;
+//   - a token naming a non-existent step;
+//   - a token naming a non-existent output of a known step.
+func lintPromptBindings(m *manifest.Manifest) error {
+	// Existence-only: take the declared-inputs set and discard the constrained
+	// set. A prompt is not an injection surface, so constraint presence is
+	// irrelevant here (the deliberate contrast with command/host).
+	declared, _ := inputConstraintSets(m)
+	knownSteps, stepOutputs := stepOutputSets(m)
+	for i, raw := range m.Aileron.Steps {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			// Lint's earlier pass already rejects a non-mapping step; keep the
+			// backstop rather than panic on a direct construct.
+			return &LintError{StepID: stepIDOf(raw), Reason: fmt.Sprintf("step %d is not a mapping", i)}
+		}
+		if scalarString(step["kind"]) != llmSeamKind {
+			continue
+		}
+		id := scalarString(step["id"])
+		prompt, ok := step["prompt"].(string)
+		if !ok || prompt == "" {
+			// An absent/empty/non-string prompt is a schema concern (#2099's
+			// minLength:1), not this guard's; skip it.
+			continue
+		}
+		refs, err := manifest.PromptBindingRefs(prompt)
+		if err != nil {
+			return &LintError{StepID: id, Reason: fmt.Sprintf("prompt: %v", err)}
+		}
+		for _, ref := range refs {
+			switch ref.Kind {
+			case manifest.PromptRefInput:
+				if !declared[ref.Input] {
+					return &LintError{StepID: id, Reason: fmt.Sprintf("prompt references undeclared input %q", ref.Input)}
+				}
+			case manifest.PromptRefStep:
+				outs, known := stepOutputs[ref.StepID]
+				if !known || !knownSteps[ref.StepID] {
+					return &LintError{StepID: id, Reason: fmt.Sprintf("prompt references unknown step %q", ref.StepID)}
+				}
+				if !outs[ref.Output] {
+					return &LintError{StepID: id, Reason: fmt.Sprintf("prompt references output %q not produced by step %q", ref.Output, ref.StepID)}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// stepOutputSets walks the raw manifest steps into the set of known step ids
+// and, per step id, the set of that step's declared output names. It reads the
+// untyped maps because freeze runs before the runtime's typed decode. Existence
+// is built from ALL steps (not only prior ones): this guard checks existence,
+// not ordering, and duplicating the acyclicity contract here would be wrong.
+func stepOutputSets(m *manifest.Manifest) (known map[string]bool, outputs map[string]map[string]bool) {
+	known = map[string]bool{}
+	outputs = map[string]map[string]bool{}
+	for _, raw := range m.Aileron.Steps {
+		step, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := scalarString(step["id"])
+		if id == "" {
+			continue
+		}
+		known[id] = true
+		outs := outputs[id]
+		if outs == nil {
+			outs = map[string]bool{}
+			outputs[id] = outs
+		}
+		if arr, ok := step["outputs"].([]any); ok {
+			for _, o := range arr {
+				if name := scalarString(o); name != "" {
+					outs[name] = true
+				}
+			}
+		}
+	}
+	return known, outputs
+}
+
 // inputConstraintSets walks the raw manifest inputs into the set of declared
 // input names and the subset that materially declare a constraint (a non-empty
 // enum or a non-whitespace pattern). It reads untyped maps because freeze runs
