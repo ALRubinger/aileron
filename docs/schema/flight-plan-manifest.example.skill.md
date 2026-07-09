@@ -141,6 +141,11 @@ aileron:
       bindings:
         series: steps.query_metrics.series
         csv: steps.render_csv.csv
+      prompt: |
+        Draft a concise weekly metrics digest as a tracking-issue body.
+        Series: {{ steps.query_metrics.series }}
+        CSV: {{ steps.render_csv.csv }}
+      model: anthropic:claude-haiku-4-5
       outputs:
         - issue_body
     - id: file_issue
@@ -163,7 +168,7 @@ The `aileron.steps` block wires this work as a deterministic step graph.
 
 1. `query_metrics` (action-call) reads the active metric set over the configured window from the metrics API.
 2. `render_csv` (transform) renders a compact CSV digest of the series and materializes it into the `digest.csv` output.
-3. `summarize` (llm-seam) drafts the issue body from the series and the CSV. This is the single marked non-deterministic seam.
+3. `summarize` (llm-seam) drafts the issue body from the series and the CSV. This is the single marked non-deterministic seam. The seam carries its sealed instruction template in `prompt` (using the same `{{ ... }}` binding grammar) and records a model target in `model`. Both ride the signed frontmatter and are audit-only.
 4. `file_issue` (action-call) files a tracking issue whose body is the summary and materializes the result into the `filed_issue.json` output.
 
 Each step binds its inputs by name to a resolved input (`inputs.<name>`) or a prior step output (`steps.<stepId>.<output>`). A binding is a reference, never a value. The references form a directed acyclic graph the runtime executes in topological order.

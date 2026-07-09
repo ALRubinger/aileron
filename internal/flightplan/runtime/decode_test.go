@@ -231,6 +231,58 @@ func TestDecode_TransformNameOnLLMSeamRefused(t *testing.T) {
 	}
 }
 
+func TestDecode_SeamCarriesPromptAndModel(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "seam", "kind": "llm-seam",
+			"prompt":  "Summarize the series.",
+			"model":   "anthropic:claude-haiku-4-5",
+			"outputs": []any{"x"},
+		}),
+	})
+	p, err := Decode(m)
+	if err != nil {
+		t.Fatalf("a seam declaring prompt and model must decode: %v", err)
+	}
+	if p.Steps[0].Prompt != "Summarize the series." {
+		t.Errorf("Prompt = %q, want the declared template", p.Steps[0].Prompt)
+	}
+	if p.Steps[0].Model != "anthropic:claude-haiku-4-5" {
+		t.Errorf("Model = %q, want the declared target", p.Steps[0].Model)
+	}
+}
+
+func TestDecode_PromptOnNonSeamRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "render", "kind": "transform",
+			"prompt":  "reach an LLM here",
+			"outputs": []any{"x"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("a transform declaring a prompt must be refused")
+	} else if !strings.Contains(err.Error(), "prompt") {
+		t.Errorf("error = %v, want a prompt rejection", err)
+	}
+}
+
+func TestDecode_ModelOnNonSeamRefused(t *testing.T) {
+	m := rawManifest(nil, nil, []any{
+		step(map[string]any{
+			"id": "call", "kind": "action-call",
+			"actionRef": "aileron:metrics.query_series",
+			"model":     "anthropic:claude-haiku-4-5",
+			"outputs":   []any{"x"},
+		}),
+	})
+	if _, err := Decode(m); err == nil {
+		t.Fatal("an action-call declaring a model must be refused")
+	} else if !strings.Contains(err.Error(), "model") {
+		t.Errorf("error = %v, want a model rejection", err)
+	}
+}
+
 func TestDecode_MalformedBinding(t *testing.T) {
 	m := rawManifest(
 		[]any{litInput("w", "number", 7)},

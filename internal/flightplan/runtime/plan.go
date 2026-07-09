@@ -269,6 +269,24 @@ type Step struct {
 	// this frontmatter copy; a contracted tool step with no sealed entry is
 	// a load refusal. Nil when the step declares no reach.
 	TrustContract *TrustContract
+
+	// The following fields are meaningful only for KindLLMSeam (#2099) and are
+	// refused at decode on any other kind. Both are audit-only: they ride the
+	// signed frontmatter's content hash (freeze seals the whole aileron block)
+	// and the v1 runtime does not consume them — the resume/consumption path is
+	// #2100, exactly as trustContractDTO's OAuth/Verification are modeled but
+	// unread. Modeling them here keeps strict KnownFields decode from rejecting
+	// a valid seam that declares them.
+
+	// Prompt is the seam's sealed instruction template, using the plan's
+	// `{{ inputs.<name> }}` / `{{ steps.<id>.<output> }}` binding grammar. Empty
+	// when the seam declares no prompt. Audit-only; unconsumed in v1.
+	Prompt string
+	// Model is the seam's recorded model target (for example
+	// anthropic:claude-haiku-4-5). It is a request/hint recorded not enforced,
+	// never a pin. Empty when the seam declares no model. Audit-only;
+	// unconsumed in v1.
+	Model string
 }
 
 // binds returns the step's binding map regardless of kind (Args for
