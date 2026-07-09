@@ -24,6 +24,8 @@ func runSeam(ctx context.Context, seam LLMSeam, step Step, bindings map[string]a
 		StepID:   step.ID,
 		Bindings: bindings,
 		Outputs:  step.Outputs,
+		Prompt:   step.Prompt,
+		Model:    step.Model,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("flightplan: llm-seam step %q failed: %w", step.ID, err)

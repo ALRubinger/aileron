@@ -267,6 +267,33 @@ type flightPlanLaunchArtifact struct {
 	Digest   string `json:"digest"`
 }
 
+// flightPlanSeamPendingResponse mirrors the daemon's 200 seam_pending body
+// (#2101): the run suspended at an unfulfilled llm-seam step, and the agent
+// fulfills it by producing the declared outputs and calling resume_flight_plan.
+// The status discriminator lets launchFlightPlanInner branch a 200 body without
+// inspecting the HTTP status.
+type flightPlanSeamPendingResponse struct {
+	Status string                    `json:"status"`
+	RunID  string                    `json:"run_id"`
+	Seam   flightPlanSeamRequestWire `json:"seam"`
+}
+
+type flightPlanSeamRequestWire struct {
+	StepID   string         `json:"step_id"`
+	Prompt   string         `json:"prompt,omitempty"`
+	Model    string         `json:"model,omitempty"`
+	Outputs  []string       `json:"outputs"`
+	Bindings map[string]any `json:"bindings,omitempty"`
+}
+
+// flightPlanResumeRequest is the body posted to
+// /v1/flightplans/runs/{runId}/resume. Outputs carries the suspended seam's
+// declared named results (stepId → outputName → value); omitted for an
+// approval-driven resume.
+type flightPlanResumeRequest struct {
+	Outputs map[string]map[string]any `json:"outputs,omitempty"`
+}
+
 type actionRunRequest struct {
 	Args map[string]any `json:"args"`
 }
@@ -518,6 +545,25 @@ var checkActionStatusTool = toolDef{
 	},
 }
 
+// resumeFlightPlanTool resumes a Flight Plan run that suspended mid-plan
+// (#2101). The agent calls it after a launch (or a prior resume) returned a
+// seam_pending result: it supplies the seam's declared outputs and the run
+// continues, returning the next seam_pending, a pending_approval, or the final
+// launch result. For an approval-driven resume (after the user approves a gated
+// action) the agent calls it with only run_id and no outputs.
+var resumeFlightPlanTool = toolDef{
+	Name:        "resume_flight_plan",
+	Description: "Resume a Flight Plan run that suspended mid-plan. Call this after a launch (or an earlier resume) returned a `seam_pending` result: the run parked at an `llm-seam` step and handed control to you. Produce the seam's declared `outputs` (named in the `seam.outputs` of the pending result), then call this tool with the `run_id` from that result and an `outputs` map keyed `{ \"<step_id>\": { \"<output_name>\": <value> } }`. The run continues and returns either the next `seam_pending` (fulfill it the same way), a `pending_approval` (a gated action needs the user's approval — surface it and, once approved, resume again with just the `run_id`), or the final completed launch result. Also call it with only `run_id` (no `outputs`) to resume after the user approved a gated action.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"run_id":  {Type: "string", Description: "The run id from the seam_pending or pending_approval result that suspended the run."},
+			"outputs": {Type: "object", Description: "Seam outputs to inject, keyed { \"<step_id>\": { \"<output_name>\": <value> } }. Supply the suspended seam step's declared outputs; omit for an approval-driven resume."},
+		},
+		Required: []string{"run_id"},
+	},
+}
+
 var httpRequestTool = toolDef{
 	Name:        "http_request",
 	Description: "Make an authenticated HTTP request to a URL covered by an api_key binding. Aileron matches the URL against configured api_key bindings (vault entries with kind=api_key and a url-pattern label) and injects the secret as a Bearer token. Does NOT inject OAuth credentials — OAuth bindings are scoped per-connector and reachable only via the bound connector's actions (see `aileron action add` for installed actions and `aileron binding list` for OAuth bindings). Requires human approval.",
@@ -705,6 +751,7 @@ var staticBuiltinToolNames = map[string]struct{}{
 	"send_message":        {},
 	"http_request":        {},
 	"check_action_status": {},
+	"resume_flight_plan":  {},
 	"aileron_diagnostics": {},
 }
 
@@ -991,6 +1038,11 @@ func (s *server) availableTools() []toolDef {
 	// are discovered (a fresh daemon), the agent might be working
 	// against an approval id minted by an earlier session.
 	tools = append(tools, checkActionStatusTool)
+	// resume_flight_plan is always available: a suspended run (seam_pending or
+	// pending_approval) may need resuming even in a session that discovered no
+	// plan tools (the run id was minted by an earlier launch). Mirrors the
+	// always-on check_action_status precedent.
+	tools = append(tools, resumeFlightPlanTool)
 	// aileron_diagnostics is always available whenever there is a daemon
 	// to discover against (AILERON_URL set). It answers "why do I only
 	// see the built-in tools?" from the agent — reporting whether
@@ -1030,6 +1082,8 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.httpRequest(args)
 	case "check_action_status":
 		return s.checkActionStatus(ctx, args)
+	case "resume_flight_plan":
+		return s.resumeFlightPlan(ctx, args)
 	case "aileron_diagnostics":
 		return s.diagnostics()
 	default:
@@ -1468,10 +1522,11 @@ func deriveFlightPlanInputSchema(p flightPlanMeta) schema {
 // /v1/flightplans/{name}/launch endpoint and returns an MCP tool result. It
 // mirrors runActionInner's auth, tracing, and error-surfacing shape.
 //
-// A non-2xx response is surfaced verbatim as an IsError tool result: this is
-// how the 403 FailureEnvelope from a gated constituent action (#2106) reaches
-// the LLM. The suspend/resume/202-passthrough surface is a separate follow-up
-// (#2101); this path ships the 403 fail-closed behavior.
+// A completed launch returns the launch result; a suspend returns the pending
+// envelope verbatim (seam_pending on 200, pending_approval on 202) so the agent
+// knows to fulfill the seam via resume_flight_plan or approve the gated action
+// (#2101). A real non-2xx error still surfaces as an IsError tool result — this
+// is how a denied approval's 403 FailureEnvelope reaches the LLM.
 func (s *server) launchFlightPlan(ctx context.Context, planName string, args map[string]any) toolResult {
 	tracer := otel.GetTracerProvider().Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "aileron.mcp.tool.call",
@@ -1515,24 +1570,133 @@ func (s *server) launchFlightPlanInner(ctx context.Context, planName string, arg
 	if err != nil {
 		return errorResult("reading response: " + err.Error())
 	}
-	if resp.StatusCode == http.StatusOK {
+	return flightPlanRunResult(resp.StatusCode, resp.Status, rawBody, "flight plan launch failed: ")
+}
+
+// flightPlanRunResult decodes a launch-or-resume daemon response into the tool
+// result the agent sees (#2101). It branches on the discriminator so launch and
+// resume speak an identical suspend/complete contract:
+//
+//   - 200 with `status: seam_pending` → surface the seam envelope verbatim so
+//     the agent produces the declared outputs and calls resume_flight_plan.
+//   - 200 without a status → a completed launch result.
+//   - 202 → a pending_approval; surface it via pendingApprovalResult (the agent
+//     already knows to poll check_action_status).
+//   - any other status → the daemon's FailureEnvelope (or body) as an IsError.
+func flightPlanRunResult(statusCode int, statusLine string, rawBody []byte, failPrefix string) toolResult {
+	switch statusCode {
+	case http.StatusOK:
+		// Probe the discriminator: a seam suspend carries status:"seam_pending";
+		// a completed run carries no status.
+		var probe struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(rawBody, &probe); err != nil {
+			return errorResult("decoding response: " + err.Error())
+		}
+		if probe.Status == "seam_pending" {
+			var seam flightPlanSeamPendingResponse
+			if err := json.Unmarshal(rawBody, &seam); err != nil {
+				return errorResult("decoding seam_pending response: " + err.Error())
+			}
+			return jsonResult(seam)
+		}
 		var launched flightPlanLaunchResponse
 		if err := json.Unmarshal(rawBody, &launched); err != nil {
 			return errorResult("decoding response: " + err.Error())
 		}
 		return jsonResult(launched)
+	case http.StatusAccepted:
+		var pending actionRunPendingResponse
+		if err := json.Unmarshal(rawBody, &pending); err != nil {
+			return errorResult("decoding pending response: " + err.Error())
+		}
+		return pendingApprovalResult(pending)
+	default:
+		// Surface the FailureEnvelope (or whatever body the daemon returned)
+		// verbatim so the agent sees the actionable detail. A denied approval's
+		// 403 FailureEnvelope reaches the LLM here as an IsError result.
+		if len(bytes.TrimSpace(rawBody)) == 0 {
+			return errorResult(failPrefix + statusLine)
+		}
+		return errorResult(string(rawBody))
 	}
-	// Non-2xx: surface the FailureEnvelope (or whatever body the daemon
-	// returned) verbatim so the agent sees the actionable detail. A gated
-	// constituent action's 403 FailureEnvelope (#2106) reaches the LLM here
-	// as an IsError result. NOTE: #2101 rewrites this to a 202 passthrough
-	// (suspend→approve→resume); until then 403 fail-closed is correct.
-	if len(bytes.TrimSpace(rawBody)) == 0 {
-		// A bodyless non-2xx (e.g. a bare 502 from a proxy) still needs an
-		// actionable message; fall back to the HTTP status line.
-		return errorResult("flight plan launch failed: " + resp.Status)
+}
+
+// resumeFlightPlan resumes a suspended Flight Plan run via the daemon's
+// /v1/flightplans/runs/{runId}/resume endpoint (#2101). It POSTs the seam
+// outputs (if any) and handles the response identically to launch: seam_pending,
+// pending_approval, completed, or error.
+func (s *server) resumeFlightPlan(ctx context.Context, args map[string]any) toolResult {
+	if s.aileronURL == "" {
+		return errorResult("Aileron daemon not configured (AILERON_URL not set)")
 	}
-	return errorResult(string(rawBody))
+	runID, _ := args["run_id"].(string)
+	if runID == "" {
+		return errorResult("resume_flight_plan requires a run_id (from an earlier seam_pending or pending_approval result)")
+	}
+	var reqBody flightPlanResumeRequest
+	if raw, ok := args["outputs"]; ok && raw != nil {
+		outputs, ok := coerceResumeOutputs(raw)
+		if !ok {
+			return errorResult("resume_flight_plan outputs must be an object keyed { \"<step_id>\": { \"<output_name>\": <value> } }")
+		}
+		reqBody.Outputs = outputs
+	}
+
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.mcp.tool.call",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("aileron.flightplan.run_id", runID)),
+	)
+	defer span.End()
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return errorResult("encoding request: " + err.Error())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.aileronURL+"/v1/flightplans/runs/"+runID+"/resume", bytes.NewReader(body))
+	if err != nil {
+		return errorResult("creating request: " + err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.setActionAuthHeaders(req)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return errorResult("daemon unreachable: " + err.Error())
+	}
+	defer resp.Body.Close()
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult("reading response: " + err.Error())
+	}
+	res := flightPlanRunResult(resp.StatusCode, resp.Status, rawBody, "flight plan resume failed: ")
+	if res.IsError {
+		span.SetStatus(codes.Error, errorText(res))
+	}
+	return res
+}
+
+// coerceResumeOutputs converts the agent-supplied outputs argument (a generic
+// map decoded from JSON) into the typed stepId → outputName → value shape. It
+// tolerates the JSON object shape MCP hosts deliver (map[string]any of
+// map[string]any) and rejects anything that is not a nested object.
+func coerceResumeOutputs(raw any) (map[string]map[string]any, bool) {
+	top, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]map[string]any, len(top))
+	for step, v := range top {
+		named, ok := v.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		out[step] = named
+	}
+	return out, true
 }
 
 // runAction synchronously executes an action via the Aileron daemon's

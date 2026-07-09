@@ -3404,12 +3404,36 @@ paths:
         LLM seam is also unwired, so a plan with an `llm-seam` step errors.
         Image-booted launch is a follow-up.
 
-        Approval passthrough: an effect-gated constituent action mirrors the
-        CLI's `daemonDispatcher` contract. The dispatcher refuses to run an
-        action whose manifest declares `[approval] required = true` and
-        surfaces an ADR-0010 FailureEnvelope directing the operator to
-        approve it (via `POST /v1/actions/{name}/run`) and re-launch. The
-        resume / seam-pending surface is a separate follow-up (#2101).
+        Suspend / resume (#2101): a launch can SUSPEND mid-plan instead of
+        completing, on either of two boundaries, and the agent resumes it via
+        `POST /v1/flightplans/runs/{runId}/resume`.
+
+          - An unfulfilled `llm-seam` step suspends with `200` and a
+            `FlightPlanSeamPendingResponse` (`status: seam_pending`): the
+            daemon returns control to the agent, which produces the seam's
+            declared outputs and resumes the run supplying them. No LLM is
+            reached daemon-side; the agent IS the seam provider.
+          - An effect-gated constituent action (its manifest declares
+            `[approval] required = true`) suspends with `202` and the existing
+            `ActionRunPendingResponse`: the daemon registers a pending
+            approval in the same queue `POST /v1/actions/{name}/run` uses, and
+            the agent approves it through the existing approval channel
+            (`POST /v1/action-approvals/{id}/decide` + `check_action_status`),
+            then resumes the run. A denied approval fails the run closed
+            (`403`). The gated action runs exactly once, on the resume that
+            replays the now-approved step.
+
+        A completed launch (no seam, no gate) returns `200` with a
+        `FlightPlanLaunchResponse`, exactly as before. The `200` response is a
+        discriminated union keyed on `status`: a `FlightPlanLaunchResponse`
+        carries no `status`, a `FlightPlanSeamPendingResponse` sets
+        `status: seam_pending`, so the MCP wrapper branches without inspecting
+        the HTTP status code.
+
+        Scope (deterministic happy path): this endpoint runs the in-process
+        pipeline only. No image/registry/tool-step/publisher seams are wired,
+        so a plan that pins an environment image or declares tool steps errors
+        (the runtime's nil-guard). Image-booted launch is a follow-up.
 
         This endpoint adds no manifest-level `[approval]` gate of its own
         (ADR-0009): the plan's constituent actions carry their own gating,
@@ -3431,11 +3455,26 @@ paths:
               $ref: "#/components/schemas/FlightPlanLaunchRequest"
       responses:
         "200":
-          description: Flight Plan launched successfully.
+          description: |
+            Flight Plan completed (`FlightPlanLaunchResponse`) or suspended at
+            an unfulfilled `llm-seam` step (`FlightPlanSeamPendingResponse`,
+            `status: seam_pending`). Discriminated on the `status` field.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/FlightPlanLaunchResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/FlightPlanLaunchResponse"
+                  - $ref: "#/components/schemas/FlightPlanSeamPendingResponse"
+        "202":
+          description: |
+            The launch suspended at an effect-gated constituent action: the
+            daemon registered a pending approval and returned control to the
+            agent (`ActionRunPendingResponse`). The agent approves via the
+            existing approval channel, then resumes the run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -3446,6 +3485,117 @@ paths:
           description: |
             No Flight Plan store is configured, the named plan is unknown,
             or the plan has no frozen version to launch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "412":
+          description: Vault locked or a required binding is missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "500":
+          description: Verification, runtime, or executor error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "502":
+          description: Network or external API error inside a constituent action.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+
+  /v1/flightplans/runs/{runId}/resume:
+    post:
+      tags: [FlightPlans]
+      summary: Resume a suspended Flight Plan run
+      description: |
+        Resumes a Flight Plan run that suspended mid-plan (#2101). A launch
+        (`POST /v1/flightplans/{name}/launch`) suspends at an unfulfilled
+        `llm-seam` step (returning `seam_pending`) or at an effect-gated
+        action (returning `202 pending_approval`); this endpoint drives the
+        run forward from where it parked.
+
+        The daemon keys the run by the server-minted `runId` echoed on the
+        suspend response and holds an in-memory, session-scoped record of the
+        run's resolved inputs and accumulated per-step outputs. On resume it
+        replays the plan through the runtime with that memo, injecting every
+        already-computed step's output WITHOUT re-executing it (exactly-once
+        for effects), and continues from the first un-fulfilled step.
+
+          - For a seam resume, the request `outputs` supply the suspended
+            seam's declared named results (keyed `stepId → outputName → value`);
+            they are merged into the memo before replay. Supplying outputs that
+            do not match the suspended seam's declared outputs is a `400`.
+          - For an approval resume, `outputs` is omitted: the daemon reads the
+            recorded approval's outcome from the queue. An approved outcome
+            replays the now-approved action; a denied outcome fails the run
+            closed (`403`).
+
+        The response mirrors launch: `200` for a completed run
+        (`FlightPlanLaunchResponse`) or the next seam suspend
+        (`FlightPlanSeamPendingResponse`), `202` for the next gated action
+        (`ActionRunPendingResponse`). A completed or denied run deletes the
+        in-memory record.
+
+        The registry is in-memory and lost on daemon restart: an unknown or
+        expired `runId` is a `404` (the agent re-launches). This endpoint
+        carries no manifest-level `[approval]` gate of its own (ADR-0009) and
+        is idempotent-neutral: a resume is a deterministic replay of the
+        recorded run.
+      operationId: resumeFlightPlan
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FlightPlanResumeRequest"
+      responses:
+        "200":
+          description: |
+            The run completed (`FlightPlanLaunchResponse`) or suspended at the
+            next unfulfilled `llm-seam` step (`FlightPlanSeamPendingResponse`,
+            `status: seam_pending`). Discriminated on the `status` field.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FlightPlanLaunchResponse"
+                  - $ref: "#/components/schemas/FlightPlanSeamPendingResponse"
+        "202":
+          description: |
+            The run suspended at the next effect-gated action
+            (`ActionRunPendingResponse`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionRunPendingResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            A denied approval failed the run closed, or a denied constituent
+            action refused (`FailureEnvelope`, `capability_denied`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "404":
+          description: |
+            The run id is unknown or expired. The run registry is in-memory
+            and session-scoped, so a daemon restart orphans in-flight runs;
+            the agent re-launches.
           content:
             application/json:
               schema:
@@ -7252,6 +7402,91 @@ components:
             emission order.
           items:
             type: string
+
+    FlightPlanSeamPendingResponse:
+      type: object
+      description: |
+        Response body when a Flight Plan launch or resume SUSPENDS at an
+        unfulfilled `llm-seam` step (#2101). The daemon returns control to the
+        agent, which produces the seam's declared outputs and resumes the run
+        via `POST /v1/flightplans/runs/{runId}/resume` supplying them. No LLM
+        is reached daemon-side: the agent is the seam provider. The `status`
+        discriminator distinguishes this from a completed
+        `FlightPlanLaunchResponse` on the shared `200` response.
+      required: [status, run_id, seam]
+      properties:
+        status:
+          type: string
+          enum: [seam_pending]
+          description: |
+            Discriminator. Always `seam_pending` for this shape; included so
+            the agent's MCP wrapper can branch without inspecting the HTTP
+            status code.
+        run_id:
+          type: string
+          description: |
+            Server-minted run id, stable across the whole suspend/resume
+            sequence. The agent passes it to
+            `POST /v1/flightplans/runs/{runId}/resume`.
+        seam:
+          $ref: "#/components/schemas/FlightPlanSeamRequest"
+
+    FlightPlanSeamRequest:
+      type: object
+      description: |
+        The suspended `llm-seam` step's request payload: everything the agent
+        needs to produce the seam's outputs. The prompt is the sealed
+        instruction template with its bindings resolved for display, the model
+        is the recorded (non-enforced) target hint, and outputs names the
+        results the seam must produce and supply on resume.
+      required: [step_id, outputs]
+      properties:
+        step_id:
+          type: string
+          description: The id of the suspended `llm-seam` step.
+        prompt:
+          type: string
+          description: |
+            The seam's sealed instruction template, rendered with its resolved
+            bindings for display. Empty when the seam declares no prompt.
+        model:
+          type: string
+          description: |
+            The seam's recorded model target (for example
+            `anthropic:claude-haiku-4-5`). A request/hint, never a pin. Empty
+            when the seam declares no model.
+        outputs:
+          type: array
+          description: |
+            The named results the seam must produce. The resume request
+            supplies a value for each under `outputs[stepId]`.
+          items:
+            type: string
+        bindings:
+          type: object
+          additionalProperties: true
+          description: |
+            The seam's resolved input bindings (binding name → resolved value),
+            for the agent's context. Never secrets (bindings are references).
+
+    FlightPlanResumeRequest:
+      type: object
+      description: |
+        Body for `POST /v1/flightplans/runs/{runId}/resume`. `outputs` is
+        supplied for a seam fulfillment (the suspended seam's declared named
+        results) and omitted for an approval-driven resume (the daemon reads
+        the recorded approval's outcome instead).
+      properties:
+        outputs:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+          description: |
+            Seam outputs to inject, keyed `stepId → outputName → value`. For a
+            seam resume this carries exactly the suspended seam step's declared
+            outputs; supplying outputs that do not match the suspended step's
+            declared outputs is a `400`.
 
     FlightPlanArtifact:
       type: object

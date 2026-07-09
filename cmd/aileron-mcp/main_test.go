@@ -95,14 +95,14 @@ func TestDispatchTool_UnknownTool(t *testing.T) {
 func TestAvailableTools_CommsOnly(t *testing.T) {
 	s := &server{commsURL: "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
 	tools := s.availableTools()
-	if len(tools) != 5 {
-		t.Fatalf("expected 4 comms tools + check_action_status, got %d", len(tools))
+	if len(tools) != 6 {
+		t.Fatalf("expected 4 comms tools + check_action_status + resume_flight_plan, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, td := range tools {
 		names[td.Name] = true
 	}
-	for _, want := range []string{"read_messages", "draft_reply", "send_message", "http_request", "check_action_status"} {
+	for _, want := range []string{"read_messages", "draft_reply", "send_message", "http_request", "check_action_status", "resume_flight_plan"} {
 		if !names[want] {
 			t.Errorf("missing tool: %s", want)
 		}
@@ -117,15 +117,15 @@ func TestAvailableTools_ActionsOnly(t *testing.T) {
 		},
 	}
 	tools := s.availableTools()
-	if len(tools) != 2 {
-		t.Fatalf("expected 1 action tool + check_action_status, got %d", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("expected 1 action tool + check_action_status + resume_flight_plan, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, td := range tools {
 		names[td.Name] = true
 	}
-	if !names["ship_update"] || !names["check_action_status"] {
-		t.Errorf("tools = %v, want ship_update + check_action_status", names)
+	if !names["ship_update"] || !names["check_action_status"] || !names["resume_flight_plan"] {
+		t.Errorf("tools = %v, want ship_update + check_action_status + resume_flight_plan", names)
 	}
 }
 
@@ -139,8 +139,8 @@ func TestAvailableTools_CommsAndActions(t *testing.T) {
 		},
 	}
 	tools := s.availableTools()
-	if len(tools) != 7 {
-		t.Fatalf("expected 4 comms + 2 action + check_action_status = 7 tools, got %d", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("expected 4 comms + 2 action + check_action_status + resume_flight_plan = 8 tools, got %d", len(tools))
 	}
 }
 
@@ -1255,8 +1255,8 @@ func TestHandle_ToolsList_ReturnsTools(t *testing.T) {
 	}
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 5 {
-		t.Errorf("expected 4 comms tools + check_action_status, got %d", len(tools))
+	if len(tools) != 6 {
+		t.Errorf("expected 4 comms tools + check_action_status + resume_flight_plan, got %d", len(tools))
 	}
 }
 

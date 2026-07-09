@@ -1,0 +1,139 @@
+package app
+
+import (
+	"sync"
+
+	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
+)
+
+// flightPlanRunRegistry is the daemon's in-memory, session-scoped store of
+// suspended Flight Plan runs (#2101). A launch that suspends (an unfulfilled
+// llm-seam or a gated action) parks its record here keyed by the runtime-minted
+// run id; the resume endpoint reads it back, replays the run with the
+// accumulated memo, and either re-parks (a further suspend) or deletes it (a
+// terminal completion or a denied approval).
+//
+// It deliberately mirrors internal/approval.PersistedRecord's field discipline
+// (registration fields immutable, accumulated state mutated per transition)
+// WITHOUT any persistence: the registry is a plain mutex-guarded map, lost on
+// daemon restart. A restart mid-suspend orphans the run (the accepted gap in
+// #2101's readiness brief); the agent re-launches. The runtime stays stateless
+// across HTTP calls — this registry is the ONLY cross-call state the
+// suspend/resume handshake needs.
+type flightPlanRunRegistry struct {
+	mu   sync.Mutex
+	runs map[string]*flightPlanRunRecord
+}
+
+// flightPlanRunRecord is one suspended run's re-launch state: enough to replay
+// the plan deterministically from the top, plus the per-run approval linkage
+// for an in-flight gated step.
+type flightPlanRunRecord struct {
+	// Name + Version select the frozen unit to replay (immutable per run).
+	Name    string
+	Version string
+	// Inputs are the literal launch overrides, replayed verbatim on every
+	// resume so Phase A resolves identically (immutable per run).
+	Inputs runtime.LaunchArgs
+	// Outputs is the accumulated memo (stepId → its named outputs) at the point
+	// of the latest suspend. On resume it is replayed as Options.ResumeOutputs so
+	// every already-computed step is injected without re-execution (exactly-once
+	// for effects). Mutated on each suspend via MergeOutputs.
+	Outputs map[string]map[string]any
+	// Approvals maps a gated action ref to the approval-queue entry id registered
+	// for it in THIS run. The resume-path approver reads it to look up the
+	// recorded decision (approved → replay the action; denied → fail closed)
+	// without re-registering. Nil until the run first suspends on an approval.
+	Approvals map[string]string
+}
+
+// newFlightPlanRunRegistry returns an empty registry ready to accept runs.
+func newFlightPlanRunRegistry() *flightPlanRunRegistry {
+	return &flightPlanRunRegistry{runs: map[string]*flightPlanRunRecord{}}
+}
+
+// Put stores (or replaces) the record for runID. The registry owns the stored
+// pointer afterwards; callers must not mutate a record after Put except through
+// the registry's own methods.
+func (r *flightPlanRunRegistry) Put(runID string, rec *flightPlanRunRecord) {
+	if r == nil || runID == "" || rec == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if rec.Outputs == nil {
+		rec.Outputs = map[string]map[string]any{}
+	}
+	if rec.Approvals == nil {
+		rec.Approvals = map[string]string{}
+	}
+	r.runs[runID] = rec
+}
+
+// Get returns the record for runID and whether it was found. The returned
+// pointer is the live registry entry; callers read it under the assumption that
+// the handler serializing this run is the only writer (the run is single-flight
+// across the suspend/resume handshake).
+func (r *flightPlanRunRegistry) Get(runID string) (*flightPlanRunRecord, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.runs[runID]
+	return rec, ok
+}
+
+// MergeOutputs folds a suspend's accumulated memo into the stored record,
+// replacing each step's outputs by id (last-write-wins per step, matching the
+// runtime's memoized-replay contract where a later suspend's memo is a superset
+// of the earlier one). A missing run id is a no-op. Returns whether the run was
+// found so a caller can distinguish "merged" from "unknown run".
+func (r *flightPlanRunRegistry) MergeOutputs(runID string, outputs map[string]map[string]any) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.runs[runID]
+	if !ok {
+		return false
+	}
+	if rec.Outputs == nil {
+		rec.Outputs = map[string]map[string]any{}
+	}
+	for id, named := range outputs {
+		rec.Outputs[id] = named
+	}
+	return true
+}
+
+// RecordApproval links a gated action ref to its registered approval-queue entry
+// id for this run, so the resume-path approver looks it up instead of
+// re-registering. A missing run id is a no-op.
+func (r *flightPlanRunRegistry) RecordApproval(runID, actionRef, approvalID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.runs[runID]
+	if !ok {
+		return
+	}
+	if rec.Approvals == nil {
+		rec.Approvals = map[string]string{}
+	}
+	rec.Approvals[actionRef] = approvalID
+}
+
+// Delete removes the record for runID (a terminal completion or a denied
+// approval). Idempotent: deleting an unknown id is a no-op.
+func (r *flightPlanRunRegistry) Delete(runID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.runs, runID)
+}

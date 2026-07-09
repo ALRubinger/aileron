@@ -503,6 +503,10 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		fpStoreDir = fpstore.DefaultDir()
 	}
 	server.flightPlanStore = fpstore.New(fpStoreDir)
+	// In-memory, session-scoped registry of suspended Flight Plan runs (#2101).
+	// It is the only cross-HTTP-call state the suspend/resume handshake needs;
+	// lost on restart (an orphaned mid-suspend run is re-launched by the agent).
+	server.flightPlanRuns = newFlightPlanRunRegistry()
 
 	// --- Audit log (ADR-0010) ---
 	// File-backed JSONL by default so events survive daemon restart;

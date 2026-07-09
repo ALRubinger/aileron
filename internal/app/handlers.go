@@ -84,6 +84,7 @@ type apiServer struct {
 	newID                func() string
 	actions              *action.Store                    // installed actions in ~/.aileron/actions/ (ADR-0003)
 	flightPlanStore      *fpstore.Store                   // installed frozen flight plans in ~/.aileron/skills/ (#2097); nil → POST /v1/flightplans/{name}/launch returns 404
+	flightPlanRuns       *flightPlanRunRegistry           // in-memory, session-scoped store of suspended Flight Plan runs (#2101); keyed by run id, lost on daemon restart
 	actionState          action.StateStore                // per-action user preferences (enabled/disabled overlay); nil means defaults apply
 	executor             action.Executor                  // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer            *cstore.Installer                // connector install pipeline (ADR-0004); nil disables /v1/connectors/install

@@ -18,6 +18,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
@@ -260,11 +261,31 @@ func newFlightPlanTestServer(t *testing.T, planName string, fv fpstore.FrozenVer
 	return &apiServer{
 		log:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		flightPlanStore: s,
+		flightPlanRuns:  newFlightPlanRunRegistry(),
 		executor:        exec,
 		auditStore:      auditStore,
 		auditRecorder:   recorder,
+		actionApprovals: approval.NewActionApprovalQueue(nil, nil),
 		newID:           func() string { return "test-id" },
 	}, auditStore
+}
+
+// resume POSTs a resume request body (or nil for an empty body) to the resume
+// endpoint for runID and returns the recorder.
+func resume(t *testing.T, srv *apiServer, runID string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = strings.NewReader(string(raw))
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/flightplans/runs/"+runID+"/resume", reader)
+	rec := httptest.NewRecorder()
+	srv.ResumeFlightPlan(rec, req, runID)
+	return rec
 }
 
 // launch POSTs a launch request body (or nil for an empty body) and returns the
@@ -578,33 +599,83 @@ func TestLaunchFlightPlan_ExplicitVersion(t *testing.T) {
 	}
 }
 
-func TestLaunchFlightPlan_ApprovalGatedActionRefused(t *testing.T) {
-	// A plan whose constituent action is a WRITE and whose installed action
-	// manifest declares [approval] required = true is refused before executing,
-	// mirroring the CLI daemonDispatcher's approve-and-re-launch contract. The
-	// runtime approves the effect gate (flightplanApprover), so the refusal is
-	// the dispatcher's manifest check, surfaced as an ADR-0010 FailureEnvelope.
+// TestLaunchFlightPlan_ApprovalGatedActionSuspends supersedes #2098's
+// fail-closed refusal (#2101): a plan whose constituent action declares
+// [approval] required = true no longer refuses with 403. It SUSPENDS with a 202
+// pending_approval (the action not yet executed); the operator approves through
+// the existing approval channel; a resume replays the run and dispatches the
+// now-approved action exactly once, completing with 200.
+func TestLaunchFlightPlan_ApprovalGatedActionSuspends(t *testing.T) {
 	fv := freezeFixture(t, writePlanMD)
 	exec := &flightplanRecordingExecutor{results: map[string]string{"file_report": reportFileMap}}
 	srv, _ := newFlightPlanTestServer(t, "daemon-write-fixture", fv, exec)
-	// Install an action store carrying the approval-gated action manifest.
 	srv.actions = approvalGatedActionStore(t)
 
+	// Launch suspends at the gate: 202 pending_approval, action NOT executed.
 	rec := launch(t, srv, "daemon-write-fixture", nil)
-	// The refusal maps to a capability_denied FailureEnvelope (403).
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("launch status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	var pending api.ActionRunPendingResponse
+	if err := json.NewDecoder(rec.Body).Decode(&pending); err != nil {
+		t.Fatalf("decode pending: %v", err)
+	}
+	if pending.Status != api.ActionRunPendingResponseStatusPendingApproval {
+		t.Errorf("status = %q, want pending_approval", pending.Status)
+	}
+	if pending.ApprovalId == "" {
+		t.Error("202 must carry an approval id")
 	}
 	if len(exec.calls) != 0 {
-		t.Errorf("approval-gated action must not execute; calls=%v", exec.calls)
+		t.Fatalf("gated action must not execute before approval; calls=%v", exec.calls)
 	}
-	var env map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
-		t.Fatalf("decode: %v", err)
+
+	// The run record exists, keyed by the minted run id (the only in-flight run).
+	runID := onlyRunID(t, srv)
+
+	// Approve through the existing channel.
+	if err := srv.actionApprovals.Decide(pending.ApprovalId, true, "", nil); err != nil {
+		t.Fatalf("Decide(approve): %v", err)
 	}
-	if _, ok := env["error"]; !ok {
-		t.Errorf("body is not an ADR-0010 FailureEnvelope: %v", env)
+
+	// Resume: the run replays, dispatches the now-approved action, completes 200.
+	rec = resume(t, srv, runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	if got := countCalls(exec, "file_report"); got != 1 {
+		t.Errorf("gated action dispatched %d times, want exactly 1", got)
+	}
+	// The run record is deleted on terminal completion.
+	if _, ok := srv.flightPlanRuns.Get(runID); ok {
+		t.Error("run record should be deleted after a completed run")
+	}
+}
+
+// onlyRunID returns the single run id in the registry, failing if there is not
+// exactly one (the e2e tests each drive one run at a time).
+func onlyRunID(t *testing.T, srv *apiServer) string {
+	t.Helper()
+	srv.flightPlanRuns.mu.Lock()
+	defer srv.flightPlanRuns.mu.Unlock()
+	if len(srv.flightPlanRuns.runs) != 1 {
+		t.Fatalf("want exactly 1 in-flight run, got %d", len(srv.flightPlanRuns.runs))
+	}
+	for id := range srv.flightPlanRuns.runs {
+		return id
+	}
+	return ""
+}
+
+// countCalls counts how many times the recording executor dispatched name.
+func countCalls(exec *flightplanRecordingExecutor, name string) int {
+	n := 0
+	for _, c := range exec.calls {
+		if c.name == name {
+			n++
+		}
+	}
+	return n
 }
 
 // listInputsPlanMD is a plan whose inputs exercise the ListFlightPlans input
