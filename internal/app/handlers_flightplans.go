@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"strings"
 
+	"sort"
+
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 	"github.com/ALRubinger/aileron/internal/model"
 )
@@ -23,6 +26,151 @@ import (
 // records attributable and self-describing without inventing a new
 // AILERON_OPERATOR_ID dependency on the daemon side.
 const flightPlanLaunchActor = "flightplan-launch"
+
+// ListFlightPlans returns the installed frozen Flight Plans in the skill store,
+// plus a per-plan load_errors slice for any plan whose latest frozen version
+// fails to verify or parse (per ADR-0010). It mirrors ListActions: a nil store
+// lists as empty, loading is non-fatal, and the list is sorted by name so the
+// aileron-mcp diff is stable.
+//
+// Each surviving plan is projected to a FlightPlanSummary carrying its latest
+// frozen version id, description, and declared input/output interface — enough
+// for aileron-mcp to expose one MCP tool per plan (#2098). The daemon carries
+// the raw manifest input type (including `timestamp`); the MCP side projects
+// `timestamp` to a JSON Schema type when deriving the tool input schema.
+func (s *apiServer) ListFlightPlans(w http.ResponseWriter, r *http.Request) {
+	if s.flightPlanStore == nil {
+		// Match the populated path's shape: an always-present (possibly empty)
+		// items array, so a client sees a consistent contract whether or not a
+		// store is configured.
+		writeJSON(w, http.StatusOK, api.FlightPlanListResponse{Items: &[]api.FlightPlanSummary{}})
+		return
+	}
+	names, err := s.flightPlanStore.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "flightplan_list_failed", err.Error())
+		return
+	}
+
+	items := make([]api.FlightPlanSummary, 0, len(names))
+	var loadErrors []api.FlightPlanLoadError
+	for _, name := range names {
+		id, count, err := s.flightPlanStore.LatestFrozen(name)
+		if err != nil {
+			loadErrors = append(loadErrors, flightPlanLoadError(
+				"lookup_error", err.Error(), s.flightPlanStore.Dir(name)))
+			continue
+		}
+		if count == 0 {
+			// List() already filters to installed/frozen plans, but a plan whose
+			// only frozen dir lost its SKILL.md between calls must not appear.
+			continue
+		}
+		loaded, err := runtime.LoadVerified(s.flightPlanStore, name, id)
+		if err != nil {
+			// A tampered or unparseable frozen version surfaces under load_errors
+			// (ADR-0010 non-fatal loading) rather than aborting the whole list.
+			loadErrors = append(loadErrors, flightPlanLoadError(
+				"verification_error", err.Error(), s.flightPlanStore.FrozenDir(name, id)))
+			continue
+		}
+		items = append(items, s.planToSummary(name, id, loaded))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+
+	resp := api.FlightPlanListResponse{Items: &items}
+	if len(loadErrors) > 0 {
+		resp.LoadErrors = &loadErrors
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// planToSummary projects a verified LoadedPlan into the API summary shape: the
+// plan name, its latest frozen version id, the manifest description, and the
+// declared input/output interface.
+func (s *apiServer) planToSummary(name, id string, loaded runtime.LoadedPlan) api.FlightPlanSummary {
+	summary := api.FlightPlanSummary{Name: name, Version: id}
+	if desc := s.planDescription(name, id); desc != "" {
+		summary.Description = &desc
+	}
+	if loaded.Plan != nil {
+		if inputs := planInputsToAPI(loaded.Plan.Inputs); len(inputs) > 0 {
+			summary.Inputs = &inputs
+		}
+		if outputs := planOutputsToAPI(loaded.Plan.Outputs); len(outputs) > 0 {
+			summary.Outputs = &outputs
+		}
+	}
+	return summary
+}
+
+// planDescription reads the frozen manifest's frontmatter description. The
+// bytes were already verified by LoadVerified above; this parse is a cheap
+// read of the same file for the human-facing description the typed Plan does
+// not carry. A read or parse failure yields an empty description rather than
+// failing the list — the description is presentational, not load-bearing.
+func (s *apiServer) planDescription(name, id string) string {
+	fv, err := s.flightPlanStore.ReadFrozen(name, id)
+	if err != nil {
+		return ""
+	}
+	m, err := manifest.Parse(fv.SkillMD)
+	if err != nil {
+		return ""
+	}
+	return m.Description
+}
+
+// planInputsToAPI projects the typed plan inputs into the API input shape. The
+// raw manifest type is carried verbatim (the MCP side projects `timestamp`);
+// `required` is computed here: a literal-rule input with no declared default is
+// caller-required, while dynamic, source, and defaulted inputs auto-resolve at
+// launch and are not.
+func planInputsToAPI(inputs []runtime.Input) []api.FlightPlanInput {
+	out := make([]api.FlightPlanInput, 0, len(inputs))
+	for _, in := range inputs {
+		required := in.Resolution.Rule == runtime.ResolutionLiteral && !in.Resolution.HasDefault
+		item := api.FlightPlanInput{
+			Name:     in.Name,
+			Type:     api.FlightPlanInputType(string(in.Type)),
+			Required: required,
+		}
+		if in.Description != "" {
+			d := in.Description
+			item.Description = &d
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// planOutputsToAPI projects the declared outputs into the API output shape,
+// sorted by name for a deterministic list.
+func planOutputsToAPI(outputs map[string]runtime.Output) []api.FlightPlanOutput {
+	out := make([]api.FlightPlanOutput, 0, len(outputs))
+	for _, o := range outputs {
+		item := api.FlightPlanOutput{Name: o.Name}
+		if o.MimeType != "" {
+			mt := o.MimeType
+			item.MimeType = &mt
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// flightPlanLoadError builds an ADR-0010 load-error entry for a plan whose
+// latest frozen version failed to load, with the always-"flightplan" boundary.
+func flightPlanLoadError(class, message, file string) api.FlightPlanLoadError {
+	boundary := "flightplan"
+	return api.FlightPlanLoadError{
+		Class:    class,
+		Message:  message,
+		File:     file,
+		Boundary: &boundary,
+	}
+}
 
 // LaunchFlightPlan launches an installed, frozen, deterministic Flight Plan by
 // name through internal/flightplan/runtime.Run (issue #2097). It is the HTTP

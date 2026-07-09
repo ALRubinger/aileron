@@ -205,6 +205,68 @@ type actionListResponse struct {
 	Items []actionMeta `json:"items"`
 }
 
+// --- Flight Plan discovery / launch (Aileron daemon) ---
+
+// flightPlanMeta is the subset of the daemon's /v1/flightplans response we
+// need to derive an MCP tool per installed frozen Flight Plan (#2098). It
+// mirrors api.FlightPlanSummary without pulling the generated types into this
+// binary, matching the actionMeta pattern.
+type flightPlanMeta struct {
+	Name        string             `json:"name"`
+	Version     string             `json:"version"`
+	Description string             `json:"description"`
+	Inputs      []flightPlanInput  `json:"inputs"`
+	Outputs     []flightPlanOutput `json:"outputs"`
+}
+
+// flightPlanInput mirrors api.FlightPlanInput. Type carries the raw manifest
+// type (including `timestamp`); the MCP side projects it to a JSON Schema type
+// when deriving the tool input schema. Required is pointer-typed to distinguish
+// an omitted field (older daemons: default required) from an explicit value.
+type flightPlanInput struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	ItemsType   string `json:"items_type,omitempty"`
+	Description string `json:"description"`
+	Required    *bool  `json:"required"`
+}
+
+// flightPlanOutput mirrors api.FlightPlanOutput. Used only to enrich the tool
+// description; it never enters the input schema.
+type flightPlanOutput struct {
+	Name        string `json:"name"`
+	MimeType    string `json:"mime_type,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type flightPlanListResponse struct {
+	Items []flightPlanMeta `json:"items"`
+}
+
+// flightPlanLaunchRequest is the body posted to /v1/flightplans/{name}/launch.
+// Version is omitted so the daemon launches the latest frozen version.
+type flightPlanLaunchRequest struct {
+	Inputs map[string]any `json:"inputs,omitempty"`
+}
+
+// flightPlanLaunchResponse decodes the launch result fields worth echoing to
+// the LLM. Optional fields are pointer/omitempty so an absent field is
+// distinguishable and the formatter surfaces only what the daemon returned.
+type flightPlanLaunchResponse struct {
+	ContentHash    string                     `json:"content_hash"`
+	ResolvedInputs map[string]any             `json:"resolved_inputs,omitempty"`
+	StepOutputs    map[string]map[string]any  `json:"step_outputs,omitempty"`
+	Artifacts      []flightPlanLaunchArtifact `json:"artifacts,omitempty"`
+	AuditIDs       []string                   `json:"audit_ids,omitempty"`
+}
+
+type flightPlanLaunchArtifact struct {
+	Name     string `json:"name"`
+	Path     string `json:"path,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Digest   string `json:"digest"`
+}
+
 type actionRunRequest struct {
 	Args map[string]any `json:"args"`
 }
@@ -372,6 +434,14 @@ type server struct {
 	// (kebab-case) used in /v1/actions/{name}/run.
 	actionTools   []toolDef
 	actionNameMap map[string]string
+	// Discovered Flight Plans, exposed one MCP tool per installed frozen plan
+	// (#2098), swapped by the same poller under actionsMu. Keys of
+	// flightPlanNameMap are snake_case (LLM-facing) tool names; values are plan
+	// names used in /v1/flightplans/{name}/launch. A plan whose tool name
+	// collides with a discovered action or a static built-in is dropped at
+	// discovery (the action/built-in wins), so no colliding entry is cached.
+	flightPlanTools   []toolDef
+	flightPlanNameMap map[string]string
 	// discovery records the outcome of the most recent /v1/actions
 	// discovery attempt (startup or a refresh tick). The aileron_diagnostics
 	// synthetic tool reports it so the degraded state is answerable from
@@ -540,6 +610,18 @@ func main() {
 					"url", s.aileronURL, "reason", diag.summary(s.aileronURL))
 			}
 		}
+		// Discover installed Flight Plans (#2098), exposing one tool per plan.
+		// Best-effort and independent of action discovery: a failure leaves the
+		// plan surface empty without disturbing the action tools. Collision
+		// baseline is the action name map just discovered (nameMap); on action
+		// discovery failure nameMap is nil, so only static built-ins collide.
+		planTools, planNameMap, planErr := s.discoverFlightPlans(context.Background(), nameMap)
+		if planErr != nil {
+			slog.Warn("flight plan discovery failed; continuing without plan tools",
+				"url", s.aileronURL, "error", planErr)
+		} else {
+			s.setFlightPlans(planTools, planNameMap)
+		}
 	}
 
 	// Refresh the action surface in the background so an
@@ -599,6 +681,31 @@ func (s *server) setActions(tools []toolDef, nameMap map[string]string) {
 	defer s.actionsMu.Unlock()
 	s.actionTools = tools
 	s.actionNameMap = nameMap
+}
+
+// setFlightPlans atomically replaces the cached Flight Plan tool surface,
+// under the same lock setActions uses. Kept separate so a plan-only change can
+// swap without touching the action cache (and vice-versa).
+func (s *server) setFlightPlans(tools []toolDef, nameMap map[string]string) {
+	s.actionsMu.Lock()
+	defer s.actionsMu.Unlock()
+	s.flightPlanTools = tools
+	s.flightPlanNameMap = nameMap
+}
+
+// staticBuiltinToolNames is the closed set of always-present built-in tool
+// names a discovered Flight Plan tool must never collide with. A plan whose
+// normalized name lands here is dropped so the built-in always wins (#2098
+// collision precedence). The comms tools are conditionally present, but a plan
+// tool is still dropped on their names so the surface is deterministic
+// regardless of whether the session was launched with comms.
+var staticBuiltinToolNames = map[string]struct{}{
+	"read_messages":       {},
+	"draft_reply":         {},
+	"send_message":        {},
+	"http_request":        {},
+	"check_action_status": {},
+	"aileron_diagnostics": {},
 }
 
 // classifyDiscovery turns a discoverActions result into a
@@ -710,35 +817,65 @@ func (s *server) refreshLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// refreshOnce performs a single discovery + diff + conditional swap.
-// Split from refreshLoop so the per-tick behavior is unit-testable
-// without driving a ticker. Returns true when the surface changed and
-// a notification was emitted.
+// refreshOnce performs a single dual-surface discovery + diff + conditional
+// swap. It re-discovers both actions and Flight Plans, treating each surface's
+// failure independently: a failure on one leaves that surface's cache intact
+// and never touches the other. When either surface changed, it performs the
+// swaps and emits exactly one notifications/tools/list_changed for the tick;
+// when neither changed, it emits nothing. Split from refreshLoop so the
+// per-tick behavior is unit-testable without driving a ticker. Returns true
+// when the surface changed and a notification was emitted.
 func (s *server) refreshOnce(ctx context.Context) bool {
-	tools, nameMap, err := s.discoverActions(ctx)
-	diag := classifyDiscovery(tools, err)
+	// --- Action surface (drives aileron_diagnostics) ---
+	actionTools, actionNameMap, actionErr := s.discoverActions(ctx)
+	diag := classifyDiscovery(actionTools, actionErr)
 	s.setDiscovery(diag)
-	if err != nil {
-		// Leave the working surface intact; surface the failure on
-		// stderr so it's visible without poisoning the tool list. The
-		// reason tag distinguishes unreachable / unauthorized / daemon
-		// error so the operator can tell the modes apart.
+	if actionErr != nil {
+		// Leave the working action surface intact; surface the failure on
+		// stderr so it's visible without poisoning the tool list. The reason
+		// tag distinguishes unreachable / unauthorized / daemon error.
 		slog.Warn("action refresh failed; keeping existing tool surface",
-			"url", s.aileronURL, "reason", diag.summary(s.aileronURL), "error", err)
-		return false
+			"url", s.aileronURL, "reason", diag.summary(s.aileronURL), "error", actionErr)
 	}
 
-	// Diff on the tool defs alone: actionNameMap is a pure function of
-	// the discovered tools (snake_case name → manifest name), so equal
-	// tool surfaces imply an equal name map. No need to diff both.
+	// The collision baseline is the action name map that will be live after
+	// this tick: the freshly-discovered one on success, or the cached one when
+	// action discovery failed (its surface is left intact). A plan tool colliding
+	// with any of those action names, or with a static built-in, is dropped.
 	s.actionsMu.RLock()
-	unchanged := toolDefsEqual(s.actionTools, tools)
+	collisionNames := s.actionNameMap
+	if actionErr == nil {
+		collisionNames = actionNameMap
+	}
 	s.actionsMu.RUnlock()
-	if unchanged {
-		return false
+
+	// --- Flight Plan surface (independent of the action surface) ---
+	planTools, planNameMap, planErr := s.discoverFlightPlans(ctx, collisionNames)
+	if planErr != nil {
+		// A plan-discovery failure must NOT clobber a healthy action surface or
+		// its diagnostic. It is stderr-logged only; the plan cache is left
+		// intact. aileron_diagnostics continues to report the action state.
+		slog.Warn("flight plan refresh failed; keeping existing plan tool surface",
+			"url", s.aileronURL, "error", planErr)
 	}
 
-	s.setActions(tools, nameMap)
+	// Diff each surface independently. actionNameMap / flightPlanNameMap are
+	// pure functions of their tool defs, so diffing the defs suffices.
+	s.actionsMu.RLock()
+	actionChanged := actionErr == nil && !toolDefsEqual(s.actionTools, actionTools)
+	planChanged := planErr == nil && !toolDefsEqual(s.flightPlanTools, planTools)
+	s.actionsMu.RUnlock()
+
+	if !actionChanged && !planChanged {
+		return false
+	}
+	if actionChanged {
+		s.setActions(actionTools, actionNameMap)
+	}
+	if planChanged {
+		s.setFlightPlans(planTools, planNameMap)
+	}
+	// Exactly one notification per tick regardless of how many surfaces changed.
 	s.emitToolsListChanged()
 	return true
 }
@@ -845,6 +982,10 @@ func (s *server) availableTools() []toolDef {
 	// refresh poller swaps the slice under.
 	s.actionsMu.RLock()
 	tools = append(tools, s.actionTools...)
+	// One MCP tool per installed frozen Flight Plan (#2098), appended after the
+	// action tools so action ordering is stable and a colliding plan (already
+	// dropped at discovery) never displaces an action.
+	tools = append(tools, s.flightPlanTools...)
 	s.actionsMu.RUnlock()
 	// check_action_status is always available — even when no actions
 	// are discovered (a fresh daemon), the agent might be working
@@ -866,9 +1007,16 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 	// Read the map under the lock the refresh poller swaps it under.
 	s.actionsMu.RLock()
 	manifestName, ok := s.actionNameMap[name]
+	planName, isPlan := s.flightPlanNameMap[name]
 	s.actionsMu.RUnlock()
 	if ok {
 		return s.runAction(ctx, manifestName, args)
+	}
+	// Discovered Flight Plans: route to /v1/flightplans/{name}/launch. Checked
+	// after the action map so an action always wins a name collision (the
+	// colliding plan is dropped at discovery, so this is defense-in-depth).
+	if isPlan {
+		return s.launchFlightPlan(ctx, planName, args)
 	}
 	// Comms tools: handled in-process via the launch product's Unix socket.
 	switch name {
@@ -1176,6 +1324,215 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 		nameMap[td.Name] = a.Name
 	}
 	return tools, nameMap, nil
+}
+
+// discoverFlightPlans queries /v1/flightplans and returns one MCP tool def per
+// installed frozen Flight Plan plus a snake_case → plan-name lookup map for
+// dispatch. It mirrors discoverActions: the same discoveryError classification,
+// transport/status/decode failure handling, and snake_case tool naming.
+//
+// collisionActionNames is the action name map (snake_case tool name → manifest
+// name) that will be live this tick. A plan whose normalized tool name collides
+// with a discovered action or a static built-in is dropped — the action or
+// built-in wins (#2098 collision precedence) — and the drop is logged so it is
+// observable. Nil collisionActionNames means no action collides (e.g. actions
+// discovered nothing); the static built-in set still applies.
+func (s *server) discoverFlightPlans(ctx context.Context, collisionActionNames map[string]string) ([]toolDef, map[string]string, error) {
+	if s.aileronURL == "" {
+		return nil, nil, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.aileronURL+"/v1/flightplans", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.setActionAuthHeaders(req)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, nil, &discoveryError{reason: reasonUnreachable, err: err}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason := reasonHTTPError
+		if resp.StatusCode == http.StatusUnauthorized {
+			reason = reasonUnauthorized
+		}
+		return nil, nil, &discoveryError{reason: reason, err: fmt.Errorf("/v1/flightplans: %s", resp.Status)}
+	}
+	var fplr flightPlanListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&fplr); err != nil {
+		return nil, nil, &discoveryError{reason: reasonHTTPError, err: fmt.Errorf("decoding /v1/flightplans: %w", err)}
+	}
+	tools := make([]toolDef, 0, len(fplr.Items))
+	nameMap := make(map[string]string, len(fplr.Items))
+	for _, p := range fplr.Items {
+		name := toolName(p.Name)
+		// Collision precedence: a discovered-action tool or a static built-in
+		// with the same normalized name wins; the plan is dropped.
+		if _, taken := collisionActionNames[name]; taken {
+			slog.Warn("dropping Flight Plan tool: name collides with a discovered action",
+				"plan", p.Name, "tool", name)
+			continue
+		}
+		if _, builtin := staticBuiltinToolNames[name]; builtin {
+			slog.Warn("dropping Flight Plan tool: name collides with a built-in tool",
+				"plan", p.Name, "tool", name)
+			continue
+		}
+		// Two plans normalizing to the same tool name would also collide; the
+		// first (in the daemon's sorted order) wins, the rest are dropped.
+		if _, dup := nameMap[name]; dup {
+			slog.Warn("dropping Flight Plan tool: name collides with another plan",
+				"plan", p.Name, "tool", name)
+			continue
+		}
+		tools = append(tools, flightPlanToolDef(p))
+		nameMap[name] = p.Name
+	}
+	return tools, nameMap, nil
+}
+
+// flightPlanToolDef builds the MCP tool def for one Flight Plan: the snake_case
+// tool name, a description naming that it launches a Flight Plan (and listing
+// declared outputs), and the derived input schema.
+func flightPlanToolDef(p flightPlanMeta) toolDef {
+	return toolDef{
+		Name:        toolName(p.Name),
+		Description: deriveFlightPlanDescription(p),
+		InputSchema: deriveFlightPlanInputSchema(p),
+	}
+}
+
+// deriveFlightPlanDescription builds the LLM-facing description: the plan's
+// declared description (or its name when empty), a note that calling the tool
+// launches the deterministic Flight Plan, and the declared outputs so the LLM
+// knows what the launch returns.
+func deriveFlightPlanDescription(p flightPlanMeta) string {
+	desc := strings.TrimSpace(p.Description)
+	if desc == "" {
+		desc = p.Name
+	}
+	desc += "\n\nLaunches the installed deterministic Flight Plan \"" + p.Name +
+		"\". The plan runs its sealed steps and returns the resolved inputs, " +
+		"per-step outputs, and materialized artifacts."
+	if len(p.Outputs) > 0 {
+		names := make([]string, 0, len(p.Outputs))
+		for _, o := range p.Outputs {
+			names = append(names, o.Name)
+		}
+		desc += " Declared outputs: " + strings.Join(names, ", ") + "."
+	}
+	return desc
+}
+
+// deriveFlightPlanInputSchema mirrors deriveInputSchema for a plan's declared
+// inputs, projecting the raw manifest type to a JSON Schema type: `timestamp` →
+// `string` (JSON Schema has no timestamp type; strict hosts like Codex reject
+// unknown types), `array` emits a permissive `items: {}` (or the element type
+// when declared), and every other type passes through. `required` follows the
+// action convention: default true when the daemon omits the field.
+func deriveFlightPlanInputSchema(p flightPlanMeta) schema {
+	s := schema{Type: "object"}
+	if len(p.Inputs) == 0 {
+		return s
+	}
+	s.Properties = make(map[string]schemaProp, len(p.Inputs))
+	for _, in := range p.Inputs {
+		jsonType := in.Type
+		if jsonType == "timestamp" {
+			// timestamp is not a JSON Schema type; project to string.
+			jsonType = "string"
+		}
+		prop := schemaProp{
+			Type:        jsonType,
+			Description: in.Description,
+		}
+		if in.Type == "array" {
+			prop.Items = &schemaItem{}
+			if in.ItemsType != "" {
+				prop.Items.Type = in.ItemsType
+			}
+		}
+		s.Properties[in.Name] = prop
+		required := true
+		if in.Required != nil {
+			required = *in.Required
+		}
+		if required {
+			s.Required = append(s.Required, in.Name)
+		}
+	}
+	return s
+}
+
+// launchFlightPlan launches an installed frozen Flight Plan via the daemon's
+// /v1/flightplans/{name}/launch endpoint and returns an MCP tool result. It
+// mirrors runActionInner's auth, tracing, and error-surfacing shape.
+//
+// A non-2xx response is surfaced verbatim as an IsError tool result: this is
+// how the 403 FailureEnvelope from a gated constituent action (#2106) reaches
+// the LLM. The suspend/resume/202-passthrough surface is a separate follow-up
+// (#2101); this path ships the 403 fail-closed behavior.
+func (s *server) launchFlightPlan(ctx context.Context, planName string, args map[string]any) toolResult {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.mcp.tool.call",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("aileron.flightplan.name", planName)),
+	)
+	defer span.End()
+
+	res := s.launchFlightPlanInner(ctx, planName, args)
+	if res.IsError {
+		span.SetStatus(codes.Error, errorText(res))
+	}
+	return res
+}
+
+func (s *server) launchFlightPlanInner(ctx context.Context, planName string, args map[string]any) toolResult {
+	if s.aileronURL == "" {
+		return errorResult("Aileron daemon not configured (AILERON_URL not set)")
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	body, err := json.Marshal(flightPlanLaunchRequest{Inputs: args})
+	if err != nil {
+		return errorResult("encoding request: " + err.Error())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.aileronURL+"/v1/flightplans/"+planName+"/launch", bytes.NewReader(body))
+	if err != nil {
+		return errorResult("creating request: " + err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.setActionAuthHeaders(req)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return errorResult("daemon unreachable: " + err.Error())
+	}
+	defer resp.Body.Close()
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult("reading response: " + err.Error())
+	}
+	if resp.StatusCode == http.StatusOK {
+		var launched flightPlanLaunchResponse
+		if err := json.Unmarshal(rawBody, &launched); err != nil {
+			return errorResult("decoding response: " + err.Error())
+		}
+		return jsonResult(launched)
+	}
+	// Non-2xx: surface the FailureEnvelope (or whatever body the daemon
+	// returned) verbatim so the agent sees the actionable detail. A gated
+	// constituent action's 403 FailureEnvelope (#2106) reaches the LLM here
+	// as an IsError result. NOTE: #2101 rewrites this to a 202 passthrough
+	// (suspend→approve→resume); until then 403 fail-closed is correct.
+	if len(bytes.TrimSpace(rawBody)) == 0 {
+		// A bodyless non-2xx (e.g. a bare 502 from a proxy) still needs an
+		// actionable message; fall back to the HTTP status line.
+		return errorResult("flight plan launch failed: " + resp.Status)
+	}
+	return errorResult(string(rawBody))
 }
 
 // runAction synchronously executes an action via the Aileron daemon's
