@@ -1527,6 +1527,11 @@ func (s *server) launchFlightPlanInner(ctx context.Context, planName string, arg
 	// constituent action's 403 FailureEnvelope (#2106) reaches the LLM here
 	// as an IsError result. NOTE: #2101 rewrites this to a 202 passthrough
 	// (suspend→approve→resume); until then 403 fail-closed is correct.
+	if len(bytes.TrimSpace(rawBody)) == 0 {
+		// A bodyless non-2xx (e.g. a bare 502 from a proxy) still needs an
+		// actionable message; fall back to the HTTP status line.
+		return errorResult("flight plan launch failed: " + resp.Status)
+	}
 	return errorResult(string(rawBody))
 }
 

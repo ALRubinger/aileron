@@ -40,7 +40,10 @@ const flightPlanLaunchActor = "flightplan-launch"
 // `timestamp` to a JSON Schema type when deriving the tool input schema.
 func (s *apiServer) ListFlightPlans(w http.ResponseWriter, r *http.Request) {
 	if s.flightPlanStore == nil {
-		writeJSON(w, http.StatusOK, api.FlightPlanListResponse{})
+		// Match the populated path's shape: an always-present (possibly empty)
+		// items array, so a client sees a consistent contract whether or not a
+		// store is configured.
+		writeJSON(w, http.StatusOK, api.FlightPlanListResponse{Items: &[]api.FlightPlanSummary{}})
 		return
 	}
 	names, err := s.flightPlanStore.List()
