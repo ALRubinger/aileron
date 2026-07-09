@@ -49,7 +49,7 @@ func TestExecute_ToolStepInterpolatesCommand(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"fetch": toolFileMap("collected\n")}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"region": "us-west-2"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"region": "us-west-2"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestExecute_ToolStepMissingInterpInputErrors(t *testing.T) {
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
 	// Resolve a DIFFERENT input, leaving region unresolved.
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"other": "v"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"other": "v"}})
 	if err == nil {
 		t.Fatal("a command token with no resolved input must error")
 	}
@@ -116,7 +116,7 @@ func TestEmitAudit_InterpolatedCommandRecordsResolvedAndDerived(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"fetch": toolFileMap("collected\n")}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"region": "us-west-2"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"region": "us-west-2"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestEmitAudit_TokenFreeCommandHasNoDerivedMarker(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": toolFileMap("collected-bytes\n")}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

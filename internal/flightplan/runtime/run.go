@@ -34,9 +34,31 @@ type Options struct {
 	Approver Approver
 	// Audit receives the customer-owned audit records. Nil emits no audit.
 	Audit AuditSink
-	// Seam is the single marked LLM seam. Nil (the v1 default) makes any
-	// llm-seam step error, so a default launch reaches no LLM.
+	// Seam is a marked LLM seam. Nil (the v1 default) makes any llm-seam step
+	// error on the non-suspendable path, so a default launch reaches no LLM. A
+	// plan may declare more than one seam (#2100); each is served by this one
+	// provider.
 	Seam LLMSeam
+
+	// Suspendable opts this run into the generic suspend/resume path (#2100).
+	// When true, the runtime SUSPENDS (returns a nil error with
+	// RunResult.Pending set) at the first step it cannot complete in-band: an
+	// unfulfilled llm-seam (no memo entry, no wired Seam value) or a gated
+	// action-call whose Approver returned Decision.Pending. When false (the
+	// default), behavior is exactly as before: a nil Seam is a hard error and a
+	// pending Approver decision is impossible (a synchronous approver never
+	// returns pending). A non-nil ResumeOutputs also implies a suspendable run,
+	// so a resume never needs both flags set.
+	Suspendable bool
+	// ResumeOutputs is the caller-supplied memo (stepId → its named outputs) from
+	// a prior suspend, replayed on resume. Every step whose id is present here is
+	// injected WITHOUT re-execution (exactly-once for effects) and re-audits
+	// nothing. Nil on a fresh launch. A non-nil value implies Suspendable.
+	ResumeOutputs map[string]map[string]any
+	// RunID is stable across a suspend/resume sequence. The runtime mints one
+	// when empty and echoes it on the suspend result, so every call in a sequence
+	// shares the same id.
+	RunID string
 	// ImageRunner boots the verified pinned environment image and runs the
 	// plan inside it. When the loaded plan carries a resolved image pin and this
 	// seam is wired, Run delegates to it; when the plan pins no image, Run stays
@@ -155,7 +177,20 @@ type RunResult struct {
 	Artifacts []Artifact
 	// AuditIDs are the audit record ids emitted to the sink.
 	AuditIDs []string
+	// Pending is set (non-nil) when the run SUSPENDED instead of completing
+	// (#2100): a suspendable run hit an unfulfilled seam or a pending approval.
+	// A completed run has Pending == nil. When Pending is set, StepOutputs /
+	// Artifacts / AuditIDs reflect only what completed THIS call, and the caller
+	// fulfills the pending step (SuspendResult) and resumes with the carried
+	// memo. Run returns a nil error alongside a non-nil Pending: a suspend is not
+	// a failure.
+	Pending *SuspendResult
 }
+
+// IsSuspended reports whether the run suspended rather than completing (#2100).
+// A caller that only cares about the completed-vs-suspended distinction reads
+// this instead of nil-checking Pending directly.
+func (r RunResult) IsSuspended() bool { return r.Pending != nil }
 
 // Run is the deterministic Launch entry point (#1511). It loads and verifies
 // the frozen unit, resolves declared inputs once (#1523), walks the step graph
@@ -256,11 +291,23 @@ func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint str
 		return RunResult{}, err
 	}
 
+	// Suspend/resume wiring (#2100). A run is suspendable when the caller opts in
+	// explicitly (Options.Suspendable) or supplies a resume memo (ResumeOutputs
+	// implies a resume, which is always a suspendable sequence). The memo, when
+	// present, injects already-computed step outputs so each step runs exactly
+	// once across the whole suspend/resume sequence.
+	suspendable := opts.Suspendable || opts.ResumeOutputs != nil
+	resumeMemo := resumeMemoFromOptions(opts.ResumeOutputs)
+
 	// Phase B: walk the DAG. The tool-step runner and the sealed per-step
 	// reach are threaded so tool steps run as scoped subprocesses; a tool
 	// step with no runner configured is an explicit error inside the executor.
-	x := &executor{plan: plan, enforcer: enf, transform: reg, seam: opts.Seam, toolRunner: opts.ToolRunner, stepTrust: stepTrust}
-	st, runErr := x.execute(ctx, inputs)
+	x := &executor{
+		plan: plan, enforcer: enf, transform: reg, seam: opts.Seam,
+		toolRunner: opts.ToolRunner, stepTrust: stepTrust,
+		suspendable: suspendable, resumeOutputs: resumeMemo,
+	}
+	st, sig, runErr := x.execute(ctx, inputs)
 
 	// Mint a launch-scoped invocation id so every audit record from this launch
 	// correlates. Provenance is fixed for the launch: reaching runPlan means the
@@ -273,13 +320,46 @@ func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint str
 		InvocationID:    uuid.NewString(),
 	}
 
-	// Emit the audit regardless of run outcome so a mid-run denial is recorded
-	// (the audit is an append-only companion, not gated on success).
-	auditIDs := emitAudit(ctx, opts.Audit, st, prov)
-
 	if runErr != nil {
+		// A hard error still emits the audit so a mid-run denial is recorded (the
+		// audit is an append-only companion, not gated on success).
+		emitAudit(ctx, opts.Audit, st, prov)
 		return RunResult{}, runErr
 	}
+
+	// A suspend is not a failure and not a terminal launch (#2100). Emit the
+	// per-step audit for steps that actually ran THIS call, but NOT the
+	// per-launch summary record (RecordKindLaunch) — the terminal (completing)
+	// resume emits that. The suspend result carries the accumulated memo and this
+	// call's audit ids so the caller resumes without re-running the completed
+	// prefix.
+	if sig != nil {
+		auditIDs := emitStepAudit(ctx, opts.Audit, st, prov)
+		runID := opts.RunID
+		if runID == "" {
+			runID = uuid.NewString()
+		}
+		return RunResult{
+			ContentHash:    contentHash,
+			ResolvedInputs: inputs.Values,
+			StepOutputs:    stepOutputsMap(st),
+			Artifacts:      st.artifacts,
+			AuditIDs:       auditIDs,
+			Pending: &SuspendResult{
+				RunID:       runID,
+				Kind:        sig.kind,
+				StepID:      sig.stepID,
+				Seam:        sig.seam,
+				Approval:    sig.approval,
+				StepOutputs: stepOutputsMap(st),
+				AuditIDs:    auditIDs,
+			},
+		}, nil
+	}
+
+	// A completed run emits the full audit (per-step records plus the per-launch
+	// summary), exactly as before.
+	auditIDs := emitAudit(ctx, opts.Audit, st, prov)
 
 	// Write file-target artifacts to OutDir.
 	if err := writeArtifacts(opts.OutDir, st.artifacts); err != nil {
@@ -293,6 +373,20 @@ func runPlan(ctx context.Context, plan *Plan, contentHash, signerFingerprint str
 		Artifacts:      st.artifacts,
 		AuditIDs:       auditIDs,
 	}, nil
+}
+
+// resumeMemoFromOptions converts the public resume memo (stepId → its named
+// outputs) into the internal stepResult shape the executor injects (#2100). A
+// nil input yields a nil memo, so a fresh launch injects nothing.
+func resumeMemoFromOptions(in map[string]map[string]any) map[string]stepResult {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]stepResult, len(in))
+	for id, outs := range in {
+		out[id] = stepResult(outs)
+	}
+	return out
 }
 
 // writeArtifacts writes every file-target artifact under outDir at its declared

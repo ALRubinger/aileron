@@ -34,7 +34,7 @@ func TestExecute_ToolStepInstantiatesSealedHost(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{templatedHost}}},
 	}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-east-1"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-east-1"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestEmitAudit_ReachRecordShowsInstantiatedHost(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{templatedHost}}},
 	}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-west-2"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-west-2"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestExecute_TokenFreeSealedHostUnchanged(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com", "cdn.example.com"}}},
 	}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if got := strings.Join(runner.specs[0].Hosts, ","); got != "api.example.com,cdn.example.com" {
@@ -128,7 +128,7 @@ func TestExecute_InstantiatedHostShapeViolationFailsClosed(t *testing.T) {
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{templatedHost}}},
 	}
 	// A value carrying a path byte substitutes to athena.us-east-1/x.amazonaws.com.
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-east-1/x"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello", "aws_region": "us-east-1/x"}})
 	if err == nil {
 		t.Fatal("an instantiated host that violates the host[:port] shape must fail the step closed")
 	}
@@ -156,7 +156,7 @@ func TestExecute_ToolStepMissingHostInputFailsClosed(t *testing.T) {
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{templatedHost}}},
 	}
 	// Resolve payload but leave aws_region unresolved.
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil {
 		t.Fatal("a host token with no resolved input must fail the step closed")
 	}

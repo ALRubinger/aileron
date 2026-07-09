@@ -141,13 +141,16 @@ type launchProvenance struct {
 	InvocationID string
 }
 
-// emitAudit records every per-action audit record, then one reach record per
-// tool step that carried a trust contract (#1784/#1829), then one
-// output.materialized record per materialized artifact, then one per-launch
-// summary record through the sink, returning the minted record ids in order.
-// The sink is the customer-owned audit store (wired by the CLI). A nil sink
-// emits nothing and returns no ids.
-func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchProvenance) []string {
+// emitStepAudit records every per-step audit record for the steps that ran this
+// call — the per-action records, the reach records, and the per-output
+// provenance records — but NOT the per-launch summary. It is the shared body of
+// emitAudit and the audit path a SUSPEND takes (#2100): a suspended call is not
+// a terminal launch, so it emits its step records now and defers the launch
+// summary to the completing resume. Because a memo-injected (replayed) step
+// never appends to st.dispatches, st.reaches, or st.outputs, this emits nothing
+// for an injected step, so a multi-resume sequence records each real execution
+// exactly once. A nil sink emits nothing and returns no ids.
+func emitStepAudit(ctx context.Context, sink AuditSink, st execState, prov launchProvenance) []string {
 	if sink == nil {
 		return nil
 	}
@@ -178,6 +181,20 @@ func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchPro
 	for _, o := range st.outputs {
 		ids = append(ids, sink.Record(ctx, buildOutputRecord(o, prov, dispatchByStep, resolvedInputs)))
 	}
+	return ids
+}
+
+// emitAudit records every per-step audit record (emitStepAudit) then one
+// per-launch summary record through the sink, returning the minted record ids
+// in order. It is the terminal-launch audit path: a completed run (or a hard
+// error) emits the launch summary; a SUSPEND uses emitStepAudit and defers the
+// summary to the completing resume (#2100). A nil sink emits nothing and returns
+// no ids.
+func emitAudit(ctx context.Context, sink AuditSink, st execState, prov launchProvenance) []string {
+	if sink == nil {
+		return nil
+	}
+	ids := emitStepAudit(ctx, sink, st, prov)
 	// Per-launch summary: resolved input source bindings, by reference. Data
 	// inputs are recorded by their source binding, never the dataset inline.
 	ids = append(ids, sink.Record(ctx, buildLaunchRecord(st, prov)))

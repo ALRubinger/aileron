@@ -196,7 +196,7 @@ func TestExecute_CapturesMaterializedOutputProvenance(t *testing.T) {
 		transform: reg,
 		seam:      fakeSeam{out: map[string]any{"issue_body": "A short digest."}},
 	}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestExecute_CapturesMaterializedOutputInputs(t *testing.T) {
 		transform: reg,
 		seam:      fakeSeam{out: map[string]any{"issue_body": "A short digest."}},
 	}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -278,6 +278,170 @@ func TestExecute_CapturesMaterializedOutputInputs(t *testing.T) {
 	}
 }
 
+// TestExecute_MemoizedStepNotReExecuted proves a step whose output is in the
+// resume memo is INJECTED, not executed: its dispatcher is never invoked and its
+// output flows to downstream bindings (#2100). It also confirms a memoized
+// materializing step still yields its artifact (materialize-on-replay).
+func TestExecute_MemoizedStepNotReExecuted(t *testing.T) {
+	p := gatedMidFlowPlan()
+	disp := newCountingDispatcher(map[string]map[string]any{
+		"aileron:tracker.create_issue": {"issue": map[string]any{"id": 1}},
+		"aileron:metrics.query_series": {"series": []any{}},
+	})
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: disp, approver: &fakeApprover{decision: Decision{Approved: true}}},
+		transform: midFlowRegistry(),
+		// Seed the gated write's output so it is injected, never dispatched.
+		resumeOutputs: map[string]stepResult{
+			"gated_write": {"issue": map[string]any{"id": 1}},
+		},
+		suspendable: true,
+	}
+	st, sig, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if sig != nil {
+		t.Fatalf("run must complete, not suspend: %+v", sig)
+	}
+	// The gated write was injected, never dispatched.
+	if disp.byRef["aileron:tracker.create_issue"] != 0 {
+		t.Errorf("memoized gated write dispatched %d times, want 0 (injected)", disp.byRef["aileron:tracker.create_issue"])
+	}
+	// The downstream read that binds the memoized output still ran.
+	if disp.byRef["aileron:metrics.query_series"] != 1 {
+		t.Errorf("downstream read dispatched %d times, want 1", disp.byRef["aileron:metrics.query_series"])
+	}
+	// The injected step emitted no audit rows.
+	for _, d := range st.dispatches {
+		if d.StepID == "gated_write" {
+			t.Error("an injected step must append no dispatch audit row")
+		}
+	}
+	// The materializing render step produced its artifact.
+	if len(st.artifacts) != 1 || st.artifacts[0].Name != "out.json" {
+		t.Fatalf("want the out.json artifact, got %+v", st.artifacts)
+	}
+}
+
+// TestExecute_MemoizedMaterializingStepRebuildsArtifact proves a memoized
+// materializing step rebuilds its artifact on replay (materialize is pure) but
+// appends NO audit-provenance row (no double-audit), so a resumed run's final
+// Artifacts is whole without re-emitting the output.materialized record.
+func TestExecute_MemoizedMaterializingStepRebuildsArtifact(t *testing.T) {
+	p := gatedMidFlowPlan()
+	disp := newCountingDispatcher(map[string]map[string]any{})
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: disp, approver: &fakeApprover{decision: Decision{Approved: true}}},
+		transform: midFlowRegistry(),
+		resumeOutputs: map[string]stepResult{
+			"gated_write": {"issue": map[string]any{"id": 1}},
+			"read_after":  {"series": []any{}},
+			"render":      {"file": map[string]any{"path": "out.json", "mimeType": "application/json", "encoding": "utf-8", "content": `{"ok":true}`}},
+		},
+		suspendable: true,
+	}
+	st, sig, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if sig != nil {
+		t.Fatalf("fully-memoized run must complete, got suspend %+v", sig)
+	}
+	// The artifact was rebuilt from the memoized output.
+	if len(st.artifacts) != 1 || st.artifacts[0].Name != "out.json" {
+		t.Fatalf("want the rebuilt out.json artifact, got %+v", st.artifacts)
+	}
+	// No effect fired (everything injected).
+	if len(disp.byRef) != 0 {
+		t.Errorf("a fully-memoized replay must dispatch nothing, got %+v", disp.byRef)
+	}
+	// No output-provenance rows: the record was emitted on the original run.
+	if len(st.outputs) != 0 {
+		t.Errorf("a memoized materializing step must append no output-provenance row, got %d", len(st.outputs))
+	}
+}
+
+// TestExecute_UnfulfilledSeamSuspends proves an un-memoized seam with a nil seam
+// on the suspendable path yields a seam suspend signal carrying the right StepID
+// and SeamRequest, with no error.
+func TestExecute_UnfulfilledSeamSuspends(t *testing.T) {
+	p := twoSeamPlan()
+	disp := newCountingDispatcher(map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{}},
+	})
+	x := &executor{
+		plan:        p,
+		enforcer:    &enforcer{dispatcher: disp, approver: &fakeApprover{}},
+		transform:   NewTransformRegistry(),
+		seam:        nil, // unwired on the suspendable path
+		suspendable: true,
+	}
+	_, sig, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if sig == nil {
+		t.Fatal("an unfulfilled seam on the suspendable path must suspend")
+	}
+	if sig.kind != SuspendKindSeam || sig.stepID != "seam_a" {
+		t.Errorf("suspend = kind %d step %q, want seam/seam_a", sig.kind, sig.stepID)
+	}
+	if sig.seam == nil || sig.seam.StepID != "seam_a" {
+		t.Errorf("suspend must carry the SeamRequest for seam_a, got %+v", sig.seam)
+	}
+}
+
+// TestExecute_PendingApprovalSuspends proves an un-memoized gated action with a
+// pending approver yields an approval suspend signal and the effect never fires.
+func TestExecute_PendingApprovalSuspends(t *testing.T) {
+	p := gatedMidFlowPlan()
+	disp := newCountingDispatcher(map[string]map[string]any{
+		"aileron:tracker.create_issue": {"issue": map[string]any{"id": 1}},
+	})
+	x := &executor{
+		plan:        p,
+		enforcer:    &enforcer{dispatcher: disp, approver: &fakeApprover{decision: Decision{Pending: true}}},
+		transform:   midFlowRegistry(),
+		suspendable: true,
+	}
+	_, sig, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if sig == nil || sig.kind != SuspendKindApproval || sig.stepID != "gated_write" {
+		t.Fatalf("want an approval suspend at gated_write, got %+v", sig)
+	}
+	if disp.byRef["aileron:tracker.create_issue"] != 0 {
+		t.Error("a pending approval must not fire the effect")
+	}
+}
+
+// TestExecute_NonSuspendableNilSeamStillErrors proves the contract is preserved:
+// off the suspendable path a nil seam is a hard error, not a suspend.
+func TestExecute_NonSuspendableNilSeamStillErrors(t *testing.T) {
+	p := twoSeamPlan()
+	disp := newCountingDispatcher(map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{}},
+	})
+	x := &executor{
+		plan:      p,
+		enforcer:  &enforcer{dispatcher: disp, approver: &fakeApprover{}},
+		transform: NewTransformRegistry(),
+		seam:      nil,
+		// suspendable false (the default).
+	}
+	_, sig, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"window_days": 7}})
+	if err == nil {
+		t.Fatal("off the suspendable path a nil seam must be a hard error")
+	}
+	if sig != nil {
+		t.Error("a hard error must not also return a suspend signal")
+	}
+}
+
 func TestExecute_MultiOutputActionMissingFieldErrors(t *testing.T) {
 	p := &Plan{
 		Name:    "t",
@@ -293,7 +457,7 @@ func TestExecute_MultiOutputActionMissingFieldErrors(t *testing.T) {
 		enforcer:  &enforcer{dispatcher: &fakeDispatcher{result: map[string]any{"a": 1}}, approver: &fakeApprover{}},
 		transform: NewTransformRegistry(),
 	}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
 		t.Fatal("a multi-output action result missing a declared output must error")
 	}
 }
@@ -309,7 +473,7 @@ func TestExecute_TransformMissingDeclaredOutputErrors(t *testing.T) {
 		return map[string]any{"a": 1}, nil // omits "b"
 	})
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: reg}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{}}); err == nil {
 		t.Fatal("a transform that omits a declared output must error")
 	}
 }

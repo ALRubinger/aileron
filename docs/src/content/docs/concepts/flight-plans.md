@@ -34,7 +34,7 @@ A Flight Plan carries two distinct determinism guarantees.
 
 The first is **environmental reproducibility**. Every image reference is pinned to a digest at freeze. The same Flight Plan resolves the same images on every run. The lockfile is the record of those pins.
 
-The second is **behavioral determinism**. No LLM runs at Flight Plan runtime by default. An LLM runs only at a single seam that is explicitly marked in the skill and structurally enforced by the runtime. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside the marked seam fails freeze and never becomes a Flight Plan. The marked seam is the one place where non-deterministic reasoning is allowed, and everything outside it is deterministic by construction.
+The second is **behavioral determinism**. No LLM runs at Flight Plan runtime by default. An LLM runs only at explicitly marked seams that are structurally enforced by the runtime. A plan may declare one or more marked seams. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside a marked seam fails freeze and never becomes a Flight Plan. The marked seams are the only places where non-deterministic reasoning is allowed, and everything outside them is deterministic by construction.
 
 ## Inputs, resolution, and the audit boundary
 

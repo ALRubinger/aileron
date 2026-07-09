@@ -1,6 +1,6 @@
 ---
 title: "ADR-0027: Flight Plan = Sealed Installable Skill"
-description: "A Flight Plan and an Aileron skill are the same construct seen at two points in one lifecycle. A skill is authored in the agentskills.io SKILL.md format extended with a requires block, and it becomes a Flight Plan at a freeze step that resolves image references to digests, produces a lockfile, binds the execution environment, attaches a per-action trust contract, and signs the result. The execution image is agent-free, and an LLM runs only at a single structurally-enforced seam."
+description: "A Flight Plan and an Aileron skill are the same construct seen at two points in one lifecycle. A skill is authored in the agentskills.io SKILL.md format extended with a requires block, and it becomes a Flight Plan at a freeze step that resolves image references to digests, produces a lockfile, binds the execution environment, attaches a per-action trust contract, and signs the result. The execution image is agent-free, and an LLM runs only at one or more explicitly marked, structurally-enforced seams."
 order: 27
 ---
 
@@ -40,7 +40,7 @@ A Flight Plan carries two distinct determinism guarantees.
 
 The first is environmental reproducibility. Every image reference is pinned to a digest at freeze. The same Flight Plan resolves the same images on every run. The lockfile is the record of those pins. Launch boots the pinned image from the verified lock, so the environment the plan runs in is the one the signature attested.
 
-The second is behavioral determinism. No LLM runs at Flight Plan runtime by default. An LLM runs only at a single seam that is explicitly marked in the skill and structurally enforced by the runtime. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside the marked seam fails freeze and never becomes a Flight Plan. The marked seam is the one place where non-deterministic reasoning is allowed, and everything outside it is deterministic by construction.
+The second is behavioral determinism. No LLM runs at Flight Plan runtime by default. An LLM runs only at explicitly marked seams that are structurally enforced by the runtime. A plan may declare one or more marked seams. A freeze-time lint rejects any unmarked LLM call. A skill that reaches an LLM outside a marked seam fails freeze and never becomes a Flight Plan. The marked seams are the only places where non-deterministic reasoning is allowed, and everything outside them is deterministic by construction.
 
 ### Inputs, resolution, and the audit boundary
 
@@ -169,7 +169,7 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 
 - A Flight Plan is reproducible. Every image reference is pinned to a digest at freeze, so the same plan resolves the same environment on every run. Launch boots that pinned image from the verified lock, so the environment the plan runs in matches the signed pin.
 - A Flight Plan is auditable. The per-action trust contract records the credential, the network reach, the effect, and the audit-record structure for every action the plan calls.
-- A Flight Plan is behaviorally deterministic. No LLM runs at runtime outside the single marked seam, and the freeze-time lint rejects any unmarked LLM call before the plan is sealed.
+- A Flight Plan is behaviorally deterministic. No LLM runs at runtime outside the explicitly marked seams, and the freeze-time lint rejects any unmarked LLM call before the plan is sealed.
 - A Flight Plan is deterministic given its resolved inputs. Inputs are declared with resolution rules, resolved once at launch, and recorded with the outputs. Results vary only with declared, resolved inputs, so every run is explainable from its recorded binding rather than reconstructed from a moving source.
 - One format spans authoring and sealing. A skill and a Flight Plan share the `SKILL.md` format, and the extension is lossless if stripped.
 - The trust contract is human-attested. The detached signature over the manifest plus lockfile records a human's confirmation that the contract is correct.
@@ -181,8 +181,17 @@ The diagram below shows the boundary. A skill crosses the freeze step and become
 ### Negative
 
 - Freeze is rigid. A frozen Flight Plan pins one resolved environment, and changing the environment requires a new freeze and a new version.
-- The single-seam constraint is strict. A Flight Plan that needs LLM reasoning in more than one place must route all of it through the one marked seam or restructure to fit.
 - The trust contract is verbose. Every action carries a full contract block, and authoring a Flight Plan with many actions records many such blocks.
+
+## Amendments
+
+### 2026-07: multi-seam permitted; suspend/resume via all-output memoization
+
+The original single-seam constraint is overturned. A Flight Plan may declare one or more `kind: llm-seam` steps ([#2100](https://github.com/ALRubinger/aileron/issues/2100), under [Milestone #2096](https://github.com/ALRubinger/aileron/issues/2096)). Every seam is still explicitly marked and structurally enforced, and the no-LLM-outside-a-seam guarantee is unchanged. Only the count ceiling is removed. The schema never capped the count; the ceiling lived only in the tests, the docs, and the freeze lint's prose.
+
+The runtime mechanism is a generic suspend and resume. A launch runs deterministically until it reaches a step it cannot complete in-band, which is either an unfulfilled seam or an action-call whose approval is not yet decided. At that point the run suspends and returns the accumulated step outputs to the caller. The caller fulfills the pending step, an LLM result for a seam or an approval decision for a gated action, and resumes with the accumulated memo. On resume the runtime re-walks the graph from the top and injects every memoized step's output without re-executing it, so each step runs exactly once across the whole suspend and resume sequence. Memoizing all step outputs, not the seam alone, is the soundness property: the graph orders steps by data edges, so an effectful step can sit before a gated action, and re-running the prefix on resume would double that effect. The memo is caller-owned, in-memory, and session-scoped. The daemon session store that persists it across process boundaries is a separate concern ([#2101](https://github.com/ALRubinger/aileron/issues/2101)).
+
+Suspend and resume across the container boot boundary is not part of this amendment; it lands with the deferred container-boundary audit threading noted below.
 
 ## Deferred
 

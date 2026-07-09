@@ -181,7 +181,7 @@ Every step carries an `id` unique within the graph and a `kind` from a closed en
 | `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
 | `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
 | `tool` | No | Runs a declared environment tool as a deterministic subprocess inside the booted plan container. Its `command` is an argv array run with no shell interpretation. Its optional `mount` and `collect` are the file-I/O boundary, and its optional `trustContract` declares the step's network reach. |
-| `llm-seam` | Yes | The single marked non-deterministic seam. The only kind that reaches an LLM. |
+| `llm-seam` | Yes | A marked non-deterministic seam. A plan may declare one or more. The only kind that reaches an LLM. |
 
 A `tool` step runs one of the tools your `environment` declared. Give it a `command` argv array (the program then its arguments, never a shell string), and optionally a `mount` to place input files into the container and a `collect` to read a produced path back as the step output. If the tool reaches the network, declare its reach with a per-step `trustContract` whose `hosts` list the upstream it may call. Freeze seals that reach into the lock, and launch enforces it: a scoped call to an undeclared host is refused at the daemon proxy before any TLS handshake, and no credential bytes ever enter the container.
 
@@ -206,11 +206,11 @@ Three rules a JSON Schema cannot express, that the freeze lint checks and the ru
 
 No step field may hold a secret. Every step kind is a closed object, and the `args` and `bindings` grammar is closed to `inputs.<name>` and `steps.<id>.<output>`, so a literal secret cannot be embedded in the wiring.
 
-### Wiring the no-LLM seam
+### Wiring the no-LLM seams
 
-Behavioral determinism is the whole point. No LLM runs at Flight Plan runtime by default. If your plan needs LLM reasoning at one point, mark exactly one step `kind: llm-seam` and route all of it through that step. Everything else is `action-call` and `transform`, both of which hold no reference to any language-model type.
+Behavioral determinism is the whole point. No LLM runs at Flight Plan runtime by default. If your plan needs LLM reasoning, mark each such step `kind: llm-seam`. A plan may declare more than one seam. Everything else is `action-call` and `transform`, both of which hold no reference to any language-model type.
 
-In v1 the seam is unwired by default. An `llm-seam` step with no configured provider is a hard error at launch, so a default launch reaches no model at all. A skill that reaches an LLM outside the marked seam fails the freeze lint and never becomes a Flight Plan. Keep the seam single. A plan that needs reasoning in more than one place routes all of it through the one marked seam or restructures to fit.
+In v1 the seam is unwired by default. An `llm-seam` step with no configured provider is a hard error at launch, so a default launch reaches no model at all. A skill that reaches an LLM outside a marked seam fails the freeze lint and never becomes a Flight Plan. When a plan declares more than one seam, each seam suspends the run for its LLM output, and the run resumes once that output is supplied.
 
 ## The Markdown body
 
@@ -235,8 +235,7 @@ After freeze, [launch](/guides/launching-a-flight-plan/) runs the frozen Flight 
 ## Common authoring mistakes
 
 - **A literal secret in the wiring.** No step field holds a value. `args` and `bindings` are references (`inputs.<name>` or `steps.<id>.<output>`), and the credential lives in the trust contract as a `kind`/`placement` declaration, never a token.
-- **An unmarked LLM call.** Any reach to a model outside a `kind: llm-seam` step fails the freeze lint. Mark the one seam, or restructure the plan to keep the logic deterministic.
-- **More than one seam.** v1 allows exactly one marked seam. Route all reasoning through it.
+- **An unmarked LLM call.** Any reach to a model outside a `kind: llm-seam` step fails the freeze lint. Mark each seam, or restructure the plan to keep the logic deterministic.
 - **An `actionRef` with no matching `requires.actions[].ref`.** A step can only call an action the `requires:` block declares. The freeze lint catches the mismatch.
 - **Hand-writing the lock.** The `lock` section is produced by freeze. It is absent before freeze, and you never author it.
 - **A `base64` output in v1.** The `encoding` field reserves `base64`, but the v1 runtime materializes `utf-8` text only. A binary artifact waits on the deferred escape hatch: a `tool` step's mount and collect file-I/O boundary.

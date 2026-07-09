@@ -78,13 +78,27 @@ func (e *enforcer) dispatch(ctx context.Context, callID string, action Action, a
 		if e.approver == nil {
 			return dispatchOutcome{}, fmt.Errorf("flightplan: action %q has effect %q and needs approval but no approver is configured", action.Ref, tc.Effect)
 		}
+		argsSummary := approvalArgsSummary(args)
 		decision, err := e.approver.Approve(ctx, ApprovalRequest{
 			ActionRef: action.Ref,
 			Effect:    tc.Effect,
-			Args:      approvalArgsSummary(args),
+			Args:      argsSummary,
 		})
 		if err != nil {
 			return dispatchOutcome{}, fmt.Errorf("flightplan: approval for %q failed: %w", action.Ref, err)
+		}
+		// Pending is the third outcome (#2100): no decision yet, so the run
+		// SUSPENDS at this step rather than blocking. It is checked BEFORE the
+		// approve/deny branches and short-circuits before Dispatch, so the effect
+		// never fires. The sentinel carries the same args summary the approver saw
+		// (a deep copy of the resolved bindings, which are references and never
+		// secrets) so the suspend result presents the request without re-deriving
+		// it.
+		// A pending decision that also (incoherently) sets Approved is treated as
+		// pending: the third outcome wins, so no effect ever fires on a pending.
+		if decision.Pending {
+			return dispatchOutcome{ApprovalRequested: true},
+				&PendingApprovalError{ActionRef: action.Ref, Effect: tc.Effect, Args: argsSummary}
 		}
 		out.Approved = decision.Approved
 		if !decision.Approved {

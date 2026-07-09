@@ -267,7 +267,7 @@ func TestExecute_ToolStepMountsRunsCollects(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestExecute_ToolStepThreadsSealedHosts(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"sealed.example.com"}}},
 	}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if strings.Join(runner.specs[0].Hosts, ",") != "sealed.example.com" {
@@ -332,7 +332,7 @@ func TestExecute_ToolStepThreadsCredentialIdentity(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com"}}},
 	}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	spec := runner.specs[0]
@@ -353,7 +353,7 @@ func TestExecute_ToolStepNoCredentialIdentityLeavesEmpty(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com"}}},
 	}
-	if _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
+	if _, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	spec := runner.specs[0]
@@ -375,7 +375,7 @@ func TestExecute_CollectedOutputFlowsDownstream(t *testing.T) {
 
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: reg, toolRunner: runner}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestExecute_CollectedOutputFlowsDownstream(t *testing.T) {
 func TestExecute_ToolStepNoRunnerErrors(t *testing.T) {
 	p := toolStepPlan()
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: nil}
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil {
 		t.Fatal("a tool step with no runner must error")
 	}
@@ -414,7 +414,7 @@ func TestExecute_ToolStepMultipleOutputsErrors(t *testing.T) {
 
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil || !strings.Contains(err.Error(), "exactly one collected output") {
 		t.Fatalf("a multi-output tool step must error, got %v", err)
 	}
@@ -435,7 +435,7 @@ func TestExecute_ToolStepZeroOutputsErrors(t *testing.T) {
 
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil || !strings.Contains(err.Error(), "exactly one collected output") {
 		t.Fatalf("a zero-output tool step must error, got %v", err)
 	}
@@ -450,7 +450,7 @@ func TestExecute_ToolStepRunnerErrorPropagates(t *testing.T) {
 	p := toolStepPlan()
 	runner := &fakeToolStepRunner{forceErr: context.DeadlineExceeded}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	_, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	_, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil {
 		t.Fatal("a tool-runner error must propagate")
 	}
@@ -469,7 +469,7 @@ func TestExecute_ToolStepCapturesSealedReachEnforced(t *testing.T) {
 		plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner,
 		stepTrust: map[string]freeze.StepReach{"extract": {Hosts: []string{"api.example.com", "cdn.example.com"}}},
 	}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestExecute_ToolStepUnsealedContractEnforcedFalse(t *testing.T) {
 	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: []string{"api.example.com"}})
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestExecute_ToolStepNoContractCapturesNoReach(t *testing.T) {
 	p := toolStepPlan()
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": "COLLECTED"}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestExecute_ToolStepReachCapturedDespiteRunnerError(t *testing.T) {
 	runner := &fakeToolStepRunner{forceErr: context.DeadlineExceeded}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil {
 		t.Fatal("a tool-runner error must propagate")
 	}
@@ -554,7 +554,7 @@ func TestExecute_ToolStepReachCapturedDespiteNilRunner(t *testing.T) {
 	setExtractContract(p, &TrustContract{Effect: EffectRead, Hosts: []string{"api.example.com"}})
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: nil}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err == nil {
 		t.Fatal("a tool step with no runner must error")
 	}
@@ -617,7 +617,7 @@ func TestExecute_ToolMaterializedOutputCarriesCommand(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": toolFileMap("collected-bytes\n")}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestExecute_NonToolMaterializedOutputHasNilCommand(t *testing.T) {
 	})
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: reg, toolRunner: nil}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hi"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hi"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -697,7 +697,7 @@ func TestEmitAudit_ToolStepEmitsToolProvenance(t *testing.T) {
 	runner := &fakeToolStepRunner{outputs: map[string]any{"extract": toolFileMap("collected-bytes\n")}}
 	x := &executor{plan: p, enforcer: &enforcer{}, transform: NewTransformRegistry(), toolRunner: runner}
 
-	st, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
+	st, _, err := x.execute(context.Background(), ResolvedInputs{Values: map[string]any{"payload": "hello"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

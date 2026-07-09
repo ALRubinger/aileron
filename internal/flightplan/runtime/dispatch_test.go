@@ -118,6 +118,30 @@ func TestDispatch_DeleteAbortsOnDeny(t *testing.T) {
 	}
 }
 
+// TestDispatch_PendingApprovalSuspendsWithoutDispatch proves the third approval
+// outcome (#2100): an approver that returns Decision.Pending yields a
+// *PendingApprovalError sentinel, and the dispatcher is NEVER called, so the
+// effect does not fire. The sentinel carries the redacted args the approver saw.
+func TestDispatch_PendingApprovalSuspendsWithoutDispatch(t *testing.T) {
+	disp := &fakeDispatcher{}
+	app := &fakeApprover{decision: Decision{Pending: true}}
+	e := &enforcer{dispatcher: disp, approver: app}
+	_, err := e.dispatch(context.Background(), "test", writeAction("aileron:t.write", false, false), map[string]any{"body": "x"}, 1)
+	var pe *PendingApprovalError
+	if !errors.As(err, &pe) {
+		t.Fatalf("a pending decision must return a *PendingApprovalError, got %v", err)
+	}
+	if pe.ActionRef != "aileron:t.write" || pe.Effect != EffectWrite {
+		t.Errorf("sentinel = %+v, want ref/effect for the write action", pe)
+	}
+	if pe.Args["body"] != "x" {
+		t.Errorf("sentinel must carry the approver's redacted args, got %+v", pe.Args)
+	}
+	if len(disp.calls) != 0 {
+		t.Error("a pending action must NOT dispatch: the effect must not fire")
+	}
+}
+
 func TestDispatch_NonRetryableNotReissued(t *testing.T) {
 	disp := &fakeDispatcher{}
 	app := &fakeApprover{decision: Decision{Approved: true}}

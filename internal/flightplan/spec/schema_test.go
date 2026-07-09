@@ -710,10 +710,13 @@ func TestModelOnTransformRejected(t *testing.T) {
 	}
 }
 
-// TestLLMSeamIsOnlySeam: the llm-seam kind is the single seam mark. No other
-// kind carries it, so the no-LLM guarantee is structurally checkable. Exactly
-// one step in the example is the marked seam, and the rest are deterministic.
-func TestLLMSeamIsOnlySeam(t *testing.T) {
+// TestLLMSeamIsOnlySeamKind: llm-seam is the ONLY kind that carries the seam
+// mark. The no-LLM-outside-a-seam guarantee is structural: every non-seam step
+// is a deterministic kind, so a language model is reachable only at an
+// explicitly marked seam. A plan may declare one or MORE seams (#2100 overturned
+// the single-seam constraint of ADR-0027); this test asserts at least one seam
+// exists and that no other kind is a seam, but it no longer caps the count.
+func TestLLMSeamIsOnlySeamKind(t *testing.T) {
 	inst := validExampleInstance(t)
 	seams := 0
 	for _, s := range steps(t, inst) {
@@ -726,9 +729,59 @@ func TestLLMSeamIsOnlySeam(t *testing.T) {
 			t.Fatalf("unexpected step kind %v", s["kind"])
 		}
 	}
-	if seams != 1 {
-		t.Fatalf("expected exactly one llm-seam in the worked example, got %d", seams)
+	if seams < 1 {
+		t.Fatalf("the worked example must carry at least one llm-seam, got %d", seams)
 	}
+}
+
+// TestMultipleSeamsValidate proves the schema permits MORE than one llm-seam
+// step (#2100). The single-seam ceiling was only ever asserted in tests, docs,
+// and the freeze lint's prose; the schema itself never capped the count. A
+// second seam that mirrors the example's seam shape and binds an earlier step's
+// output validates, so the runtime's multi-seam suspend/resume support has a
+// schema-valid shape to run.
+func TestMultipleSeamsValidate(t *testing.T) {
+	sch := compileSchema(t)
+	inst := validExampleInstance(t)
+	blk := aileronBlock(t, inst)
+	raw := blk["steps"].([]any)
+	// Clone the existing seam and re-key it as a second, distinct seam that binds
+	// the first seam's output, so both are structurally valid and dependency-
+	// ordered.
+	first := seamStep(t, inst)
+	firstID, _ := first["id"].(string)
+	second := map[string]any{
+		"id":       firstID + "_2",
+		"kind":     "llm-seam",
+		"bindings": map[string]any{"prior": "steps." + firstID + "." + firstSeamOutput(t, first)},
+		"outputs":  []any{"refined"},
+	}
+	blk["steps"] = append(raw, second)
+	if err := sch.Validate(inst); err != nil {
+		t.Fatalf("a plan with two llm-seam steps must validate (multi-seam, #2100):\n%v", err)
+	}
+	// And it carries two seams now.
+	seams := 0
+	for _, s := range steps(t, inst) {
+		if s["kind"] == "llm-seam" {
+			seams++
+		}
+	}
+	if seams != 2 {
+		t.Fatalf("expected two seams after adding one, got %d", seams)
+	}
+}
+
+// firstSeamOutput returns a seam step's first declared output name, for building
+// a downstream binding in the multi-seam test.
+func firstSeamOutput(t *testing.T, seam map[string]any) string {
+	t.Helper()
+	outs, ok := seam["outputs"].([]any)
+	if !ok || len(outs) == 0 {
+		t.Fatal("the example seam must declare at least one output")
+	}
+	name, _ := outs[0].(string)
+	return name
 }
 
 // TestStepBindingsResolve: every binding in the worked example resolves to a
