@@ -84,5 +84,27 @@ func runSkillPublish(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
+
+	// Record the install origin sidecar so a later `skill launch` of this
+	// just-published version takes the registry pull-and-verify boot path
+	// (internal/flightplan/runtime/image.go), not the mutable local-tag path.
+	// The composed local tag `aileron/sandbox-tools:<hex>` is content-derived
+	// purely from base+featureRefs and is a SHARED daemon tag any later freeze of
+	// any plan with the same environment rebuilds/repoints, which would leave this
+	// plan's signed lock attesting a stale digest and trip the #1863
+	// config-content-digest guard. The published image is content-addressed and
+	// verified against the same signed lock pin, so pointing launch at the
+	// registry resolves the dead-end. This mirrors the OCI-install path
+	// (cmd/aileron/skill_install_oci.go): the sidecar is non-signed provenance
+	// (where to fetch), never a trust anchor; every fetched byte is still verified
+	// against the signed lock. A sidecar write failure fails the publish rather
+	// than leaving a version whose launch silently stays on the local-tag path.
+	if err := s.WriteOrigin(name, id, store.Origin{
+		Registry:   *registryRef,
+		VersionTag: id,
+	}); err != nil {
+		fmt.Fprintf(stderr, "error: record publish origin for %q: %v\n", id, err)
+		return 1
+	}
 	return 0
 }
