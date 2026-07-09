@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -425,6 +427,111 @@ func TestResume_NoDoubleAudit(t *testing.T) {
 	// Exactly one per-launch summary, emitted only on the completing call.
 	if counts[RecordKindLaunch] != 1 {
 		t.Errorf("per-launch summary records = %d, want exactly 1 (only on completion)", counts[RecordKindLaunch])
+	}
+}
+
+// earlyMaterializePlan puts a materializing transform BEFORE a seam, so on the
+// completing resume the materializing step is in the memoized prefix (injected,
+// not re-executed) and its artifact must still surface in the final result and
+// be written to OutDir. This locks in that prefix artifacts survive a
+// suspend/resume sequence (the artifact-loss soundness property).
+func earlyMaterializePlan() *Plan {
+	mb := func(s string) Binding { b, _ := ParseBinding(s); return b }
+	p := &Plan{
+		Name: "early-materialize",
+		Actions: map[string]Action{
+			"aileron:metrics.query_series": {Ref: "aileron:metrics.query_series", TrustContract: TrustContract{
+				Effect: EffectRead, Hosts: []string{"api.example.com"},
+				Idempotency: Idempotency{SafeToRetry: true}}},
+		},
+		Outputs: map[string]Output{
+			"early.json": {Name: "early.json", MimeType: "application/json", Encoding: EncodingUTF8, Target: PublishFile, Path: "early.json"},
+		},
+		Steps: []Step{
+			{ID: "read", Kind: KindActionCall, ActionRef: "aileron:metrics.query_series",
+				Args: map[string]Binding{"w": mb("inputs.window_days")}, Outputs: []string{"series"}},
+			{ID: "render_early", Kind: KindTransform,
+				Bindings: map[string]Binding{"series": mb("steps.read.series")},
+				Outputs:  []string{"file"}, MaterializesOutput: "early.json"},
+			{ID: "seam", Kind: KindLLMSeam,
+				Bindings: map[string]Binding{"file": mb("steps.render_early.file")}, Outputs: []string{"body"}},
+		},
+		Inputs: []Input{{Name: "window_days", Type: "number",
+			Resolution: Resolution{Rule: ResolutionLiteral, HasDefault: true, Default: 7}}},
+	}
+	order, err := topoSort(p, map[string]int{"read": 0, "render_early": 1, "seam": 2})
+	if err != nil {
+		panic(err)
+	}
+	p.Order = order
+	return p
+}
+
+func earlyMaterializeRegistry() *TransformRegistry {
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(_ map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{
+			"path": "early.json", "mimeType": "application/json", "encoding": "utf-8", "content": `{"early":true}`,
+		}}, nil
+	})
+	return reg
+}
+
+// TestResume_PrefixArtifactSurvivesSuspend proves a materializing step that runs
+// BEFORE the suspend point is memoized on resume, yet its artifact still appears
+// in the completing run's RunResult.Artifacts AND is written to OutDir. A
+// suspend does not write to OutDir; the completing resume writes the whole set.
+func TestResume_PrefixArtifactSurvivesSuspend(t *testing.T) {
+	p := earlyMaterializePlan()
+	outDir := t.TempDir()
+	app := newGatedApprover()
+	memo := map[string]map[string]any(nil)
+	runID := ""
+	var final RunResult
+	completed := false
+	for i := 0; i < 8 && !completed; i++ {
+		disp := newCountingDispatcher(map[string]map[string]any{
+			"aileron:metrics.query_series": {"series": []any{map[string]any{"n": "cpu"}}},
+		})
+		opts := Options{
+			Dispatcher: disp, Approver: app, Transforms: earlyMaterializeRegistry(),
+			Clock: FixedClock{}, Suspendable: true, ResumeOutputs: memo, RunID: runID, OutDir: outDir,
+		}
+		res, err := runPlan(context.Background(), p, "sha256:test", "sha256:signer", nil, opts)
+		if err != nil {
+			t.Fatalf("runPlan (iter %d): %v", i, err)
+		}
+		if res.Pending == nil {
+			final = res
+			completed = true
+			break
+		}
+		// The suspend must NOT have written the artifact to disk yet.
+		if _, statErr := os.Stat(filepath.Join(outDir, "early.json")); statErr == nil {
+			t.Error("a suspend must not write artifacts to OutDir; only the completing resume writes them")
+		}
+		runID = res.Pending.RunID
+		memo = res.Pending.StepOutputs
+		if memo == nil {
+			memo = map[string]map[string]any{}
+		}
+		memo[res.Pending.StepID] = map[string]any{"body": "B"}
+	}
+	if !completed {
+		t.Fatal("sequence never completed")
+	}
+	// The prefix artifact is in the final result even though render_early was
+	// memoized (injected) on the completing resume.
+	if len(final.Artifacts) != 1 || final.Artifacts[0].Name != "early.json" {
+		t.Fatalf("prefix artifact lost across suspend/resume: got %+v", final.Artifacts)
+	}
+	// And it was written to disk on completion.
+	got, err := os.ReadFile(filepath.Join(outDir, "early.json"))
+	if err != nil {
+		t.Fatalf("prefix artifact not written to OutDir on completion: %v", err)
+	}
+	if string(got) != `{"early":true}` {
+		t.Errorf("early.json content = %q", got)
 	}
 }
 

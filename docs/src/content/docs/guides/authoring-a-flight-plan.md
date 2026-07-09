@@ -181,7 +181,7 @@ Every step carries an `id` unique within the graph and a `kind` from a closed en
 | `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
 | `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
 | `tool` | No | Runs a declared environment tool as a deterministic subprocess inside the booted plan container. Its `command` is an argv array run with no shell interpretation. Its optional `mount` and `collect` are the file-I/O boundary, and its optional `trustContract` declares the step's network reach. |
-| `llm-seam` | Yes | A marked non-deterministic seam. A plan may declare more than one. The only kind that reaches an LLM. |
+| `llm-seam` | Yes | A marked non-deterministic seam. A plan may declare one or more. The only kind that reaches an LLM. |
 
 A `tool` step runs one of the tools your `environment` declared. Give it a `command` argv array (the program then its arguments, never a shell string), and optionally a `mount` to place input files into the container and a `collect` to read a produced path back as the step output. If the tool reaches the network, declare its reach with a per-step `trustContract` whose `hosts` list the upstream it may call. Freeze seals that reach into the lock, and launch enforces it: a scoped call to an undeclared host is refused at the daemon proxy before any TLS handshake, and no credential bytes ever enter the container.
 

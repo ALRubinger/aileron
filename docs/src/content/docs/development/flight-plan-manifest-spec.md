@@ -188,7 +188,7 @@ There are four step kinds.
 | `action-call` | No | Invokes a declared action. Its `actionRef` names the action and its `args` bind the action's arguments. |
 | `transform` | No | Runs deterministic no-LLM logic over data already in the graph. It has no host, network, or credential surface. |
 | `tool` | No | Runs a declared environment tool as a deterministic subprocess inside the single booted plan container. Its `command` is an argv array run with no shell interpretation. Its optional `mount` and `collect` are the file-I/O boundary, and its optional `trustContract` declares the step's network reach. |
-| `llm-seam` | Yes | A marked non-deterministic seam. A plan may declare more than one. The only kind that reaches an LLM. |
+| `llm-seam` | Yes | A marked non-deterministic seam. A plan may declare one or more. The only kind that reaches an LLM. |
 
 The `kind` enum is closed. By construction no kind other than `llm-seam` can reach an LLM, so the no-LLM guarantee is structurally checkable. The `kind: llm-seam` value is the first-class mark the freeze and lint step ([#1509](https://github.com/ALRubinger/aileron/issues/1509)) checks, and the runtime ([#1511](https://github.com/ALRubinger/aileron/issues/1511)) enforces that only a marked seam reaches an LLM. A plan may declare one or more seams ([#2100](https://github.com/ALRubinger/aileron/issues/2100)); each suspends the run for its LLM output on the suspend/resume path. A `transform` and a `tool` step are the structural guarantee that intermediate logic stays deterministic.
 
