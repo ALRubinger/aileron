@@ -24,6 +24,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/failure"
+	fpstore "github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
@@ -82,6 +83,7 @@ type apiServer struct {
 	vaultUnlockedCh      chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
 	newID                func() string
 	actions              *action.Store                    // installed actions in ~/.aileron/actions/ (ADR-0003)
+	flightPlanStore      *fpstore.Store                   // installed frozen flight plans in ~/.aileron/skills/ (#2097); nil → POST /v1/flightplans/{name}/launch returns 404
 	actionState          action.StateStore                // per-action user preferences (enabled/disabled overlay); nil means defaults apply
 	executor             action.Executor                  // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer            *cstore.Installer                // connector install pipeline (ADR-0004); nil disables /v1/connectors/install

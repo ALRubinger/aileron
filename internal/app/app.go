@@ -28,6 +28,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
+	fpstore "github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/observability"
@@ -194,6 +195,13 @@ type Config struct {
 	// sessions/<session-id>/sandbox-proxy/{ca.pem,ca.key}. Empty keeps
 	// transparent CONNECT proxy transport disabled.
 	SandboxProxyStateDir string
+
+	// FlightPlanStoreDir is the directory installed frozen Flight Plans
+	// live in, launched via POST /v1/flightplans/{name}/launch (#2097).
+	// Empty resolves to the canonical store.DefaultDir() (~/.aileron/skills),
+	// matching the CLI launch path. Tests pass t.TempDir() so a fixture
+	// frozen plan is discoverable without touching the user's store.
+	FlightPlanStoreDir string
 }
 
 // buildApprovalsReviewURL composes the approval-notification ReviewURL
@@ -482,6 +490,19 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 			log.Warn("action manifest failed to load", "file", e.File, "line", e.Line, "class", e.Class, "message", e.Message)
 		}
 	}
+
+	// --- Flight Plan store (#2097) ---
+	// The store of installed frozen Flight Plans launched via
+	// POST /v1/flightplans/{name}/launch. An empty FlightPlanStoreDir
+	// resolves to the canonical ~/.aileron/skills, matching the CLI launch
+	// path; tests point it at a temp dir. store.New never touches disk, so
+	// this is always wired (a missing directory surfaces as "no frozen
+	// version" at launch, i.e. a 404, not a startup failure).
+	fpStoreDir := cfg.FlightPlanStoreDir
+	if fpStoreDir == "" {
+		fpStoreDir = fpstore.DefaultDir()
+	}
+	server.flightPlanStore = fpstore.New(fpStoreDir)
 
 	// --- Audit log (ADR-0010) ---
 	// File-backed JSONL by default so events survive daemon restart;

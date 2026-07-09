@@ -79,6 +79,15 @@ tags:
       to connectors at canonical `github://OWNER/REPO` FQNs — the Hub
       does not host or vet connectors. Trust is a separate decision
       handled by the keyring and the install-time prompt.
+  - name: FlightPlans
+    description: |
+      Launch installed, frozen, deterministic Flight Plans through the
+      daemon (issue #2097). `aileron-mcp` speaks only HTTP to the daemon,
+      so this surface lets an agent launch a verified frozen unit through
+      the same `internal/flightplan/runtime.Run` entry point the CLI uses,
+      with the SPI seams wired to in-process daemon-backed implementations
+      (the action executor and the audit recorder) rather than looping back
+      over HTTP.
 
 paths:
   /v1/health:
@@ -3331,6 +3340,112 @@ paths:
                 $ref: "#/components/schemas/FailureEnvelope"
         "502":
           description: Network or external API error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+
+  /v1/flightplans/{name}/launch:
+    post:
+      tags: [FlightPlans]
+      summary: Launch an installed frozen Flight Plan
+      description: |
+        Launches an installed, frozen, deterministic Flight Plan by name
+        through `internal/flightplan/runtime.Run` (issue #2097). This is the
+        HTTP door `aileron-mcp` uses: the MCP process speaks only HTTP to
+        the daemon, so it cannot reach the in-process `runtime.Run` entry
+        the CLI calls directly. The daemon wires `runtime.Run`'s SPI seams
+        to in-process daemon-backed implementations — the action dispatcher
+        calls the same executor `POST /v1/actions/{name}/run` uses, and the
+        audit sink calls the same recorder `POST /v1/audit` uses — so the
+        launch runs against a single writer for both, with no HTTP self-loop.
+
+        Version selection mirrors the CLI: an explicit `version` in the
+        request body pins that frozen version; when absent, the latest
+        frozen version (by freeze time) is launched. A plan with no frozen
+        version is a 404.
+
+        Inputs are forwarded as literal overrides and resolved once by the
+        runtime. This is the non-interactive daemon path, so no input walk
+        or prompt is wired: a missing required input with no declared
+        default fail-fasts, exactly as a scripted (non-TTY) CLI launch does.
+
+        Scope (deterministic happy path): this endpoint runs the in-process
+        deterministic pipeline only. No image/registry/tool-step/publisher
+        seams are wired, so a plan that pins an environment image or
+        declares tool steps errors (the runtime's nil-guard). The single
+        LLM seam is also unwired, so a plan with an `llm-seam` step errors.
+        Image-booted launch is a follow-up.
+
+        Approval passthrough: an effect-gated constituent action mirrors the
+        CLI's `daemonDispatcher` contract. The dispatcher refuses to run an
+        action whose manifest declares `[approval] required = true` and
+        surfaces an ADR-0010 FailureEnvelope directing the operator to
+        approve it (via `POST /v1/actions/{name}/run`) and re-launch. The
+        resume / seam-pending surface is a separate follow-up (#2101).
+
+        This endpoint adds no manifest-level `[approval]` gate of its own
+        (ADR-0009): the plan's constituent actions carry their own gating,
+        and a launch is a deterministic, verified re-runnable unit
+        (re-launching re-runs deterministically), so the endpoint itself is
+        idempotent-neutral.
+      operationId: launchFlightPlan
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FlightPlanLaunchRequest"
+      responses:
+        "200":
+          description: Flight Plan launched successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlightPlanLaunchResponse"
+        "202":
+          description: |
+            A constituent action requires user approval; the launch was
+            not run. Approve the action via `POST /v1/actions/{name}/run`
+            and re-launch. Reuses the action-run pending-approval shape.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionRunPendingResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            No Flight Plan store is configured, the named plan is unknown,
+            or the plan has no frozen version to launch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "412":
+          description: Vault locked or a required binding is missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "500":
+          description: Verification, runtime, or executor error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "502":
+          description: Network or external API error inside a constituent action.
           content:
             application/json:
               schema:
@@ -7055,6 +7170,97 @@ components:
             Human-readable instruction the agent should surface to the
             user verbatim. Names the approval, the review URL, and the
             `aileron open approval <id>` shell command alternative.
+
+    FlightPlanLaunchRequest:
+      type: object
+      description: |
+        Body for `POST /v1/flightplans/{name}/launch`. Both fields are
+        optional: an empty body launches the latest frozen version with
+        every input at its declared default.
+      properties:
+        inputs:
+          type: object
+          additionalProperties: true
+          description: |
+            Literal input overrides, forwarded to the runtime as launch
+            args and resolved once. A key names a declared plan input; its
+            value overrides that input's default. Inputs not named here fall
+            back to their declared default (a missing required input with no
+            default fail-fasts the launch).
+        version:
+          type: string
+          description: |
+            Frozen version id to launch (mirrors the CLI `--version`). When
+            omitted, the latest frozen version by freeze time is launched.
+
+    FlightPlanLaunchResponse:
+      type: object
+      description: |
+        Successful result of launching a frozen Flight Plan: the verified
+        content hash, the resolved inputs, the per-step outputs, the
+        materialized artifacts, and the audit record ids emitted for the
+        launch. Mirrors the `RunResult` shape the CLI launch surfaces.
+      required: [content_hash]
+      properties:
+        content_hash:
+          type: string
+          description: |
+            Verified content hash of the frozen unit that ran
+            (`sha256:<hex>`). Always present on a successful launch.
+        resolved_inputs:
+          type: object
+          additionalProperties: true
+          description: |
+            The frozen resolved-input set (Phase A output): every declared
+            input mapped to the value the run used, after applying the
+            request overrides and declared defaults.
+        step_outputs:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+          description: |
+            Per-step named outputs, keyed by step id. Each value is the map
+            of that step's named outputs.
+        artifacts:
+          type: array
+          description: The materialized output artifacts.
+          items:
+            $ref: "#/components/schemas/FlightPlanArtifact"
+        audit_ids:
+          type: array
+          description: |
+            Audit record ids emitted to the sink for this launch, in
+            emission order.
+          items:
+            type: string
+
+    FlightPlanArtifact:
+      type: object
+      description: |
+        Metadata for one materialized output artifact from a Flight Plan
+        launch. The daemon writes no host out-dir, so an artifact is
+        surfaced by its declared name/path/mime and its content digest; the
+        digest is the content-addressed handle the caller uses to reference
+        the materialized bytes. The raw bytes are not returned inline.
+      required: [name, digest]
+      properties:
+        name:
+          type: string
+          description: Declared output name.
+        path:
+          type: string
+          description: |
+            Declared relative artifact path. Present for a file-target
+            output; empty for a retained (non-file) output.
+        mime_type:
+          type: string
+          description: Declared MIME type of the artifact content.
+        digest:
+          type: string
+          description: |
+            Content digest of the materialized bytes (`sha256:<hex>`), the
+            content-addressed handle for the artifact.
 
     ActionApprovalResult:
       type: object
