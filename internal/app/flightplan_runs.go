@@ -2,9 +2,18 @@ package app
 
 import (
 	"sync"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 )
+
+// flightPlanRunTTL bounds how long a suspended run lingers in the registry
+// without being touched (launched-then-abandoned by a crashed or idle agent).
+// A resume touches the record, so an actively-driven multi-suspend run never
+// expires mid-flight; only a run the agent walks away from is reaped. This
+// bounds the registry's memory over a long-lived daemon session — the runs are
+// already restart-scoped, so an hour is generous headroom for a human approval.
+const flightPlanRunTTL = time.Hour
 
 // flightPlanRunRegistry is the daemon's in-memory, session-scoped store of
 // suspended Flight Plan runs (#2101). A launch that suspends (an unfulfilled
@@ -23,6 +32,11 @@ import (
 type flightPlanRunRegistry struct {
 	mu   sync.Mutex
 	runs map[string]*flightPlanRunRecord
+	// ttl bounds how long an un-touched run lingers before lazy expiry; now is
+	// injectable so tests can drive expiry deterministically. Both default via
+	// newFlightPlanRunRegistry.
+	ttl time.Duration
+	now func() time.Time
 }
 
 // flightPlanRunRecord is one suspended run's re-launch state: enough to replay
@@ -45,11 +59,42 @@ type flightPlanRunRecord struct {
 	// recorded decision (approved → replay the action; denied → fail closed)
 	// without re-registering. Nil until the run first suspends on an approval.
 	Approvals map[string]string
+	// touched is the last time the record was created/updated/read, driving lazy
+	// TTL expiry so an abandoned suspended run is eventually reaped.
+	touched time.Time
 }
 
-// newFlightPlanRunRegistry returns an empty registry ready to accept runs.
+// newFlightPlanRunRegistry returns an empty registry ready to accept runs, with
+// the default TTL and a real clock.
 func newFlightPlanRunRegistry() *flightPlanRunRegistry {
-	return &flightPlanRunRegistry{runs: map[string]*flightPlanRunRecord{}}
+	return &flightPlanRunRegistry{
+		runs: map[string]*flightPlanRunRecord{},
+		ttl:  flightPlanRunTTL,
+		now:  time.Now,
+	}
+}
+
+// clock returns the registry's time source, defaulting to time.Now so a
+// zero-value registry (defensive) still works.
+func (r *flightPlanRunRegistry) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// reapExpiredLocked drops every run untouched for longer than the TTL. Called
+// under the lock from Put/Get so expiry is lazy (no background goroutine). A
+// non-positive TTL disables expiry.
+func (r *flightPlanRunRegistry) reapExpiredLocked(nowT time.Time) {
+	if r.ttl <= 0 {
+		return
+	}
+	for id, rec := range r.runs {
+		if nowT.Sub(rec.touched) > r.ttl {
+			delete(r.runs, id)
+		}
+	}
 }
 
 // Put stores (or replaces) the record for runID. The registry owns the stored
@@ -67,7 +112,10 @@ func (r *flightPlanRunRegistry) Put(runID string, rec *flightPlanRunRecord) {
 	if rec.Approvals == nil {
 		rec.Approvals = map[string]string{}
 	}
+	nowT := r.clock()
+	rec.touched = nowT
 	r.runs[runID] = rec
+	r.reapExpiredLocked(nowT)
 }
 
 // Get returns the record for runID and whether it was found. The returned
@@ -80,7 +128,13 @@ func (r *flightPlanRunRegistry) Get(runID string) (*flightPlanRunRecord, bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	nowT := r.clock()
+	r.reapExpiredLocked(nowT)
 	rec, ok := r.runs[runID]
+	if ok {
+		// A read is a touch: an actively-driven run never expires mid-flight.
+		rec.touched = nowT
+	}
 	return rec, ok
 }
 
@@ -105,6 +159,7 @@ func (r *flightPlanRunRegistry) MergeOutputs(runID string, outputs map[string]ma
 	for id, named := range outputs {
 		rec.Outputs[id] = named
 	}
+	rec.touched = r.clock()
 	return true
 }
 
@@ -125,6 +180,7 @@ func (r *flightPlanRunRegistry) RecordApproval(runID, actionRef, approvalID stri
 		rec.Approvals = map[string]string{}
 	}
 	rec.Approvals[actionRef] = approvalID
+	rec.touched = r.clock()
 }
 
 // Delete removes the record for runID (a terminal completion or a denied

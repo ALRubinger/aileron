@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
 )
@@ -109,6 +110,50 @@ func TestFlightPlanRunRegistry_RecordApprovalAndDelete(t *testing.T) {
 	}
 	// Delete is idempotent.
 	reg.Delete("run-3")
+}
+
+// TestFlightPlanRunRegistry_LazyExpiry: a run untouched past the TTL is reaped
+// on the next Put/Get, while an actively-touched run survives (a read is a
+// touch, so a resume mid-flight never expires).
+func TestFlightPlanRunRegistry_LazyExpiry(t *testing.T) {
+	now := time.Unix(0, 0)
+	reg := &flightPlanRunRegistry{
+		runs: map[string]*flightPlanRunRecord{},
+		ttl:  time.Hour,
+		now:  func() time.Time { return now },
+	}
+	reg.Put("stale", &flightPlanRunRecord{Name: "p", Version: "v1"})
+	reg.Put("fresh", &flightPlanRunRecord{Name: "p", Version: "v1"})
+
+	// Advance 30 min and touch "fresh" so only "stale" ages out.
+	now = now.Add(30 * time.Minute)
+	if _, ok := reg.Get("fresh"); !ok {
+		t.Fatal("fresh run missing after 30m")
+	}
+
+	// Advance past the TTL relative to "stale"'s last touch but not "fresh"'s.
+	now = now.Add(31 * time.Minute) // stale: 61m untouched; fresh: 31m untouched
+	if _, ok := reg.Get("stale"); ok {
+		t.Error("stale run should have been reaped after exceeding the TTL")
+	}
+	if _, ok := reg.Get("fresh"); !ok {
+		t.Error("fresh run (touched recently) should survive")
+	}
+}
+
+// TestFlightPlanRunRegistry_ExpiryDisabled: a non-positive TTL disables expiry.
+func TestFlightPlanRunRegistry_ExpiryDisabled(t *testing.T) {
+	now := time.Unix(0, 0)
+	reg := &flightPlanRunRegistry{
+		runs: map[string]*flightPlanRunRecord{},
+		ttl:  0,
+		now:  func() time.Time { return now },
+	}
+	reg.Put("keep", &flightPlanRunRecord{Name: "p"})
+	now = now.Add(1000 * time.Hour)
+	if _, ok := reg.Get("keep"); !ok {
+		t.Error("with TTL disabled, a run must never expire")
+	}
 }
 
 // TestFlightPlanRunRegistry_NilSafety: the zero/nil registry tolerates every

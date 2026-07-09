@@ -3397,13 +3397,6 @@ paths:
         or prompt is wired: a missing required input with no declared
         default fail-fasts, exactly as a scripted (non-TTY) CLI launch does.
 
-        Scope (deterministic happy path): this endpoint runs the in-process
-        deterministic pipeline only. No image/registry/tool-step/publisher
-        seams are wired, so a plan that pins an environment image or
-        declares tool steps errors (the runtime's nil-guard). The single
-        LLM seam is also unwired, so a plan with an `llm-seam` step errors.
-        Image-booted launch is a follow-up.
-
         Suspend / resume (#2101): a launch can SUSPEND mid-plan instead of
         completing, on either of two boundaries, and the agent resumes it via
         `POST /v1/flightplans/runs/{runId}/resume`.

@@ -317,8 +317,16 @@ func (s *apiServer) ResumeFlightPlan(w http.ResponseWriter, r *http.Request, run
 		s.flightPlanRuns.MergeOutputs(runID, resumeOutputs)
 	}
 
-	// Re-read the record so the merged memo is visible, then replay.
-	rec, _ = s.flightPlanRuns.Get(runID)
+	// Re-read the record so the merged memo is visible, then replay. The registry
+	// is shared and in-memory: a racing resume/completion could have deleted the
+	// record between the first Get and here, so re-check ok rather than
+	// dereferencing a possibly-nil pointer.
+	rec, ok = s.flightPlanRuns.Get(runID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found",
+			"run id is unknown or expired (the run registry is in-memory; a daemon restart orphans in-flight runs)")
+		return
+	}
 	s.runOrResume(w, r, *rec, runID)
 }
 
