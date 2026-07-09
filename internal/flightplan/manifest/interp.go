@@ -32,6 +32,17 @@ import (
 // text, trailing junk) does not match and is reported as a malformed token.
 var tokenBodyPattern = regexp.MustCompile(`^inputs\.([a-zA-Z0-9_-]+)$`)
 
+// promptBodyPattern matches a token's inner body against the plan's FULL
+// binding grammar, which a prompt (unlike a command/host) uses: either
+// `inputs.<name>` OR `steps.<id>.<output>`. It is deliberately SEPARATE from
+// tokenBodyPattern so the command/host grammar keeps rejecting `steps.…`; the
+// two grammars stay independent. Character classes mirror runtime/binding.go's
+// bindingPattern and the schema's $defs.binding (`[a-zA-Z0-9_-]+`). Group 1 is
+// the input name for the inputs form; groups 2 and 3 are the step id and output
+// for the steps form.
+var promptBodyPattern = regexp.MustCompile(
+	`^(?:inputs\.([a-zA-Z0-9_-]+)|steps\.([a-zA-Z0-9_-]+)\.([a-zA-Z0-9_-]+))$`)
+
 // segment is one span of a scanned command element: either a literal run of
 // text or a resolved token naming an input.
 type segment struct {
@@ -96,6 +107,47 @@ func scan(s string) ([]segment, error) {
 	return segs, nil
 }
 
+// scanTokens walks a string's `{{ … }}` tokens with the same brace grammar as
+// scan (same fail-closed rules for stray closers, unbalanced openers, and
+// nested `{{`), invoking onBody with each raw (untrimmed) token body. Literal
+// spans are skipped. It is the grammar-agnostic core the prompt extractor
+// reuses: onBody applies the caller's per-token body grammar and returns an
+// error to fail the scan closed. scan (command/host) keeps its own segment
+// accumulation because it also needs literal spans for SubstituteInputs.
+func scanTokens(s string, onBody func(body string) error) error {
+	i := 0
+	for i < len(s) {
+		open := strings.Index(s[i:], "{{")
+		closer := strings.Index(s[i:], "}}")
+		// A `}}` reached before the next `{{` (or with no `{{` at all) is a
+		// stray closer: unbalanced braces.
+		if closer != -1 && (open == -1 || closer < open) {
+			return fmt.Errorf("malformed interpolation in %q: '}}' has no matching '{{'", s)
+		}
+		if open == -1 {
+			// No further token opener and (checked above) no stray closer: the
+			// rest is literal.
+			break
+		}
+		openAbs := i + open
+		rest := s[openAbs+2:]
+		c := strings.Index(rest, "}}")
+		if c == -1 {
+			return fmt.Errorf("malformed interpolation in %q: '{{' has no matching '}}'", s)
+		}
+		body := rest[:c]
+		// A `{{` inside the body means nested/overlapping openers: malformed.
+		if strings.Contains(body, "{{") {
+			return fmt.Errorf("malformed interpolation in %q: nested '{{' inside a token", s)
+		}
+		if err := onBody(body); err != nil {
+			return err
+		}
+		i = openAbs + 2 + c + 2
+	}
+	return nil
+}
+
 // parseTokenBody validates a brace-stripped token body and returns the
 // referenced input name. The body is whitespace-trimmed first (a token may
 // carry surrounding whitespace: `{{ inputs.x }}`), then must match
@@ -107,6 +159,59 @@ func parseTokenBody(body, whole string) (string, error) {
 		return "", fmt.Errorf("malformed interpolation in %q: token body %q is not inputs.<name>", whole, trimmed)
 	}
 	return m[1], nil
+}
+
+// PromptRefKind discriminates the two binding forms a prompt token may carry.
+type PromptRefKind int
+
+const (
+	// PromptRefInput is a `{{ inputs.<name> }}` token.
+	PromptRefInput PromptRefKind = iota
+	// PromptRefStep is a `{{ steps.<id>.<output> }}` token.
+	PromptRefStep
+)
+
+// PromptRef is one binding reference extracted from a prompt template. Kind
+// discriminates which fields are meaningful: Input for PromptRefInput; StepID
+// and Output for PromptRefStep. Raw carries the whitespace-trimmed token body
+// as written, for error messages.
+type PromptRef struct {
+	Kind   PromptRefKind
+	Input  string
+	StepID string
+	Output string
+	Raw    string
+}
+
+// PromptBindingRefs extracts the binding references in a prompt template, in
+// order of appearance, validating the token grammar. Unlike CommandInputRefs
+// (which admits ONLY `inputs.<name>`), a prompt uses the plan's FULL binding
+// grammar: `{{ inputs.<name> }}` AND `{{ steps.<id>.<output> }}`. A string with
+// no tokens is valid and returns no refs. A malformed brace shape or a token
+// body that is neither binding form is a hard error.
+//
+// It shares the brace-walking scanner with CommandInputRefs so freeze and any
+// future runtime prompt resolution recognize tokens identically; only the
+// per-token body grammar differs (promptBodyPattern vs tokenBodyPattern).
+func PromptBindingRefs(s string) ([]PromptRef, error) {
+	var refs []PromptRef
+	err := scanTokens(s, func(body string) error {
+		trimmed := strings.TrimSpace(body)
+		m := promptBodyPattern.FindStringSubmatch(trimmed)
+		if m == nil {
+			return fmt.Errorf("malformed interpolation in %q: token body %q is not inputs.<name> or steps.<id>.<output>", s, trimmed)
+		}
+		if m[1] != "" {
+			refs = append(refs, PromptRef{Kind: PromptRefInput, Input: m[1], Raw: trimmed})
+			return nil
+		}
+		refs = append(refs, PromptRef{Kind: PromptRefStep, StepID: m[2], Output: m[3], Raw: trimmed})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 // CommandInputRefs extracts the input names referenced by `{{ inputs.<name> }}`

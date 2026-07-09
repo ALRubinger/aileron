@@ -76,6 +76,10 @@ func TestLint_AcceptsExplicitLLMSeam(t *testing.T) {
 // llmMarkers set the non-seam kinds are rejected against.
 func TestLint_AcceptsSeamWithPromptAndModel(t *testing.T) {
 	m := manifestWithSteps([]any{
+		// The seam's prompt references steps.render.csv, so a `render` step
+		// producing a `csv` output must exist for the #2120 prompt binding-
+		// existence guard to lint it clean.
+		map[string]any{"id": "render", "kind": "transform", "outputs": []any{"csv"}},
 		map[string]any{
 			"id": "summarize", "kind": "llm-seam",
 			"prompt":  "Summarize {{ steps.render.csv }}.",

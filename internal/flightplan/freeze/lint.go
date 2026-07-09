@@ -133,6 +133,18 @@ func Lint(m *manifest.Manifest) error {
 	if err := lintActionHostLiterals(m); err != nil {
 		return err
 	}
+	// Guard the seam prompt's binding tokens (#2120): every
+	// `{{ inputs.<name> }}` and `{{ steps.<id>.<output> }}` token in a sealed
+	// `kind: llm-seam` prompt must reference something the plan defines (a
+	// declared input, a known step, a real output of that step). This is
+	// EXISTENCE-ONLY and carries NO constrained-input clause: unlike a command
+	// argv or a trustContract host, a prompt is natural language handed to an
+	// LLM, not a shell/host injection surface, so a declared-but-unconstrained
+	// input is allowed. The guard rejects only typos (references to things that
+	// do not exist), matching the same-token rejection command/host already make.
+	if err := lintPromptBindings(m); err != nil {
+		return err
+	}
 	return nil
 }
 
