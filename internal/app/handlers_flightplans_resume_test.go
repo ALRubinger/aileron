@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
+	fpstore "github.com/ALRubinger/aileron/internal/flightplan/store"
 	"github.com/ALRubinger/aileron/internal/model"
 )
 
@@ -494,6 +497,72 @@ func TestResumeFlightPlan_UnknownRun404(t *testing.T) {
 	rec := resume(t, srv, "no-such-run", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestResumeFlightPlan_UnconfiguredGuards: the resume endpoint fails closed when
+// the store or executor is not configured (404 / 500), mirroring launch.
+func TestResumeFlightPlan_UnconfiguredGuards(t *testing.T) {
+	// No flight plan store → 404.
+	noStore := &apiServer{
+		log:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		flightPlanRuns: newFlightPlanRunRegistry(),
+	}
+	rec := resume(t, noStore, "run", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("no-store status = %d, want 404", rec.Code)
+	}
+
+	// Store present but no executor → 500.
+	fv := freezeFixture(t, oneSeamPlanMD)
+	dir := t.TempDir()
+	fps := fpstore.New(dir)
+	if err := fps.WriteFrozen("one-seam-fixture", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	noExec := &apiServer{
+		log:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		flightPlanStore: fps,
+		flightPlanRuns:  newFlightPlanRunRegistry(),
+	}
+	rec = resume(t, noExec, "run", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("no-executor status = %d, want 500", rec.Code)
+	}
+}
+
+// TestResumeFlightPlan_TrailingTokensBadBody: a body with trailing tokens after
+// the first JSON value is a 400 (mirrors launch's strict-decode contract).
+func TestResumeFlightPlan_TrailingTokensBadBody(t *testing.T) {
+	fv := freezeFixture(t, oneSeamPlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{"query_series": `{"series":[1]}`}}
+	srv, _ := newFlightPlanTestServer(t, "one-seam-fixture", fv, exec)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/flightplans/runs/x/resume",
+		strings.NewReader(`{"outputs":{}} trailing`))
+	rec := httptest.NewRecorder()
+	srv.ResumeFlightPlan(rec, req, "x")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("trailing-token status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestFlightPlanApprover_NoQueueFailsClosed: a gated action with no approval
+// queue configured fails the run closed (403) rather than running unattended.
+func TestFlightPlanApprover_NoQueueFailsClosed(t *testing.T) {
+	fv := freezeFixture(t, writePlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{"file_report": reportFileMap}}
+	srv, _ := newFlightPlanTestServer(t, "daemon-write-fixture", fv, exec)
+	srv.actions = approvalGatedActionStore(t)
+	// Remove the approval queue to exercise the fail-closed guard.
+	srv.actionApprovals = nil
+
+	rec := launch(t, srv, "daemon-write-fixture", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 fail-closed when no queue is configured; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := countCalls(exec, "file_report"); got != 0 {
+		t.Errorf("gated action ran %d times with no queue, want 0", got)
 	}
 }
 

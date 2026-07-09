@@ -110,6 +110,12 @@ func TestFlightPlanRunRegistry_RecordApprovalAndDelete(t *testing.T) {
 	}
 	// Delete is idempotent.
 	reg.Delete("run-3")
+
+	// RecordApproval on an unknown run is a no-op (does not create a record).
+	reg.RecordApproval("ghost", "ref", "id")
+	if _, ok := reg.Get("ghost"); ok {
+		t.Error("RecordApproval must not create a record for an unknown run")
+	}
 }
 
 // TestFlightPlanRunRegistry_LazyExpiry: a run untouched past the TTL is reaped
