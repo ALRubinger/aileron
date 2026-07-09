@@ -437,11 +437,26 @@ func TestKeyringTrust_PrivateRepoAPI404GivesGuidance(t *testing.T) {
 	if rc == 0 {
 		t.Fatal("expected non-zero exit when the API path is absent")
 	}
-	if !strings.Contains(stderr.String(), "keys/publisher.pub") {
-		t.Errorf("expected error to name the convention path; got: %s", stderr.String())
+	got := stderr.String()
+	if !strings.Contains(got, "keys/publisher.pub") {
+		t.Errorf("expected error to name the convention path; got: %s", got)
 	}
-	if !strings.Contains(stderr.String(), "read access") {
-		t.Errorf("expected token-access hint; got: %s", stderr.String())
+	// A private-repo 404 on the authenticated path means the token lacks
+	// access, not that the file is missing.
+	if !strings.Contains(got, "access") {
+		t.Errorf("expected token-access hint; got: %s", got)
+	}
+	// Name the exact token scopes for both PAT kinds.
+	if !strings.Contains(got, "Contents: Read-only") || !strings.Contains(got, "\"repo\"") {
+		t.Errorf("expected fine-grained and classic PAT scope guidance; got: %s", got)
+	}
+	// GH_TOKEN-over-GITHUB_TOKEN precedence, so the operator knows which wins.
+	if !strings.Contains(got, "GH_TOKEN") {
+		t.Errorf("expected GH_TOKEN guidance; got: %s", got)
+	}
+	// Point at the --key-file escape hatch.
+	if !strings.Contains(got, "--key-file") {
+		t.Errorf("expected --key-file escape hatch; got: %s", got)
 	}
 }
 
@@ -455,8 +470,25 @@ func TestKeyringTrust_Anonymous404MentionsToken(t *testing.T) {
 	if rc := runKeyring([]string{"trust", "github://acme/private"}, stdout, stderr); rc == 0 {
 		t.Fatal("expected non-zero exit on 404")
 	}
-	if !strings.Contains(stderr.String(), "GH_TOKEN") || !strings.Contains(stderr.String(), "GITHUB_TOKEN") {
-		t.Errorf("expected 404 to mention GH_TOKEN/GITHUB_TOKEN; got: %s", stderr.String())
+	got := stderr.String()
+	if !strings.Contains(got, "GH_TOKEN") || !strings.Contains(got, "GITHUB_TOKEN") {
+		t.Errorf("expected 404 to mention GH_TOKEN/GITHUB_TOKEN; got: %s", got)
+	}
+	// The 404 means no/insufficient access, not a missing file.
+	if !strings.Contains(got, "access") {
+		t.Errorf("expected access-not-missing framing; got: %s", got)
+	}
+	// The one-liner fix with GH_TOKEN-over-GITHUB_TOKEN precedence.
+	if !strings.Contains(got, "gh auth token") {
+		t.Errorf("expected `gh auth token` one-liner; got: %s", got)
+	}
+	// Name the exact token scopes for both PAT kinds.
+	if !strings.Contains(got, "Contents: Read-only") || !strings.Contains(got, "\"repo\"") {
+		t.Errorf("expected fine-grained and classic PAT scope guidance; got: %s", got)
+	}
+	// Point at the --key-file escape hatch.
+	if !strings.Contains(got, "--key-file") {
+		t.Errorf("expected --key-file escape hatch; got: %s", got)
 	}
 }
 
