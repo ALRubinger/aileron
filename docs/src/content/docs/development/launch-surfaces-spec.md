@@ -42,6 +42,8 @@ Three per-surface dimensions specialize this contract.
 
 Approval routing reuses the effect-driven gate. The trust contract declares an `effect` for each action, one of `read`, `write`, `delete`, `spend`, or `external-send` ([Flight Plan Manifest Spec](/development/flight-plan-manifest-spec/) trust contract). A `read` Launch runs unattended. A `write`, `delete`, `spend`, or `external-send` Launch raises an out-of-band approval gate and blocks on the decision ([ADR-0009](/adr/0009-user-channel)). The approval-time preview is fetched at decision time ([ADR-0016](/adr/0016-approval-preview/)). A surface routes the approval to the approver through its channel and surfaces the recorded decision in result delivery. A surface never confirms an effect inline in place of the out-of-band gate.
 
+A Flight Plan that carries a marked llm-seam step needs a surface that can fulfill that seam. An interactive agent context wires a seam provider directly. The daemon launch door suspends an unfulfilled seam so an agent fulfills it out of band and resumes the run. A surface that can do neither, such as a plain `aileron skill launch` with no agent-backed provider, fails the launch closed before any step runs. A deterministic Flight Plan with no llm-seam step runs unchanged on every surface.
+
 ## Internal surfaces
 
 The internal surfaces expose a Flight Plan to people inside the org. The four internal surfaces are the button in the org's own portal, the form, the Slack command, and integrations into the org's own tools.

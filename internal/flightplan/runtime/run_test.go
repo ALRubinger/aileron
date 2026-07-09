@@ -82,6 +82,169 @@ func TestRun_StructuralNoLLMGuarantee(t *testing.T) {
 	}
 }
 
+// TestRun_SeamPlanOnNonAgentSurfaceFailsClosed proves the surface gate (#2102):
+// a store-backed plan carrying an llm-seam step, launched through Run on a
+// non-agent surface (no wired Seam, not suspendable), fails CLOSED before any
+// step runs with the exact agent-context message. A dispatcher is wired so that
+// any accidental step execution would be observable; the gate must fire first,
+// so the dispatcher is never called.
+func TestRun_SeamPlanOnNonAgentSurfaceFailsClosed(t *testing.T) {
+	fv := frozenNoImage(t) // no-environment variant that keeps the summarize seam step
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("no-exec-env", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
+	}}
+	fake := &fakeImageRunner{}
+	res, err := Run(context.Background(), Options{
+		Store:       s,
+		Name:        "no-exec-env",
+		Version:     "test",
+		ImageRunner: fake,
+		Dispatcher:  disp,
+		Approver:    &fakeApprover{decision: Decision{Approved: true}},
+		// Seam intentionally nil and Suspendable unset: the non-agent surface.
+		Clock:  FixedClock{},
+		OutDir: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("a seam plan on a non-agent surface must fail closed")
+	}
+	const want = "contains an llm-seam step; it can only be launched from an interactive agent context (aileron launch), not this surface"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+	}
+	// The gate is a static precondition: no step ran, so nothing dispatched and
+	// no result was produced.
+	if len(disp.calls) != 0 {
+		t.Errorf("the gate must fire before any step runs; the dispatcher was invoked %d time(s)", len(disp.calls))
+	}
+	if fake.called {
+		t.Error("a no-environment plan must not touch the ImageRunner")
+	}
+	if res.ContentHash != "" || len(res.Artifacts) != 0 {
+		t.Errorf("a fail-closed run must produce no result: %+v", res)
+	}
+}
+
+// TestRun_NoSeamPlanRunsOnNonAgentSurface proves the gate keys on seam presence,
+// not on the absence of a wired Seam alone: a deterministic (no-seam) plan runs
+// unchanged on the same non-agent surface (no Seam, not suspendable). This is
+// the load-bearing "deterministic plans keep running everywhere" guarantee.
+func TestRun_NoSeamPlanRunsOnNonAgentSurface(t *testing.T) {
+	fv := frozenNoSeam(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("no-seam", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "name\ncpu\n", "mimeType": "text/csv"}}, nil
+	})
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
+	}}
+	res, err := Run(context.Background(), Options{
+		Store:      s,
+		Name:       "no-seam",
+		Version:    "test",
+		Dispatcher: disp,
+		Approver:   &fakeApprover{decision: Decision{Approved: true}},
+		// Seam nil and Suspendable unset: the same non-agent surface. A
+		// deterministic plan must run here unchanged.
+		Clock:      FixedClock{},
+		Transforms: reg,
+		OutDir:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("a deterministic plan must run on a non-agent surface: %v", err)
+	}
+	if !strings.HasPrefix(res.ContentHash, "sha256:") {
+		t.Errorf("RunResult.ContentHash = %q, want the verified hash", res.ContentHash)
+	}
+}
+
+// TestRun_SeamPlanWithWiredSeamRunsOnAgentSurface proves the gate is inert on an
+// agent surface: the same seam plan, launched with a non-nil Seam (the CLI
+// `aileron launch` wiring), runs to completion. The gate keys on provider
+// absence, not merely on seam presence.
+func TestRun_SeamPlanWithWiredSeamRunsOnAgentSurface(t *testing.T) {
+	fv := frozenNoImage(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("no-exec-env", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "name\ncpu\n", "mimeType": "text/csv"}}, nil
+	})
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
+	}}
+	res, err := Run(context.Background(), Options{
+		Store:      s,
+		Name:       "no-exec-env",
+		Version:    "test",
+		Dispatcher: disp,
+		Approver:   &fakeApprover{decision: Decision{Approved: true}},
+		Seam:       fakeSeam{out: map[string]any{"issue_body": "x"}},
+		Clock:      FixedClock{},
+		Transforms: reg,
+		OutDir:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("a seam plan with a wired Seam must run on an agent surface: %v", err)
+	}
+	if !strings.HasPrefix(res.ContentHash, "sha256:") {
+		t.Errorf("RunResult.ContentHash = %q, want the verified hash", res.ContentHash)
+	}
+}
+
+// TestRun_SeamPlanSuspendableStaysInert proves the gate does not fire on the
+// daemon's suspendable surface: a seam plan with no wired Seam but Suspendable
+// set SUSPENDS (SuspendKindSeam) for the agent to fulfill via resume, rather
+// than failing closed. This is the third gate condition (`!opts.Suspendable`).
+func TestRun_SeamPlanSuspendableStaysInert(t *testing.T) {
+	fv := frozenNoImage(t)
+	s := store.New(t.TempDir())
+	if err := s.WriteFrozen("no-exec-env", fv); err != nil {
+		t.Fatalf("WriteFrozen: %v", err)
+	}
+	reg := NewTransformRegistry()
+	reg.Register("identity", func(b map[string]any, outs []string) (map[string]any, error) {
+		return map[string]any{outs[0]: map[string]any{"encoding": "utf-8", "content": "name\ncpu\n", "mimeType": "text/csv"}}, nil
+	})
+	disp := &dispatchRouter{results: map[string]map[string]any{
+		"aileron:metrics.query_series": {"series": []any{map[string]any{"name": "cpu"}}},
+		"aileron:tracker.create_issue": {"encoding": "utf-8", "content": "{}", "mimeType": "application/json"},
+	}}
+	res, err := Run(context.Background(), Options{
+		Store:       s,
+		Name:        "no-exec-env",
+		Version:     "test",
+		Dispatcher:  disp,
+		Approver:    &fakeApprover{decision: Decision{Approved: true}},
+		Suspendable: true, // the daemon surface: unfulfilled seam suspends, not fails
+		Clock:       FixedClock{},
+		Transforms:  reg,
+		OutDir:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("a suspendable seam launch must not fail closed: %v", err)
+	}
+	if res.Pending == nil {
+		t.Fatal("a suspendable seam launch with no wired Seam must SUSPEND, not complete")
+	}
+	if res.Pending.Kind != SuspendKindSeam {
+		t.Errorf("suspend kind = %v, want SuspendKindSeam", res.Pending.Kind)
+	}
+}
+
 // TestRun_DeniedApprovalAbortsAndAudits proves a denied write mid-run aborts
 // the run and the audit reflects the denial.
 func TestRun_DeniedApprovalAbortsAndAudits(t *testing.T) {

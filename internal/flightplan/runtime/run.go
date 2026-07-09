@@ -253,6 +253,40 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 	if hasWholePlanImage(lp.ResolvedImages) && !opts.InPinnedImage {
 		return runInImage(ctx, lp, opts)
 	}
+	// LLM-seam surface gate (#2102). A plan carrying a marked llm-seam step can
+	// only run on a surface that can fulfill the seam: an interactive agent
+	// context (`aileron launch`) wires a non-nil Seam, and the daemon HTTP door
+	// runs suspendable so an unfulfilled seam SUSPENDS for the agent to fulfill
+	// via resume. Every other surface (a plain `aileron skill launch` with no
+	// agent-backed provider) can neither wire a provider nor suspend, so a seam
+	// plan there would reach the mid-run runSeam nil-guard only after earlier
+	// deterministic steps already ran. This precondition fails such a launch
+	// CLOSED before any step runs, with a message that names the fulfilling
+	// surface.
+	//
+	// The gate keys on three conditions together:
+	//   - planHasSeamSteps(lp.Plan): the plan actually carries a seam.
+	//   - opts.Seam == nil: no provider is wired (an agent launch wires one, so
+	//     the gate is inert there — including the in-container image-boot
+	//     re-entry, where the agent passes a real Seam and in-process IS the
+	//     certified environment).
+	//   - !opts.Suspendable: this surface cannot suspend/resume. The daemon HTTP
+	//     handler sets Suspendable, so a seam plan there SUSPENDS (SuspendKindSeam)
+	//     for the agent, and the gate stays inert — that surface fulfills the seam
+	//     out of band, it does not fail closed.
+	//
+	// Placement is deliberate: this guards only the in-process runPlan branch,
+	// AFTER the image-boot branch. An image-pinning plan (the committed worked
+	// example pins an environment AND carries a seam) still boots (or hits the
+	// image nil-guard) exactly as before, so the existing image tests are
+	// unaffected. The daemon caller is internal/app/handlers_flightplans.go; it
+	// is a governed runtime.Run caller, but because it runs Suspendable the gate
+	// is inert for it and a seam plan suspends rather than failing closed.
+	if planHasSeamSteps(lp.Plan) && opts.Seam == nil && !opts.Suspendable {
+		return RunResult{}, fmt.Errorf(
+			"flightplan: plan %q contains an llm-seam step; it can only be launched from an interactive agent context (aileron launch), not this surface",
+			lp.Plan.Name)
+	}
 	return runPlan(ctx, lp.Plan, lp.ContentHash, lp.SignerFingerprint, lp.StepTrust, opts)
 }
 
@@ -260,6 +294,18 @@ func Run(ctx context.Context, opts Options) (RunResult, error) {
 func planHasToolSteps(plan *Plan) bool {
 	for _, s := range plan.Steps {
 		if s.Kind == KindTool {
+			return true
+		}
+	}
+	return false
+}
+
+// planHasSeamSteps reports whether the plan carries any `kind: llm-seam` step.
+// It mirrors planHasToolSteps and is the marker the surface gate (#2102) keys
+// on: the presence of a seam step is what makes a launch surface-sensitive.
+func planHasSeamSteps(plan *Plan) bool {
+	for _, s := range plan.Steps {
+		if s.Kind == KindLLMSeam {
 			return true
 		}
 	}
