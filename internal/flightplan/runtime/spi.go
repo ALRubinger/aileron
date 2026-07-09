@@ -69,17 +69,30 @@ type ApprovalRequest struct {
 	Args map[string]any
 }
 
-// Decision is an approval outcome.
+// Decision is an approval outcome. It is a closed three-way: approved, denied,
+// or pending. A zero Decision ({Approved:false, Pending:false}) is an explicit
+// deny. Pending:true means no decision has landed yet and the run must SUSPEND
+// at this step rather than block (#2100); the caller (the daemon, #2101) later
+// resumes with the memoized outputs once a decision is made. Approved and
+// Pending are mutually exclusive: a pending decision is neither approved nor
+// denied, so the enforcer short-circuits before dispatch and the effect never
+// fires.
 type Decision struct {
 	Approved bool
+	// Pending reports that no decision has landed yet, so the run suspends at
+	// this action-call instead of blocking. Mutually exclusive with Approved.
+	Pending bool
 	// Reason carries an optional human reason recorded in the audit on deny.
 	Reason string
 }
 
 // Approver routes an effect-gated action through the out-of-band approval
-// channel and blocks until a decision lands (ADR-0009). A read action never
-// reaches the Approver; the runtime calls it only for write/delete/spend/
-// external-send.
+// channel (ADR-0009). A read action never reaches the Approver; the runtime
+// calls it only for write/delete/spend/external-send. It has three outcomes:
+// approve (Decision.Approved), deny (a zero Decision or a Reason'd deny), and
+// pending (Decision.Pending) — the third suspends the run at this step rather
+// than blocking, so a decision that is not yet available parks the run instead
+// of holding the goroutine (#2100).
 type Approver interface {
 	Approve(ctx context.Context, req ApprovalRequest) (Decision, error)
 }
@@ -136,7 +149,8 @@ type AuditSink interface {
 	Record(ctx context.Context, rec AuditRecord) string
 }
 
-// SeamRequest is the input to the single marked LLM seam (the llm-seam step).
+// SeamRequest is the input to a marked LLM seam (an llm-seam step). A plan may
+// declare more than one seam (#2100); each is served by this same request shape.
 type SeamRequest struct {
 	StepID   string
 	Bindings map[string]any
@@ -144,10 +158,13 @@ type SeamRequest struct {
 	Outputs []string
 }
 
-// LLMSeam is the single marked non-deterministic seam (ADR-0027). It is the
-// ONLY interface in the runtime that may reach a language model. In v1 the
-// seam is unset by default, so an llm-seam step errors with "no seam provider
-// configured" and a default launch reaches no LLM at all. The action-call and
+// LLMSeam is a marked non-deterministic seam (ADR-0027, multi-seam per #2100).
+// It is the ONLY interface in the runtime that may reach a language model. A
+// plan may declare one or more llm-seam steps; every seam is structurally
+// marked and served through this one interface. In v1 the seam is unset by
+// default, so an llm-seam step errors with "no seam provider configured" and a
+// default launch reaches no LLM at all (the suspend/resume path, #2100, is the
+// opt-in alternative to a synchronously wired seam). The action-call and
 // transform branches hold no reference to this type, so no deterministic step
 // can reach an LLM by construction.
 type LLMSeam interface {

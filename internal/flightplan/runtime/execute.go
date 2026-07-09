@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
@@ -156,13 +157,31 @@ type executor struct {
 	// trust-contract copy on the Step is audit context, never the
 	// enforcement input. Nil/absent entries mean the step declares no reach.
 	stepTrust map[string]freeze.StepReach
+
+	// suspendable opts this walk into the generic suspend/resume path (#2100).
+	// When true, an unfulfilled llm-seam (nil seam and no memo entry) and a
+	// pending approval both SUSPEND the walk (return a suspendSignal) instead of
+	// erroring/blocking. When false, behavior is exactly as before: a nil seam is
+	// a hard error and a pending approval is impossible.
+	suspendable bool
+	// resumeOutputs is the caller-supplied memo (stepId → its outputs) replayed
+	// on resume (#2100). A step whose id is present is INJECTED without
+	// re-execution (exactly-once for effects) and re-audits nothing. Nil on a
+	// fresh launch.
+	resumeOutputs map[string]stepResult
 }
 
 // execute runs Phase B: it walks p.Order, executes each step against the
 // resolved inputs and accumulated step outputs, materializes declared
 // artifacts, and returns the final state. A step error aborts the walk (no
 // later step runs) and is returned to the caller.
-func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execState, error) {
+//
+// On the suspendable path (#2100), execute also injects already-memoized step
+// outputs (x.resumeOutputs) WITHOUT re-executing or re-auditing them, and
+// SUSPENDS at the first step it cannot complete in-band — an unfulfilled seam
+// or a pending approval — by returning a non-nil *suspendSignal (with a nil
+// error). A nil signal and nil error means the walk completed.
+func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execState, *suspendSignal, error) {
 	st := execState{
 		inputs:       inputs,
 		stepOutput:   map[string]stepResult{},
@@ -170,9 +189,31 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 	}
 	for _, idx := range x.plan.Order {
 		step := x.plan.Steps[idx]
+
+		// Memoized-replay (#2100): a step whose id is in the resume memo is
+		// INJECTED, not executed. Its output flows to downstream bindings, its
+		// materializing artifact is rebuilt (materialize is pure — it reads the
+		// memoized outputs), but no effect fires and no audit record is emitted
+		// (the call that actually ran the step already audited it). This is the
+		// soundness fix from residual #2107: because topoSort orders by data
+		// edges only, an effectful step can sit before a gated action, so seam-
+		// only memoization would re-run it on resume. Memoizing ALL outputs makes
+		// every step run exactly once across the whole suspend/resume sequence.
+		if memo, ok := x.resumeOutputs[step.ID]; ok {
+			if err := x.injectMemoized(step, memo, &st); err != nil {
+				return st, nil, err
+			}
+			continue
+		}
+
 		resolved, err := x.resolveBindings(step, st)
 		if err != nil {
-			return st, err
+			return st, nil, err
+		}
+
+		// Suspend BEFORE executing when this step cannot complete in-band.
+		if sig, suspend := x.suspendFor(ctx, step, resolved); suspend {
+			return st, sig, nil
 		}
 
 		var outputs map[string]any
@@ -193,7 +234,19 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 			err = fmt.Errorf("flightplan: step %q has unhandled kind %q", step.ID, step.Kind)
 		}
 		if err != nil {
-			return st, err
+			// On the suspendable path a pending approval surfaces as a sentinel
+			// error from runActionCall's dispatch; convert it to a suspend rather
+			// than a run failure. The effect never fired (dispatch short-circuits
+			// before Dispatch).
+			var pending *PendingApprovalError
+			if x.suspendable && errors.As(err, &pending) {
+				return st, &suspendSignal{
+					kind:     SuspendKindApproval,
+					stepID:   step.ID,
+					approval: &ApprovalRequest{ActionRef: pending.ActionRef, Effect: pending.Effect, Args: pending.Args},
+				}, nil
+			}
+			return st, nil, err
 		}
 
 		// Every declared output must be produced so downstream bindings
@@ -201,7 +254,7 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 		// transform are checked here.)
 		for _, name := range step.Outputs {
 			if _, ok := outputs[name]; !ok {
-				return st, fmt.Errorf("flightplan: step %q did not produce declared output %q", step.ID, name)
+				return st, nil, fmt.Errorf("flightplan: step %q did not produce declared output %q", step.ID, name)
 			}
 		}
 		st.stepOutput[step.ID] = stepResult(outputs)
@@ -210,7 +263,7 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 		if step.MaterializesOutput != "" {
 			art, err := materialize(x.plan, step, outputs)
 			if err != nil {
-				return st, err
+				return st, nil, err
 			}
 			st.artifacts = append(st.artifacts, art)
 			// Capture the artifact with its originating step's provenance. This
@@ -241,7 +294,57 @@ func (x *executor) execute(ctx context.Context, inputs ResolvedInputs) (execStat
 			})
 		}
 	}
-	return st, nil
+	return st, nil, nil
+}
+
+// injectMemoized replays a memoized step's output on resume (#2100): it seeds
+// st.stepOutput from the caller-supplied memo, runs the declared-output presence
+// check against the memoized value, and rebuilds a materializing step's artifact
+// (materialize is pure). It executes NOTHING (no effect fires) and audits
+// NOTHING: it does not append to st.dispatches, st.reaches, or st.outputs, so
+// emitAudit emits no record for an injected step and the exactly-once /
+// no-double-audit contract holds. The artifact IS appended to st.artifacts so
+// the final RunResult.Artifacts is whole after the completing resume; the audit
+// provenance list (st.outputs) is deliberately NOT appended, because the
+// output.materialized record was already emitted on the call that executed the
+// step.
+func (x *executor) injectMemoized(step Step, memo stepResult, st *execState) error {
+	for _, name := range step.Outputs {
+		if _, ok := memo[name]; !ok {
+			return fmt.Errorf("flightplan: resumed step %q memo is missing declared output %q", step.ID, name)
+		}
+	}
+	st.stepOutput[step.ID] = memo
+	if step.MaterializesOutput != "" {
+		art, err := materialize(x.plan, step, map[string]any(memo))
+		if err != nil {
+			return err
+		}
+		st.artifacts = append(st.artifacts, art)
+	}
+	return nil
+}
+
+// suspendFor decides whether the walk must SUSPEND at this step before executing
+// it (#2100), on the suspendable path only. It suspends at an llm-seam step that
+// has no wired seam value able to produce its output (a memo miss reached this
+// point, so the seam is unfulfilled). The pending-approval suspend is detected
+// AFTER dispatch (the approver is what returns pending), so it is handled at the
+// call site via the PendingApprovalError sentinel, not here. On the
+// non-suspendable path this returns (nil, false) so today's behavior — a nil
+// seam is a hard error inside runSeam — is preserved exactly.
+func (x *executor) suspendFor(_ context.Context, step Step, resolved map[string]any) (*suspendSignal, bool) {
+	if !x.suspendable {
+		return nil, false
+	}
+	if step.Kind == KindLLMSeam && x.seam == nil {
+		return &suspendSignal{
+			kind:   SuspendKindSeam,
+			stepID: step.ID,
+			seam:   &SeamRequest{StepID: step.ID, Bindings: resolved, Outputs: step.Outputs},
+		}, true
+	}
+	return nil, false
 }
 
 // toolCommandArgv returns the INSTANTIATED argv a tool step exec'd (the
@@ -279,6 +382,16 @@ func toolCommandDerived(step Step, st *execState) []int {
 func (x *executor) runActionCall(ctx context.Context, step Step, args map[string]any, st *execState) (map[string]any, error) {
 	action := x.plan.Actions[step.ActionRef]
 	outcome, err := x.enforcer.dispatch(ctx, "step:"+step.ID, action, args, 1)
+	// A pending approval (#2100) is NOT a decision and NOT an executed dispatch:
+	// the run will SUSPEND here and resume later, at which point this step
+	// dispatches for real and records exactly one dispatch. Returning before the
+	// dispatch record is appended keeps the audit exactly-once across the whole
+	// suspend/resume sequence (no pending row now, no double row on resume) and
+	// emits no deny record (a pending is neither approved nor denied).
+	var pending *PendingApprovalError
+	if errors.As(err, &pending) {
+		return nil, err
+	}
 	// Record the dispatch even on a deny so the audit reflects the denial.
 	rec := actionDispatch{
 		StepID:            step.ID,

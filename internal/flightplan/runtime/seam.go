@@ -5,11 +5,13 @@ import (
 	"fmt"
 )
 
-// runSeam executes the single marked llm-seam step. It is the ONLY place the
-// runtime reaches the LLMSeam interface. When no seam provider is configured
-// (the v1 default), it errors with a clear "no seam provider configured"
-// message, so a default launch reaches no LLM at all and the no-LLM guarantee
-// holds by default, not merely by construction.
+// runSeam executes a marked llm-seam step (a plan may declare more than one,
+// #2100). It is the ONLY place the runtime reaches the LLMSeam interface. When
+// no seam provider is configured (the v1 default) on the non-suspendable path,
+// it errors with a clear "no seam provider configured" message, so a default
+// launch reaches no LLM at all and the no-LLM guarantee holds by default, not
+// merely by construction. On the suspendable path an unfulfilled seam suspends
+// the run before reaching this function (see executor.suspendFor).
 //
 // Keeping seam invocation in this dedicated function, distinct from the
 // transform and action-call paths, is the structural guarantee: the
