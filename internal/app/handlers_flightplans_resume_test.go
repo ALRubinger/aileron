@@ -143,6 +143,85 @@ aileron:
 # Two Seam Fixture
 `
 
+// seamSourceBindingPlanMD is a one-seam plan whose seam binds BOTH a non-source
+// step output (steps.read.series) AND a source-rule input (inputs.dataset,
+// resolved from an action-call read). The seam sends the whole bindings map to
+// the agent, but the flightplan.launch.seam audit record must exclude the
+// source binding's inline dataset per the ADR-0027 audit boundary (#2119).
+const seamSourceBindingPlanMD = `---
+name: seam-source-fixture
+description: A one-seam plan whose seam binds a source input plus a step output.
+license: Apache-2.0
+aileron:
+  schemaVersion: aileron.flightplan.v1
+  requires:
+    actions:
+      - ref: aileron:metrics.query_series
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+            idempotencyKey: false
+          audit:
+            fields:
+              - operation-effect
+              - result
+            sink: audit/reads
+      - ref: aileron:metrics.load_dataset
+        trustContract:
+          credential:
+            kind: none
+          hosts:
+            - api.example.com
+          effect: read
+          idempotency:
+            safeToRetry: true
+            idempotencyKey: false
+          audit:
+            fields:
+              - operation-effect
+              - result
+            sink: audit/reads
+  inputs:
+    - name: dataset
+      type: object
+      description: A source-resolved dataset the seam binds.
+      resolution:
+        rule: source
+        source:
+          actionRef: aileron:metrics.load_dataset
+          select: rows
+  outputs:
+    - name: summary.json
+      mimeType: application/json
+      encoding: utf-8
+      publish:
+        target: file
+        path: summary.json
+  steps:
+    - id: read
+      kind: action-call
+      actionRef: aileron:metrics.query_series
+      outputs:
+        - series
+    - id: summarize
+      kind: llm-seam
+      model: anthropic:claude-haiku-4-5
+      bindings:
+        series: steps.read.series
+        dataset: inputs.dataset
+      outputs:
+        - summary
+      materializesOutput: summary.json
+---
+
+# Seam Source Fixture
+`
+
 // mixedPlanMD chains a gated write action → a read action → an llm-seam, so a
 // launch suspends first at the gate (202), then at the seam (seam_pending), then
 // completes. The write is topologically before the read + seam, so a naive
@@ -601,9 +680,11 @@ func TestResumeFlightPlan_DeniedApprovalFailsClosed(t *testing.T) {
 }
 
 // TestLaunchFlightPlan_SeamAuditRecordsModelAndBindings (R8): a completed seam
-// run's audit trail carries the seam step's outputs, and each real step is
-// recorded exactly once across the suspend/resume sequence (no double-audit).
-func TestLaunchFlightPlan_SeamAuditNoDoubleRecord(t *testing.T) {
+// run's audit trail carries exactly one flightplan.launch.seam record for the
+// seam step, stamped with the seam's model hint and its non-source bindings, and
+// each real step is recorded exactly once across the suspend/resume sequence (no
+// double-audit).
+func TestLaunchFlightPlan_SeamAuditRecordsModelAndBindings(t *testing.T) {
 	fv := freezeFixture(t, oneSeamPlanMD)
 	exec := &flightplanRecordingExecutor{results: map[string]string{"query_series": `{"series":[1,2,3]}`}}
 	srv, auditStore := newFlightPlanTestServer(t, "one-seam-fixture", fv, exec)
@@ -625,12 +706,15 @@ func TestLaunchFlightPlan_SeamAuditNoDoubleRecord(t *testing.T) {
 	}
 	actionRecords := 0
 	launchSummaries := 0
+	var seamRecords []audit.Event
 	for _, ev := range events {
 		switch ev.EventType {
 		case model.EventTypeFlightPlanLaunchAction:
 			actionRecords++
 		case model.EventTypeFlightPlanLaunch:
 			launchSummaries++
+		case model.EventTypeFlightPlanLaunchSeam:
+			seamRecords = append(seamRecords, ev)
 		}
 	}
 	if actionRecords != 1 {
@@ -639,6 +723,184 @@ func TestLaunchFlightPlan_SeamAuditNoDoubleRecord(t *testing.T) {
 	// Exactly one per-launch summary, emitted by the terminal (completing) resume.
 	if launchSummaries != 1 {
 		t.Errorf("per-launch summary records = %d, want exactly 1", launchSummaries)
+	}
+	// Exactly one flightplan.launch.seam record, carrying the model + bindings.
+	if len(seamRecords) != 1 {
+		t.Fatalf("seam audit records = %d, want exactly 1", len(seamRecords))
+	}
+	ev := seamRecords[0]
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != flightPlanLaunchActor {
+		t.Errorf("seam record actor = %+v, want service/%s", ev.Actor, flightPlanLaunchActor)
+	}
+	if ev.Payload["aileron.seam.step_id"] != "summarize" {
+		t.Errorf("seam step_id = %v, want summarize", ev.Payload["aileron.seam.step_id"])
+	}
+	if ev.Payload["aileron.seam.model"] != "anthropic:claude-haiku-4-5" {
+		t.Errorf("seam model = %v, want anthropic:claude-haiku-4-5", ev.Payload["aileron.seam.model"])
+	}
+	binds, ok := ev.Payload["aileron.seam.bindings"].(map[string]any)
+	if !ok {
+		t.Fatalf("seam bindings = %v (%T), want map", ev.Payload["aileron.seam.bindings"], ev.Payload["aileron.seam.bindings"])
+	}
+	if _, present := binds["series"]; !present {
+		t.Errorf("seam bindings missing the non-source BindStep binding %q; got %v", "series", binds)
+	}
+}
+
+// countSeamAuditEvents returns the flightplan.launch.seam records grouped by
+// their seam step id, so a test can assert one record per distinct seam step.
+func countSeamAuditEvents(t *testing.T, store *audit.MemStore) map[string]int {
+	t.Helper()
+	events, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	byStep := map[string]int{}
+	for _, ev := range events {
+		if ev.EventType != model.EventTypeFlightPlanLaunchSeam {
+			continue
+		}
+		stepID, _ := ev.Payload["aileron.seam.step_id"].(string)
+		byStep[stepID]++
+	}
+	return byStep
+}
+
+// TestLaunchFlightPlan_SeamAuditNoDoubleOnEmptyResume: an empty-body resume while
+// the same seam is still unfulfilled re-walks and re-suspends the same step, but
+// the daemon's AuditedSeams stamp keeps exactly one flightplan.launch.seam record
+// for that step (#2119).
+func TestLaunchFlightPlan_SeamAuditNoDoubleOnEmptyResume(t *testing.T) {
+	fv := freezeFixture(t, oneSeamPlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{"query_series": `{"series":[1,2,3]}`}}
+	srv, auditStore := newFlightPlanTestServer(t, "one-seam-fixture", fv, exec)
+
+	seam := decodeSeam(t, launch(t, srv, "one-seam-fixture", nil))
+	if got := countSeamAuditEvents(t, auditStore)["summarize"]; got != 1 {
+		t.Fatalf("seam records after launch = %d, want 1", got)
+	}
+
+	// Resume with an empty body: the seam is still unfulfilled, so the run
+	// re-suspends at the same step. No new seam record must be emitted.
+	rec := resume(t, srv, seam.RunId, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty-body resume status = %d, want 200 seam_pending; body=%s", rec.Code, rec.Body.String())
+	}
+	reSeam := decodeSeam(t, rec)
+	if reSeam.Seam.StepId != "summarize" {
+		t.Fatalf("re-suspend step = %q, want summarize", reSeam.Seam.StepId)
+	}
+	if got := countSeamAuditEvents(t, auditStore)["summarize"]; got != 1 {
+		t.Errorf("seam records after empty re-suspend = %d, want exactly 1 (no double-audit)", got)
+	}
+}
+
+// TestLaunchFlightPlan_TwoSeamsAuditOnePerStep: a two-seam plan emits exactly one
+// flightplan.launch.seam record per distinct seam step across the
+// suspend→resume→suspend→resume sequence — both present, neither duplicated.
+func TestLaunchFlightPlan_TwoSeamsAuditOnePerStep(t *testing.T) {
+	fv := freezeFixture(t, twoSeamPlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{"query_series": `{"series":[1,2,3]}`}}
+	srv, auditStore := newFlightPlanTestServer(t, "two-seam-fixture", fv, exec)
+
+	seam := decodeSeam(t, launch(t, srv, "two-seam-fixture", nil))
+	runID := seam.RunId
+	if seam.Seam.StepId != "seam_a" {
+		t.Fatalf("first suspend step = %q, want seam_a", seam.Seam.StepId)
+	}
+
+	rec := resume(t, srv, runID, api.FlightPlanResumeRequest{
+		Outputs: &map[string]map[string]interface{}{"seam_a": {"summary": "S"}},
+	})
+	seam = decodeSeam(t, rec)
+	if seam.Seam.StepId != "seam_b" {
+		t.Fatalf("second suspend step = %q, want seam_b", seam.Seam.StepId)
+	}
+
+	bodyFileMap := `{"path":"body.json","mimeType":"application/json","encoding":"utf-8","content":"{\"body\":\"done\"}"}`
+	rec = resume(t, srv, runID, api.FlightPlanResumeRequest{
+		Outputs: &map[string]map[string]interface{}{"seam_b": {"body": bodyFileMap}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("final resume status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	byStep := countSeamAuditEvents(t, auditStore)
+	if byStep["seam_a"] != 1 {
+		t.Errorf("seam_a records = %d, want exactly 1", byStep["seam_a"])
+	}
+	if byStep["seam_b"] != 1 {
+		t.Errorf("seam_b records = %d, want exactly 1", byStep["seam_b"])
+	}
+	if len(byStep) != 2 {
+		t.Errorf("distinct seam steps recorded = %d, want 2 (seam_a, seam_b); got %v", len(byStep), byStep)
+	}
+}
+
+// TestLaunchFlightPlan_SeamAuditExcludesSourceBinding: a seam that binds a
+// source-rule input inline-carries that dataset to the agent, but the
+// flightplan.launch.seam record excludes the source binding (ADR-0027 audit
+// boundary) while keeping the non-source step-output binding (#2119).
+func TestLaunchFlightPlan_SeamAuditExcludesSourceBinding(t *testing.T) {
+	fv := freezeFixture(t, seamSourceBindingPlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{
+		"query_series": `{"series":[1,2,3]}`,
+		"load_dataset": `{"rows":[{"secret":"do-not-audit"}]}`,
+	}}
+	srv, auditStore := newFlightPlanTestServer(t, "seam-source-fixture", fv, exec)
+
+	seam := decodeSeam(t, launch(t, srv, "seam-source-fixture", nil))
+	if seam.Seam.StepId != "summarize" {
+		t.Fatalf("suspend step = %q, want summarize", seam.Seam.StepId)
+	}
+	// The agent still receives the full bindings, source dataset included.
+	if seam.Seam.Bindings == nil {
+		t.Fatal("seam_pending must carry the full bindings to the agent")
+	}
+	if _, present := (*seam.Seam.Bindings)["dataset"]; !present {
+		t.Errorf("agent bindings must include the source binding %q; got %v", "dataset", *seam.Seam.Bindings)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var seamRecords []audit.Event
+	for _, ev := range events {
+		if ev.EventType == model.EventTypeFlightPlanLaunchSeam {
+			seamRecords = append(seamRecords, ev)
+		}
+	}
+	if len(seamRecords) != 1 {
+		t.Fatalf("seam audit records = %d, want exactly 1", len(seamRecords))
+	}
+	binds, ok := seamRecords[0].Payload["aileron.seam.bindings"].(map[string]any)
+	if !ok {
+		t.Fatalf("seam bindings = %v (%T), want map", seamRecords[0].Payload["aileron.seam.bindings"], seamRecords[0].Payload["aileron.seam.bindings"])
+	}
+	if _, present := binds["dataset"]; present {
+		t.Errorf("seam audit bindings must EXCLUDE the source binding %q; got %v", "dataset", binds)
+	}
+	if _, present := binds["series"]; !present {
+		t.Errorf("seam audit bindings must include the non-source binding %q; got %v", "series", binds)
+	}
+}
+
+// TestLaunchFlightPlan_SeamAuditNilRecorder: a daemon with no configured audit
+// recorder still suspends the seam cleanly and simply emits no seam record (the
+// best-effort discipline: audit is a companion, never a hard dependency).
+func TestLaunchFlightPlan_SeamAuditNilRecorder(t *testing.T) {
+	fv := freezeFixture(t, oneSeamPlanMD)
+	exec := &flightplanRecordingExecutor{results: map[string]string{"query_series": `{"series":[1,2,3]}`}}
+	srv, auditStore := newFlightPlanTestServer(t, "one-seam-fixture", fv, exec)
+	srv.auditRecorder = nil
+
+	seam := decodeSeam(t, launch(t, srv, "one-seam-fixture", nil))
+	if seam.Seam.StepId != "summarize" {
+		t.Fatalf("suspend step = %q, want summarize", seam.Seam.StepId)
+	}
+	if got := countSeamAuditEvents(t, auditStore); len(got) != 0 {
+		t.Errorf("seam records with nil recorder = %v, want none", got)
 	}
 }
 

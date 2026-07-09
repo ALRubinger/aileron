@@ -439,7 +439,7 @@ func (s *apiServer) runOrResume(w http.ResponseWriter, r *http.Request, rec flig
 	}
 
 	if res.Pending != nil {
-		s.writeFlightPlanPending(w, rec, res)
+		s.writeFlightPlanPending(w, r, rec, res)
 		return
 	}
 
@@ -453,7 +453,7 @@ func (s *apiServer) runOrResume(w http.ResponseWriter, r *http.Request, rec flig
 // writeFlightPlanPending stores/updates the run record with the suspend's
 // accumulated memo and writes the matching pending envelope: 200 seam_pending
 // for a seam suspend, 202 pending_approval for an approval suspend.
-func (s *apiServer) writeFlightPlanPending(w http.ResponseWriter, rec flightPlanRunRecord, res runtime.RunResult) {
+func (s *apiServer) writeFlightPlanPending(w http.ResponseWriter, r *http.Request, rec flightPlanRunRecord, res runtime.RunResult) {
 	pending := res.Pending
 	runID := pending.RunID
 
@@ -462,16 +462,25 @@ func (s *apiServer) writeFlightPlanPending(w http.ResponseWriter, rec flightPlan
 	// The approver may already have recorded an approval linkage on rec.Approvals
 	// during this call (a first-reach gated action), so carry it forward.
 	stored := &flightPlanRunRecord{
-		Name:      rec.Name,
-		Version:   rec.Version,
-		Inputs:    rec.Inputs,
-		Outputs:   pending.StepOutputs,
-		Approvals: rec.Approvals,
+		Name:         rec.Name,
+		Version:      rec.Version,
+		Inputs:       rec.Inputs,
+		Outputs:      pending.StepOutputs,
+		Approvals:    rec.Approvals,
+		AuditedSeams: rec.AuditedSeams,
 	}
 	s.flightPlanRuns.Put(runID, stored)
 
 	switch pending.Kind {
 	case runtime.SuspendKindSeam:
+		// Emit the flightplan.launch.seam audit record (#2119) exactly once per
+		// distinct seam step. The daemon owns the run record, so it is the only
+		// layer that can dedupe across suspend/resume calls: an empty-body resume
+		// while still seam-suspended re-walks and re-suspends the same step, and
+		// the AuditedSeams stamp guards against re-emitting for it. This is
+		// best-effort (a record/verify error must not fail the launch), matching
+		// the audit sink's own best-effort discipline (ADR-0010).
+		s.recordSeamAudit(r, stored, pending.Seam)
 		writeJSON(w, http.StatusOK, flightPlanSeamPendingResponse(runID, pending.Seam))
 	case runtime.SuspendKindApproval:
 		// The approval id was recorded on the run record by the approver during
@@ -525,6 +534,67 @@ func flightPlanSeamPendingResponse(runID string, seam *runtime.SeamRequest) api.
 		out.Seam = sr
 	}
 	return out
+}
+
+// recordSeamAudit writes the flightplan.launch.seam audit record for a seam
+// suspend, once per distinct seam step id in this run (#2119). It is a no-op
+// when the seam is absent, the recorder is unwired, or the step was already
+// recorded (an empty-body re-suspend of the same still-unfulfilled seam). It
+// loads and verifies the plan to filter the seam's bindings to the non-source
+// subset (the source-input inline dataset is excluded per the ADR-0027 audit
+// boundary) and to derive the plan provenance. It is best-effort: a load,
+// build, or record failure must not fail the launch, so it returns without
+// stamping the seam so a later suspend may retry, matching the audit sink's own
+// best-effort discipline (ADR-0010).
+func (s *apiServer) recordSeamAudit(r *http.Request, stored *flightPlanRunRecord, seam *runtime.SeamRequest) {
+	if seam == nil || s.auditRecorder == nil {
+		return
+	}
+	if stored.AuditedSeams != nil && stored.AuditedSeams[seam.StepID] {
+		return
+	}
+	loaded, err := runtime.LoadVerified(s.flightPlanStore, stored.Name, stored.Version)
+	if err != nil {
+		// Best-effort: a verify failure here does not fail the suspended launch.
+		// Leave the seam unstamped so a subsequent suspend may retry the emit.
+		return
+	}
+	payload := flightplanSeamAuditPayload(loaded, seam)
+	rec := runtime.AuditRecord{Kind: runtime.RecordKindSeam, Fields: payload}
+	eventType, evPayload := flightplanAuditEvent(rec)
+	actor := model.ActorRef{Type: model.ActorTypeService, ID: flightPlanLaunchActor}
+	if _, err := s.auditRecorder.RecordEvent(r.Context(), eventType, actor, evPayload); err != nil {
+		// Best-effort append: leave the seam unstamped so a later suspend retries.
+		return
+	}
+	if stored.AuditedSeams == nil {
+		stored.AuditedSeams = map[string]bool{}
+	}
+	stored.AuditedSeams[seam.StepID] = true
+}
+
+// flightplanSeamAuditPayload builds the flat `aileron.*` payload for a
+// flightplan.launch.seam record (#2119): the seam step id, the recorded model
+// hint (omitted when empty, mirroring the omit-rather-than-guess discipline),
+// the seam's non-source resolved bindings (the ADR-0027 audit boundary drops a
+// source-input's inline dataset), and the plan provenance the daemon derives
+// truthfully from the verified plan (skill name + content hash, each omitted
+// when empty).
+func flightplanSeamAuditPayload(loaded runtime.LoadedPlan, seam *runtime.SeamRequest) map[string]any {
+	payload := map[string]any{
+		"aileron.seam.step_id":  seam.StepID,
+		"aileron.seam.bindings": runtime.NonSourceSeamBindings(loaded.Plan, seam.StepID, seam.Bindings),
+	}
+	if seam.Model != "" {
+		payload["aileron.seam.model"] = seam.Model
+	}
+	if loaded.Plan != nil && loaded.Plan.Name != "" {
+		payload["aileron.plan.skill"] = loaded.Plan.Name
+	}
+	if loaded.ContentHash != "" {
+		payload["aileron.plan.content_hash"] = loaded.ContentHash
+	}
+	return payload
 }
 
 // writeFlightPlanLaunchError maps a runtime.Run error onto an ADR-0010
@@ -833,6 +903,7 @@ func (s *flightplanAuditSink) Record(ctx context.Context, rec runtime.AuditRecor
 //   - RecordKindLaunch  → flightplan.launch, flat aileron.* fields
 //   - RecordKindOutput  → output.materialized, flat aileron.* fields
 //   - RecordKindReach   → flightplan.launch.reach, flat aileron.* fields
+//   - RecordKindSeam    → flightplan.launch.seam, flat aileron.* fields
 //
 // The flat-vs-nested split matches #1928: output/reach/launch records surface
 // their aileron.* map as the top-level payload so the invocation filter and the
@@ -844,6 +915,8 @@ func flightplanAuditEvent(rec runtime.AuditRecord) (model.EventType, map[string]
 		return model.EventTypeOutputMaterialized, flatOrEmpty(rec.Fields)
 	case runtime.RecordKindReach:
 		return model.EventTypeFlightPlanLaunchReach, flatOrEmpty(rec.Fields)
+	case runtime.RecordKindSeam:
+		return model.EventTypeFlightPlanLaunchSeam, flatOrEmpty(rec.Fields)
 	case runtime.RecordKindLaunch:
 		return model.EventTypeFlightPlanLaunch, flatOrEmpty(rec.Fields)
 	default: // runtime.RecordKindAction
