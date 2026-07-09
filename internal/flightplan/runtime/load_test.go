@@ -96,6 +96,99 @@ func frozenNoImage(t *testing.T) store.FrozenVersion {
 	}
 }
 
+// frozenNoSeam freezes a no-environment, no-seam variant of the worked example:
+// the `environment` block is stripped (so freeze pins no image and the run
+// stays in-process) AND the `summarize` llm-seam step is removed, with
+// `file_issue`'s dangling `body: steps.summarize.issue_body` binding rewired
+// onto the surviving deterministic `render_csv.csv` output so the frozen plan
+// still decodes (a naive seam-step delete would leave a dangling binding
+// freeze/decode rejects). The result is a fully deterministic plan that runs on
+// every surface, including a non-agent one, which is what the surface gate
+// (#2102) must leave untouched.
+func frozenNoSeam(t *testing.T) store.FrozenVersion {
+	t.Helper()
+	keyPath := writeSigningKey(t)
+
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "schema", "flight-plan-manifest.example.skill.md"))
+	if err != nil {
+		t.Fatalf("read worked example: %v", err)
+	}
+	stripped := stripEnvironment(t, string(raw))
+	deSeamed := stripSeamRewireBinding(t, stripped)
+
+	res, err := freeze.Run(context.Background(), []byte(deSeamed), freeze.Options{
+		Version:        "1.0.0",
+		SigningKeyPath: keyPath,
+	})
+	if err != nil {
+		t.Fatalf("freeze.Run no-seam variant: %v", err)
+	}
+	return store.FrozenVersion{
+		ID:        "test",
+		SkillMD:   res.FrozenManifest,
+		Lockfile:  res.Lockfile,
+		Signature: res.Signature,
+		PublicKey: res.PublicKey,
+	}
+}
+
+// stripSeamRewireBinding removes the worked example's `summarize` llm-seam step
+// and rewires the `file_issue` action-call's `body` binding off the deleted
+// seam output onto the surviving `render_csv.csv` output. It drops the seam
+// step by the same 4-space list-item indent boundary stripEnvironment uses for
+// its block, then does a targeted string replacement on the one dangling
+// binding. It fails the test if either surgery does not apply, so a change to
+// the worked example that breaks this assumption is caught rather than silently
+// producing a seam-carrying fixture.
+func stripSeamRewireBinding(t *testing.T, md string) string {
+	t.Helper()
+	lines := strings.Split(md, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	dropped := false
+	for _, ln := range lines {
+		if !skipping {
+			// The `summarize` step header is a list item at 4-space indent
+			// (`    - id: summarize`). Drop from it until the next line at the
+			// same-or-shallower list-item indent.
+			if strings.TrimSpace(ln) == "- id: summarize" {
+				skipping = true
+				dropped = true
+				continue
+			}
+			out = append(out, ln)
+			continue
+		}
+		trimmed := strings.TrimLeft(ln, " ")
+		indent := len(ln) - len(trimmed)
+		// A blank line or a line indented deeper than the list item (4 spaces)
+		// is a child of the seam step; the next list item at 4-space indent ends
+		// it.
+		if trimmed == "" || indent > 4 {
+			continue
+		}
+		skipping = false
+		out = append(out, ln)
+	}
+	if !dropped {
+		t.Fatalf("stripSeamRewireBinding: did not find the summarize seam step to drop")
+	}
+	res := strings.Join(out, "\n")
+	// Guard on the step declaration specifically. The manifest's prose body
+	// mentions "(llm-seam)" in describing the step, so a bare "llm-seam"
+	// substring check would false-positive on the surviving narrative.
+	if strings.Contains(res, "kind: llm-seam") {
+		t.Fatalf("stripSeamRewireBinding left an llm-seam step in place")
+	}
+	// Rewire the one dangling binding onto a surviving deterministic output.
+	const dangling = "body: steps.summarize.issue_body"
+	if !strings.Contains(res, dangling) {
+		t.Fatalf("stripSeamRewireBinding: expected file_issue to bind %q", dangling)
+	}
+	res = strings.Replace(res, dangling, "body: steps.render_csv.csv", 1)
+	return res
+}
+
 // stripEnvironment removes the `environment:` mapping (and its indented
 // children) from the worked-example frontmatter, leaving a valid
 // no-environment manifest. It drops the block by 2-space indent boundary:

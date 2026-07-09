@@ -418,6 +418,15 @@ func (s *apiServer) runOrResume(w http.ResponseWriter, r *http.Request, rec flig
 		// environment image or declares tool steps errors via the runtime's own
 		// nil-guards. The LLM seam is nil so an unfulfilled seam SUSPENDS
 		// (SuspendKindSeam) rather than erroring — the agent is the provider.
+		//
+		// The runtime's llm-seam surface gate (#2102) is INERT for this caller:
+		// it fires only when the seam is unwired AND the run is not suspendable,
+		// and this endpoint sets Suspendable above. So a seam plan here suspends
+		// for the agent to fulfill via resume; it does not fail closed. That gate
+		// governs the plain non-agent surface (a bare `aileron skill launch` with
+		// no agent-backed provider), where a seam plan fails closed at the Run
+		// precondition and surfaces through writeFlightPlanLaunchError as a
+		// runtime-boundary FailureEnvelope.
 	})
 	if err != nil {
 		// A denied approval (or any other runtime error) on this call is terminal:

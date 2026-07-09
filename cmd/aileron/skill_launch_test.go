@@ -254,6 +254,53 @@ func stripEnvironmentBlock(t *testing.T, md string) string {
 	return res
 }
 
+// stripSeamStepRewireBinding removes the worked example's `summarize` llm-seam
+// step and rewires the `file_issue` action-call's `body` binding off the
+// deleted seam output onto the surviving deterministic `render_csv.csv` output,
+// producing a fully deterministic no-seam variant. A naive seam-step delete
+// leaves a dangling `steps.summarize.issue_body` binding that freeze rejects, so
+// the rewire is required. It fails the test if either surgery does not apply.
+func stripSeamStepRewireBinding(t *testing.T, md string) string {
+	t.Helper()
+	lines := strings.Split(md, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	dropped := false
+	for _, ln := range lines {
+		if !skipping {
+			// The `summarize` step is a list item at 4-space indent
+			// (`    - id: summarize`). Drop from it until the next list item at the
+			// same-or-shallower indent.
+			if strings.TrimSpace(ln) == "- id: summarize" {
+				skipping = true
+				dropped = true
+				continue
+			}
+			out = append(out, ln)
+			continue
+		}
+		trimmed := strings.TrimLeft(ln, " ")
+		indent := len(ln) - len(trimmed)
+		if trimmed == "" || indent > 4 {
+			continue
+		}
+		skipping = false
+		out = append(out, ln)
+	}
+	if !dropped {
+		t.Fatal("stripSeamStepRewireBinding: did not find the summarize seam step")
+	}
+	res := strings.Join(out, "\n")
+	if strings.Contains(res, "kind: llm-seam") {
+		t.Fatal("stripSeamStepRewireBinding left an llm-seam step in place")
+	}
+	const dangling = "body: steps.summarize.issue_body"
+	if !strings.Contains(res, dangling) {
+		t.Fatalf("stripSeamStepRewireBinding: expected file_issue to bind %q", dangling)
+	}
+	return strings.Replace(res, dangling, "body: steps.render_csv.csv", 1)
+}
+
 // TestRunSkillLaunch_BootsPinnedEnvironmentImage proves the acceptance
 // property: the worked example declares environment tools, so its verified
 // lock pins a composed image carrying a bootable local-daemon tag (#1856).

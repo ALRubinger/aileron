@@ -198,6 +198,13 @@ func freezeRequiredInputForLaunch(t *testing.T, storeDir string) {
 		t.Fatal(err)
 	}
 	stripped := stripEnvironmentBlock(t, string(raw))
+	// Remove the llm-seam step so this fixture isolates the input-resolution
+	// fail-fast path. The worked example carries a `summarize` llm-seam step, and
+	// the runtime's surface gate (#2102) fails a seam plan closed on a non-agent
+	// surface BEFORE input resolution runs. This test drives the required-input
+	// path, not the seam gate, so it removes the seam (and rewires the dangling
+	// binding) to keep the plan deterministic.
+	stripped = stripSeamStepRewireBinding(t, stripped)
 	// Remove the window_days default so it becomes a required-no-default literal.
 	required := strings.Replace(stripped, "\n        default: 7", "", 1)
 	if required == stripped {
