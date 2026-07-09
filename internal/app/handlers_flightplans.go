@@ -11,7 +11,9 @@ import (
 
 	"sort"
 
+	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/flightplan/manifest"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -247,29 +249,273 @@ func (s *apiServer) LaunchFlightPlan(w http.ResponseWriter, r *http.Request, nam
 		inputs = runtime.LaunchArgs(*req.Inputs)
 	}
 
-	res, err := runtime.Run(r.Context(), runtime.Options{
-		Store:   s.flightPlanStore,
+	// A fresh launch owns no run id yet (the runtime mints one on the first
+	// suspend) and carries no accumulated memo. runOrResume drives the run and
+	// branches on completion vs. suspend, storing the run record on a suspend and
+	// deleting it on a terminal outcome.
+	s.runOrResume(w, r, flightPlanRunRecord{
 		Name:    name,
 		Version: version,
 		Inputs:  inputs,
+	}, "")
+}
+
+// ResumeFlightPlan resumes a Flight Plan run that suspended mid-plan (#2101),
+// keyed by the server-minted run id. It reads the in-memory run record, merges
+// any newly-supplied seam outputs into the accumulated memo, and replays the run
+// through the runtime with that memo (exactly-once for effects). The response
+// mirrors launch: 200 completed / 200 seam_pending / 202 pending_approval, with
+// a denied approval failing the run closed (403) and a terminal outcome deleting
+// the record.
+func (s *apiServer) ResumeFlightPlan(w http.ResponseWriter, r *http.Request, runID string) {
+	if s.vaultLocked {
+		writeVaultLocked(w)
+		return
+	}
+	if s.flightPlanStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "flight plan store not configured")
+		return
+	}
+	if s.executor == nil {
+		writeError(w, http.StatusInternalServerError, "executor_unavailable", "action executor not configured")
+		return
+	}
+
+	// Decode the optional resume body. An empty body is valid (an approval-driven
+	// resume supplies no outputs); a malformed body is a 400.
+	var req api.FlightPlanResumeRequest
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil {
+			if !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+				return
+			}
+		} else if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+			return
+		}
+	}
+
+	rec, ok := s.flightPlanRuns.Get(runID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found",
+			"run id is unknown or expired (the run registry is in-memory; a daemon restart orphans in-flight runs)")
+		return
+	}
+
+	// Merge seam outputs supplied on this resume into the accumulated memo before
+	// replay. Validate they name the suspended seam's declared outputs so a
+	// malformed resume fails before touching the runtime.
+	var resumeOutputs map[string]map[string]any
+	if req.Outputs != nil {
+		resumeOutputs = normalizeResumeOutputs(*req.Outputs)
+		if err := s.validateSeamResumeOutputs(rec, resumeOutputs); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_resume_outputs", err.Error())
+			return
+		}
+		s.flightPlanRuns.MergeOutputs(runID, resumeOutputs)
+	}
+
+	// Re-read the record so the merged memo is visible, then replay. The registry
+	// is shared and in-memory: a racing resume/completion could have deleted the
+	// record between the first Get and here, so re-check ok rather than
+	// dereferencing a possibly-nil pointer.
+	rec, ok = s.flightPlanRuns.Get(runID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found",
+			"run id is unknown or expired (the run registry is in-memory; a daemon restart orphans in-flight runs)")
+		return
+	}
+	s.runOrResume(w, r, *rec, runID)
+}
+
+// normalizeResumeOutputs deep-copies the API resume-outputs shape
+// (stepId → outputName → value) into the runtime's memo shape so the stored
+// record never aliases the request body.
+func normalizeResumeOutputs(in map[string]map[string]any) map[string]map[string]any {
+	out := make(map[string]map[string]any, len(in))
+	for step, named := range in {
+		cp := make(map[string]any, len(named))
+		for k, v := range named {
+			cp[k] = v
+		}
+		out[step] = cp
+	}
+	return out
+}
+
+// validateSeamResumeOutputs checks that resume outputs name the run's currently
+// suspended seam step and carry exactly its declared outputs. It loads the plan
+// to read the suspended step's declared output names. A resume that supplies
+// outputs for a step that is not an llm-seam, or omits/adds a declared output,
+// is a 400 (the malformed resume fails before replay).
+func (s *apiServer) validateSeamResumeOutputs(rec *flightPlanRunRecord, outputs map[string]map[string]any) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	loaded, err := runtime.LoadVerified(s.flightPlanStore, rec.Name, rec.Version)
+	if err != nil {
+		return fmt.Errorf("cannot verify plan to validate resume outputs: %v", err)
+	}
+	declared := map[string][]string{}
+	for _, st := range loaded.Plan.Steps {
+		if st.Kind == runtime.KindLLMSeam {
+			declared[st.ID] = st.Outputs
+		}
+	}
+	for stepID, named := range outputs {
+		want, ok := declared[stepID]
+		if !ok {
+			return fmt.Errorf("resume outputs name step %q, which is not an llm-seam step in this plan", stepID)
+		}
+		if len(named) != len(want) {
+			return fmt.Errorf("seam step %q declares %d output(s) but resume supplied %d", stepID, len(want), len(named))
+		}
+		for _, name := range want {
+			if _, present := named[name]; !present {
+				return fmt.Errorf("seam step %q resume is missing declared output %q", stepID, name)
+			}
+		}
+	}
+	return nil
+}
+
+// runOrResume drives a Flight Plan run (fresh launch or resume) through the
+// suspendable runtime path and branches on the outcome, shared by
+// LaunchFlightPlan and ResumeFlightPlan so the two speak an identical
+// suspend/complete contract. runID is "" on a fresh launch (the runtime mints
+// one on the first suspend) and the stable run id on a resume.
+//
+// The seam is intentionally left unwired (Options.Seam nil): on the suspendable
+// path an unfulfilled seam with no memo entry suspends via SuspendKindSeam, and
+// the agent fulfills it by feeding outputs into ResumeOutputs on the next
+// resume. The daemon is the seam provider, so no LLM is reached daemon-side.
+func (s *apiServer) runOrResume(w http.ResponseWriter, r *http.Request, rec flightPlanRunRecord, runID string) {
+	// The approver writes a first-reach approval id into this shared map so the
+	// handler reads it back after Run returns (to fill the 202 and store the run
+	// record). A fresh launch seeds an empty map; a resume carries the record's.
+	if rec.Approvals == nil {
+		rec.Approvals = map[string]string{}
+	}
+	approver := &flightplanApprover{server: s, runID: runID, approvals: rec.Approvals}
+	res, err := runtime.Run(r.Context(), runtime.Options{
+		Store:         s.flightPlanStore,
+		Name:          rec.Name,
+		Version:       rec.Version,
+		Inputs:        rec.Inputs,
+		Suspendable:   true,
+		ResumeOutputs: rec.Outputs,
+		RunID:         runID,
 		// In-process seams: the dispatcher calls the daemon's own executor and
 		// the audit sink calls the daemon's own recorder, so this endpoint does
 		// not loop back over HTTP the way the CLI's daemon seams do.
 		Dispatcher: &flightplanDispatcher{server: s},
-		Approver:   flightplanApprover{},
+		Approver:   approver,
 		Audit:      &flightplanAuditSink{server: s},
-		// Image / registry / tool-step / publisher / LLM seams are intentionally
-		// nil: this endpoint runs the deterministic in-process pipeline only. A
-		// plan that pins an environment image, declares tool steps, or has an
-		// llm-seam step errors via the runtime's own nil-guards. Image-booted
-		// launch is a follow-up.
+		// Image / registry / tool-step / publisher seams are intentionally nil:
+		// this endpoint runs the in-process pipeline only. A plan that pins an
+		// environment image or declares tool steps errors via the runtime's own
+		// nil-guards. The LLM seam is nil so an unfulfilled seam SUSPENDS
+		// (SuspendKindSeam) rather than erroring — the agent is the provider.
 	})
 	if err != nil {
+		// A denied approval (or any other runtime error) on this call is terminal:
+		// drop the run record so a fail-closed run does not linger in the registry.
+		if runID != "" {
+			s.flightPlanRuns.Delete(runID)
+		}
 		s.writeFlightPlanLaunchError(w, err)
 		return
 	}
 
+	if res.Pending != nil {
+		s.writeFlightPlanPending(w, rec, res)
+		return
+	}
+
+	// A completed run: drop the record (if any) and return the terminal result.
+	if res.Pending == nil && runID != "" {
+		s.flightPlanRuns.Delete(runID)
+	}
 	writeJSON(w, http.StatusOK, flightPlanLaunchResponse(res))
+}
+
+// writeFlightPlanPending stores/updates the run record with the suspend's
+// accumulated memo and writes the matching pending envelope: 200 seam_pending
+// for a seam suspend, 202 pending_approval for an approval suspend.
+func (s *apiServer) writeFlightPlanPending(w http.ResponseWriter, rec flightPlanRunRecord, res runtime.RunResult) {
+	pending := res.Pending
+	runID := pending.RunID
+
+	// Persist the accumulated memo (and immutable re-launch state) under the
+	// run id so the resume replays the completed prefix without re-execution.
+	// The approver may already have recorded an approval linkage on rec.Approvals
+	// during this call (a first-reach gated action), so carry it forward.
+	stored := &flightPlanRunRecord{
+		Name:      rec.Name,
+		Version:   rec.Version,
+		Inputs:    rec.Inputs,
+		Outputs:   pending.StepOutputs,
+		Approvals: rec.Approvals,
+	}
+	s.flightPlanRuns.Put(runID, stored)
+
+	switch pending.Kind {
+	case runtime.SuspendKindSeam:
+		writeJSON(w, http.StatusOK, flightPlanSeamPendingResponse(runID, pending.Seam))
+	case runtime.SuspendKindApproval:
+		// The approval id was recorded on the run record by the approver during
+		// this call (keyed by the suspended action's ref).
+		approvalID := ""
+		actionName := ""
+		connFQN := ""
+		if pending.Approval != nil {
+			actionName = flightplanActionName(pending.Approval.ActionRef)
+			if stored.Approvals != nil {
+				approvalID = stored.Approvals[pending.Approval.ActionRef]
+			}
+			if entry, ok := s.actionApprovals.Get(approvalID); ok {
+				connFQN = entry.ConnectorFQN
+			}
+		}
+		reviewURL := buildApprovalsReviewURL(s.webappURL, "", approvalID)
+		writeJSON(w, http.StatusAccepted, buildPendingApprovalResponse(approvalID, actionName, connFQN, reviewURL))
+	default:
+		// An unknown suspend kind is a runtime-contract violation, not a client
+		// error; surface it as a runtime-boundary failure rather than a bare 200.
+		s.writeFlightPlanLaunchError(w, fmt.Errorf("flightplan: unknown suspend kind %d", pending.Kind))
+	}
+}
+
+// flightPlanSeamPendingResponse builds the 200 seam_pending body from a seam
+// SuspendResult. The prompt/model/outputs/bindings ride the runtime's
+// SeamRequest (the sealed template + recorded model hint landed by #2105).
+func flightPlanSeamPendingResponse(runID string, seam *runtime.SeamRequest) api.FlightPlanSeamPendingResponse {
+	out := api.FlightPlanSeamPendingResponse{
+		Status: api.SeamPending,
+		RunId:  runID,
+	}
+	if seam != nil {
+		sr := api.FlightPlanSeamRequest{
+			StepId:  seam.StepID,
+			Outputs: append([]string(nil), seam.Outputs...),
+		}
+		if seam.Prompt != "" {
+			p := seam.Prompt
+			sr.Prompt = &p
+		}
+		if seam.Model != "" {
+			m := seam.Model
+			sr.Model = &m
+		}
+		if len(seam.Bindings) > 0 {
+			b := map[string]interface{}(seam.Bindings)
+			sr.Bindings = &b
+		}
+		out.Seam = sr
+	}
+	return out
 }
 
 // writeFlightPlanLaunchError maps a runtime.Run error onto an ADR-0010
@@ -286,18 +532,10 @@ func (s *apiServer) writeFlightPlanLaunchError(w http.ResponseWriter, err error)
 		failure.WriteHTTP(w, fe)
 		return
 	}
-	// An approval-required constituent action mirrors the CLI's daemonDispatcher
-	// contract: refuse, directing the operator to approve it and re-launch. The
-	// resume / seam-pending surface is a separate follow-up (#2101).
-	var ae *approvalRequiredError
-	if errors.As(err, &ae) {
-		failure.WriteHTTP(w, failure.CapabilityDeniedAt(failure.Action,
-			fmt.Sprintf("action %q requires approval; approve it (POST /v1/actions/%s/run) and re-launch",
-				ae.actionRef, ae.actionName)))
-		return
-	}
-	// A denied approval decision (the runtime's own DenyError) is likewise a
-	// forbidden outcome.
+	// A denied approval decision (the runtime's own DenyError) fails the run
+	// closed: a mid-plan gated action the user denied is a forbidden outcome
+	// (#2101). This is the terminal state a resume reaches after the agent denied
+	// the approval through the existing approval channel.
 	var de *runtime.DenyError
 	if errors.As(err, &de) {
 		failure.WriteHTTP(w, failure.CapabilityDeniedAt(failure.Action, de.Error()))
@@ -349,58 +587,23 @@ func flightPlanLaunchResponse(res runtime.RunResult) api.FlightPlanLaunchRespons
 	return out
 }
 
-// approvalRequiredError is the sentinel the in-process dispatcher raises when a
-// constituent action's manifest declares [approval] required = true. It mirrors
-// the CLI daemonDispatcher's "202 → approve-and-re-launch error" behavior: the
-// daemon does not run the mid-plan action-boundary 202 registration here (that
-// lives in RunAction, not the executor), so the launch refuses deterministically
-// and the handler surfaces an ADR-0010 FailureEnvelope. The resume surface is
-// #2101.
-type approvalRequiredError struct {
-	actionRef  string
-	actionName string
-}
-
-func (e *approvalRequiredError) Error() string {
-	return fmt.Sprintf("flightplan: action %q requires approval; approve it and re-launch", e.actionRef)
-}
-
 // flightplanDispatcher is the in-process ActionDispatcher seam: it dispatches a
 // plan's declared action through the daemon's own executor (the same executor
-// POST /v1/actions/{name}/run uses), never over HTTP. It replicates the CLI
-// daemonDispatcher's behavior in-process: the action ref (aileron:<c>.<a>) maps
-// to the bare daemon action name, an approval-gated action is refused (the CLI
-// surfaces the daemon's 202 as an error; here the dispatcher checks the
-// manifest and raises the same-shaped refusal), and the executor's string
-// Content is parsed into the map the runtime binds downstream.
+// POST /v1/actions/{name}/run uses), never over HTTP. The action ref
+// (aileron:<c>.<a>) maps to the bare daemon action name, and the executor's
+// string Content is parsed into the map the runtime binds downstream.
+//
+// It no longer pre-emptively refuses an approval-gated action (#2101): gating
+// now flows through the Approver seam, which suspends the run and registers a
+// pending approval. The dispatcher only reaches a gated action's Execute on a
+// resume AFTER the approver observed an approved outcome, so a dispatch here is
+// always an approved (or read) action.
 type flightplanDispatcher struct {
 	server *apiServer
 }
 
 func (d *flightplanDispatcher) Dispatch(ctx context.Context, ref string, args map[string]any) (runtime.DispatchResult, error) {
 	name := flightplanActionName(ref)
-
-	// Refuse an approval-gated action before executing, mirroring the CLI's
-	// daemonDispatcher (which surfaces the daemon's 202 as an error). The
-	// executor itself does not run RunAction's 202 registration, so the launch
-	// refuses deterministically; the handler maps this to a FailureEnvelope.
-	//
-	// The approval gate reads the SAME action store the executor is backed by
-	// (s.actions), so the two can never diverge: an action that is not resolvable
-	// here is not resolvable by the executor either, and fails not-found there
-	// with a precise ADR-0010 failure. The security property — an approval-gated
-	// action never runs unattended through launch — therefore holds by refusing
-	// on any positively-loaded manifest that declares [approval] required = true
-	// (or has failed to carry a manifest). A missing store or a not-installed
-	// action is deliberately allowed to fall through to the executor, which is
-	// the single authority on action existence and produces the accurate error.
-	if d.server.actions != nil {
-		if loaded, err := d.server.actions.Get(name); err == nil {
-			if loaded.Manifest == nil || loaded.Manifest.ApprovalRequired() {
-				return runtime.DispatchResult{}, &approvalRequiredError{actionRef: ref, actionName: name}
-			}
-		}
-	}
 
 	result, err := d.server.executor.Execute(ctx, name, args)
 	if err != nil {
@@ -468,14 +671,110 @@ func flightplanDispatchEnvelopeOutput(m map[string]any) (map[string]any, bool) {
 	return out, true
 }
 
-// flightplanApprover defers to the action boundary exactly as the CLI's
-// daemonApprover does: it always approves so the effect-gate is decided once,
-// at the dispatcher's manifest check (which refuses an approval-required action
-// before executing). A read action never reaches the approver.
-type flightplanApprover struct{}
+// flightplanApprover is the plan-scoped Approver seam that drives the mid-plan
+// action-approval handshake (#2101). The runtime calls Approve ONLY for an
+// effect-gated action (a read never reaches it). Its behavior depends on whether
+// the run has already registered an approval for the action ref:
+//
+//   - First reach (no recorded approval id): register a pending entry in the
+//     SAME action-approval queue POST /v1/actions/{name}/run uses (reusing the
+//     preview + input-field projection), record actionRef → entry.ID on the run
+//     record, and return Decision{Pending:true}. The run SUSPENDS; the handler
+//     surfaces the 202. NOTE: no executeApprovedAction goroutine is spawned — the
+//     plan resumes via replay and the dispatcher runs the now-approved action
+//     itself (residual #2104).
+//   - Resume reach (a recorded approval id): read the queue's outcome. Approved
+//     (or approved_not_started, the state Decide lands at with no auto-executor)
+//     → Decision{Approved:true}, so the dispatcher runs the action. Denied →
+//     Decision{} (an explicit deny), so the run fails closed. Still pending →
+//     Decision{Pending:true} again (idempotent re-suspend, no re-register).
+//
+// runID is "" on the very first launch call (the runtime mints one on the first
+// suspend). Because a suspend needs the recorded approval id to fill the 202, the
+// approver writes into the shared approvals map (also referenced by the run
+// record) so the handler reads the id back after Run returns.
+type flightplanApprover struct {
+	server *apiServer
+	runID  string
+	// approvals is the run record's actionRef → approvalID map, shared with the
+	// handler so a first-reach registration is visible when the handler builds the
+	// 202. Never nil for a resume (the record carries it); the handler seeds a
+	// fresh map on the first launch.
+	approvals map[string]string
+}
 
-func (flightplanApprover) Approve(_ context.Context, _ runtime.ApprovalRequest) (runtime.Decision, error) {
-	return runtime.Decision{Approved: true}, nil
+func (a *flightplanApprover) Approve(ctx context.Context, req runtime.ApprovalRequest) (runtime.Decision, error) {
+	if a.server.actionApprovals == nil {
+		// No approval queue configured: fail closed rather than silently running a
+		// gated action unattended.
+		return runtime.Decision{}, nil
+	}
+	ref := req.ActionRef
+
+	// Resume reach: a recorded approval id means this ref already suspended once.
+	if id, ok := a.approvals[ref]; ok && id != "" {
+		outcome, found := a.server.actionApprovals.Outcome(id)
+		if !found {
+			// The recorded entry is gone (queue is in-memory; a restart lost it):
+			// re-suspend by re-registering below is unsafe (would double-register),
+			// so fail closed — the agent re-launches.
+			return runtime.Decision{}, nil
+		}
+		switch outcome.Status {
+		case approval.OutcomeApprovedNotStarted, approval.OutcomeRunning,
+			approval.OutcomeCompleted, approval.OutcomeAwaitingVault:
+			// The user approved. No background executor ran the action for a
+			// plan-scoped approval (#2104), so the dispatcher runs it now on replay.
+			// (Running/Completed/AwaitingVault are unreachable on the plan path — no
+			// executeApprovedAction goroutine is spawned — but treating them as
+			// approved keeps the mapping correct if that ever changes.)
+			return runtime.Decision{Approved: true}, nil
+		case approval.OutcomeDenied:
+			// The user denied: fail the run closed.
+			return runtime.Decision{Reason: outcome.DenyReason}, nil
+		case approval.OutcomePendingApproval:
+			// Still awaiting the user's decision: re-suspend idempotently (no
+			// re-register — the recorded id already exists).
+			return runtime.Decision{Pending: true}, nil
+		default: // OutcomeFailed or any unexpected terminal state
+			// Unreachable on the plan-scoped path, but fail closed rather than
+			// re-suspend forever if a terminal-failed entry is ever observed.
+			return runtime.Decision{Reason: "approval entry reached an unexpected terminal state: " + string(outcome.Status)}, nil
+		}
+	}
+
+	// First reach: register a pending approval mirroring RunAction's registration
+	// (preview + input-field projection) and suspend.
+	name := flightplanActionName(ref)
+	connFQN := ""
+	var preview *approval.ActionApprovalPreview
+	var inputFields []approval.ActionApprovalPreviewField
+	if a.server.actions != nil {
+		if loaded, err := a.server.actions.Get(name); err == nil && loaded.Manifest != nil {
+			if len(loaded.Manifest.Execute) > 0 {
+				connFQN = loaded.Manifest.Execute[0].Connector
+			}
+			if invoker, ok := a.server.executor.(action.PreviewInvoker); ok && loaded.Manifest.ApprovalPreview() != nil {
+				pr := invoker.InvokePreview(ctx, loaded.Manifest, req.Args)
+				preview = previewFromActionResult(pr)
+			}
+			inputFields = inputFieldsForAPI(action.BuildInputFields(loaded.Manifest, req.Args))
+		}
+	}
+	entry := a.server.actionApprovals.RegisterKindWithPreviewAndInputs(
+		approval.ApprovalKindAction, name, connFQN, "", req.Args, preview, inputFields)
+
+	// Record the linkage so the handler can fill the 202 and a later resume can
+	// look up the outcome. The runtime has minted the run id by the time the
+	// SuspendResult surfaces; the handler stores the record under it. Writing into
+	// the shared map makes the id visible to the handler after Run returns.
+	if a.approvals != nil {
+		a.approvals[ref] = entry.ID
+	}
+	if a.runID != "" {
+		a.server.flightPlanRuns.RecordApproval(a.runID, ref, entry.ID)
+	}
+	return runtime.Decision{Pending: true}, nil
 }
 
 // flightplanAuditSink is the in-process AuditSink seam: it persists each launch

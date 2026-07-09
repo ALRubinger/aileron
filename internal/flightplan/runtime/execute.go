@@ -341,7 +341,7 @@ func (x *executor) suspendFor(_ context.Context, step Step, resolved map[string]
 		return &suspendSignal{
 			kind:   SuspendKindSeam,
 			stepID: step.ID,
-			seam:   &SeamRequest{StepID: step.ID, Bindings: resolved, Outputs: step.Outputs},
+			seam:   &SeamRequest{StepID: step.ID, Bindings: resolved, Outputs: step.Outputs, Prompt: step.Prompt, Model: step.Model},
 		}, true
 	}
 	return nil, false

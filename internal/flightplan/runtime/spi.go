@@ -156,6 +156,16 @@ type SeamRequest struct {
 	Bindings map[string]any
 	// Outputs are the named results the seam must produce.
 	Outputs []string
+	// Prompt is the seam's sealed instruction template (#2105), carried so a
+	// suspend/resume caller (#2101) can present it to the agent that fulfills the
+	// seam. Empty when the seam declares no prompt. It is the frozen template
+	// verbatim; a caller that wants the bindings rendered in resolves them from
+	// Bindings.
+	Prompt string
+	// Model is the seam's recorded model target hint (#2105), for example
+	// anthropic:claude-haiku-4-5. A request/hint, never a pin. Empty when the
+	// seam declares no model.
+	Model string
 }
 
 // LLMSeam is a marked non-deterministic seam (ADR-0027, multi-seam per #2100).
