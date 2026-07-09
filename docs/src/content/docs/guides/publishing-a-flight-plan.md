@@ -45,6 +45,12 @@ Install with:
 
 If the semver label carries build metadata (a `+build` suffix) or any other character outside the OCI tag grammar, publish skips the semver tag with a warning and still publishes the content-hash and `latest` tags.
 
+## Publish makes this version launch from the registry
+
+Publishing also records where the version now lives, so `aileron skill launch <name>` boots the copy you just pushed rather than a local build. On success publish writes a small install-origin note next to the frozen version pointing launch at `<registry>` and the version tag. Launch then pulls the published, content-addressed image and verifies it against the signed lock, exactly as it does on a machine that installed the plan by OCI reference.
+
+This matters because a composed-tools plan's local image tag is a shared, content-derived daemon tag. A later freeze of any plan with the same base and tools rebuilds and repoints that tag, which would strand this version's signed lock on a now-stale local digest. Booting from the published registry image keeps launch pinned to the immutable copy you published. You do not need to install the plan locally after publishing it: the machine that published a version can launch it straight from the registry.
+
 ## Two binding kinds
 
 The digest that lets launch verify the pulled image against the signed lock depends on the plan's pin type. Publish branches automatically.
