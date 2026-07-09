@@ -337,7 +337,17 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 		url.PathEscape(fqn.Repo),
 		publisherKeyPath,
 	)
-	return fetchKeyFromURL(keyURL)
+	pub, err := fetchKeyFromURL(keyURL)
+	if err != nil {
+		// raw.githubusercontent.com does not accept bearer tokens, so a
+		// private repo 404s here even with a valid token. Enrich the
+		// anonymous-path failure with the private-repo remediation, which is
+		// specific to the convention-path publisher key (not the Hub key_url
+		// path, which fetchKeyFromURL also serves).
+		return nil, fmt.Errorf("%w\n  A private-repo 404 means no/insufficient access, not that %s is missing.\n  Fix: export GH_TOKEN=$(gh auth token) to fetch it over the GitHub Contents API (GH_TOKEN wins over GITHUB_TOKEN).\n  The token needs \"Contents: Read-only\" for a fine-grained PAT, or the \"repo\" scope for a classic PAT.\n  Or bypass the fetch entirely: aileron keyring trust --key-file <path> %s",
+			err, publisherKeyPath, fqn.OwnerAuthority())
+	}
+	return pub, nil
 }
 
 // githubToken returns the GitHub token from the environment, preferring
@@ -380,8 +390,8 @@ func fetchPublisherKeyViaAPI(fqn cstore.FQN, token string) (ed25519.PublicKey, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch; check the token has read access to this repo)",
-			endpoint, resp.StatusCode, publisherKeyPath)
+		return nil, fmt.Errorf("GET %s: HTTP %d (a private-repo 404 here means the token lacks access, not that %s is missing; grant the token \"Contents: Read-only\" for a fine-grained PAT or the \"repo\" scope for a classic PAT; export GH_TOKEN=$(gh auth token) reuses your gh login (GH_TOKEN wins over GITHUB_TOKEN); or bypass the fetch entirely with `aileron keyring trust --key-file <path> %s`)",
+			endpoint, resp.StatusCode, publisherKeyPath, fqn.OwnerAuthority())
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -399,9 +409,10 @@ func fetchPublisherKeyViaAPI(fqn cstore.FQN, token string) (ed25519.PublicKey, e
 // decodes it (PEM or base64). Shared by fetchPublisherKey (the
 // convention-path fetch) and the Hub `key_url` resolution
 // (resolveOwnerKeyFromHub), so both honor the same timeout, size cap,
-// and decode rules. The 404 message names the convention path because
-// that is the most common cause for the per-repo fetch; the Hub path
-// fetches a fully-qualified `key_url` and surfaces the same status.
+// and decode rules. The status-code error stays scope-agnostic here
+// because the two callers differ: fetchPublisherKey wraps this with the
+// convention-path private-repo remediation (GH_TOKEN over the Contents
+// API), which does not apply to the Hub's fully-qualified `key_url`.
 func fetchKeyFromURL(keyURL string) (ed25519.PublicKey, error) {
 	client := &http.Client{Timeout: publisherKeyFetchTimeout}
 	resp, err := client.Get(keyURL)
@@ -411,8 +422,7 @@ func fetchKeyFromURL(keyURL string) (ed25519.PublicKey, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch; a private repo 404s here — set GH_TOKEN or GITHUB_TOKEN to fetch it over the GitHub API)",
-			keyURL, resp.StatusCode, publisherKeyPath)
+		return nil, fmt.Errorf("GET %s: HTTP %d", keyURL, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
