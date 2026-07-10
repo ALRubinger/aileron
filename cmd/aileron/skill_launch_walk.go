@@ -141,15 +141,16 @@ func (w launchInputWalker) walkLiteral(in runtime.Input) (any, bool, error) {
 	}
 }
 
-// literalPrompt renders the one-line prompt for a literal input: its name, the
-// declared description, the required marker (with a "has default" note when the
-// input carries one), the current default with an Enter-to-accept note
-// (defaulted inputs only), and any enum/pattern hint.
+// literalPrompt renders the one-line prompt for a literal input: its bracketed
+// name ([name]), the declared description rendered bare after a leading space,
+// the required marker (with a "has default" note when the input carries one),
+// the current default with an Enter-to-accept note (defaulted inputs only), and
+// any enum/pattern hint.
 func (w launchInputWalker) literalPrompt(in runtime.Input) string {
 	var b strings.Builder
-	b.WriteString(in.Name)
+	fmt.Fprintf(&b, "[%s]", in.Name)
 	if in.Description != "" {
-		fmt.Fprintf(&b, " (%s)", in.Description)
+		fmt.Fprintf(&b, " %s", in.Description)
 	}
 	if in.Resolution.HasDefault {
 		b.WriteString(" [required · has default]")

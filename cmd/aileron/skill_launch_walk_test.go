@@ -326,3 +326,25 @@ func TestWalk_NoPromptStillOverridable(t *testing.T) {
 		t.Errorf("an overridden input must not also render the advanced skip line:\n%s", s)
 	}
 }
+
+// The literal prompt brackets the input name ([name]) and renders the
+// declared description bare after a leading space, with no parentheses around
+// it. The trailing "(default: X, Enter to accept)" note keeps its parenthetical
+// form. This guards the interactive-launch prompt format specifically.
+func TestWalk_LiteralPromptBracketsNameBareDescription(t *testing.T) {
+	w, out := newWalker("\n") // accept the default
+	inputs := []runtime.Input{litDefault("aws_region", "The AWS region to target", "us-east-1")}
+	if _, err := w.Walk(inputs, nil); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "[aws_region] The AWS region to target") {
+		t.Errorf("prompt must bracket the name and render the description bare:\n%s", s)
+	}
+	if strings.Contains(s, "(The AWS region to target)") {
+		t.Errorf("the description must not be wrapped in parentheses:\n%s", s)
+	}
+	if !strings.Contains(s, "(default: us-east-1, Enter to accept)") {
+		t.Errorf("the default-note parenthetical must be preserved:\n%s", s)
+	}
+}
