@@ -28,14 +28,15 @@ func TestNewLaunchInputPrompter_TTYGate(t *testing.T) {
 }
 
 // linePrompter reads one line for the missing input and echoes the name,
-// description, and constraint hint so the operator knows what to type.
+// description, and the human-readable enum hint so the operator knows what to
+// type.
 func TestLinePrompter_PromptInput(t *testing.T) {
 	var out bytes.Buffer
 	p := linePrompter{stdin: strings.NewReader("us-east-1\n"), stdout: &out}
 	in := runtime.Input{
 		Name:        "region",
 		Description: "target AWS region",
-		Constraint:  &runtime.Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")},
+		Constraint:  &runtime.Constraint{Enum: []string{"us-east-1", "us-west-2"}},
 	}
 	got, err := p.PromptInput(in)
 	if err != nil {
@@ -45,10 +46,30 @@ func TestLinePrompter_PromptInput(t *testing.T) {
 		t.Errorf("prompted value = %q, want %q", got, "us-east-1")
 	}
 	prompt := out.String()
-	for _, want := range []string{"region", "target AWS region", "^us-[a-z]+-[0-9]$"} {
+	for _, want := range []string{"region", "target AWS region", "[one of: us-east-1, us-west-2]"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt %q missing %q", prompt, want)
 		}
+	}
+}
+
+// A pattern-constrained input must NOT echo the raw regex into the prompt: it is
+// meaningless noise to an operator (#2130). The pattern is still enforced on
+// submit by the runtime validator; the prompt just no longer prints it.
+func TestLinePrompter_PatternHidden(t *testing.T) {
+	var out bytes.Buffer
+	p := linePrompter{stdin: strings.NewReader("us-east-1\n"), stdout: &out}
+	in := runtime.Input{
+		Name:        "region",
+		Description: "target AWS region",
+		Constraint:  &runtime.Constraint{Pattern: regexp.MustCompile("^us-[a-z]+-[0-9]$")},
+	}
+	if _, err := p.PromptInput(in); err != nil {
+		t.Fatalf("PromptInput: %v", err)
+	}
+	prompt := out.String()
+	if strings.Contains(prompt, "^us-[a-z]+-[0-9]$") || strings.Contains(prompt, "[matching") {
+		t.Errorf("prompt %q must not surface the raw pattern", prompt)
 	}
 }
 
@@ -73,7 +94,12 @@ func TestInputConstraintHint(t *testing.T) {
 	}{
 		{"nil", nil, ""},
 		{"enum", &runtime.Constraint{Enum: []string{"prod", "staging"}}, "[one of: prod, staging]"},
-		{"pattern", &runtime.Constraint{Pattern: regexp.MustCompile("^x$")}, "[matching ^x$]"},
+		// A pattern-only constraint renders no hint: the raw regex is meaningless
+		// noise to an operator (#2130). The pattern is still enforced on submit;
+		// this only suppresses its display.
+		{"pattern-suppressed", &runtime.Constraint{Pattern: regexp.MustCompile("^x$")}, ""},
+		// Enum takes precedence and is still shown even when a pattern coexists.
+		{"enum-wins-over-pattern", &runtime.Constraint{Enum: []string{"a", "b"}, Pattern: regexp.MustCompile("^x$")}, "[one of: a, b]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

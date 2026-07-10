@@ -227,18 +227,19 @@ func (p linePrompter) PromptInput(in runtime.Input) (string, error) {
 }
 
 // inputConstraintHint renders a short, parenthesized hint for a declared input
-// constraint so the interactive prompt tells the operator the accepted shape:
-// the allowed enum values or the required pattern. An unconstrained input
-// returns "".
+// constraint so the interactive prompt tells the operator the accepted shape.
+// Only the enum branch is surfaced: "[one of: a, b, c]" is human-readable and
+// helps the operator answer. A raw regexp Pattern is deliberately NOT rendered
+// because the raw expression (e.g. `^[a-z]{2}-[a-z]+-\d$`) is meaningless noise
+// to an operator answering a prompt (#2130); the pattern is still enforced on
+// submit by the validator, this only governs display. An unconstrained input,
+// or one constrained solely by a pattern, returns "".
 func inputConstraintHint(c *runtime.Constraint) string {
 	if c == nil {
 		return ""
 	}
 	if len(c.Enum) > 0 {
 		return "[one of: " + strings.Join(c.Enum, ", ") + "]"
-	}
-	if c.Pattern != nil {
-		return "[matching " + c.Pattern.String() + "]"
 	}
 	return ""
 }
