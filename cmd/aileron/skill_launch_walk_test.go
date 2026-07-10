@@ -216,8 +216,26 @@ func TestWalk_EmptyRequiredReprompts(t *testing.T) {
 	}
 }
 
-// A pattern-constrained input shows its hint in the prompt.
+// An enum-constrained input shows its human-readable hint in the prompt.
 func TestWalk_ConstraintHintShown(t *testing.T) {
+	w, out := newWalker("us-east-1\n")
+	inputs := []runtime.Input{{
+		Name:       "region",
+		Resolution: runtime.Resolution{Rule: runtime.ResolutionLiteral},
+		Constraint: &runtime.Constraint{Enum: []string{"us-east-1", "us-west-2"}},
+	}}
+	if _, err := w.Walk(inputs, nil); err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	if !strings.Contains(out.String(), "[one of: us-east-1, us-west-2]") {
+		t.Errorf("prompt must carry the enum hint:\n%s", out.String())
+	}
+}
+
+// A pattern-constrained input must NOT leak the raw regex into the walk prompt:
+// it is meaningless noise to an operator (#2130). The pattern is still enforced
+// on submit; the prompt just no longer prints it.
+func TestWalk_PatternHintHidden(t *testing.T) {
 	w, out := newWalker("us-east-1\n")
 	inputs := []runtime.Input{{
 		Name:       "region",
@@ -227,8 +245,8 @@ func TestWalk_ConstraintHintShown(t *testing.T) {
 	if _, err := w.Walk(inputs, nil); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
-	if !strings.Contains(out.String(), "^us-[a-z]+-[0-9]$") {
-		t.Errorf("prompt must carry the pattern hint:\n%s", out.String())
+	if strings.Contains(out.String(), "^us-[a-z]+-[0-9]$") || strings.Contains(out.String(), "[matching") {
+		t.Errorf("prompt must not surface the raw pattern:\n%s", out.String())
 	}
 }
 

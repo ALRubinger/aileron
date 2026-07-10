@@ -23,7 +23,7 @@ var newLaunchInputWalker = func(stdin *bufio.Reader, stdout io.Writer) runtime.I
 // launchInputWalker is the guided interactive input walk: it walks every
 // declared input in declaration order, prompting once per literal input
 // (name+description, required/optional marker, current default with
-// Enter-to-accept, enum/pattern hint), re-prompting on an invalid entry. It
+// Enter-to-accept, enum hint), re-prompting on an invalid entry. It
 // runs host-side, before container boot, so it feeds inputs into the sealed
 // (frozen-plan) mainline where the in-container prompter is never consulted.
 //
@@ -145,7 +145,7 @@ func (w launchInputWalker) walkLiteral(in runtime.Input) (any, bool, error) {
 // name ([name]), the declared description rendered bare after a leading space,
 // the required marker (with a "has default" note when the input carries one),
 // the current default with an Enter-to-accept note (defaulted inputs only), and
-// any enum/pattern hint.
+// any enum hint.
 func (w launchInputWalker) literalPrompt(in runtime.Input) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[%s]", in.Name)
