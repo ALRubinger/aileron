@@ -62,23 +62,28 @@ func TestWalk_ZeroInputsSilentNoOp(t *testing.T) {
 	}
 }
 
-// A required input renders [required]; an optional (defaulted) input renders
-// [optional] with the default and an Enter-to-accept note.
+// A no-default input renders [required]; a defaulted input renders
+// [required · has default] with the default and an Enter-to-accept note. The
+// value is always required either way; the default only lets the operator skip
+// typing it, so both markers say [required].
 func TestWalk_RequiredOptionalMarkers(t *testing.T) {
-	w, out := newWalker("typed\n\n") // required: "typed", optional: Enter-accept
+	w, out := newWalker("typed\n\n") // no-default: "typed", defaulted: Enter-accept
 	inputs := []runtime.Input{
 		litRequired("req", "a required one"),
-		litDefault("opt", "an optional one", "d7"),
+		litDefault("opt", "a defaulted one", "d7"),
 	}
 	if _, err := w.Walk(inputs, nil); err != nil {
 		t.Fatalf("Walk: %v", err)
 	}
 	s := out.String()
 	if !strings.Contains(s, "[required]") {
-		t.Errorf("required input must render [required]:\n%s", s)
+		t.Errorf("no-default input must render [required]:\n%s", s)
 	}
-	if !strings.Contains(s, "[optional]") || !strings.Contains(s, "default: d7") || !strings.Contains(s, "Enter to accept") {
-		t.Errorf("optional input must render [optional] + default + Enter note:\n%s", s)
+	if strings.Contains(s, "[optional]") {
+		t.Errorf("no input may render the retired [optional] marker:\n%s", s)
+	}
+	if !strings.Contains(s, "[required · has default]") || !strings.Contains(s, "default: d7") || !strings.Contains(s, "Enter to accept") {
+		t.Errorf("defaulted input must render [required · has default] + default + Enter note:\n%s", s)
 	}
 }
 
