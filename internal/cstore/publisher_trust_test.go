@@ -186,3 +186,80 @@ func TestPublisherTrust_MalformedAuthorityStaysFailClosed(t *testing.T) {
 		t.Error("a malformed authority must not widen trust to an unregistered key")
 	}
 }
+
+// keysContain reports whether the fingerprint-equal key is present in the
+// snapshot slice, comparing by ed25519 value equality (not slice identity), so
+// the scope-exposure assertions do not depend on the keyring's internal order.
+func keysContain(keys []ed25519.PublicKey, target ed25519.PublicKey) bool {
+	for _, k := range keys {
+		if k.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPublisherTrust_ExposesScopeKeys proves the result carries defensive-copy
+// snapshots of both scopes' trusted keys (#2139) so the CLI can name the exact
+// diverging material in the conflict note. It checks membership per scope, that
+// the copies are independent of the keyring's internal slices (mutating the
+// returned slice does not affect a subsequent resolution), and that an empty
+// scope is a non-nil empty slice callers can range over unconditionally.
+func TestPublisherTrust_ExposesScopeKeys(t *testing.T) {
+	ownerKey := mustGenKey(t)
+	perRepoKey := mustGenKey(t)
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://acme", ownerKey)
+	ring.Add("github://acme/plans", perRepoKey)
+
+	res, err := ring.PublisherTrust("github://acme/plans", perRepoKey)
+	if err != nil {
+		t.Fatalf("PublisherTrust: %v", err)
+	}
+	if !res.Trusted || !res.Conflict {
+		t.Fatalf("expected trusted+conflict (both scopes non-empty and divergent); got %+v", res)
+	}
+	if !keysContain(res.OwnerKeys, ownerKey) {
+		t.Errorf("OwnerKeys = %v, want it to contain the owner-scope key", res.OwnerKeys)
+	}
+	if keysContain(res.OwnerKeys, perRepoKey) {
+		t.Errorf("OwnerKeys must not contain the per-repo-only key")
+	}
+	if !keysContain(res.PerRepoKeys, perRepoKey) {
+		t.Errorf("PerRepoKeys = %v, want it to contain the per-repo-scope key", res.PerRepoKeys)
+	}
+	if keysContain(res.PerRepoKeys, ownerKey) {
+		t.Errorf("PerRepoKeys must not contain the owner-only key")
+	}
+
+	// The snapshots are defensive copies: overwriting a returned slice element
+	// must not corrupt the keyring, so a subsequent resolution is unaffected.
+	if len(res.OwnerKeys) > 0 {
+		res.OwnerKeys[0] = nil
+	}
+	res2, err := ring.PublisherTrust("github://acme/plans", ownerKey)
+	if err != nil {
+		t.Fatalf("second PublisherTrust: %v", err)
+	}
+	if !res2.Trusted {
+		t.Error("mutating the first result's OwnerKeys copy must not alter keyring trust")
+	}
+	if !keysContain(res2.OwnerKeys, ownerKey) {
+		t.Errorf("OwnerKeys corrupted across calls: %v", res2.OwnerKeys)
+	}
+
+	// An empty scope is a non-nil empty slice, not nil, so callers may range
+	// over it without a guard. A per-repo-only grant leaves OwnerKeys empty.
+	perRepoOnly := NewEd25519Keyring()
+	perRepoOnly.Add("github://acme/plans", perRepoKey)
+	res3, err := perRepoOnly.PublisherTrust("github://acme/plans", perRepoKey)
+	if err != nil {
+		t.Fatalf("per-repo-only PublisherTrust: %v", err)
+	}
+	if res3.OwnerKeys == nil {
+		t.Error("OwnerKeys must be a non-nil empty slice for an empty owner scope")
+	}
+	if len(res3.OwnerKeys) != 0 {
+		t.Errorf("OwnerKeys = %v, want empty for a per-repo-only grant", res3.OwnerKeys)
+	}
+}

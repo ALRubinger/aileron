@@ -91,13 +91,51 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 	}
 	if v.diag != nil {
 		if res.Conflict {
-			fmt.Fprintf(v.diag, "publisher %s trusted (key %s); note: owner-level and per-repo grants disagree on trusted keys for this publisher\n",
-				publisher, fingerprint(signingKey))
+			writeConflictDiag(v.diag, publisher, signingKey, res)
 		} else {
 			fmt.Fprintf(v.diag, "publisher %s trusted (key %s)\n", publisher, fingerprint(signingKey))
 		}
 	}
 	return nil
+}
+
+// writeConflictDiag emits the owner-vs-per-repo publisher-trust divergence
+// note. The launch is already permitted (the plan's signing key is a member of
+// the union and res.Conflict was set only after Trusted passed), so the message
+// leads with that decision and states plainly that it is informational, never
+// alarming. It then lists both diverging scopes' fingerprints, marks which
+// scope carries this plan's signing key, and offers a concrete reconcile step:
+// `aileron keyring revoke --key <fp>` to drop whichever key material the
+// operator decides is stale. signingKey is the plan's verified key so the "(this
+// plan)" marker can be placed on the exact fingerprint the launch resolved to.
+func writeConflictDiag(w io.Writer, publisher string, signingKey ed25519.PublicKey, res cstore.PublisherTrustResult) {
+	planFP := fingerprint(signingKey)
+	fmt.Fprintf(w, "publisher %s trusted (key %s); launch proceeding.\n", publisher, planFP)
+	fmt.Fprintln(w, "note (informational, no action required): this publisher's owner-level and per-repo trust grants list different keys.")
+	fmt.Fprintln(w, "  owner-level grant:")
+	writeScopeKeys(w, res.OwnerKeys, planFP)
+	fmt.Fprintln(w, "  per-repo grant:")
+	writeScopeKeys(w, res.PerRepoKeys, planFP)
+	fmt.Fprintf(w, "  to reconcile, revoke the key you no longer trust: aileron keyring revoke --key <fp>\n")
+}
+
+// writeScopeKeys prints one indented line per trusted key in a scope, marking
+// the fingerprint that matches the plan's signing key with "(this plan)" so the
+// operator can see at a glance which scope authorized the running launch. An
+// empty scope prints "(none)".
+func writeScopeKeys(w io.Writer, keys []ed25519.PublicKey, planFP string) {
+	if len(keys) == 0 {
+		fmt.Fprintln(w, "    (none)")
+		return
+	}
+	for _, k := range keys {
+		fp := fingerprint(k)
+		if fp == planFP {
+			fmt.Fprintf(w, "    %s (this plan)\n", fp)
+		} else {
+			fmt.Fprintf(w, "    %s\n", fp)
+		}
+	}
 }
 
 // newLaunchPublisherVerifier builds the keyring-backed publisher-trust gate
