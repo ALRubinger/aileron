@@ -159,6 +159,17 @@ type PublisherTrustResult struct {
 	// divergence observed at the launch gate, where a fetched-key-not-in-union
 	// is simply "refuse" (Trusted=false), not a conflict.
 	Conflict bool
+	// OwnerKeys is a defensive-copy snapshot of the owner-level grant's trusted
+	// keys (`<scheme>://<owner>`) at resolution time, and PerRepoKeys is the
+	// same for the per-repo grant (`authority`). Both are populated on every
+	// call (empty slice when the scope trusts nothing) so a caller can name the
+	// exact diverging key material — e.g. the launch-gate conflict diagnostic
+	// lists each scope's fingerprints and marks which one carries the plan's
+	// signing key. They are copies, not aliases of the keyring's internal
+	// slices, so a caller may hold or sort them without racing a concurrent
+	// keyring mutation.
+	OwnerKeys   []ed25519.PublicKey
+	PerRepoKeys []ed25519.PublicKey
 }
 
 // PublisherTrust resolves the Flight-Plan publisher's signing key against the
@@ -202,7 +213,23 @@ func (k *Ed25519Keyring) PublisherTrust(authority string, signingKey ed25519.Pub
 	if trusted && len(owner) > 0 && len(perRepo) > 0 && !keySetsEqual(owner, perRepo) {
 		conflict = true
 	}
-	return PublisherTrustResult{Trusted: trusted, Conflict: conflict}, nil
+	// owner and perRepo are already defensive copies of the keyring's internal
+	// slices (taken under the RLock above), so handing them to the caller does
+	// not alias keyring state. Normalize a nil owner (malformed or missing
+	// owner authority) to a non-nil empty slice so callers can range over it
+	// unconditionally.
+	if owner == nil {
+		owner = []ed25519.PublicKey{}
+	}
+	if perRepo == nil {
+		perRepo = []ed25519.PublicKey{}
+	}
+	return PublisherTrustResult{
+		Trusted:     trusted,
+		Conflict:    conflict,
+		OwnerKeys:   owner,
+		PerRepoKeys: perRepo,
+	}, nil
 }
 
 // keySetContains reports whether target is present in keys.

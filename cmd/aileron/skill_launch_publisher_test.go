@@ -158,6 +158,9 @@ func TestKeyringPublisherVerifier_RevokedFailsClosed(t *testing.T) {
 // TestKeyringPublisherVerifier_ConflictNoteOnStderr proves the P2 conflict
 // diagnostic lands on the held diag (stderr) writer when the owner and per-repo
 // scopes disagree while membership passes, and the launch is still permitted.
+// The rewritten message (#2139) must lead with the permit decision, mark itself
+// informational rather than alarming, list both diverging scopes' fingerprints,
+// and offer the concrete `keyring revoke --key` reconcile step.
 func TestKeyringPublisherVerifier_ConflictNoteOnStderr(t *testing.T) {
 	shared, _ := genKeyPair(t)
 	ownerExtra, _ := genKeyPair(t)
@@ -176,8 +179,64 @@ func TestKeyringPublisherVerifier_ConflictNoteOnStderr(t *testing.T) {
 	if err := v.VerifyPublisher("github://acme/plans", shared); err != nil {
 		t.Fatalf("a conflict must not block a member key: %v", err)
 	}
-	if !strings.Contains(diag.String(), "disagree") {
-		t.Errorf("diag = %q, want a conflict note", diag.String())
+	out := diag.String()
+	// Leads with the permit decision, not an alarm.
+	if !strings.Contains(out, "trusted") || !strings.Contains(out, "launch proceeding") {
+		t.Errorf("diag = %q, want it to lead with the trusted/launch-proceeding decision", out)
+	}
+	// Framed as informational, no action required.
+	if !strings.Contains(out, "informational") || !strings.Contains(out, "no action required") {
+		t.Errorf("diag = %q, want it framed as informational with no action required", out)
+	}
+	// Names both diverging scopes.
+	if !strings.Contains(out, "owner-level grant") || !strings.Contains(out, "per-repo grant") {
+		t.Errorf("diag = %q, want both owner-level and per-repo scopes named", out)
+	}
+	// Lists each scope's actual fingerprints (owner has the extra key too).
+	if !strings.Contains(out, fingerprint(shared)) || !strings.Contains(out, fingerprint(ownerExtra)) {
+		t.Errorf("diag = %q, want both diverging fingerprints listed", out)
+	}
+	// Offers the concrete reconcile step.
+	if !strings.Contains(out, "aileron keyring revoke --key") {
+		t.Errorf("diag = %q, want the keyring revoke --key reconcile step", out)
+	}
+}
+
+// TestKeyringPublisherVerifier_ConflictNoteMarksOwnerScope proves that when the
+// plan's signing key lives only in the owner-level grant (not the per-repo
+// grant), the conflict note marks the owner-scope fingerprint "(this plan)" so
+// the operator sees which scope authorized the running launch. This is the
+// mirror of the per-repo case and guards that the marker follows the key, not a
+// fixed scope.
+func TestKeyringPublisherVerifier_ConflictNoteMarksOwnerScope(t *testing.T) {
+	ownerKey, _ := genKeyPair(t)   // the plan's signing key, owner-scope only
+	perRepoKey, _ := genKeyPair(t) // a different key trusted per-repo
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keyring.json")
+	ring := cstore.NewEd25519Keyring()
+	ring.AddOwner("github://acme", ownerKey)
+	ring.Add("github://acme/plans", perRepoKey)
+	if err := ring.SaveKeyring(path); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+
+	var diag bytes.Buffer
+	v := keyringPublisherVerifier{path: path, diag: &diag}
+	// The plan signs with the owner-scope key: it is a union member (owner
+	// grant), so trust passes, and the two scopes diverge, so Conflict fires.
+	if err := v.VerifyPublisher("github://acme/plans", ownerKey); err != nil {
+		t.Fatalf("an owner-scope member key must verify: %v", err)
+	}
+	out := diag.String()
+	ownerFP := fingerprint(ownerKey)
+	perRepoFP := fingerprint(perRepoKey)
+	// The owner-scope key carries the plan's key and must be marked.
+	if !strings.Contains(out, ownerFP+" (this plan)") {
+		t.Errorf("diag = %q, want the owner-scope fingerprint %s marked (this plan)", out, ownerFP)
+	}
+	// The per-repo key is a different key and must NOT be marked.
+	if strings.Contains(out, perRepoFP+" (this plan)") {
+		t.Errorf("diag = %q, per-repo fingerprint %s must not be marked (this plan)", out, perRepoFP)
 	}
 }
 
