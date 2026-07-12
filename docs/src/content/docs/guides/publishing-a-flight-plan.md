@@ -51,6 +51,16 @@ Publishing also records where the version now lives, so `aileron skill launch <n
 
 This matters because a composed-tools plan's local image tag is a shared, content-derived daemon tag. A later freeze of any plan with the same base and tools rebuilds and repoints that tag, which would strand this version's signed lock on a now-stale local digest. Booting from the published registry image keeps launch pinned to the immutable copy you published. You do not need to install the plan locally after publishing it: the machine that published a version can launch it straight from the registry.
 
+## Launching a plan you just froze or published
+
+When you freeze a plan with `--publisher`, launch gates on the plan's own signing key (the `--signing-key` you froze with). If you signed with your own key rather than the repository's committed `keys/publisher.pub`, `aileron keyring trust <publisher>` will not unblock you: that command fetches the repo's committed key, a different key, and no-ops when your keyring already trusts the owner. Trust the plan's own signing key instead, with no network fetch:
+
+```
+aileron keyring trust --plan <name>
+```
+
+This reads the plan's `signing-key.pub` from your local frozen store and grants it at the plan's declared per-repo publisher authority (`github://owner/repo`), which is exactly what launch resolves. It does not widen owner-level trust to a key your organization never committed. Publishing a plan that declares a publisher prints this exact command on success, and a launch that refuses for an untrusted publisher suggests it in the refusal.
+
 ## Two binding kinds
 
 The digest that lets launch verify the pulled image against the signed lock depends on the plan's pin type. Publish branches automatically.

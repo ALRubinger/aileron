@@ -168,12 +168,14 @@ var newLaunchToolStepRunner = func() runtime.ToolStepRunner {
 // before boot and the keyring is not mounted, so wiring the gate here would
 // resolve an empty container keyring and fail closed for every image-pinned
 // plan. On a host launch it returns the keyring-backed verifier; the runtime
-// still skips the gate for a plan that declares no publisher.
-func launchPublisherVerifier(stderr io.Writer) runtime.PublisherVerifier {
+// still skips the gate for a plan that declares no publisher. planName is
+// threaded so a fail-closed refusal can suggest the working self-trust command
+// `aileron keyring trust --plan <planName>` (#2136).
+func launchPublisherVerifier(planName string, stderr io.Writer) runtime.PublisherVerifier {
 	if os.Getenv(envSkillImageBooted) != "" {
 		return nil
 	}
-	return newLaunchPublisherVerifier(stderr)
+	return newLaunchPublisherVerifier(planName, stderr)
 }
 
 // launchSeamForTest is the LLM seam the launch wires into the runtime. It is
@@ -370,7 +372,7 @@ func runSkillLaunch(args []string, stdout, stderr io.Writer) int {
 		// closed for every image-pinned plan. On a host launch it is the
 		// keyring-backed verifier; the runtime still skips the gate for a plan
 		// that declares no publisher.
-		PublisherVerifier: launchPublisherVerifier(stderr),
+		PublisherVerifier: launchPublisherVerifier(name, stderr),
 		// ToolRunner executes each `kind: tool` step as a scoped subprocess in
 		// the current (pinned) environment (#1829). No sibling container is
 		// ever dispatched.

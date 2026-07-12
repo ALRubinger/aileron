@@ -151,6 +151,56 @@ func TestRunSkillPublishRecordsOrigin(t *testing.T) {
 	}
 }
 
+// TestRunSkillPublishPrintsSelfTrustCommand is the #2136 item-4 regression: a
+// successful publish of a plan that declares a publisher must print the exact
+// working `keyring trust --plan <name>` command that unblocks self-launch, so
+// the author is not stranded by the no-op `keyring trust <publisher>` path. It
+// must NOT silently auto-register the key (that would undermine the opt-in trust
+// model); printing the command satisfies the ask without changing trust posture.
+func TestRunSkillPublishPrintsSelfTrustCommand(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	pin := freeze.ImagePin{Ref: "docker.io/library/python", Digest: "sha256:abc"}
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{
+		ResolvedImages: []freeze.ImagePin{pin},
+		Publisher:      "github://acme/plans",
+	})
+	withStubPublish(t, func(_ context.Context, o publish.Options) (publish.Result, error) {
+		return publish.Result{ArtifactRef: o.Registry + ":" + o.VersionID}, nil
+	})
+
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "aileron keyring trust --plan demo") {
+		t.Errorf("stdout = %q, want the self-trust command `aileron keyring trust --plan demo`", out.String())
+	}
+}
+
+// TestRunSkillPublishNoPublisherOmitsSelfTrustCommand proves a plan with no
+// declared publisher has no launch-time trust gate, so publish does not print
+// the (inapplicable) self-trust command.
+func TestRunSkillPublishNoPublisherOmitsSelfTrustCommand(t *testing.T) {
+	dir := t.TempDir()
+	skillStoreDir = dir
+	t.Cleanup(func() { skillStoreDir = "" })
+	pin := freeze.ImagePin{Ref: "docker.io/library/python", Digest: "sha256:abc"}
+	writeFrozenFixture(t, dir, "demo", "v1", freeze.Lockfile{ResolvedImages: []freeze.ImagePin{pin}})
+	withStubPublish(t, func(_ context.Context, o publish.Options) (publish.Result, error) {
+		return publish.Result{}, nil
+	})
+
+	var out, errBuf bytes.Buffer
+	if code := runSkillPublish([]string{"demo", "--registry", "ghcr.io/acme/demo"}, &out, &errBuf); code != 0 {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, errBuf.String())
+	}
+	if strings.Contains(out.String(), "keyring trust --plan") {
+		t.Errorf("stdout = %q, want no self-trust command for a publisher-less plan", out.String())
+	}
+}
+
 // TestRunSkillPublishOriginRecordsResolvedNewest proves the sidecar records the
 // RESOLVED newest version id (not a literal --version), so launching the newest
 // after an unpinned publish takes the registry path against the version that was

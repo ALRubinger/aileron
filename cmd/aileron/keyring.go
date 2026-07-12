@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/flightplan/freeze"
+	"github.com/ALRubinger/aileron/internal/flightplan/store"
 )
 
 // publisherKeyPath is the conventional location of a connector
@@ -84,15 +86,30 @@ func runKeyring(args []string, stdout, stderr io.Writer) int {
 // operators who already hold `publisher.pub` locally. The authority arg
 // is still required because it names the owner the grant covers.
 //
-// Writing an owner-level key the keyring already trusts is a no-op, so
+// The `--plan <name>[@<version>]` flag is the author self-trust path (#2136):
+// it reads the plan's OWN signing key from the local frozen store
+// (`signing-key.pub`), and grants it at the plan's declared per-repo
+// publisher authority (`lock.Publisher`). This is the one command that
+// unblocks launching a plan you just froze/published whose signing key is
+// not the repo's committed `keys/publisher.pub`. It takes no authority arg
+// because the authority is read from the plan's signed lock. Per-repo scope
+// (not owner) is deliberate: it matches exactly what launch resolves for that
+// authority and does not widen owner-level trust to a key the org never
+// committed.
+//
+// Writing a key the keyring already trusts at the same scope is a no-op, so
 // re-running is safe.
 func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("keyring trust", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { printTrustUsage(stderr) }
 	keyFile := flags.String("key-file", "", "Read the publisher key from a local file (no network fetch)")
+	plan := flags.String("plan", "", "Trust a locally-frozen plan's own signing key at its per-repo publisher authority (no network fetch): <name>[@<version>]")
 	if err := flags.Parse(args); err != nil {
 		return 1
+	}
+	if *plan != "" {
+		return runKeyringTrustPlan(*plan, *keyFile, flags.Args(), stdout, stderr)
 	}
 	rest := flags.Args()
 	if len(rest) != 1 {
@@ -135,6 +152,18 @@ func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Publisher already trusted: %s\n", ownerAuthority)
 		fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
 		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+		// The owner grant matches the fetched key, but a per-repo authority
+		// under this owner may register a DIFFERENT key (e.g. a plan frozen
+		// with a private --signing-key that is not the repo's committed
+		// publisher.pub). Surface that divergence instead of letting the
+		// "already trusted" line imply every plan under this owner will launch:
+		// a plan whose signing key is neither the owner key nor its own
+		// per-repo grant still fails closed at launch (#2136).
+		if repos := perRepoWithDifferentKey(keyring, ownerAuthority, pub); len(repos) > 0 {
+			fmt.Fprintf(stdout, "  Note: %s already has per-repo grant(s) with a DIFFERENT key: %s\n", ownerAuthority, strings.Join(repos, ", "))
+			fmt.Fprintln(stdout, "        If a plan you froze/published still refuses to launch, trust its own")
+			fmt.Fprintln(stdout, "        signing key with `aileron keyring trust --plan <name>`.")
+		}
 		return 0
 	}
 
@@ -149,6 +178,157 @@ func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
 	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
 	return 0
+}
+
+// runKeyringTrustPlan is the author self-trust path (#2136). It reads a
+// locally-frozen plan's OWN signing key (`signing-key.pub`) from the skill
+// store, decodes it (PEM or base64), and grants it at the plan's declared
+// per-repo publisher authority (`lock.Publisher`). This is the command that
+// unblocks launching a plan you just froze or published: `skill launch` gates
+// on the plan's actual signing key, while `keyring trust <authority>` fetches
+// the repo-committed `keys/publisher.pub`, which is a DIFFERENT key when the
+// freeze used a private `--signing-key`. The two never converge; this path
+// closes that gap by trusting exactly the key the plan was signed with.
+//
+// Per-repo scope (not owner) is deliberate: launch resolves the plan's signing
+// key against the owner∪per-repo union for `lock.Publisher`, so a per-repo
+// grant is sufficient to launch, and it does not widen owner-level trust to a
+// key the org never committed. The plan spec is `<name>[@<version>]`; without a
+// version the newest frozen version is used. `--key-file` is rejected here
+// because the key source is the frozen store, not an external file.
+func runKeyringTrustPlan(planSpec, keyFile string, extraArgs []string, stdout, stderr io.Writer) int {
+	if keyFile != "" {
+		fmt.Fprintln(stderr, "error: --plan and --key-file are mutually exclusive (the plan's signing key is read from the frozen store)")
+		return 1
+	}
+	if len(extraArgs) != 0 {
+		fmt.Fprintln(stderr, "error: --plan takes no authority argument; the publisher authority is read from the plan's signed lock")
+		printTrustUsage(stderr)
+		return 1
+	}
+
+	name, version := splitPlanSpec(planSpec)
+	if name == "" {
+		fmt.Fprintln(stderr, "error: --plan requires a plan name, e.g. --plan my-plan or --plan my-plan@1.0.0")
+		return 1
+	}
+
+	authority, pub, err := resolveTrustKeyFromPlan(name, version)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	path := cstore.DefaultKeyringPath()
+	if path == "" {
+		fmt.Fprintln(stderr, "error: cannot determine home directory; set $HOME or write ~/.aileron/keyring.json by hand")
+		return 1
+	}
+	keyring, err := cstore.LoadKeyring(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load keyring %q: %v\n", path, err)
+		return 1
+	}
+
+	// A launch resolves the plan's key against the owner∪per-repo union, so a
+	// key already trusted at EITHER scope makes launch succeed; re-granting is a
+	// no-op either way. Report the covering scope so the operator sees why the
+	// grant was skipped.
+	ownerAuthority := ownerAuthorityOf(authority)
+	viaOwner := !keyring.HasKey(authority, pub) && ownerAuthority != "" && keyring.HasOwnerKey(ownerAuthority, pub)
+	if keyring.HasKey(authority, pub) || viaOwner {
+		if viaOwner {
+			// The per-repo grant this path writes is absent, but an owner-level
+			// grant already covers the plan's key, so launch already succeeds.
+			// Name the covering scope so the operator sees why nothing changed.
+			fmt.Fprintf(stdout, "Plan %s already trusted via owner grant %s (covers %s)\n", name, ownerAuthority, authority)
+		} else {
+			fmt.Fprintf(stdout, "Plan %s already trusted: %s\n", name, authority)
+		}
+		fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
+		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+		return 0
+	}
+
+	keyring.Add(authority, pub)
+	if err := keyring.SaveKeyring(path); err != nil {
+		fmt.Fprintf(stderr, "error: save keyring: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "✓ Trusted plan %s at %s\n", name, authority)
+	fmt.Fprintln(stdout, "  This trusts the plan's own signing key so you can launch it.")
+	fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
+	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+	return 0
+}
+
+// splitPlanSpec splits a `<name>[@<version>]` plan spec into its name and
+// version parts. An absent `@` yields an empty version (newest frozen version).
+func splitPlanSpec(spec string) (name, version string) {
+	if name, version, found := strings.Cut(spec, "@"); found {
+		return name, version
+	}
+	return spec, ""
+}
+
+// resolveTrustKeyFromPlan reads a locally-frozen plan's signing key and the
+// per-repo publisher authority it was frozen under. The authority comes from
+// the signed lock (`lock.Publisher`), which is covered by the content hash and
+// signature, so it is exactly the authority launch gates against. The signing
+// key comes from the frozen `signing-key.pub` (FrozenVersion.PublicKey),
+// decoded by the same decodePublicKey the convention path uses. Returns an
+// error when the plan has no frozen versions, declares no publisher (so there
+// is nothing to gate and nothing to trust), or its artifacts are unreadable.
+func resolveTrustKeyFromPlan(name, version string) (string, ed25519.PublicKey, error) {
+	s := store.New(skillStoreDir)
+	id, _, err := resolveFrozenVersion(s, name, version)
+	if err != nil {
+		return "", nil, err
+	}
+	fv, err := s.ReadFrozen(name, id)
+	if err != nil {
+		return "", nil, fmt.Errorf("read frozen version %q of %q: %w", id, name, err)
+	}
+	lock, err := freeze.ParseLockfile(fv.Lockfile)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse lock for %q: %w", name, err)
+	}
+	if lock.Publisher == "" {
+		return "", nil, fmt.Errorf("plan %q (version %s) declares no publisher, so it has no launch-time trust gate; nothing to trust", name, id)
+	}
+	pub, err := decodePublicKey(fv.PublicKey)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode signing key for %q: %w", name, err)
+	}
+	return lock.Publisher, pub, nil
+}
+
+// perRepoWithDifferentKey returns the per-repo authorities registered under
+// ownerAuthority that carry at least one key not equal to ownerKey, in sorted
+// order. It is how `keyring trust <authority>` detects that an owner grant it
+// just re-matched coexists with a per-repo grant on a different key (#2136),
+// so the "already trusted" line can flag the divergence instead of implying
+// every plan under this owner will launch. Returns nil when no per-repo grant
+// under this owner diverges from ownerKey.
+func perRepoWithDifferentKey(keyring *cstore.Ed25519Keyring, ownerAuthority string, ownerKey ed25519.PublicKey) []string {
+	var out []string
+	for _, authority := range keyring.Authorities() {
+		if authority == ownerAuthority {
+			continue // the owner grant itself, not a per-repo grant
+		}
+		if ownerAuthorityOf(authority) != ownerAuthority {
+			continue // belongs to a different owner
+		}
+		for _, k := range keyring.Keys(authority) {
+			if !ed25519.PublicKey(k).Equal(ownerKey) {
+				out = append(out, authority)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolveTrustKey maps a `keyring trust` argument to the owner-level
@@ -184,10 +364,14 @@ func resolveTrustKey(authority string, stderr io.Writer) (string, ed25519.Public
 // sync.
 func printTrustUsage(stderr io.Writer) {
 	fmt.Fprintln(stderr, "usage: aileron keyring trust [--key-file <path>] <authority>")
+	fmt.Fprintln(stderr, "   or: aileron keyring trust --plan <name>[@<version>]")
 	fmt.Fprintln(stderr, "  authority: github://owner            (trust the whole publisher, key resolved via the Hub)")
 	fmt.Fprintln(stderr, "             github://owner/connector  (trust the whole publisher, key from the connector repo)")
 	fmt.Fprintln(stderr, "  --key-file <path>  read the publisher key from a local file with no network fetch")
 	fmt.Fprintln(stderr, "                     (for private repos or air-gapped hosts); the authority is still required.")
+	fmt.Fprintln(stderr, "  --plan <name>[@<version>]  trust a locally-frozen plan's OWN signing key at its per-repo")
+	fmt.Fprintln(stderr, "                     publisher authority (no network fetch); use this to launch a plan you")
+	fmt.Fprintln(stderr, "                     just froze or published whose signing key is not the repo's publisher.pub.")
 	fmt.Fprintln(stderr, "  Trusting an owner covers every connector that publisher ships.")
 	fmt.Fprintln(stderr, "  Set GH_TOKEN or GITHUB_TOKEN to fetch the key from a private repo over the GitHub API.")
 }

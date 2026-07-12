@@ -106,5 +106,17 @@ func runSkillPublish(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: record publish origin for %q: %v\n", id, err)
 		return 1
 	}
+
+	// A plan frozen with a private --signing-key gates `skill launch` on that
+	// key, which is NOT the repo's committed keys/publisher.pub. `keyring trust
+	// <publisher>` fetches the committed key and no-ops when an owner grant
+	// already exists, so it never unblocks self-launch. Print the exact working
+	// command (#2136) so the author can trust the plan's OWN signing key. This is
+	// an opt-in prompt, never a silent auto-register: the operator still runs it
+	// to keep the trust decision explicit.
+	if lock.Publisher != "" {
+		fmt.Fprintf(stdout, "\nTo launch this plan yourself, trust its signing key:\n")
+		fmt.Fprintf(stdout, "  aileron keyring trust --plan %s\n", name)
+	}
 	return 0
 }
