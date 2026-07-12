@@ -111,6 +111,36 @@ func TestPublisherTrust_ConflictWhenScopesDiffer(t *testing.T) {
 	}
 }
 
+// TestPublisherTrust_ExposesScopeKeys proves the result carries a snapshot of
+// each scope's trusted keys (#2139) so a caller rendering the conflict
+// diagnostic can name the diverging fingerprints. OwnerKeys and PerRepoKeys are
+// copies, so a later keyring mutation must not alter an already-returned result.
+func TestPublisherTrust_ExposesScopeKeys(t *testing.T) {
+	planKey := mustGenKey(t)
+	ownerKey := mustGenKey(t)
+	ring := NewEd25519Keyring()
+	ring.AddOwner("github://acme", ownerKey)
+	ring.Add("github://acme/plans", planKey)
+
+	res, err := ring.PublisherTrust("github://acme/plans", planKey)
+	if err != nil {
+		t.Fatalf("PublisherTrust: %v", err)
+	}
+	if len(res.OwnerKeys) != 1 || !res.OwnerKeys[0].Equal(ownerKey) {
+		t.Errorf("OwnerKeys = %v, want the single owner-level key", res.OwnerKeys)
+	}
+	if len(res.PerRepoKeys) != 1 || !res.PerRepoKeys[0].Equal(planKey) {
+		t.Errorf("PerRepoKeys = %v, want the single per-repo key", res.PerRepoKeys)
+	}
+
+	// The snapshot must not alias the keyring's internal storage: adding a key
+	// after resolution must not grow the already-returned slice.
+	ring.AddOwner("github://acme", mustGenKey(t))
+	if len(res.OwnerKeys) != 1 {
+		t.Errorf("OwnerKeys grew to %d after a post-resolution keyring write; want a defensive copy", len(res.OwnerKeys))
+	}
+}
+
 // TestPublisherTrust_NoConflictWhenScopesAgree proves identical key sets in
 // both scopes trust the key with no conflict.
 func TestPublisherTrust_NoConflictWhenScopesAgree(t *testing.T) {

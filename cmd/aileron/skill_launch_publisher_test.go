@@ -158,26 +158,80 @@ func TestKeyringPublisherVerifier_RevokedFailsClosed(t *testing.T) {
 // TestKeyringPublisherVerifier_ConflictNoteOnStderr proves the P2 conflict
 // diagnostic lands on the held diag (stderr) writer when the owner and per-repo
 // scopes disagree while membership passes, and the launch is still permitted.
+// It also proves the note is self-explanatory (#2139): it leads with the permit
+// decision, names both diverging fingerprint sets (marking which scope carried
+// the plan's key), and offers a reconcile path — none of which the prior terse
+// "grants disagree" one-liner did.
 func TestKeyringPublisherVerifier_ConflictNoteOnStderr(t *testing.T) {
-	shared, _ := genKeyPair(t)
-	ownerExtra, _ := genKeyPair(t)
+	planKey, _ := genKeyPair(t)   // per-repo scope; the plan's signing key
+	ownerKey, _ := genKeyPair(t)  // owner-level scope; the stale divergent key
 	dir := t.TempDir()
 	path := filepath.Join(dir, "keyring.json")
 	ring := cstore.NewEd25519Keyring()
-	ring.AddOwner("github://acme", shared)
-	ring.AddOwner("github://acme", ownerExtra)
-	ring.Add("github://acme/plans", shared)
+	ring.AddOwner("github://acme", ownerKey)
+	ring.Add("github://acme/plans", planKey)
 	if err := ring.SaveKeyring(path); err != nil {
 		t.Fatalf("SaveKeyring: %v", err)
 	}
 
 	var diag bytes.Buffer
 	v := keyringPublisherVerifier{path: path, diag: &diag}
-	if err := v.VerifyPublisher("github://acme/plans", shared); err != nil {
+	if err := v.VerifyPublisher("github://acme/plans", planKey); err != nil {
 		t.Fatalf("a conflict must not block a member key: %v", err)
 	}
-	if !strings.Contains(diag.String(), "disagree") {
-		t.Errorf("diag = %q, want a conflict note", diag.String())
+	out := diag.String()
+
+	// Leads with the permit decision, not an alarming "disagree".
+	if !strings.Contains(out, "trusted") || !strings.Contains(out, "proceeding") {
+		t.Errorf("diag = %q, want it to lead with the permit decision", out)
+	}
+	// Both diverging fingerprints appear so the operator can see what differs.
+	if !strings.Contains(out, fingerprint(ownerKey)) {
+		t.Errorf("diag = %q, want the owner-level fingerprint %s", out, fingerprint(ownerKey))
+	}
+	if !strings.Contains(out, fingerprint(planKey)) {
+		t.Errorf("diag = %q, want the per-repo fingerprint %s", out, fingerprint(planKey))
+	}
+	// The plan's key is marked so the operator sees which scope authorized it.
+	if !strings.Contains(out, "(this plan)") {
+		t.Errorf("diag = %q, want the plan's key marked", out)
+	}
+	// A reconcile path is offered.
+	if !strings.Contains(out, "keyring revoke") {
+		t.Errorf("diag = %q, want a reconcile hint", out)
+	}
+	// It states the note is benign.
+	if !strings.Contains(out, "informational") {
+		t.Errorf("diag = %q, want it to state the note is informational", out)
+	}
+}
+
+// TestKeyringPublisherVerifier_ConflictNoteMarksOwnerScope proves that when the
+// plan's signing key lives in the OWNER-level scope (and the per-repo scope
+// carries a different key), the note reports the owner scope as the authorizing
+// one — the mirror of the per-repo case — and still lists both sides.
+func TestKeyringPublisherVerifier_ConflictNoteMarksOwnerScope(t *testing.T) {
+	planKey, _ := genKeyPair(t)  // owner-level scope; the plan's signing key
+	repoKey, _ := genKeyPair(t)  // per-repo scope; a different key
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	ring := cstore.NewEd25519Keyring()
+	ring.AddOwner("github://acme", planKey)
+	ring.Add("github://acme/plans", repoKey)
+	if err := ring.SaveKeyring(path); err != nil {
+		t.Fatalf("SaveKeyring: %v", err)
+	}
+
+	var diag bytes.Buffer
+	v := keyringPublisherVerifier{path: path, diag: &diag}
+	if err := v.VerifyPublisher("github://acme/plans", planKey); err != nil {
+		t.Fatalf("a conflict must not block a member key: %v", err)
+	}
+	out := diag.String()
+	if !strings.Contains(out, "owner-level scope") {
+		t.Errorf("diag = %q, want the owner-level scope named as the authorizing one", out)
+	}
+	if !strings.Contains(out, fingerprint(repoKey)) {
+		t.Errorf("diag = %q, want the divergent per-repo fingerprint %s", out, fingerprint(repoKey))
 	}
 }
 

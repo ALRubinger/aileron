@@ -159,6 +159,18 @@ type PublisherTrustResult struct {
 	// divergence observed at the launch gate, where a fetched-key-not-in-union
 	// is simply "refuse" (Trusted=false), not a conflict.
 	Conflict bool
+	// OwnerKeys is the snapshot of the owner-level grant's trusted keys
+	// (`<scheme>://<owner>`) at resolution time. Populated on every call so a
+	// caller rendering the Conflict diagnostic can name exactly which
+	// owner-level fingerprint(s) diverge from the per-repo scope, rather than
+	// only reporting that *something* differs. Empty when the owner scope has
+	// no grant (or the authority was malformed and owner derivation was
+	// skipped). A copy, not an alias into the keyring's internal map.
+	OwnerKeys []ed25519.PublicKey
+	// PerRepoKeys is the snapshot of the per-repo grant's trusted keys
+	// (`authority`) at resolution time, the per-repo counterpart to OwnerKeys.
+	// A copy, not an alias into the keyring's internal map.
+	PerRepoKeys []ed25519.PublicKey
 }
 
 // PublisherTrust resolves the Flight-Plan publisher's signing key against the
@@ -202,7 +214,12 @@ func (k *Ed25519Keyring) PublisherTrust(authority string, signingKey ed25519.Pub
 	if trusted && len(owner) > 0 && len(perRepo) > 0 && !keySetsEqual(owner, perRepo) {
 		conflict = true
 	}
-	return PublisherTrustResult{Trusted: trusted, Conflict: conflict}, nil
+	return PublisherTrustResult{
+		Trusted:     trusted,
+		Conflict:    conflict,
+		OwnerKeys:   owner,
+		PerRepoKeys: perRepo,
+	}, nil
 }
 
 // keySetContains reports whether target is present in keys.

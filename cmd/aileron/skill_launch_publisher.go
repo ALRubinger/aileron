@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/flightplan/runtime"
@@ -91,13 +92,93 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 	}
 	if v.diag != nil {
 		if res.Conflict {
-			fmt.Fprintf(v.diag, "publisher %s trusted (key %s); note: owner-level and per-repo grants disagree on trusted keys for this publisher\n",
-				publisher, fingerprint(signingKey))
+			v.writeConflictDiag(publisher, signingKey, res)
 		} else {
 			fmt.Fprintf(v.diag, "publisher %s trusted (key %s)\n", publisher, fingerprint(signingKey))
 		}
 	}
 	return nil
+}
+
+// writeConflictDiag renders the owner-vs-per-repo trust-divergence note for a
+// launch that was PERMITTED. The prior one-liner ("... grants disagree ...")
+// read like a warning and gave the operator nothing to act on: it never said
+// the launch proceeded, never showed which fingerprints diverged, and offered
+// no reconcile path (#2139). This message leads with the permit decision, names
+// the diverging owner-level vs per-repo fingerprints (marking which set the
+// plan's signing key came from), and offers a concrete `keyring revoke` next
+// step for an operator who wants the two scopes to agree. It is purely
+// informational — nothing is broken and there is nothing to fix for
+// correctness (ADR-0013, ADR-0027).
+func (v keyringPublisherVerifier) writeConflictDiag(publisher string, signingKey ed25519.PublicKey, res cstore.PublisherTrustResult) {
+	signingFP := fingerprint(signingKey)
+	inPerRepo := containsKey(res.PerRepoKeys, signingKey)
+	scope := "owner-level"
+	if inPerRepo {
+		scope = "per-repo"
+	}
+
+	fmt.Fprintf(v.diag, "publisher %s trusted (key %s); %s proceeding\n",
+		publisher, signingFP, v.opLabel())
+	fmt.Fprintf(v.diag, "  note: the owner-level and per-repo trust scopes for this publisher list different keys, but the plan's signing key is trusted in the %s scope, so the %s was permitted. This is informational; nothing is wrong.\n",
+		scope, v.opLabel())
+	fmt.Fprintf(v.diag, "  owner-level (%s://%s): %s\n",
+		schemeOf(publisher), ownerOf(publisher), fingerprintList(res.OwnerKeys, signingKey))
+	fmt.Fprintf(v.diag, "  per-repo   (%s): %s\n",
+		publisher, fingerprintList(res.PerRepoKeys, signingKey))
+	fmt.Fprintf(v.diag, "  to reconcile so the scopes agree, revoke a stale key by fingerprint, e.g. `aileron keyring revoke --key <sha256:...>`\n")
+}
+
+// fingerprintList renders a keyset as a comma-separated list of fingerprints,
+// marking the plan's signing key with a trailing " (this plan)" so the operator
+// can see, at a glance, which side of the divergence authorized the launch.
+// Returns "(none)" for an empty scope.
+func fingerprintList(keys []ed25519.PublicKey, signingKey ed25519.PublicKey) string {
+	if len(keys) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		fp := fingerprint(k)
+		if k.Equal(signingKey) {
+			fp += " (this plan)"
+		}
+		parts = append(parts, fp)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// containsKey reports whether target is present in keys.
+func containsKey(keys []ed25519.PublicKey, target ed25519.PublicKey) bool {
+	for _, k := range keys {
+		if k.Equal(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// schemeOf and ownerOf split a `<scheme>://<owner>/<repo>` publisher authority
+// into the parts of its owner-level authority (`<scheme>://<owner>`) for
+// display. They are best-effort: a string that doesn't match the expected shape
+// falls back to the whole input so the diagnostic never panics or drops
+// context on a malformed authority.
+func schemeOf(publisher string) string {
+	if i := strings.Index(publisher, "://"); i >= 0 {
+		return publisher[:i]
+	}
+	return publisher
+}
+
+func ownerOf(publisher string) string {
+	rest := publisher
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.Index(rest, "/"); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // newLaunchPublisherVerifier builds the keyring-backed publisher-trust gate
