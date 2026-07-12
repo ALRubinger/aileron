@@ -205,7 +205,7 @@ func TestKeyringPublisherVerifier_MalformedKeyringSurfacesError(t *testing.T) {
 // re-check never runs against the container's empty keyring.
 func TestLaunchPublisherVerifier_NilOnImageBoot(t *testing.T) {
 	t.Setenv(envSkillImageBooted, "1")
-	if v := launchPublisherVerifier(&bytes.Buffer{}); v != nil {
+	if v := launchPublisherVerifier("weekly-metrics-digest", &bytes.Buffer{}); v != nil {
 		t.Errorf("image-boot re-entry must nil the publisher verifier, got %v", v)
 	}
 }
@@ -214,7 +214,7 @@ func TestLaunchPublisherVerifier_NilOnImageBoot(t *testing.T) {
 // sentinel) wires the keyring-backed verifier.
 func TestLaunchPublisherVerifier_WiredOnHostLaunch(t *testing.T) {
 	t.Setenv(envSkillImageBooted, "")
-	if v := launchPublisherVerifier(&bytes.Buffer{}); v == nil {
+	if v := launchPublisherVerifier("weekly-metrics-digest", &bytes.Buffer{}); v == nil {
 		t.Error("a host launch must wire the publisher verifier")
 	}
 }
@@ -257,8 +257,8 @@ func freezeNoImageWithPublisher(t *testing.T, storeDir, publisher string) ed2551
 func stubLaunchPublisherVerifier(t *testing.T, path string) {
 	t.Helper()
 	orig := newLaunchPublisherVerifier
-	newLaunchPublisherVerifier = func(diag io.Writer) runtime.PublisherVerifier {
-		return keyringPublisherVerifier{path: path, diag: diag}
+	newLaunchPublisherVerifier = func(planName string, diag io.Writer) runtime.PublisherVerifier {
+		return keyringPublisherVerifier{path: path, planName: planName, diag: diag}
 	}
 	t.Cleanup(func() { newLaunchPublisherVerifier = orig })
 }
@@ -350,6 +350,58 @@ func TestRunSkillLaunch_PublisherlessLaunchesLocally(t *testing.T) {
 	code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("a publisher-less plan must launch without a keyring; exit=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunSkillLaunch_SelfTrustPlanUnblocksLaunch is the #2136 end-to-end
+// regression: a plan frozen (and self-published) with a private --signing-key
+// that is NOT the repo's committed keys/publisher.pub must FAIL to launch before
+// the operator self-trusts it, and must SUCCEED after running the exact command
+// the refusal prints (`keyring trust --plan <name>`). This proves the two
+// commands converge on the plan's real signing key (they did not before the
+// fix: `keyring trust <publisher>` fetched a different key and no-op'd).
+func TestRunSkillLaunch_SelfTrustPlanUnblocksLaunch(t *testing.T) {
+	storeDir := withTempStore(t)
+	withTempHome(t) // DefaultKeyringPath() lands in the test filesystem
+	// Freeze with a publisher and a controlled signing key. The frozen
+	// signing-key.pub is that key's public half, which is deliberately NOT any
+	// repo-committed keys/publisher.pub.
+	freezeNoImageWithPublisher(t, storeDir, "github://acme/plans")
+
+	// Wire the REAL launch verifier (reads DefaultKeyringPath) so the keyring
+	// that `keyring trust --plan` writes is the same one launch consults.
+	stubLaunchSeams(t, launchInProcessDispatcher())
+	stubLaunchImageRunner(t, &fakeLaunchImageRunner{})
+	origSeam := launchSeamForTest
+	launchSeamForTest = fakeCLISeam{}
+	t.Cleanup(func() { launchSeamForTest = origSeam })
+
+	// Before self-trust: the keyring is empty, so the publisher gate fails
+	// closed and the refusal names the working self-trust command.
+	var out1, err1 bytes.Buffer
+	if code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &out1, &err1); code == 0 {
+		t.Fatal("launch must fail closed before the plan's signing key is trusted")
+	}
+	if !strings.Contains(err1.String(), "not trusted") {
+		t.Errorf("refusal = %q, want a not-trusted message", err1.String())
+	}
+	if !strings.Contains(err1.String(), "aileron keyring trust --plan weekly-metrics-digest") {
+		t.Errorf("refusal = %q, want it to suggest the working `keyring trust --plan` command", err1.String())
+	}
+
+	// Run the exact command the refusal printed.
+	var tout, terr bytes.Buffer
+	if code := runKeyring([]string{"trust", "--plan", "weekly-metrics-digest"}, &tout, &terr); code != 0 {
+		t.Fatalf("self-trust command must succeed; stderr=%s", terr.String())
+	}
+
+	// After self-trust: the same launch now succeeds.
+	var out2, err2 bytes.Buffer
+	if code := runSkillLaunch([]string{"--out-dir", t.TempDir(), "weekly-metrics-digest"}, &out2, &err2); code != 0 {
+		t.Fatalf("launch must succeed after self-trust; exit=%d stderr=%s", code, err2.String())
+	}
+	if !strings.Contains(err2.String(), "trusted") {
+		t.Errorf("stderr = %q, want the publisher-trust diagnostic after self-trust", err2.String())
 	}
 }
 

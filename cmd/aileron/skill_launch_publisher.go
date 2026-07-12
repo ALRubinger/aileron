@@ -32,6 +32,14 @@ type keyringPublisherVerifier struct {
 	// differ by op. Empty defaults to "launch" so a zero-value struct (as some
 	// tests construct) keeps the historical launch wording.
 	op string
+	// planName is the frozen plan being gated. When set, the fail-closed refusal
+	// suggests the WORKING self-trust command `aileron keyring trust --plan
+	// <planName>` (#2136), which grants the plan's OWN signing key at its
+	// per-repo publisher authority. The bare `keyring trust <publisher>` a
+	// refusal used to print fetches the repo's committed publisher.pub, a
+	// different key that no-ops when the org already has an owner grant, so it
+	// never unblocks self-launch. Empty falls back to the bare-publisher hint.
+	planName string
 	// diag receives the one-line trust/conflict diagnostic. Nil suppresses it.
 	diag io.Writer
 }
@@ -43,6 +51,20 @@ func (v keyringPublisherVerifier) opLabel() string {
 		return "launch"
 	}
 	return v.op
+}
+
+// trustRemediationCommand returns the exact `aileron keyring trust ...` command
+// that unblocks this operation. With a known plan name it points at the author
+// self-trust path (`--plan <name>`, #2136), which grants the plan's own signing
+// key at its per-repo publisher authority and actually converges with the key
+// launch gates on. Without a plan name (e.g. the install path, or a zero-value
+// verifier) it falls back to the bare-publisher form, which still names the
+// authority to trust.
+func (v keyringPublisherVerifier) trustRemediationCommand(publisher string) string {
+	if v.planName != "" {
+		return fmt.Sprintf("aileron keyring trust --plan %s", v.planName)
+	}
+	return fmt.Sprintf("aileron keyring trust %s", publisher)
 }
 
 // VerifyPublisher implements runtime.PublisherVerifier. It loads the keyring,
@@ -64,8 +86,8 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 	}
 	if !res.Trusted {
 		return fmt.Errorf(
-			"skill %s: publisher %s is not trusted for this plan's signing key (%s); trust it with `aileron keyring trust %s` or %s a plan you trust",
-			v.opLabel(), publisher, fingerprint(signingKey), publisher, v.opLabel())
+			"skill %s: publisher %s is not trusted for this plan's signing key (%s); trust it with `%s` or %s a plan you trust",
+			v.opLabel(), publisher, fingerprint(signingKey), v.trustRemediationCommand(publisher), v.opLabel())
 	}
 	if v.diag != nil {
 		if res.Conflict {
@@ -79,10 +101,12 @@ func (v keyringPublisherVerifier) VerifyPublisher(publisher string, signingKey e
 }
 
 // newLaunchPublisherVerifier builds the keyring-backed publisher-trust gate
-// for a host launch. It is a package-level seam so CLI tests point path at a
-// temp keyring and capture diag. The runtime skips the gate entirely for a
-// plan that declares no publisher, so a publisher-less plan launches whether or
-// not this verifier is wired.
-var newLaunchPublisherVerifier = func(diag io.Writer) runtime.PublisherVerifier {
-	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), op: "launch", diag: diag}
+// for a host launch. planName names the plan being launched so a fail-closed
+// refusal can suggest the WORKING self-trust command `aileron keyring trust
+// --plan <planName>` (#2136). It is a package-level seam so CLI tests point
+// path at a temp keyring and capture diag. The runtime skips the gate entirely
+// for a plan that declares no publisher, so a publisher-less plan launches
+// whether or not this verifier is wired.
+var newLaunchPublisherVerifier = func(planName string, diag io.Writer) runtime.PublisherVerifier {
+	return keyringPublisherVerifier{path: cstore.DefaultKeyringPath(), op: "launch", planName: planName, diag: diag}
 }
