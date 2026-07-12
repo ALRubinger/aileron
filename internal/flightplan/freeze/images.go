@@ -40,8 +40,12 @@ type FeatureComposer interface {
 	// serialization-agnostic config content digests (one PlatformDigest per built
 	// platform, e.g. linux/amd64 and linux/arm64). The freeze producer records the
 	// whole set as the composed pin's ConfigDigests, so a plan launches on either
-	// architecture (ADR-0027, issue #2036). Every entry's Digest MUST be a
-	// `sha256:` content digest; a tag is rejected.
+	// architecture (ADR-0027, issue #2036). The host-platform entry is attested
+	// from the image the daemon-load build actually loaded under LocalTag, which is
+	// the exact image the local (no-publish) launch boots and re-checks, so the
+	// boot guard's observed digest equals the recorded pin by construction (issue
+	// #2138). Every entry's Digest MUST be a `sha256:` content digest; a tag is
+	// rejected.
 	ComposeDigest(ctx context.Context, base string, features []string) ([]PlatformDigest, error)
 }
 

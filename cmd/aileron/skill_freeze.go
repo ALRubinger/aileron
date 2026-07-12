@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/cli/progress"
@@ -460,9 +461,10 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	// LocalTag; buildx reuses the layer cache, so it is cheap. This host-arch daemon
 	// image is intentionally retained: local `launch` of an un-published Flight Plan
 	// resolves the composed image straight from the daemon under LocalTag, with no
-	// publish step in between. Publish itself no longer needs it: as of S4 (#2047)
-	// it consumes the OCI layout directly. Dropping this second build is a documented
-	// launch-side follow-up, not done here.
+	// publish step in between, AND freeze re-attests the host pin from this exact
+	// image below (#2138) so the boot guard's observed digest equals the recorded
+	// want by construction. Publish itself no longer needs it: as of S4 (#2047) it
+	// consumes the OCI layout directly.
 	loadOpts := buildOpts
 	loadOpts.Platforms = nil
 	loadOpts.OCILayoutDest = ""
@@ -486,12 +488,59 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		loadInd.Done("Loaded image into local daemon")
 	}
 
+	// Re-attest the host-platform entry from the daemon-loaded image itself
+	// (issue #2138). The per-arch digests above come from the multi-arch buildx
+	// OCI-layout build on the dedicated docker-container driver; the daemon-load
+	// build just run is a SECOND, independent build on the default docker driver
+	// with a separate layer cache. Composed layers are not bit-reproducible, so
+	// the host child's diff_ids (and thus its config content digest) can differ
+	// between the two builds. Local launch of an unpublished plan boots the
+	// daemon-loaded LocalTag and the #1863 boot guard resolves it through the
+	// SAME localImageContentDigest used here, so unless the recorded host pin is
+	// taken from the daemon image, `observed != want` fires on a freeze->launch
+	// with nothing rebuilt. Overwrite the host entry with the daemon image's
+	// content digest so observed == want on the host by construction; the other
+	// arch and the publish/cross-machine path keep the OCI-layout digests, and
+	// the guard stays fully fail-closed for a genuine post-freeze rebuild.
+	hostDigest, err := in.localImageContentDigest(ctx, localTag)
+	if err != nil {
+		return nil, fmt.Errorf("resolve daemon-loaded composed image digest for %q: %w", localTag, err)
+	}
 	out := make([]freeze.PlatformDigest, 0, len(perArch))
+	hostArch := hostComposedArch()
+	replaced := false
 	for _, p := range perArch {
-		out = append(out, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: p.Digest})
+		digest := p.Digest
+		if p.OS == composedImageOS && p.Arch == hostArch {
+			digest = hostDigest
+			replaced = true
+		}
+		out = append(out, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: digest})
+	}
+	// The multi-arch build always produces the host child (composition builds for
+	// both linux/amd64 and linux/arm64, one of which is the host), so a missing
+	// host entry means the OCI-layout read and the daemon build disagree on which
+	// platforms exist — a fail-closed error rather than a silent single-source pin.
+	if !replaced {
+		return nil, fmt.Errorf(
+			"compose environment tools: multi-arch layout carried no %s/%s child to re-attest from the daemon-loaded image %q",
+			composedImageOS, hostArch, localTag)
 	}
 	return out, nil
 }
+
+// composedImageOS is the operating system every composed container image is
+// built for. imgconfig.CanonicalConfig.OS for a container image is "linux"
+// regardless of the launching host GOOS, matching the platform vocabulary the
+// freeze producer and the launch boot guard key on (freeze.hostPlatform).
+const composedImageOS = "linux"
+
+// hostComposedArch returns the architecture whose composed config digest the
+// launch boot guard selects for this host: the host GOARCH. It mirrors the
+// platform key freeze/launch use to pick the host entry from a composed pin's
+// per-arch set, so the daemon-loaded image re-attested here lands on the exact
+// entry the boot guard later compares against.
+func hostComposedArch() string { return goruntime.GOARCH }
 
 // localImageContentDigest resolves a local image tag to its serialization-
 // agnostic config content digest (see internal/flightplan/imgconfig): a hash

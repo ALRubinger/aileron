@@ -83,12 +83,15 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 	// boot therefore trusts the LocalTag string; nothing else re-checks that the
 	// daemon image behind that tag STILL resolves to the attested Digest. When a
 	// resolver is wired, re-inspect the tag in the local daemon and fail closed
-	// unless it resolves to pin.Digest: a mismatch means the local tag was
-	// rebuilt or repointed since freeze, and a resolve error means the attested
-	// image is gone. Either way the boot must refuse rather than enter an
-	// unverified environment. The guard is scoped to composed pins: for an
-	// image-only / custom-base pin the boot target is content-addressed
-	// (`ref@digest`) and the daemon resolves the digest itself, so no local-Id
+	// unless it resolves to the attested host config digest: a mismatch means the
+	// local tag was rebuilt or repointed since freeze, and a resolve error means
+	// the attested image is gone. Either way the boot must refuse rather than
+	// enter an unverified environment, and the error names `aileron skill freeze`
+	// as the recovery verb. Freeze re-attests the host pin from this same
+	// daemon-loaded image (#2138), so a fresh freeze->launch always satisfies the
+	// guard; only a genuine post-freeze mutation trips it. The guard is scoped to
+	// composed pins: for an image-only / custom-base pin the boot target is
+	// content-addressed (`ref@digest`) and the daemon resolves the digest itself, so no local-Id
 	// comparison applies. A nil resolver skips the guard (backward-compatible).
 	//
 	// The boot target stays the LocalTag (imageRef's LocalTag-wins semantics,
@@ -113,12 +116,12 @@ func runInImage(ctx context.Context, lp LoadedPlan, opts Options) (RunResult, er
 		observed, err := opts.ImageDigestResolver.Resolve(ctx, pin.LocalTag)
 		if err != nil {
 			return RunResult{}, fmt.Errorf(
-				"flightplan: refusing to boot composed local tag %q: cannot resolve its digest in the local daemon (attested %s): %w",
+				"flightplan: refusing to boot composed local tag %q: cannot resolve its digest in the local daemon (attested %s); the frozen image may have been removed — re-run `aileron skill freeze` for this plan to rebuild and re-attest it: %w",
 				pin.LocalTag, want, err)
 		}
 		if observed != want {
 			return RunResult{}, fmt.Errorf(
-				"flightplan: refusing to boot composed local tag %q: it resolves to %s but the signed lock attested %s; the local image was rebuilt or repointed since freeze",
+				"flightplan: refusing to boot composed local tag %q: the local image now resolves to config digest %s but the signed lock attested %s, so the tag no longer points at the frozen environment; re-run `aileron skill freeze` for this plan to re-attest the current local image",
 				pin.LocalTag, observed, want)
 		}
 	}

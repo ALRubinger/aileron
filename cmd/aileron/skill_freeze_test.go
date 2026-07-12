@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -211,7 +212,12 @@ func TestRunSkillFreeze_MultiArchRecordsBothArchesInLock(t *testing.T) {
 		{OS: "linux", Arch: "amd64", Digest: amd},
 		{OS: "linux", Arch: "arm64", Digest: arm},
 	})
-	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	// The host arch's entry is re-attested from the daemon-loaded image (#2138),
+	// so its recorded digest is the content digest of this inspect body, not the
+	// OCI-layout value. The other arch keeps its OCI-layout digest.
+	inspect := dockerInspectJSON(t, "multiarch-lock-daemon-image")
+	hostDigest := wantContentDigestFromDocker(t, inspect)
+	fr := &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: inspect}
 	withFakeInspector(t, fr)
 
 	var stdout, stderr bytes.Buffer
@@ -229,7 +235,13 @@ func TestRunSkillFreeze_MultiArchRecordsBothArchesInLock(t *testing.T) {
 		t.Fatalf("ReadFrozen: %v", err)
 	}
 	lf := string(v.Lockfile)
-	for _, want := range []string{"arch: amd64", "arch: arm64", amd, arm} {
+	// Both arch keys are recorded, the host arch pins the re-attested daemon
+	// digest, and the non-host arch pins its OCI-layout digest.
+	nonHost := arm
+	if goruntime.GOARCH == "arm64" {
+		nonHost = amd
+	}
+	for _, want := range []string{"arch: amd64", "arch: arm64", hostDigest, nonHost} {
 		if !strings.Contains(lf, want) {
 			t.Errorf("lockfile must record %q for the multi-arch pin:\n%s", want, lf)
 		}
@@ -294,7 +306,7 @@ func TestRunSkillFreeze_IndicatorDrivenAcrossPullAndBuilds(t *testing.T) {
 		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
 	})
 	gr := &genericInspectRunner{
-		fakeRunner: &fakeRunner{outputs: buildxPreflightOK()},
+		fakeRunner: &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: dockerInspectJSON(t, "indicator-daemon-image")},
 		repoDigest: "sha256:" + strings.Repeat("c", 64),
 	}
 
@@ -361,7 +373,7 @@ func TestRunSkillFreeze_QuietSuppressesProgress(t *testing.T) {
 		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
 	})
 	gr := &genericInspectRunner{
-		fakeRunner: &fakeRunner{outputs: buildxPreflightOK()},
+		fakeRunner: &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: dockerInspectJSON(t, "quiet-daemon-image")},
 		repoDigest: "sha256:" + strings.Repeat("c", 64),
 	}
 
@@ -1028,7 +1040,12 @@ type fakeRunner struct {
 	outputs map[string]string
 	// fails maps a join of the args to an error the command returns.
 	fails map[string]error
-	calls []string
+	// inspectJSON, when non-empty, is written as the body of any
+	// `image inspect --format {{json .}} <ref>` command regardless of the ref,
+	// so a composer/launch test can answer the daemon-loaded composed image's
+	// content-digest read (#2138) without scripting the content-derived local tag.
+	inspectJSON string
+	calls       []string
 	// callEnvs is parallel to calls: the per-invocation env each command saw
 	// (nil for a plain Run), so a test can assert a scoped BUILDX_BUILDER
 	// selection reached the multi-arch build but not the daemon-load build.
@@ -1050,6 +1067,14 @@ func (f *fakeRunner) RunWithEnv(_ context.Context, _ string, args, env []string,
 	}
 	if out, ok := f.outputs[key]; ok {
 		_, _ = stdout.Write([]byte(out))
+		return nil
+	}
+	// Answer the daemon-loaded composed image's content-digest read (#2138): the
+	// re-attest inspects `image inspect --format {{json .}} <localTag>`, and the
+	// tag is content-derived, so match on the command shape rather than the exact
+	// tag when an inspectJSON body is configured.
+	if f.inspectJSON != "" && strings.Contains(key, "image inspect --format {{json .}}") {
+		_, _ = stdout.Write([]byte(f.inspectJSON))
 	}
 	return nil
 }
@@ -1230,14 +1255,17 @@ func TestBuilderFeatureComposer_ResolvesHostNPXToolchain(t *testing.T) {
 		{OS: "linux", Arch: "amd64", Digest: amd},
 		{OS: "linux", Arch: "arm64", Digest: arm},
 	})
-	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	inspect := dockerInspectJSON(t, "host-npx-daemon-image")
+	hostDigest := wantContentDigestFromDocker(t, inspect)
+	fr := &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: inspect}
 	withFakeInspector(t, fr)
 
 	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
 	if err != nil {
 		t.Fatalf("ComposeDigest with host-npx toolchain: %v", err)
 	}
-	assertTwoArchDigests(t, got, amd, arm)
+	// The host arch's entry is re-attested from the daemon-loaded image (#2138).
+	assertTwoArchDigests(t, got, amd, arm, hostDigest)
 }
 
 // TestBuilderFeatureComposer_ScopesFreezeBuilder is the regression guard for
@@ -1254,7 +1282,8 @@ func TestBuilderFeatureComposer_ScopesFreezeBuilder(t *testing.T) {
 	})
 	// The freeze builder is absent, so the preflight must create it exactly once.
 	fr := &fakeRunner{
-		outputs: buildxPreflightOK(),
+		outputs:     buildxPreflightOK(),
+		inspectJSON: dockerInspectJSON(t, "scoped-builder-daemon-image"),
 		fails: map[string]error{
 			"buildx inspect " + container.FreezeBuilderName: errors.New("no builder named aileron-freeze"),
 		},
@@ -1332,17 +1361,94 @@ func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
 		{OS: "linux", Arch: "amd64", Digest: amd},
 		{OS: "linux", Arch: "arm64", Digest: arm},
 	})
-	fr := &fakeRunner{outputs: buildxPreflightOK()}
+	inspect := dockerInspectJSON(t, "managed-daemon-image")
+	hostDigest := wantContentDigestFromDocker(t, inspect)
+	fr := &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: inspect}
 	withFakeInspector(t, fr)
 
 	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
 	if err != nil {
 		t.Fatalf("ComposeDigest with managed toolchain + escape hatch: %v", err)
 	}
-	assertTwoArchDigests(t, got, amd, arm)
+	// The host arch's entry is re-attested from the daemon-loaded image (#2138).
+	assertTwoArchDigests(t, got, amd, arm, hostDigest)
 }
 
-func assertTwoArchDigests(t *testing.T, got []freeze.PlatformDigest, amd, arm string) {
+// TestBuilderFeatureComposer_HostPinReattestedFromDaemonImage is the #2138
+// regression guard. Freeze runs TWO independent builds: the multi-arch buildx
+// OCI-layout build (whose per-arch config digests are the OCI-layout values) and
+// a second daemon-load build on the default docker driver. Composed layers are
+// not bit-reproducible, so the daemon-loaded host image's config content digest
+// can DIFFER from the OCI-layout host digest. Local (no-publish) launch boots the
+// daemon image under LocalTag and the #1863 boot guard resolves it through the
+// SAME localImageContentDigest, so unless the recorded host pin comes from the
+// daemon image, observed != want and a fresh freeze->launch refuses to boot with
+// nothing rebuilt.
+//
+// This test wires the OCI-layout host digest to a value that DIFFERS from the
+// daemon inspect's content digest and asserts the composer records the DAEMON
+// digest for the host arch (and keeps the OCI-layout digest for the other arch).
+// Before the fix the composer recorded the OCI-layout host digest verbatim, so
+// this assertion fails; after the fix the host pin equals exactly what the boot
+// guard observes, so observed == want by construction.
+func TestBuilderFeatureComposer_HostPinReattestedFromDaemonImage(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+
+	// OCI-layout host digest deliberately unequal to the daemon image's digest,
+	// standing in for the non-reproducible-build diff_id divergence.
+	ociAMD := "sha256:" + strings.Repeat("1", 64)
+	ociARM := "sha256:" + strings.Repeat("2", 64)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: ociAMD},
+		{OS: "linux", Arch: "arm64", Digest: ociARM},
+	})
+	inspect := dockerInspectJSON(t, "reattest-daemon-image")
+	daemonDigest := wantContentDigestFromDocker(t, inspect)
+
+	ociHost := ociARM
+	if goruntime.GOARCH == "amd64" {
+		ociHost = ociAMD
+	}
+	if daemonDigest == ociHost {
+		t.Fatalf("test precondition: the daemon digest %q must differ from the OCI-layout host digest to exercise the divergence", daemonDigest)
+	}
+
+	fr := &fakeRunner{outputs: buildxPreflightOK(), inspectJSON: inspect}
+	withFakeInspector(t, fr)
+
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
+	if err != nil {
+		t.Fatalf("ComposeDigest: %v", err)
+	}
+
+	byArch := map[string]string{}
+	for _, p := range got {
+		byArch[p.Arch] = p.Digest
+	}
+	// The host arch pins the re-attested daemon digest (the value the boot guard
+	// will observe), NOT the OCI-layout host digest.
+	if byArch[goruntime.GOARCH] != daemonDigest {
+		t.Errorf("host arch %s pin = %q, want the daemon-loaded image digest %q (re-attested per #2138), not the OCI-layout digest %q",
+			goruntime.GOARCH, byArch[goruntime.GOARCH], daemonDigest, ociHost)
+	}
+	// The non-host arch keeps its OCI-layout digest (the daemon-load build only
+	// loads the host arch, so the other arch has no daemon image to re-attest).
+	otherArch, otherOCI := "arm64", ociARM
+	if goruntime.GOARCH == "arm64" {
+		otherArch, otherOCI = "amd64", ociAMD
+	}
+	if byArch[otherArch] != otherOCI {
+		t.Errorf("non-host arch %s pin = %q, want its OCI-layout digest %q unchanged", otherArch, byArch[otherArch], otherOCI)
+	}
+}
+
+// assertTwoArchDigests asserts the composer returned both arch entries with the
+// expected digests. The host arch's entry is re-attested from the daemon-loaded
+// image (#2138), so its expected value is hostDigest (the content digest of the
+// runner's inspectJSON) rather than the OCI-layout value amd/arm. The non-host
+// arch keeps its OCI-layout digest. A hostDigest of "" means the test did not
+// configure a daemon inspect, so the OCI-layout value is expected on both arches.
+func assertTwoArchDigests(t *testing.T, got []freeze.PlatformDigest, amd, arm, hostDigest string) {
 	t.Helper()
 	if len(got) != 2 {
 		t.Fatalf("want two per-arch digests, got %+v", got)
@@ -1351,11 +1457,20 @@ func assertTwoArchDigests(t *testing.T, got []freeze.PlatformDigest, amd, arm st
 	for _, p := range got {
 		byArch[p.Arch] = p.Digest
 	}
-	if byArch["amd64"] != amd {
-		t.Errorf("amd64 digest = %q, want %q", byArch["amd64"], amd)
+	wantAMD, wantARM := amd, arm
+	if hostDigest != "" {
+		switch goruntime.GOARCH {
+		case "amd64":
+			wantAMD = hostDigest
+		case "arm64":
+			wantARM = hostDigest
+		}
 	}
-	if byArch["arm64"] != arm {
-		t.Errorf("arm64 digest = %q, want %q", byArch["arm64"], arm)
+	if byArch["amd64"] != wantAMD {
+		t.Errorf("amd64 digest = %q, want %q", byArch["amd64"], wantAMD)
+	}
+	if byArch["arm64"] != wantARM {
+		t.Errorf("arm64 digest = %q, want %q", byArch["arm64"], wantARM)
 	}
 }
 

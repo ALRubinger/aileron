@@ -100,9 +100,11 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 	// builderFeatureComposer -> container.Builder + composition.ToolsPlan, which
 	// BUILDS a genuine multi-architecture composed image via docker buildx (both
 	// linux/amd64 and linux/arm64), reads the per-arch serialization-agnostic
-	// config content digests back from the built OCI layout, and loads the composed
-	// image into the local daemon under LocalTag. The produced pin carries the
-	// bootable LocalTag and a per-arch config-digest set. This path needs buildx +
+	// config content digests back from the built OCI layout, loads the composed
+	// image into the local daemon under LocalTag, and re-attests the host-arch pin
+	// from that daemon-loaded image (#2138) so the boot guard observes exactly what
+	// freeze recorded. The produced pin carries the bootable LocalTag and a
+	// per-arch config-digest set. This path needs buildx +
 	// the QEMU emulators + the containerd image store on the CI host; provisioning
 	// that emulated build environment is owned by the S5 CI job (#2036).
 	raw, err := os.ReadFile(exampleManifestPath(t))
