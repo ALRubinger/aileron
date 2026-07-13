@@ -129,6 +129,111 @@ func TestResolveImages_ToolsComposeOntoDefaultBase(t *testing.T) {
 	}
 }
 
+// preflightingComposer is a FeatureComposer that also implements
+// ComposerPreflighter, recording the order of Preflight vs. the resolver's pull
+// so the #2144 preflight-before-pull ordering is observable in a Docker-free
+// test. preflightErr, when set, makes Preflight fail.
+type preflightingComposer struct {
+	preflightErr error
+	// events records "preflight" / "compose" in call order; the resolver
+	// appends "resolve" through a shared slice so the ordering is one sequence.
+	events *[]string
+}
+
+func (c preflightingComposer) Preflight(context.Context) error {
+	if c.events != nil {
+		*c.events = append(*c.events, "preflight")
+	}
+	return c.preflightErr
+}
+
+func (c preflightingComposer) ComposeDigest(context.Context, string, []string) (ComposeResult, error) {
+	if c.events != nil {
+		*c.events = append(*c.events, "compose")
+	}
+	return hostCR(fakeDigest2), nil
+}
+
+// TestResolveImages_PreflightRunsBeforeBasePull is the #2144 regression: on the
+// tools path the composer's multi-arch Preflight must run BEFORE the base-image
+// pull (the resolver's ResolveDigest), so a missing/unregistered emulator set
+// aborts the freeze with no wasted pull. A resolver that fails if called before
+// the preflight, plus an ordered event log, proves it.
+func TestResolveImages_PreflightRunsBeforeBasePull(t *testing.T) {
+	m := parseM(t, exampleSkillMD(t))
+	var events []string
+	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
+		events = append(events, "resolve")
+		return fakeDigest, nil
+	})
+	fc := preflightingComposer{events: &events}
+	if _, _, err := resolveImages(context.Background(), m, dr, fc, "dev"); err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if len(events) == 0 || events[0] != "preflight" {
+		t.Fatalf("preflight must run first, event order = %v", events)
+	}
+	// The resolver's pull must come after the preflight, and the compose after
+	// the pull.
+	want := []string{"preflight", "resolve", "compose"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Errorf("event order = %v, want %v", events, want)
+	}
+}
+
+// TestResolveImages_PreflightFailureSkipsBasePull is the #2144 fail-fast
+// regression: when the multi-arch Preflight fails, the base-image pull (the
+// resolver) is never called and the freeze aborts with the preflight's guided
+// remediation. No wasted pull, no dead-end.
+func TestResolveImages_PreflightFailureSkipsBasePull(t *testing.T) {
+	m := parseM(t, exampleSkillMD(t))
+	resolverCalled := false
+	dr := DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
+		resolverCalled = true
+		return fakeDigest, nil
+	})
+	fc := preflightingComposer{preflightErr: errors.New("register the QEMU emulators")}
+	_, _, err := resolveImages(context.Background(), m, dr, fc, "dev")
+	if err == nil || !strings.Contains(err.Error(), "register the QEMU emulators") {
+		t.Fatalf("err = %v, want the preflight remediation to surface", err)
+	}
+	if !strings.Contains(err.Error(), "preflight multi-arch build") {
+		t.Errorf("err = %v, want the preflight wrap", err)
+	}
+	if resolverCalled {
+		t.Error("a failed preflight must abort BEFORE the base-image pull (no wasted pull)")
+	}
+}
+
+// TestResolveImages_ImageOnlyDoesNotPreflight proves the image-only path never
+// preflights the multi-arch toolchain: it composes nothing, so a single-arch
+// host must still be able to pin a custom base image by digest.
+func TestResolveImages_ImageOnlyDoesNotPreflight(t *testing.T) {
+	m := parseM(t, []byte(envImageMD))
+	preflighted := false
+	dr := resolverReturning(fakeDigest, nil)
+	fc := preflightGuard{preflighted: &preflighted}
+	if _, _, err := resolveImages(context.Background(), m, dr, fc, ""); err != nil {
+		t.Fatalf("resolveImages: %v", err)
+	}
+	if preflighted {
+		t.Error("the image-only path must never preflight the multi-arch toolchain")
+	}
+}
+
+// preflightGuard flips *preflighted when its Preflight is called; its
+// ComposeDigest must never run on the image-only path.
+type preflightGuard struct{ preflighted *bool }
+
+func (g preflightGuard) Preflight(context.Context) error {
+	*g.preflighted = true
+	return nil
+}
+
+func (g preflightGuard) ComposeDigest(context.Context, string, []string) (ComposeResult, error) {
+	return hostCR(fakeDigest2), nil
+}
+
 // TestResolveImages_ToolsDefaultBaseReleaseUsesLatest proves the CLI-version
 // tag split on the default composition base: a release version resolves the
 // runner base at :latest, matching composition.BaseImage.

@@ -349,7 +349,20 @@ var freezeOCILayoutDir = composition.OCILayoutDir
 // disk; the layout read itself is covered in internal/flightplan/ociremote.
 var readOCILayoutConfigDigests = ociremote.ConfigContentDigestsFromOCILayout
 
-func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) (freeze.ComposeResult, error) {
+// Preflight validates the multi-arch build toolchain before any image work, so
+// freeze aborts with a guided remediation and NO wasted base-image pull when the
+// QEMU emulators are not registered (issue #2144). resolveImages calls this ahead
+// of the base-image pull; ComposeDigest re-runs the same check defensively (it is
+// idempotent), so the freeze still fails closed even if the preflight is skipped.
+func (builderFeatureComposer) Preflight(ctx context.Context) error {
+	in, err := newImageInspector()
+	if err != nil {
+		return err
+	}
+	return container.CheckMultiArchBuild(ctx, in.runner, in.runtime)
+}
+
+func (bfc builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) (freeze.ComposeResult, error) {
 	in, err := newImageInspector()
 	if err != nil {
 		return freeze.ComposeResult{}, err
@@ -357,6 +370,9 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	// Preflight the multi-arch toolchain BEFORE building. On a miss (no buildx, or
 	// the QEMU emulators are not registered) abort with an actionable remediation
 	// rather than silently producing a single-arch pin (Q2). No pin is emitted.
+	// resolveImages already runs this ahead of the base-image pull (issue #2144);
+	// the check is idempotent, so re-running it here keeps ComposeDigest failing
+	// closed on its own for any caller that reaches it without the preflight.
 	if err := container.CheckMultiArchBuild(ctx, in.runner, in.runtime); err != nil {
 		return freeze.ComposeResult{}, err
 	}

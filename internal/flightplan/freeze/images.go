@@ -77,6 +77,23 @@ func (f DigestResolverFunc) ResolveDigest(ctx context.Context, ref string) (stri
 	return f(ctx, ref)
 }
 
+// ComposerPreflighter is the optional capability a FeatureComposer may
+// implement to validate the multi-architecture build toolchain BEFORE any
+// image work. resolveImages runs it (when present) ahead of the base-image
+// pull so a missing/unregistered multi-arch toolchain aborts the freeze with a
+// guided remediation and no wasted pull — rather than surfacing only after the
+// base image has been fetched. Preflight MUST be idempotent and side-effect
+// free beyond the transparent build-environment provisioning ComposeDigest
+// already performs, since ComposeDigest may run the same checks again. A
+// composer that does not implement this interface is preflighted implicitly by
+// ComposeDigest, matching the prior behavior.
+type ComposerPreflighter interface {
+	// Preflight validates that the multi-architecture composed build can run.
+	// It returns a guided, actionable error on a miss (for example, the QEMU
+	// emulators are not registered) and nil when the toolchain is ready.
+	Preflight(ctx context.Context) error
+}
+
 // FeatureComposerFunc adapts a function to FeatureComposer.
 type FeatureComposerFunc func(ctx context.Context, base string, features []string) (ComposeResult, error)
 
@@ -141,6 +158,21 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 	}
 	if len(tools) > 0 && fc == nil {
 		return nil, nil, fmt.Errorf("freeze: environment tools require a feature composer")
+	}
+
+	// Preflight the multi-arch build toolchain BEFORE pulling the base image, so a
+	// missing/unregistered emulator set aborts the freeze fast with a guided
+	// remediation and no wasted base-image pull. Only the tools path composes a
+	// multi-arch image, so only it preflights; the image-only path never reaches
+	// here. The composer implicitly re-checks inside ComposeDigest, so a composer
+	// that does not implement ComposerPreflighter still fails closed — it just
+	// surfaces after the pull, as before.
+	if len(tools) > 0 {
+		if pf, ok := fc.(ComposerPreflighter); ok {
+			if err := pf.Preflight(ctx); err != nil {
+				return nil, nil, fmt.Errorf("freeze: preflight multi-arch build: %w", err)
+			}
+		}
 	}
 
 	// Resolve the base image to its digest. Both paths need it: the
