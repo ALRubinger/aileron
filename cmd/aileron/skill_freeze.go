@@ -349,16 +349,16 @@ var freezeOCILayoutDir = composition.OCILayoutDir
 // disk; the layout read itself is covered in internal/flightplan/ociremote.
 var readOCILayoutConfigDigests = ociremote.ConfigContentDigestsFromOCILayout
 
-func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) ([]freeze.PlatformDigest, error) {
+func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, features []string) (freeze.ComposeResult, error) {
 	in, err := newImageInspector()
 	if err != nil {
-		return nil, err
+		return freeze.ComposeResult{}, err
 	}
 	// Preflight the multi-arch toolchain BEFORE building. On a miss (no buildx, or
 	// the QEMU emulators are not registered) abort with an actionable remediation
 	// rather than silently producing a single-arch pin (Q2). No pin is emitted.
 	if err := container.CheckMultiArchBuild(ctx, in.runner, in.runtime); err != nil {
-		return nil, err
+		return freeze.ComposeResult{}, err
 	}
 	// Resolve the devcontainer toolchain from flag/env/default, mirroring the
 	// `aileron sandbox` and launch callers (freeze has no --toolchain flag, so
@@ -402,7 +402,7 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	localTag := composition.LocalToolsImageTag(base, features)
 	dest, err := freezeOCILayoutDir(localTag)
 	if err != nil {
-		return nil, err
+		return freeze.ComposeResult{}, err
 	}
 	// The layout dir is a stable, tag-keyed path reused across freezes of the same
 	// composition, so clear any prior contents before the build: a crashed or
@@ -410,10 +410,10 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 	// the per-arch read would otherwise pick up. buildx writes a fresh layout into
 	// the emptied dir.
 	if err := os.RemoveAll(dest); err != nil {
-		return nil, fmt.Errorf("clear freeze OCI layout dir %q: %w", dest, err)
+		return freeze.ComposeResult{}, fmt.Errorf("clear freeze OCI layout dir %q: %w", dest, err)
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
-		return nil, fmt.Errorf("prepare freeze OCI layout dir %q: %w", dest, err)
+		return freeze.ComposeResult{}, fmt.Errorf("prepare freeze OCI layout dir %q: %w", dest, err)
 	}
 
 	// Build the composed image for both linux/amd64 and linux/arm64 to a persisted
@@ -445,14 +445,14 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		if buildInd != nil {
 			buildInd.Fail("Building environment image")
 		}
-		return nil, fmt.Errorf("compose environment tools (multi-arch): %w", err)
+		return freeze.ComposeResult{}, fmt.Errorf("compose environment tools (multi-arch): %w", err)
 	}
 	if buildInd != nil {
 		buildInd.Done("Built environment image")
 	}
 	perArch, err := readOCILayoutConfigDigests(ctx, result.OCILayoutDir)
 	if err != nil {
-		return nil, fmt.Errorf("read composed per-arch config digests from %q: %w", result.OCILayoutDir, err)
+		return freeze.ComposeResult{}, fmt.Errorf("read composed per-arch config digests from %q: %w", result.OCILayoutDir, err)
 	}
 
 	// The multi-arch OCI-layout build does not load into the daemon. Run the same
@@ -480,17 +480,33 @@ func (builderFeatureComposer) ComposeDigest(ctx context.Context, base string, fe
 		if loadInd != nil {
 			loadInd.Fail("Loading image into local daemon")
 		}
-		return nil, fmt.Errorf("load composed image into the local daemon under %q: %w", localTag, err)
+		return freeze.ComposeResult{}, fmt.Errorf("load composed image into the local daemon under %q: %w", localTag, err)
 	}
 	if loadInd != nil {
 		loadInd.Done("Loaded image into local daemon")
+	}
+
+	// Resolve the just-loaded host-arch daemon image to its serialization-agnostic
+	// config content digest through the SAME localImageContentDigest the #1863 boot
+	// guard uses at launch. This is the local no-publish boot target: the
+	// daemon-load build and the multi-arch OCI-layout build use separate layer
+	// caches over non-reproducible composed layers, so their config content digests
+	// can legitimately differ (#2138). Recording the daemon image's own digest here
+	// makes the launch-time compare apples-to-apples by construction, while perArch
+	// (the OCI-layout digests) stays the publish/cross-machine pull identity. A
+	// resolve failure is fatal: without the local boot target the guard would fall
+	// back to the OCI-layout digest and mis-refuse the boot, which is the bug being
+	// fixed.
+	localHostConfigDigest, err := in.localImageContentDigest(ctx, localTag)
+	if err != nil {
+		return freeze.ComposeResult{}, fmt.Errorf("resolve local daemon config digest for %q: %w", localTag, err)
 	}
 
 	out := make([]freeze.PlatformDigest, 0, len(perArch))
 	for _, p := range perArch {
 		out = append(out, freeze.PlatformDigest{OS: p.OS, Arch: p.Arch, Digest: p.Digest})
 	}
-	return out, nil
+	return freeze.ComposeResult{PerArch: out, LocalHostConfigDigest: localHostConfigDigest}, nil
 }
 
 // localImageContentDigest resolves a local image tag to its serialization-

@@ -26,6 +26,25 @@ type DigestResolver interface {
 	ResolveDigest(ctx context.Context, ref string) (string, error)
 }
 
+// ComposeResult is what a FeatureComposer returns: the per-arch OCI-layout
+// config digests plus the host-arch daemon-loaded image's config digest.
+type ComposeResult struct {
+	// PerArch is the per-arch set of serialization-agnostic config content
+	// digests read from the multi-arch OCI layout, one entry per built platform
+	// (e.g. linux/amd64 and linux/arm64). freeze records the whole set as the
+	// composed pin's ConfigDigests, the publish/cross-machine pull identity.
+	PerArch []PlatformDigest
+	// LocalHostConfigDigest is the config content digest of the host-arch image
+	// the composer loaded into the local daemon under the composed LocalTag,
+	// resolved through the SAME localImageContentDigest the #1863 boot guard
+	// uses. freeze records it as the pin's LocalHostConfigDigest so the local
+	// no-publish boot compares apples-to-apples against the daemon image rather
+	// than the OCI-layout child (which can legitimately differ, #2138). Empty
+	// when the composer did not perform a daemon load (e.g. a fake in tests), in
+	// which case the boot guard falls back to the host ConfigDigests entry.
+	LocalHostConfigDigest string
+}
+
 // FeatureComposer composes a devcontainer Feature set onto a base image and
 // returns the built image's `sha256:` digest. It is the seam over
 // container.Builder + composition so freeze's composed-environment path is
@@ -38,11 +57,13 @@ type FeatureComposer interface {
 	// ComposeDigest builds the image composed from the given Features onto base
 	// for every supported architecture and returns the per-arch set of
 	// serialization-agnostic config content digests (one PlatformDigest per built
-	// platform, e.g. linux/amd64 and linux/arm64). The freeze producer records the
-	// whole set as the composed pin's ConfigDigests, so a plan launches on either
-	// architecture (ADR-0027, issue #2036). Every entry's Digest MUST be a
-	// `sha256:` content digest; a tag is rejected.
-	ComposeDigest(ctx context.Context, base string, features []string) ([]PlatformDigest, error)
+	// platform, e.g. linux/amd64 and linux/arm64) plus the host-arch daemon-loaded
+	// image's config content digest. The freeze producer records the per-arch set
+	// as the composed pin's ConfigDigests, so a plan launches on either
+	// architecture (ADR-0027, issue #2036), and the host-arch daemon digest as
+	// LocalHostConfigDigest for the local no-publish boot compare (#2138). Every
+	// PerArch entry's Digest MUST be a `sha256:` content digest; a tag is rejected.
+	ComposeDigest(ctx context.Context, base string, features []string) (ComposeResult, error)
 }
 
 // DigestResolverFunc adapts a function to DigestResolver.
@@ -57,12 +78,12 @@ func (f DigestResolverFunc) ResolveDigest(ctx context.Context, ref string) (stri
 }
 
 // FeatureComposerFunc adapts a function to FeatureComposer.
-type FeatureComposerFunc func(ctx context.Context, base string, features []string) ([]PlatformDigest, error)
+type FeatureComposerFunc func(ctx context.Context, base string, features []string) (ComposeResult, error)
 
 // ComposeDigest calls f, or errors when f is nil (a zero-valued adapter).
-func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, base string, features []string) ([]PlatformDigest, error) {
+func (f FeatureComposerFunc) ComposeDigest(ctx context.Context, base string, features []string) (ComposeResult, error) {
 	if f == nil {
-		return nil, fmt.Errorf("freeze: nil feature composer")
+		return ComposeResult{}, fmt.Errorf("freeze: nil feature composer")
 	}
 	return f(ctx, base, features)
 }
@@ -150,10 +171,11 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 	// Compose the catalog-resolved Feature references onto the digest-pinned
 	// base for every supported architecture.
 	pinnedBase := base + "@" + baseDigest
-	configDigests, err := fc.ComposeDigest(ctx, pinnedBase, featureRefs)
+	composed, err := fc.ComposeDigest(ctx, pinnedBase, featureRefs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("freeze: compose environment tools: %w", err)
 	}
+	configDigests := composed.PerArch
 	if len(configDigests) == 0 {
 		return nil, nil, fmt.Errorf("freeze: compose environment tools: composer returned no per-arch config digests")
 	}
@@ -164,22 +186,36 @@ func resolveImages(ctx context.Context, m *manifest.Manifest, dr DigestResolver,
 			return nil, nil, err
 		}
 	}
-	// The composed pin carries three identities: the descriptive Ref (what was
+	// The host-arch daemon-loaded image's config digest is the local boot
+	// target. When the composer recorded it (a real daemon load), enforce the
+	// same pin-by-digest invariant so a drifting value is rejected before the
+	// pin is recorded. An empty value is allowed (a fake composer that did not
+	// load), in which case the boot guard falls back to the host ConfigDigests
+	// entry.
+	if composed.LocalHostConfigDigest != "" {
+		if err := requireDigest("environment:"+strings.Join(tools, ",")+" (local host daemon image)", composed.LocalHostConfigDigest); err != nil {
+			return nil, nil, err
+		}
+	}
+	// The composed pin carries four identities: the descriptive Ref (what was
 	// composed onto which pinned base, for errors/audit), the attesting per-arch
-	// ConfigDigests set (the composed image's serialization-agnostic config
-	// content digest, keyed by platform), and the bootable LocalTag (the
-	// local-daemon tag the composed image actually carries, so the runtime can
-	// boot it). The composer builds a real multi-arch image and returns one entry
-	// per built platform (linux/amd64 and linux/arm64); the whole set is recorded
-	// so a plan launches on either host architecture (ADR-0027). LocalTag is
-	// computed from the SAME pinnedBase and catalog-resolved featureRefs the
-	// composer received, so it is byte-identical to
-	// composition.ToolsPlan(pinnedBase, featureRefs).Image; LocalToolsImageTag
-	// sorts internally, so declaration order does not matter.
+	// ConfigDigests set (the multi-arch OCI-layout config content digests, the
+	// publish/cross-machine pull identity), the bootable LocalTag (the local-daemon
+	// tag the composed image actually carries, so the runtime can boot it), and the
+	// LocalHostConfigDigest (the host-arch DAEMON-loaded image's config digest, the
+	// local no-publish boot compare target — see #2138: the daemon-load and
+	// OCI-layout builds can legitimately diverge). The composer builds a real
+	// multi-arch image and returns one PerArch entry per built platform
+	// (linux/amd64 and linux/arm64); the whole set is recorded so a plan launches
+	// on either host architecture (ADR-0027). LocalTag is computed from the SAME
+	// pinnedBase and catalog-resolved featureRefs the composer received, so it is
+	// byte-identical to composition.ToolsPlan(pinnedBase, featureRefs).Image;
+	// LocalToolsImageTag sorts internally, so declaration order does not matter.
 	return []ImagePin{{
-		Ref:           composedToolsRef(pinnedBase, tools),
-		ConfigDigests: sortedConfigDigests(configDigests),
-		LocalTag:      composition.LocalToolsImageTag(pinnedBase, featureRefs),
+		Ref:                   composedToolsRef(pinnedBase, tools),
+		ConfigDigests:         sortedConfigDigests(configDigests),
+		LocalTag:              composition.LocalToolsImageTag(pinnedBase, featureRefs),
+		LocalHostConfigDigest: composed.LocalHostConfigDigest,
 	}}, tools, nil
 }
 

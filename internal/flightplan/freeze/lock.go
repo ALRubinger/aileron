@@ -50,6 +50,23 @@ type ImagePin struct {
 	// pre-localTag format. Sealed inside the signed lock (covered by the
 	// content hash and signature), so it cannot be re-supplied at launch.
 	LocalTag string `yaml:"localTag,omitempty" json:"localTag,omitempty"`
+	// LocalHostConfigDigest is the serialization-agnostic config content digest
+	// of the host-architecture image freeze loaded into the local daemon under
+	// LocalTag. freeze builds the composed image twice: the multi-arch OCI
+	// layout (whose per-arch digests are ConfigDigests, the publish/cross-machine
+	// pull identity) and a separate host-arch daemon-load build on the default
+	// docker driver. Those two builds use different buildkit drivers with
+	// separate layer caches over non-reproducible composed layers, so their
+	// rootfs.diff_ids — and thus config content digests — can legitimately
+	// differ. The #1863 local no-publish boot guard compares the daemon-resolved
+	// digest against THIS field (when present), so freeze -> launch on the same
+	// machine is self-consistent by construction while ConfigDigests stays
+	// entirely the OCI-layout/published identity that publish and cross-machine
+	// pull verify. Set only on a composed-tools pin frozen by a CLI that records
+	// it; a lock without it (older freeze) falls back to the host ConfigDigests
+	// entry for the boot compare. Covered by the content hash and signature
+	// (NOT cleared by withoutContentHash), so it cannot be re-supplied at launch.
+	LocalHostConfigDigest string `yaml:"localHostConfigDigest,omitempty" json:"localHostConfigDigest,omitempty"`
 }
 
 // StepReach is the sealed network reach for one tool step: the `hosts` from

@@ -698,6 +698,11 @@
                 "type": "string",
                 "description": "The bootable local-daemon tag the runtime boots for a composed-tools pin (aileron/sandbox-tools:<hex>). Present only on a composed-tools pin; absent for a directly-pinned base, which boots ref@digest.",
                 "minLength": 1
+              },
+              "localHostConfigDigest": {
+                "type": "string",
+                "description": "The serialization-agnostic config content digest of the host-architecture image that freeze loaded into the local daemon under localTag. The composed image is built twice — the multi-arch OCI layout (recorded in configDigests, used for publish and cross-machine pull) and a separate host-arch daemon load — and their non-reproducible composed layers can legitimately yield different config content digests. The local no-publish boot guard compares the daemon-resolved digest against this field so freeze -> launch on the same machine is self-consistent by construction, while configDigests stays the published/pull identity. Present only on a composed-tools pin frozen by a CLI that records it; a lock without it falls back to the host configDigests entry for the boot compare.",
+                "pattern": "^sha256:[a-f0-9]{64}$"
               }
             },
             "if": { "required": ["localTag"] },
