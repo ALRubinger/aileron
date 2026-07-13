@@ -52,3 +52,31 @@ func (p ImagePin) HostConfigDigest() (digest, platform string, ok bool) {
 	digest, ok = p.ConfigDigestFor(os, arch)
 	return digest, platform, ok
 }
+
+// LocalBootConfigDigest selects the config content digest the #1863 local
+// no-publish boot guard compares the daemon-resolved digest against. It exists
+// because freeze builds the composed image twice — the multi-arch OCI layout
+// (ConfigDigests, the publish/cross-machine pull identity) and a separate
+// host-arch daemon-load build — whose non-reproducible composed layers can
+// legitimately produce different config content digests. When freeze recorded
+// the daemon-loaded image's digest (LocalHostConfigDigest set), the guard must
+// compare against THAT so freeze -> launch on the same machine is self-consistent;
+// ConfigDigests stays the published identity. When it is absent (an older freeze
+// that predates the field), the guard falls back to the host ConfigDigests entry
+// (HostConfigDigest), preserving the pre-field behavior.
+//
+// ok gates on the host ConfigDigests entry existing either way: a plan not built
+// for this host's platform still fails closed (the LocalHostConfigDigest is only
+// ever recorded alongside a host ConfigDigests entry, so a lock carrying the
+// local field but no matching per-arch entry is malformed and correctly reports
+// ok=false). platform is the human-facing `os/arch` for the fail-closed error.
+func (p ImagePin) LocalBootConfigDigest() (digest, platform string, ok bool) {
+	hostDigest, platform, ok := p.HostConfigDigest()
+	if !ok {
+		return "", platform, false
+	}
+	if p.LocalHostConfigDigest != "" {
+		return p.LocalHostConfigDigest, platform, true
+	}
+	return hostDigest, platform, true
+}

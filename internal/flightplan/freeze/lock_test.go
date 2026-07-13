@@ -226,9 +226,36 @@ func composedLock() Lockfile {
 				{OS: "linux", Arch: "amd64", Digest: fakeDigest},
 				{OS: "linux", Arch: "arm64", Digest: fakeDigest2},
 			},
-			LocalTag: "aileron/sandbox-tools:abc123",
+			LocalTag:              "aileron/sandbox-tools:abc123",
+			LocalHostConfigDigest: fakeDigest,
 		}},
 		Version: "1.2.3",
+	}
+}
+
+// TestWithoutContentHash_PreservesLocalHostConfigDigest proves the #2138 daemon
+// digest field is HASHED: withoutContentHash (the canonical bytes the content
+// hash and signature are taken over) clears the content hash but leaves
+// LocalHostConfigDigest intact, so a tampered daemon-boot target fails signature
+// verification and cannot be re-supplied at launch.
+func TestWithoutContentHash_PreservesLocalHostConfigDigest(t *testing.T) {
+	l := composedLock()
+	l.ContentHash = "sha256:whatever"
+	got := l.withoutContentHash()
+	if got.ContentHash != "" {
+		t.Errorf("withoutContentHash must clear the content hash, got %q", got.ContentHash)
+	}
+	if got.ResolvedImages[0].LocalHostConfigDigest != fakeDigest {
+		t.Errorf("LocalHostConfigDigest = %q, want it preserved (hashed) as %q",
+			got.ResolvedImages[0].LocalHostConfigDigest, fakeDigest)
+	}
+	// It is also emitted in the marshaled canonical bytes, so the hash covers it.
+	b, err := MarshalLockfile(got)
+	if err != nil {
+		t.Fatalf("MarshalLockfile: %v", err)
+	}
+	if !strings.Contains(string(b), "localHostConfigDigest:") {
+		t.Errorf("marshaled composed pin must emit localHostConfigDigest:\n%s", b)
 	}
 }
 

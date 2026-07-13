@@ -148,11 +148,11 @@ func freezeExampleForIntegration(t *testing.T) store.FrozenVersion {
 		Resolver: freeze.DigestResolverFunc(func(context.Context, string) (string, error) {
 			return "sha256:" + strings.Repeat("b", 64), nil
 		}),
-		Composer: freeze.FeatureComposerFunc(func(context.Context, string, []string) ([]freeze.PlatformDigest, error) {
-			return []freeze.PlatformDigest{
+		Composer: freeze.FeatureComposerFunc(func(context.Context, string, []string) (freeze.ComposeResult, error) {
+			return freeze.ComposeResult{PerArch: []freeze.PlatformDigest{
 				{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
 				{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("a", 64)},
-			}, nil
+			}}, nil
 		}),
 	})
 	if err != nil {

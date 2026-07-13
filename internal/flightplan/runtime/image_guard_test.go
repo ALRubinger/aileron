@@ -62,6 +62,101 @@ func composedPin(localTag, imageID string) LoadedPlan {
 	}
 }
 
+// TestRunInImage_LocalBootComparesAgainstLocalHostConfigDigest is the #2138
+// regression: freeze builds the composed image twice (the multi-arch OCI layout,
+// whose digests are ConfigDigests, and a separate host-arch daemon load), and the
+// two non-reproducible builds can legitimately produce DIFFERENT config content
+// digests. The local no-publish boot guard must compare the daemon-resolved digest
+// against the recorded daemon digest (LocalHostConfigDigest), NOT the OCI-layout
+// ConfigDigests[host]. Before the fix the guard compared against ConfigDigests[host]
+// and refused to boot the operator's own freshly-frozen image (observed != want)
+// even though nothing was rebuilt. After the fix a daemon image resolving to
+// LocalHostConfigDigest boots, while a resolver returning the OCI-layout digest
+// (the value the daemon does NOT carry) is correctly refused.
+func TestRunInImage_LocalBootComparesAgainstLocalHostConfigDigest(t *testing.T) {
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	ociLayoutDigest := "sha256:" + strings.Repeat("a", 64) // ConfigDigests[host], the published identity
+	daemonDigest := "sha256:" + strings.Repeat("d", 64)    // LocalHostConfigDigest, what the daemon actually carries
+	if ociLayoutDigest == daemonDigest {
+		t.Fatal("precondition: the two digests must differ to exercise the two-source-of-truth path")
+	}
+	pin := freeze.ImagePin{
+		Ref:                   "aileron/sandbox-tools+tools(gh)",
+		ConfigDigests:         hostConfigDigests(ociLayoutDigest),
+		LocalTag:              localTag,
+		LocalHostConfigDigest: daemonDigest,
+	}
+	lp := LoadedPlan{ContentHash: "sha256:content", ResolvedImages: []freeze.ImagePin{pin}}
+
+	// The daemon resolves the tag to the daemon digest (what freeze actually
+	// loaded). The guard must accept this — it compares against LocalHostConfigDigest.
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	resolver := &fakeImageDigestResolver{digest: daemonDigest}
+	if _, err := runInImage(context.Background(), lp, Options{
+		Name:                "tools-plan",
+		Version:             "1.0.0",
+		ImageRunner:         runner,
+		ImageDigestResolver: resolver,
+	}); err != nil {
+		t.Fatalf("a daemon image resolving to LocalHostConfigDigest must boot (the #2138 fix): %v", err)
+	}
+	if !runner.called {
+		t.Fatal("the guard must boot when the daemon digest matches LocalHostConfigDigest")
+	}
+
+	// A resolver returning the OCI-layout digest (the value the daemon does NOT
+	// carry) must be refused: the guard is still fail-closed, just against the
+	// correct local target.
+	runner2 := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	resolver2 := &fakeImageDigestResolver{digest: ociLayoutDigest}
+	_, err := runInImage(context.Background(), lp, Options{
+		Name:                "tools-plan",
+		Version:             "1.0.0",
+		ImageRunner:         runner2,
+		ImageDigestResolver: resolver2,
+	})
+	if err == nil {
+		t.Fatal("a daemon digest that matches only the OCI-layout ConfigDigests (not LocalHostConfigDigest) must fail closed")
+	}
+	if runner2.called {
+		t.Fatal("a mismatch against LocalHostConfigDigest must NOT boot the runner")
+	}
+	// The mismatch error names the daemon target (LocalHostConfigDigest), proving
+	// the compare used the local field, not ConfigDigests[host].
+	if !strings.Contains(err.Error(), daemonDigest) {
+		t.Errorf("mismatch error %q must name the daemon target %q", err.Error(), daemonDigest)
+	}
+}
+
+// TestRunInImage_LocalBootFallsBackToConfigDigestsWhenLocalFieldAbsent proves the
+// backward-compatible fallback: a pin frozen before the LocalHostConfigDigest field
+// existed (empty field) still compares against the host ConfigDigests entry, so an
+// older lock keeps its pre-#2138 behavior.
+func TestRunInImage_LocalBootFallsBackToConfigDigestsWhenLocalFieldAbsent(t *testing.T) {
+	localTag := "aileron/sandbox-tools:0123456789abcdef"
+	configDigest := "sha256:" + strings.Repeat("b", 64)
+	pin := freeze.ImagePin{
+		Ref:           "aileron/sandbox-tools+tools(gh)",
+		ConfigDigests: hostConfigDigests(configDigest),
+		LocalTag:      localTag,
+		// LocalHostConfigDigest intentionally empty (older freeze).
+	}
+	lp := LoadedPlan{ContentHash: "sha256:content", ResolvedImages: []freeze.ImagePin{pin}}
+	runner := &fakeImageRunner{result: ImageRunResult{ContentHash: "sha256:content"}}
+	resolver := &fakeImageDigestResolver{digest: configDigest}
+	if _, err := runInImage(context.Background(), lp, Options{
+		Name:                "tools-plan",
+		Version:             "1.0.0",
+		ImageRunner:         runner,
+		ImageDigestResolver: resolver,
+	}); err != nil {
+		t.Fatalf("an older lock with no LocalHostConfigDigest must compare against ConfigDigests[host]: %v", err)
+	}
+	if !runner.called {
+		t.Fatal("the fallback compare against ConfigDigests[host] must boot on a match")
+	}
+}
+
 func TestRunInImage_GuardBootsOnDigestMatch(t *testing.T) {
 	// A composed pin whose LocalTag resolves in the daemon to the attested
 	// Digest boots: the guard consults the resolver, the digests match, and the
@@ -161,10 +256,11 @@ func TestRunInImage_GuardFailsClosedOnResolveError(t *testing.T) {
 
 func TestRunInImage_GuardFailsClosedWhenHostArchAbsent(t *testing.T) {
 	// A composed pin whose per-arch config-digest set carries no entry for the
-	// host platform fails closed with the "not published for <host platform>"
+	// host platform fails closed with the "not frozen for <host platform>"
 	// message: the artifact was built for other arches only, so this host must not
 	// boot an unattested image. The resolver is never consulted and the runner is
-	// never called.
+	// never called. The local no-publish boot path says "frozen" (not "published")
+	// because this is the author's own freeze, with no publish involved (#2138).
 	localTag := "aileron/sandbox-tools:0123456789abcdef"
 	lp := LoadedPlan{
 		ContentHash: "sha256:content",
@@ -186,8 +282,8 @@ func TestRunInImage_GuardFailsClosedWhenHostArchAbsent(t *testing.T) {
 	if err == nil {
 		t.Fatal("a composed pin lacking the host arch must fail closed")
 	}
-	if !strings.Contains(err.Error(), "not published for") {
-		t.Errorf("error = %v, want a 'not published for <host platform>' message", err)
+	if !strings.Contains(err.Error(), "not frozen for") {
+		t.Errorf("error = %v, want a 'not frozen for <host platform>' message", err)
 	}
 	if resolver.called {
 		t.Error("the guard must fail closed BEFORE consulting the resolver when the host arch is absent")

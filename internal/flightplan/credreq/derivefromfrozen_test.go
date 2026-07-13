@@ -89,11 +89,11 @@ func TestDeriveFromFrozen_HappyPath(t *testing.T) {
 		Resolver: freeze.DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 			return "sha256:" + strings.Repeat("b", 64), nil
 		}),
-		Composer: freeze.FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]freeze.PlatformDigest, error) {
-			return []freeze.PlatformDigest{
+		Composer: freeze.FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (freeze.ComposeResult, error) {
+			return freeze.ComposeResult{PerArch: []freeze.PlatformDigest{
 				{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
 				{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("a", 64)},
-			}, nil
+			}}, nil
 		}),
 	})
 	if err != nil {

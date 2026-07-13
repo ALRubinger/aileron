@@ -70,6 +70,14 @@ func wantContentDigestFromDocker(t *testing.T, inspectJSON string) string {
 
 const fakeFreezeDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// defaultLocalInspectJSON is a valid `docker image inspect --format {{json .}}`
+// body a fake runner returns for the composer's daemon-load digest leg (#2138)
+// when a test does not need a specific one, so localImageContentDigest resolves a
+// stable LocalHostConfigDigest.
+const defaultLocalInspectJSON = `{"Id":"sha256:` + "1111111111111111111111111111111111111111111111111111111111111111" +
+	`","Os":"linux","Architecture":"amd64","Config":{"Env":["PATH=/usr/bin"],"Entrypoint":["/entry"],"Cmd":["bash"],"WorkingDir":"/work"},"RootFS":{"Type":"layers","Layers":["sha256:` +
+	"2222222222222222222222222222222222222222222222222222222222222222" + `"]}}`
+
 var (
 	errTestPull    = errors.New("pull failed")
 	errTestInspect = errors.New("inspect failed")
@@ -84,8 +92,8 @@ func stubFreezeResolvers(t *testing.T, digest string) {
 		return freeze.DigestResolverFunc(func(context.Context, string) (string, error) { return digest, nil })
 	}
 	newFeatureComposer = func() freeze.FeatureComposer {
-		return freeze.FeatureComposerFunc(func(context.Context, string, []string) ([]freeze.PlatformDigest, error) {
-			return bothArchDigests(digest), nil
+		return freeze.FeatureComposerFunc(func(context.Context, string, []string) (freeze.ComposeResult, error) {
+			return freeze.ComposeResult{PerArch: bothArchDigests(digest)}, nil
 		})
 	}
 	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
@@ -248,6 +256,12 @@ type genericInspectRunner struct {
 	pulledMu   sync.Mutex
 	pulled     bool
 	repoDigest string
+	// localInspectJSON is the `{{json .}}` docker-inspect body the composer's
+	// daemon-load digest resolution (localImageContentDigest, #2138) reads for the
+	// loaded LocalTag. When empty it defaults to a fixed valid body so the real
+	// composer's new local-host-digest leg resolves without the test scripting the
+	// exact tag.
+	localInspectJSON string
 }
 
 func (r *genericInspectRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
@@ -266,6 +280,17 @@ func (r *genericInspectRunner) RunWithEnv(ctx context.Context, name string, args
 		ref := args[len(args)-1]
 		repo := repoOfRef(ref)
 		_, _ = stdout.Write([]byte(`["` + repo + `@` + r.repoDigest + `"]`))
+		return nil
+	}
+	// The composer's daemon-load digest leg (#2138) inspects the loaded LocalTag
+	// with `{{json .}}`; answer it with a valid inspect body so the real composer
+	// resolves LocalHostConfigDigest without the test scripting the exact tag.
+	if strings.Contains(joined, "image inspect") && strings.Contains(joined, "{{json .}}") {
+		body := r.localInspectJSON
+		if body == "" {
+			body = defaultLocalInspectJSON
+		}
+		_, _ = stdout.Write([]byte(body))
 		return nil
 	}
 	return r.fakeRunner.RunWithEnv(ctx, name, args, env, stdout, stderr)
@@ -841,10 +866,10 @@ func TestRunSkillFreeze_ToolsComposeOntoCustomBase(t *testing.T) {
 		})
 	}
 	newFeatureComposer = func() freeze.FeatureComposer {
-		return freeze.FeatureComposerFunc(func(_ context.Context, base string, features []string) ([]freeze.PlatformDigest, error) {
+		return freeze.FeatureComposerFunc(func(_ context.Context, base string, features []string) (freeze.ComposeResult, error) {
 			composeBase = base
 			composeFeatures = features
-			return bothArchDigests(composedDigest), nil
+			return freeze.ComposeResult{PerArch: bothArchDigests(composedDigest)}, nil
 		})
 	}
 	t.Cleanup(func() { newDigestResolver, newFeatureComposer = origDR, origFC })
@@ -1050,6 +1075,15 @@ func (f *fakeRunner) RunWithEnv(_ context.Context, _ string, args, env []string,
 	}
 	if out, ok := f.outputs[key]; ok {
 		_, _ = stdout.Write([]byte(out))
+		return nil
+	}
+	// The composer's daemon-load digest leg (#2138) inspects the loaded LocalTag
+	// with `{{json .}}`. When a test did not script the exact tag key, answer with
+	// a valid default inspect body so localImageContentDigest resolves rather than
+	// failing on empty output. A test that needs a specific body or a failure
+	// scripts the exact key in outputs/fails, which is matched above.
+	if strings.Contains(key, "image inspect") && strings.Contains(key, "{{json .}}") {
+		_, _ = stdout.Write([]byte(defaultLocalInspectJSON))
 	}
 	return nil
 }
@@ -1140,6 +1174,87 @@ func TestBuilderFeatureComposer_DaemonLoadErrorPropagates(t *testing.T) {
 
 	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err == nil || !strings.Contains(err.Error(), "load composed image") {
 		t.Fatalf("err = %v, want a daemon-load failure", err)
+	}
+}
+
+// failLocalInspectRunner passes both builds but fails the composer's daemon-load
+// digest inspect (the `{{json .}}` image inspect of the loaded LocalTag, #2138),
+// so the composer's local-host-digest resolve error path is exercised. It
+// overrides both Run and RunWithEnv so the inspect is caught on either path.
+type failLocalInspectRunner struct{ *fakeRunner }
+
+func (r failLocalInspectRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
+	return r.RunWithEnv(ctx, name, args, nil, stdout, stderr)
+}
+
+func (r failLocalInspectRunner) RunWithEnv(ctx context.Context, name string, args, env []string, stdout, stderr io.Writer) error {
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "image inspect") && strings.Contains(joined, "{{json .}}") {
+		return errors.New("no such image")
+	}
+	return r.fakeRunner.RunWithEnv(ctx, name, args, env, stdout, stderr)
+}
+
+// TestBuilderFeatureComposer_LocalHostDigestResolveErrorPropagates proves the
+// #2138 leg fails closed: if the just-loaded host image cannot be inspected for
+// its config content digest (the local no-publish boot target), the composer
+// errors rather than sealing a pin whose local boot would fall back to the wrong
+// digest.
+func TestBuilderFeatureComposer_LocalHostDigestResolveErrorPropagates(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	fr := failLocalInspectRunner{fakeRunner: &fakeRunner{outputs: buildxPreflightOK()}}
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{runner: fr, runtime: "docker"}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	if _, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"}); err == nil || !strings.Contains(err.Error(), "local daemon config digest") {
+		t.Fatalf("err = %v, want a local daemon config digest resolve failure", err)
+	}
+}
+
+// TestBuilderFeatureComposer_RecordsLocalHostConfigDigest proves the composer
+// records the daemon-loaded host image's config content digest (#2138) so the
+// local no-publish boot has its own compare target, distinct from the OCI-layout
+// per-arch digests.
+func TestBuilderFeatureComposer_RecordsLocalHostConfigDigest(t *testing.T) {
+	t.Setenv(container.ToolchainModeEnv, container.ToolchainModeHostNPX)
+	stubOCILayoutDigests(t, []ociremote.PlatformConfigDigest{
+		{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("b", 64)},
+	})
+	// The daemon-load inspect returns a specific body; the composer must resolve it
+	// to that body's content digest and record it as LocalHostConfigDigest.
+	inspectBody := dockerInspectJSON(t, "local-daemon-marker")
+	wantLocal := wantContentDigestFromDocker(t, inspectBody)
+	gr := &genericInspectRunner{
+		fakeRunner:       &fakeRunner{outputs: buildxPreflightOK()},
+		repoDigest:       "sha256:" + strings.Repeat("c", 64),
+		localInspectJSON: inspectBody,
+	}
+	orig := newImageInspector
+	newImageInspector = func() (imageInspector, error) {
+		return imageInspector{runner: gr, runtime: "docker"}, nil
+	}
+	t.Cleanup(func() { newImageInspector = orig })
+
+	got, err := (builderFeatureComposer{}).ComposeDigest(context.Background(), "base@"+fakeFreezeDigest, []string{"aws-cli"})
+	if err != nil {
+		t.Fatalf("ComposeDigest: %v", err)
+	}
+	if got.LocalHostConfigDigest != wantLocal {
+		t.Errorf("LocalHostConfigDigest = %q, want the daemon-inspect content digest %q", got.LocalHostConfigDigest, wantLocal)
+	}
+	// It is distinct from the OCI-layout per-arch digests (the two builds diverge).
+	for _, p := range got.PerArch {
+		if p.Digest == wantLocal {
+			t.Errorf("LocalHostConfigDigest must be recorded from the daemon image, not equal to the OCI-layout %s entry", p.Arch)
+		}
 	}
 }
 
@@ -1342,13 +1457,13 @@ func TestBuilderFeatureComposer_ManagedToolchainWiresProvisioner(t *testing.T) {
 	assertTwoArchDigests(t, got, amd, arm)
 }
 
-func assertTwoArchDigests(t *testing.T, got []freeze.PlatformDigest, amd, arm string) {
+func assertTwoArchDigests(t *testing.T, got freeze.ComposeResult, amd, arm string) {
 	t.Helper()
-	if len(got) != 2 {
-		t.Fatalf("want two per-arch digests, got %+v", got)
+	if len(got.PerArch) != 2 {
+		t.Fatalf("want two per-arch digests, got %+v", got.PerArch)
 	}
 	byArch := map[string]string{}
-	for _, p := range got {
+	for _, p := range got.PerArch {
 		byArch[p.Arch] = p.Digest
 	}
 	if byArch["amd64"] != amd {

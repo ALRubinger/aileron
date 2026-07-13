@@ -171,6 +171,27 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		t.Fatalf("the composed pin's host config digest must be a sha256: attested Id, got %q", attested)
 	}
 
+	// #2138 regression: freeze must record the host-arch DAEMON-loaded image's
+	// config digest as LocalHostConfigDigest, distinct from the OCI-layout
+	// ConfigDigests[host] (attested above). The two builds — the multi-arch OCI
+	// layout and the separate host-arch daemon load — use different buildkit
+	// drivers with separate layer caches over non-reproducible composed layers, so
+	// their config content digests can legitimately differ. Before this fix the
+	// boot guard compared the daemon-resolved digest against ConfigDigests[host]
+	// and refused the operator's own freshly-frozen image (observed != want) with
+	// no rebuild. The boot below MUST compare against LocalHostConfigDigest.
+	if pin.LocalHostConfigDigest == "" {
+		t.Fatalf("freeze must record the daemon-loaded host image's config digest (LocalHostConfigDigest); got %+v", pin)
+	}
+	if !strings.HasPrefix(pin.LocalHostConfigDigest, "sha256:") {
+		t.Fatalf("LocalHostConfigDigest must be a sha256: content digest, got %q", pin.LocalHostConfigDigest)
+	}
+	localBoot, _, ok := pin.LocalBootConfigDigest()
+	if !ok || localBoot != pin.LocalHostConfigDigest {
+		t.Fatalf("the local boot compare target must be LocalHostConfigDigest %q, got %q (ok=%v)",
+			pin.LocalHostConfigDigest, localBoot, ok)
+	}
+
 	// Boot the produced composed pin through the production runner with the
 	// production digest resolver wired. The runtime consults the resolver on the
 	// composed boot path: it re-inspects pin.LocalTag in the daemon and MUST
@@ -195,7 +216,8 @@ func TestFlightPlanComposedToolsBootGuard(t *testing.T) {
 		ImageDigestResolver: containerImageDigestResolver{},
 	})
 	if err != nil {
-		t.Fatalf("boot the composed pin (guard must resolve the just-built local tag %q to the attested %s): %v", pin.LocalTag, attested, err)
+		t.Fatalf("boot the composed pin (guard must resolve the just-built local tag %q to the daemon-loaded config digest %s; OCI-layout attested %s): %v",
+			pin.LocalTag, pin.LocalHostConfigDigest, attested, err)
 	}
 	_ = res2
 }

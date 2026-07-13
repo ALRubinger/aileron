@@ -168,3 +168,49 @@ func TestHostConfigDigest(t *testing.T) {
 		}
 	})
 }
+
+// TestLocalBootConfigDigest is the #2138 local-boot selector: it returns the
+// recorded daemon-loaded digest (LocalHostConfigDigest) when present so the local
+// no-publish boot compares against the daemon image rather than the OCI-layout
+// ConfigDigests[host], falls back to the host ConfigDigests entry when the field
+// is absent (older lock), and stays fail-closed when the host arch is unbuilt.
+func TestLocalBootConfigDigest(t *testing.T) {
+	base := ImagePin{
+		LocalTag: "aileron/sandbox-tools:x",
+		ConfigDigests: []PlatformDigest{
+			{OS: "linux", Arch: "amd64", Digest: "sha256:aaa"},
+			{OS: "linux", Arch: "arm64", Digest: "sha256:bbb"},
+		},
+	}
+	t.Run("prefers LocalHostConfigDigest when set", func(t *testing.T) {
+		withHostGOARCH(t, "amd64")
+		pin := base
+		pin.LocalHostConfigDigest = "sha256:daemon"
+		got, platform, ok := pin.LocalBootConfigDigest()
+		if !ok || got != "sha256:daemon" {
+			t.Errorf("LocalBootConfigDigest = %q, %v; want the daemon digest sha256:daemon, true", got, ok)
+		}
+		if platform != "linux/amd64" {
+			t.Errorf("platform = %q, want linux/amd64", platform)
+		}
+	})
+	t.Run("falls back to the host ConfigDigests entry when the field is absent", func(t *testing.T) {
+		withHostGOARCH(t, "amd64")
+		got, _, ok := base.LocalBootConfigDigest()
+		if !ok || got != "sha256:aaa" {
+			t.Errorf("LocalBootConfigDigest = %q, %v; want the OCI-layout amd64 entry sha256:aaa, true", got, ok)
+		}
+	})
+	t.Run("fails closed when the host arch is unbuilt even with a local field", func(t *testing.T) {
+		withHostGOARCH(t, "riscv64")
+		pin := base
+		pin.LocalHostConfigDigest = "sha256:daemon"
+		got, platform, ok := pin.LocalBootConfigDigest()
+		if ok {
+			t.Errorf("LocalBootConfigDigest = %q, ok=true; want a fail-closed miss when the host arch is unbuilt", got)
+		}
+		if platform != "linux/riscv64" {
+			t.Errorf("platform = %q, want linux/riscv64 for the fail-closed message", platform)
+		}
+	})
+}

@@ -15,12 +15,22 @@ func hostPD(digest string) []PlatformDigest {
 	return []PlatformDigest{{OS: os, Arch: arch, Digest: digest}}
 }
 
+// hostCR wraps a single digest as a ComposeResult carrying just the host-platform
+// per-arch set (no LocalHostConfigDigest), the shape an inline test composer
+// returns when it does not model the daemon-load leg. The freeze producer treats
+// an empty LocalHostConfigDigest as "no daemon load recorded" and the boot guard
+// falls back to the host ConfigDigests entry, so these fakes exercise the
+// pre-field behavior.
+func hostCR(digest string) ComposeResult {
+	return ComposeResult{PerArch: hostPD(digest)}
+}
+
 // fakeComposer returns a composer that yields a single host-platform config
 // digest, so callers that only care that a composed pin is produced keep their
 // external signature unchanged after the producer became per-arch (#2036).
 func fakeComposer(digest string) FeatureComposer {
-	return FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
-		return hostPD(digest), nil
+	return FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (ComposeResult, error) {
+		return hostCR(digest), nil
 	})
 }
 
@@ -416,9 +426,9 @@ aileron:
 	_, err := Run(context.Background(), []byte(strings.Replace(badMD, "kind: action-call", "kind: not-a-kind", 1)), Options{
 		SigningKeyPath: keyPath,
 		Resolver:       dummyResolver(),
-		Composer: FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]PlatformDigest, error) {
+		Composer: FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (ComposeResult, error) {
 			composerHit = true
-			return hostPD(fakeDigest), nil
+			return hostCR(fakeDigest), nil
 		}),
 	})
 	if err == nil {

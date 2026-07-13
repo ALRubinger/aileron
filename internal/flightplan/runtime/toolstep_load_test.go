@@ -79,11 +79,11 @@ func frozenToolStep(t *testing.T, withEnvironment bool) store.FrozenVersion {
 		opts.Resolver = freeze.DigestResolverFunc(func(_ context.Context, _ string) (string, error) {
 			return "sha256:" + strings.Repeat("b", 64), nil
 		})
-		opts.Composer = freeze.FeatureComposerFunc(func(_ context.Context, _ string, _ []string) ([]freeze.PlatformDigest, error) {
-			return []freeze.PlatformDigest{
+		opts.Composer = freeze.FeatureComposerFunc(func(_ context.Context, _ string, _ []string) (freeze.ComposeResult, error) {
+			return freeze.ComposeResult{PerArch: []freeze.PlatformDigest{
 				{OS: "linux", Arch: "amd64", Digest: "sha256:" + strings.Repeat("a", 64)},
 				{OS: "linux", Arch: "arm64", Digest: "sha256:" + strings.Repeat("a", 64)},
-			}, nil
+			}}, nil
 		})
 	}
 	res, err := freeze.Run(context.Background(), toolStepSkillMD(withEnvironment), opts)

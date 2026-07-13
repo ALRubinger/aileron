@@ -373,6 +373,18 @@ func TestLockResolvedImagesSinglePinShape(t *testing.T) {
 			t.Fatal("a configDigests entry missing arch must be rejected")
 		}
 	})
+	t.Run("valid/composed pin carries localHostConfigDigest", func(t *testing.T) {
+		// #2138: a composed pin may carry the daemon-loaded host image's config
+		// content digest as the local no-publish boot compare target.
+		if err := validateFrontmatter(lockFrontmatter(composedItem("\n        localHostConfigDigest: " + lockTestDigest))); err != nil {
+			t.Fatalf("a composed pin with localHostConfigDigest must validate, got: %v", err)
+		}
+	})
+	t.Run("invalid/localHostConfigDigest not a sha256 digest", func(t *testing.T) {
+		if err := validateFrontmatter(lockFrontmatter(composedItem("\n        localHostConfigDigest: not-a-digest"))); err == nil {
+			t.Fatal("a localHostConfigDigest that is not a sha256: digest must be rejected by the pattern")
+		}
+	})
 }
 
 // TestLockStepTrust locks the step-keyed sealed trust section at the schema
