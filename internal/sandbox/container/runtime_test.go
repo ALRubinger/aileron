@@ -457,6 +457,29 @@ func TestCheckMultiArchBuild(t *testing.T) {
 			t.Fatalf("err = %v, want a bootstrap-failure remediation", err)
 		}
 	})
+
+	// #2144: the remediation must be guided — explain WHY the emulators are
+	// needed, give the exact one-time command, and note it may not persist across
+	// reboots — not just print the raw privileged incantation.
+	t.Run("remediation is guided", func(t *testing.T) {
+		fr := &scriptedRunner{outputs: map[string]string{
+			bootstrapFreeze: "Platforms: linux/amd64, linux/386\n",
+		}}
+		err := CheckMultiArchBuild(context.Background(), fr, "docker")
+		if err == nil {
+			t.Fatal("want a remediation error")
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"QEMU", // explains WHY
+			"docker run --privileged --rm tonistiigi/binfmt --install all", // exact command
+			"reboot", // per-boot note
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("remediation missing %q:\n%s", want, msg)
+			}
+		}
+	})
 }
 
 // TestEnsureFreezeBuilder proves the dedicated freeze builder is created only

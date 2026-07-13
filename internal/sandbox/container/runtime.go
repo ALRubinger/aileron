@@ -1337,11 +1337,22 @@ func EnsureFreezeBuilder(ctx context.Context, runner Runner, runtimeName string)
 	return nil
 }
 
+// binfmtRemediation is the guided remediation appended to every multi-arch
+// preflight miss (issue #2144). A freeze produces one image that launches on
+// both linux/amd64 and linux/arm64 (ADR-0027), so it emulates the non-host
+// architecture through the QEMU binfmt handlers. On a stock Linux host those
+// handlers are not registered, so the emulated leg cannot build. Aileron does
+// not auto-run the fix: it mutates the host kernel's binfmt_misc and needs
+// --privileged, so the operator runs it themselves. The message explains why the
+// step is needed, gives the exact one-time command, and notes it may not persist
+// across reboots on some hosts.
+const binfmtRemediation = "A multi-arch freeze emulates the non-host architecture with the QEMU binfmt handlers, which are not registered on this host. Register them once by running, yourself:\n\n    docker run --privileged --rm tonistiigi/binfmt --install all\n\nThen re-run `aileron skill freeze`. Some hosts do not persist this across reboots, so you may need to re-run the command after a restart."
+
 // CheckMultiArchBuild is the freeze-time preflight for a multi-architecture
-// composed build. It runs BEFORE the build so the freeze producer aborts with an
-// actionable remediation rather than silently producing a single-arch pin (issue
-// #2036, Q2). It shells out through the Runner seam so it is unit-testable
-// without Docker.
+// composed build. It runs BEFORE the base-image pull so the freeze producer
+// aborts with an actionable remediation and no wasted pull rather than silently
+// producing a single-arch pin (issues #2036 Q2, #2144). It shells out through the
+// Runner seam so it is unit-testable without Docker.
 //
 // Rather than require the operator's default builder to support multi-arch OCI
 // export (Docker Desktop's default `docker` driver cannot), freeze provisions its
@@ -1350,16 +1361,17 @@ func EnsureFreezeBuilder(ctx context.Context, runner Runner, runtimeName string)
 // present); idempotently ensures the FreezeBuilderName builder exists; bootstraps
 // it with `docker buildx inspect <name> --bootstrap` (which pulls the buildkit
 // image and registers the bundled QEMU emulators); and confirms it advertises
-// every default freeze platform. A genuine miss returns an error naming the
-// concrete fix (register the QEMU emulators with `docker run --privileged --rm
-// tonistiigi/binfmt --install all`). Docker-unreachable and buildkit-image-pull
-// failures surface through the same error chain (issue #2054).
+// every default freeze platform. A genuine miss returns a guided error that
+// explains why the QEMU emulators are needed and gives the exact one-time
+// `docker run --privileged --rm tonistiigi/binfmt --install all` command
+// (binfmtRemediation). Docker-unreachable and buildkit-image-pull failures
+// surface through the same error chain (issue #2054).
 func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string) error {
 	if runner == nil {
 		runner = execRunner{}
 	}
 	if err := runner.Run(ctx, runtimeName, []string{"buildx", "version"}, io.Discard, io.Discard); err != nil {
-		return fmt.Errorf("multi-arch freeze build requires docker buildx, which is not available (%w); install/enable Docker buildx, then register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", err)
+		return fmt.Errorf("multi-arch freeze build requires docker buildx, which is not available (%w). Install/enable Docker buildx, then register the QEMU emulators.\n\n%s", err, binfmtRemediation)
 	}
 	// Transparently provision the dedicated docker-container builder (a no-op when
 	// it already exists) so a default Docker Desktop setup — whose active builder
@@ -1370,7 +1382,7 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 	}
 	var out bytes.Buffer
 	if err := runner.Run(ctx, runtimeName, []string{"buildx", "inspect", FreezeBuilderName, "--bootstrap"}, &out, &out); err != nil {
-		return fmt.Errorf("multi-arch freeze build could not bootstrap the dedicated `%s` buildx builder (%w); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", FreezeBuilderName, err)
+		return fmt.Errorf("multi-arch freeze build could not bootstrap the dedicated `%s` buildx builder (%w).\n\n%s", FreezeBuilderName, err, binfmtRemediation)
 	}
 	inspect := out.String()
 	var missing []string
@@ -1380,7 +1392,7 @@ func CheckMultiArchBuild(ctx context.Context, runner Runner, runtimeName string)
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("the dedicated `%s` buildx builder cannot build %s (needed for a multi-arch freeze); register the QEMU emulators with `docker run --privileged --rm tonistiigi/binfmt --install all`", FreezeBuilderName, strings.Join(missing, ", "))
+		return fmt.Errorf("the dedicated `%s` buildx builder cannot build %s (needed for a multi-arch freeze).\n\n%s", FreezeBuilderName, strings.Join(missing, ", "), binfmtRemediation)
 	}
 	return nil
 }
