@@ -74,7 +74,7 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	raw, err := readSkillForFreeze(target)
+	raw, srcPath, err := readSkillForFreeze(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -130,7 +130,126 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "  ContentHash: %s\n", res.ContentHash)
 	fmt.Fprintf(stdout, "  Stored at:   %s\n", s.FrozenDir(res.Name, id))
+
+	// When a publisher is attributed, the frozen plan's launch-time trust gate
+	// resolves the consumer's committed `keys/publisher.pub` (seeded by
+	// `keyring trust github://owner/repo`). Freeze has just computed and stored
+	// the matching signing-key.pub; surface it here so the committed pubkey is a
+	// byproduct of freezing rather than a manual afterthought, and warn loudly
+	// when an existing committed key in the source repo has diverged from it.
+	if *publisher != "" {
+		surfacePublisherKey(stdout, s.FrozenDir(res.Name, id), srcPath, res.PublicKey)
+	}
 	return 0
+}
+
+// publisherKeyRepoPath is the repo-relative path a consumer commits the
+// publisher public key at and that `keyring trust github://owner/repo` fetches.
+// It mirrors cmd/aileron/keyring.go's publisherKeyPath so the surfaced hint and
+// the launch-time gate agree on one location.
+const publisherKeyRepoPath = "keys/publisher.pub"
+
+// signingKeyPubFile is the file name freeze persists the derived signing-key
+// public key under inside each frozen version directory (store's
+// frozenPublicKeyFile). Surfacing it lets an author copy the exact bytes the
+// launch gate will verify into their repo's committed publisher key.
+const signingKeyPubFile = "signing-key.pub"
+
+// surfacePublisherKey prints where freeze stored the derived signing-key.pub and
+// the exact repo path a consumer seeds via `keyring trust`, plus a copy hint. It
+// then reconciles against any key already committed in the freeze source repo:
+// when the source was a filesystem path, it walks up from the SKILL.md dir to a
+// bounded repo root looking for a committed keys/publisher.pub. A committed key
+// whose ed25519 bytes differ from the freshly derived key is a STALE-key
+// divergence (the launch trust gate will fail closed for consumers), surfaced as
+// a prominent NON-FATAL warning with the fix. An absent key gets a create hint.
+// When frozen from an installed skill name (srcPath == ""), there is no repo to
+// reconcile, so only the surface + generic recommit hint prints.
+func surfacePublisherKey(stdout io.Writer, frozenDir, srcPath string, derivedPubPEM []byte) {
+	storedPub := filepath.Join(frozenDir, signingKeyPubFile)
+	fmt.Fprintf(stdout, "  Publisher key: %s\n", storedPub)
+	fmt.Fprintf(stdout, "    Consumers trust this plan by committing it to %q in your repo\n", publisherKeyRepoPath)
+
+	committed, ok := findCommittedPublisherKey(srcPath)
+	if !ok {
+		// No repo path to reconcile (installed-name source) or no committed key
+		// found on the ascent: point the author at the copy that makes the key a
+		// byproduct of freezing.
+		fmt.Fprintf(stdout, "    Commit it as %s:\n", publisherKeyRepoPath)
+		fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, publisherKeyRepoPath)
+		return
+	}
+
+	if publisherKeysEqual(committed.pem, derivedPubPEM) {
+		fmt.Fprintf(stdout, "    Committed %s matches this signing key.\n", committed.path)
+		return
+	}
+
+	// A committed key that does not match the freshly derived signing key means
+	// regenerating the signing key has orphaned the repo's publisher.pub. The
+	// launch-time publisher-trust gate is fail-closed, so every consumer that
+	// seeded the old key will refuse to launch this plan. Warn prominently and
+	// non-fatally with the exact fix.
+	fmt.Fprintf(stdout, "  WARNING: committed %s is STALE: it does not match the signing key just used.\n", committed.path)
+	fmt.Fprintln(stdout, "    Consumers who trusted the committed key will FAIL the launch publisher-trust gate.")
+	fmt.Fprintf(stdout, "    Fix: recommit the surfaced key, then refreeze and republish:\n")
+	fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, committed.path)
+}
+
+// committedPublisherKey is a committed keys/publisher.pub found on the ascent
+// from a freeze source path: its on-disk location and PEM bytes.
+type committedPublisherKey struct {
+	path string
+	pem  []byte
+}
+
+// findCommittedPublisherKey walks up from the freeze source's SKILL.md directory
+// looking for an existing committed keys/publisher.pub. The ascent is bounded: it
+// stops at the git/repo root (a directory containing a `.git` entry) or after a
+// small fixed number of levels, so it never escapes far up the filesystem. It
+// returns false when srcPath is empty (frozen from an installed skill name, no
+// repo to check) or no committed key is found.
+func findCommittedPublisherKey(srcPath string) (committedPublisherKey, bool) {
+	if srcPath == "" {
+		return committedPublisherKey{}, false
+	}
+	dir := filepath.Dir(srcPath)
+	// Bound the ascent so a stray SKILL.md deep in the filesystem never walks to
+	// the root probing every ancestor. 24 levels comfortably covers any real repo
+	// layout while staying finite.
+	for i := 0; i < 24; i++ {
+		candidate := filepath.Join(dir, publisherKeyRepoPath)
+		if b, err := os.ReadFile(candidate); err == nil {
+			return committedPublisherKey{path: candidate, pem: b}, true
+		}
+		// Stop at the repo root: a `.git` entry marks the top of the working tree,
+		// beyond which there is no repo to reconcile against.
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return committedPublisherKey{}, false
+}
+
+// publisherKeysEqual reports whether two PEM-encoded public keys represent the
+// same ed25519 key. It compares the parsed keys (not the raw PEM bytes) so
+// whitespace, trailing-newline, or line-wrapping differences between a
+// hand-committed key and freeze's emitted key never read as divergence. When
+// either input fails to parse, it falls back to a trimmed byte compare so a
+// malformed committed key that nonetheless matches byte-for-byte is not
+// mis-flagged as stale.
+func publisherKeysEqual(a, b []byte) bool {
+	ka, aerr := cstore.ParsePEMPublicKey(a)
+	kb, berr := cstore.ParsePEMPublicKey(b)
+	if aerr == nil && berr == nil {
+		return ka.Equal(kb)
+	}
+	return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
 }
 
 // validatePublisherAuthority checks that a --publisher value is a connector-
@@ -152,8 +271,11 @@ func validatePublisherAuthority(authority string) error {
 
 // readSkillForFreeze loads the SKILL.md bytes to freeze. The target is
 // either an installed skill name (read from the store) or a filesystem path
-// to a skill directory or a SKILL.md file.
-func readSkillForFreeze(target string) ([]byte, error) {
+// to a skill directory or a SKILL.md file. The returned srcPath is the resolved
+// on-disk SKILL.md path when the source was a filesystem path, and "" when the
+// source was an installed skill name (there is no source repo to reconcile a
+// committed publisher key against in that case).
+func readSkillForFreeze(target string) (raw []byte, srcPath string, err error) {
 	// A filesystem path (directory or SKILL.md) takes precedence when it
 	// exists, so a local author can freeze before installing.
 	if info, statErr := os.Stat(target); statErr == nil {
@@ -161,22 +283,28 @@ func readSkillForFreeze(target string) ([]byte, error) {
 		if info.IsDir() {
 			path = filepath.Join(target, "SKILL.md")
 		} else if filepath.Base(target) != "SKILL.md" {
-			return nil, fmt.Errorf("freeze source %q is not a SKILL.md", target)
+			return nil, "", fmt.Errorf("freeze source %q is not a SKILL.md", target)
 		}
 		b, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return nil, fmt.Errorf("read %s: %w", path, readErr)
+			return nil, "", fmt.Errorf("read %s: %w", path, readErr)
 		}
-		return b, nil
+		abs, absErr := filepath.Abs(path)
+		if absErr != nil {
+			// Fall back to the resolved (possibly relative) path: the ancestor
+			// walk still works from a relative dir, it just cannot climb above cwd.
+			abs = path
+		}
+		return b, abs, nil
 	}
 
 	// Otherwise treat it as an installed skill name.
 	s := store.New(skillStoreDir)
 	b, readErr := s.Read(target)
 	if readErr != nil {
-		return nil, fmt.Errorf("no installed skill or path %q (install it first, or pass a path to a SKILL.md): %w", target, readErr)
+		return nil, "", fmt.Errorf("no installed skill or path %q (install it first, or pass a path to a SKILL.md): %w", target, readErr)
 	}
-	return b, nil
+	return b, "", nil
 }
 
 // frozenVersionID derives the immutable store directory id from a
