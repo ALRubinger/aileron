@@ -128,6 +128,83 @@ func writeSigningKey(t *testing.T) string {
 	return path
 }
 
+// writeSigningKeyWithPub writes a fresh PKCS#8 ed25519 PEM signing key to a temp
+// file and returns its path plus the PKIX PEM of the matching public key (the
+// exact bytes freeze derives and surfaces as signing-key.pub). Tests use the
+// returned PEM to seed a committed keys/publisher.pub that either matches or (by
+// generating a second key) diverges from the signing key.
+func writeSigningKeyWithPub(t *testing.T) (keyPath string, pubPEM []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "key.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+}
+
+// freshPubPEM returns a PKIX PEM public key for a freshly generated, unrelated
+// ed25519 keypair — used to seed a STALE committed publisher key that does not
+// match the signing key.
+func freshPubPEM(t *testing.T) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+}
+
+// exampleSourceInRepo materializes the worked example SKILL.md inside a fake repo
+// root (a dir containing a `.git` marker) and, when committedPub is non-nil,
+// writes it as keys/publisher.pub under that root. It returns the repo root and
+// the SKILL.md dir; the SKILL.md lives at <root>/plan/SKILL.md so the ancestor
+// walk must climb one level to find the committed key, and the `.git` marker
+// bounds the ascent.
+func exampleSourceInRepo(t *testing.T, committedPub []byte) (repoRoot, skillDir string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "docs", "schema", "flight-plan-manifest.example.skill.md"))
+	if err != nil {
+		t.Fatalf("read worked example: %v", err)
+	}
+	repoRoot = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillDir = filepath.Join(repoRoot, "plan")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if committedPub != nil {
+		keysDir := filepath.Join(repoRoot, "keys")
+		if err := os.MkdirAll(keysDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(keysDir, "publisher.pub"), committedPub, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repoRoot, skillDir
+}
+
 // installExample copies the worked example into the temp store under its
 // name so `skill freeze <name>` can read it.
 func installExample(t *testing.T, storeDir string) {
@@ -715,6 +792,147 @@ func TestRunSkillFreeze_InvalidPublisherFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid --publisher") {
 		t.Errorf("stderr = %q, want an invalid-publisher message", stderr.String())
+	}
+}
+
+// TestRunSkillFreeze_SurfacesPublisherKey proves that with --publisher set the
+// freeze summary surfaces the stored signing-key.pub path and the exact
+// keys/publisher.pub target with a copy hint, so the committed pubkey is a
+// byproduct of freezing (issue #2146, item 1).
+func TestRunSkillFreeze_SurfacesPublisherKey(t *testing.T) {
+	withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	src := exampleSource(t) // a bare temp dir with no repo / committed key
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", src}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, signingKeyPubFile) {
+		t.Errorf("summary must surface the stored %s path:\n%s", signingKeyPubFile, out)
+	}
+	if !strings.Contains(out, publisherKeyRepoPath) {
+		t.Errorf("summary must surface the committed %s target:\n%s", publisherKeyRepoPath, out)
+	}
+}
+
+// TestRunSkillFreeze_NoPublisherDoesNotSurfaceKey proves the key surface is gated
+// on --publisher: an omitted publisher (no launch trust gate) prints no
+// publisher-key lines.
+func TestRunSkillFreeze_NoPublisherDoesNotSurfaceKey(t *testing.T) {
+	withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	src := exampleSource(t)
+
+	var stdout, stderr bytes.Buffer
+	if code := runSkillFreeze([]string{"--signing-key", key, src}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Publisher key:") {
+		t.Errorf("without --publisher the summary must not surface a publisher key:\n%s", stdout.String())
+	}
+}
+
+// TestRunSkillFreeze_StaleCommittedKeyWarns proves the divergence check (issue
+// #2146, item 2): freezing --publisher from a repo path whose committed
+// keys/publisher.pub does NOT match the signing key prints a prominent NON-FATAL
+// stale-key warning and still exits 0.
+func TestRunSkillFreeze_StaleCommittedKeyWarns(t *testing.T) {
+	withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	// Commit an unrelated key so the freshly-derived signing key diverges from it.
+	_, skillDir := exampleSourceInRepo(t, freshPubPEM(t))
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", filepath.Join(skillDir, "SKILL.md")}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a stale committed key must warn NON-fatally; exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "STALE") {
+		t.Errorf("a diverged committed key must produce a STALE warning:\n%s", out)
+	}
+	if !strings.Contains(out, publisherKeyRepoPath) {
+		t.Errorf("the stale warning must point at the committed key path:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_MatchingCommittedKeyNoWarning proves a committed
+// keys/publisher.pub that matches the signing key produces no stale warning
+// (compared as parsed ed25519 keys, so PEM whitespace never trips it).
+func TestRunSkillFreeze_MatchingCommittedKeyNoWarning(t *testing.T) {
+	withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key, pub := writeSigningKeyWithPub(t)
+	// Seed the committed key with extra surrounding whitespace to prove the
+	// compare ignores PEM whitespace differences.
+	committed := append([]byte("\n\n"), append(pub, '\n')...)
+	_, skillDir := exampleSourceInRepo(t, committed)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", filepath.Join(skillDir, "SKILL.md")}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "STALE") {
+		t.Errorf("a matching committed key must NOT warn:\n%s", out)
+	}
+	if !strings.Contains(out, "matches this signing key") {
+		t.Errorf("a matching committed key should be confirmed:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_NoCommittedKeyHints proves that freezing --publisher from a
+// repo with no committed keys/publisher.pub prints a create hint rather than a
+// warning.
+func TestRunSkillFreeze_NoCommittedKeyHints(t *testing.T) {
+	withTempStore(t)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	_, skillDir := exampleSourceInRepo(t, nil) // repo root, no committed key
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", filepath.Join(skillDir, "SKILL.md")}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "STALE") {
+		t.Errorf("no committed key must not warn STALE:\n%s", out)
+	}
+	if !strings.Contains(out, "Commit it as "+publisherKeyRepoPath) {
+		t.Errorf("no committed key must print a create hint:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_InstalledNameNoDivergenceCheck proves freezing --publisher
+// from an installed skill name (no source repo path) surfaces the key but runs
+// no divergence check and never crashes (issue #2146, item 2: skip silently when
+// there is no repo).
+func TestRunSkillFreeze_InstalledNameNoDivergenceCheck(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("freeze from an installed name must succeed; exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "STALE") {
+		t.Errorf("an installed-name freeze has no repo, so no stale warning:\n%s", out)
+	}
+	// The key is still surfaced with a generic commit hint.
+	if !strings.Contains(out, "Publisher key:") {
+		t.Errorf("the surfaced publisher key must still print for an installed-name freeze:\n%s", out)
 	}
 }
 
@@ -1590,14 +1808,14 @@ func TestReadSkillForFreeze_NonSkillFilePath(t *testing.T) {
 	if err := os.WriteFile(notSkill, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readSkillForFreeze(notSkill); err == nil {
+	if _, _, err := readSkillForFreeze(notSkill); err == nil {
 		t.Error("a non-SKILL.md file path must error")
 	}
 }
 
 func TestReadSkillForFreeze_DirectoryWithoutSkill(t *testing.T) {
 	withTempStore(t)
-	if _, err := readSkillForFreeze(t.TempDir()); err == nil {
+	if _, _, err := readSkillForFreeze(t.TempDir()); err == nil {
 		t.Error("a directory with no SKILL.md must error")
 	}
 }
