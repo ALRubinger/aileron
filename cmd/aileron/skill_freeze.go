@@ -138,7 +138,7 @@ func runSkillFreeze(args []string, stdout, stderr io.Writer) int {
 	// byproduct of freezing rather than a manual afterthought, and warn loudly
 	// when an existing committed key in the source repo has diverged from it.
 	if *publisher != "" {
-		surfacePublisherKey(stdout, s.FrozenDir(res.Name, id), srcPath, res.PublicKey)
+		surfacePublisherKey(stdout, s.FrozenDir(res.Name, id), srcPath, *publisher, res.PublicKey)
 	}
 	return 0
 }
@@ -157,26 +157,37 @@ const signingKeyPubFile = "signing-key.pub"
 
 // surfacePublisherKey prints where freeze stored the derived signing-key.pub and
 // the exact repo path a consumer seeds via `keyring trust`, plus a copy hint. It
-// then reconciles against any key already committed in the freeze source repo:
-// when the source was a filesystem path, it walks up from the SKILL.md dir to a
-// bounded repo root looking for a committed keys/publisher.pub. A committed key
-// whose ed25519 bytes differ from the freshly derived key is a STALE-key
-// divergence (the launch trust gate will fail closed for consumers), surfaced as
-// a prominent NON-FATAL warning with the fix. An absent key gets a create hint.
-// When frozen from an installed skill name (srcPath == ""), there is no repo to
-// reconcile, so only the surface + generic recommit hint prints.
-func surfacePublisherKey(stdout io.Writer, frozenDir, srcPath string, derivedPubPEM []byte) {
+// then reconciles the freshly derived key against the publisher's committed
+// keys/publisher.pub. Two reconciliation sources exist, tried in order:
+//
+//  1. A LOCAL committed key in the freeze source repo: when the source was a
+//     filesystem path, it walks up from the SKILL.md dir to a bounded repo root
+//     looking for a committed keys/publisher.pub.
+//  2. When no local key is found (the common freeze-by-installed-name flow, where
+//     srcPath == "" and there is no repo to walk) AND --publisher is a full
+//     per-repo FQN (github://owner/repo, not a bare owner), the REMOTE
+//     keys/publisher.pub is fetched via fetchPublisherKey — the exact bytes
+//     `keyring trust` fetches and consumers seed — so a name-freeze still catches
+//     a stale published key.
+//
+// A committed key whose ed25519 identity differs from the freshly derived key is a
+// STALE-key divergence (the launch trust gate will fail closed for consumers),
+// surfaced as a prominent NON-FATAL warning with the fix; a match prints a
+// confirmation. When neither source yields a key (no local repo, a bare-owner
+// publisher, or a remote fetch failure) the check is skipped non-fatally with a
+// clearer note than a generic recommit hint, so the author knows divergence was
+// NOT checked and should verify it by hand.
+func surfacePublisherKey(stdout io.Writer, frozenDir, srcPath, publisher string, derivedPubPEM []byte) {
 	storedPub := filepath.Join(frozenDir, signingKeyPubFile)
 	fmt.Fprintf(stdout, "  Publisher key: %s\n", storedPub)
 	fmt.Fprintf(stdout, "    Consumers trust this plan by committing it to %q in your repo\n", publisherKeyRepoPath)
 
 	committed, ok := findCommittedPublisherKey(srcPath)
 	if !ok {
-		// No repo path to reconcile (installed-name source) or no committed key
-		// found on the ascent: point the author at the copy that makes the key a
-		// byproduct of freezing.
-		fmt.Fprintf(stdout, "    Commit it as %s:\n", publisherKeyRepoPath)
-		fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, publisherKeyRepoPath)
+		// No LOCAL committed key to reconcile (installed-name source, or none found
+		// on the ascent). Fall back to the REMOTE published key so the primary
+		// freeze-by-installed-name flow is not silently skipped (issue #2148).
+		surfaceRemotePublisherDivergence(stdout, storedPub, publisher, derivedPubPEM)
 		return
 	}
 
@@ -194,6 +205,66 @@ func surfacePublisherKey(stdout io.Writer, frozenDir, srcPath string, derivedPub
 	fmt.Fprintln(stdout, "    Consumers who trusted the committed key will FAIL the launch publisher-trust gate.")
 	fmt.Fprintf(stdout, "    Fix: recommit the surfaced key, then refreeze and republish:\n")
 	fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, committed.path)
+}
+
+// surfaceRemotePublisherDivergence reconciles the freshly derived signing key
+// against the publisher's REMOTE committed keys/publisher.pub when no local repo
+// key was found. It runs only for a full per-repo FQN (github://owner/repo): a
+// bare-owner publisher (github://owner) resolves through the Hub, not a fixed
+// repo path, so there is no single keys/publisher.pub to fetch. The fetch is the
+// same fetchPublisherKey `keyring trust` uses (and stub-testable via the
+// rawGitHubBase / githubAPIBase seams), so a divergence surfaced here is exactly
+// what a consumer would trust. Like freeze's other network I/O (the base-image
+// pull) this is best-effort and NON-FATAL: on a bare-owner publisher or a fetch
+// failure it prints a clear "NOT checked" note and a commit hint rather than
+// failing the freeze.
+func surfaceRemotePublisherDivergence(stdout io.Writer, storedPub, publisher string, derivedPubPEM []byte) {
+	if isBareOwnerAuthority(publisher) {
+		// A bare-owner publisher has no fixed keys/publisher.pub to fetch (Hub
+		// resolution picks the repo). Skip the remote check and say so.
+		surfaceDivergenceNotChecked(stdout, storedPub, publisher, "a bare-owner --publisher resolves the key through the Hub, not a fixed repo")
+		return
+	}
+
+	remote, err := fetchPublisherKey(publisher)
+	if err != nil {
+		// Best-effort, like the base-image pull: a fetch failure (offline, private
+		// repo without a token, no committed key yet) must not fail the freeze.
+		surfaceDivergenceNotChecked(stdout, storedPub, publisher, fmt.Sprintf("fetching %s from %s failed: %v", publisherKeyRepoPath, publisher, err))
+		return
+	}
+
+	derived, err := cstore.ParsePEMPublicKey(derivedPubPEM)
+	if err != nil {
+		// The derived signing-key.pub freeze just emitted should always parse; if
+		// it somehow does not, skip the compare rather than mis-flag a divergence.
+		surfaceDivergenceNotChecked(stdout, storedPub, publisher, fmt.Sprintf("the surfaced signing key could not be parsed for comparison: %v", err))
+		return
+	}
+
+	if derived.Equal(remote) {
+		fmt.Fprintf(stdout, "    Published %s at %s matches this signing key.\n", publisherKeyRepoPath, publisher)
+		return
+	}
+
+	// The published key that consumers seed via `keyring trust` differs from the
+	// freshly derived signing key: every consumer that already trusted it will
+	// fail the fail-closed launch gate. Warn prominently and non-fatally.
+	fmt.Fprintf(stdout, "  WARNING: published %s at %s is STALE: it does not match the signing key just used.\n", publisherKeyRepoPath, publisher)
+	fmt.Fprintln(stdout, "    Consumers who trusted the published key will FAIL the launch publisher-trust gate.")
+	fmt.Fprintf(stdout, "    Fix: commit the surfaced key to %s and republish:\n", publisherKeyRepoPath)
+	fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, publisherKeyRepoPath)
+}
+
+// surfaceDivergenceNotChecked prints the non-fatal fallback when the publisher
+// key could not be reconciled (issue #2148 option 2): it names WHY the check was
+// skipped and still points the author at the commit that makes the key a
+// byproduct of freezing, so a manual verification is possible.
+func surfaceDivergenceNotChecked(stdout io.Writer, storedPub, publisher, reason string) {
+	fmt.Fprintf(stdout, "    NOTE: the committed %s for %s was NOT checked for divergence (%s); verify it matches the surfaced %s.\n",
+		publisherKeyRepoPath, publisher, reason, signingKeyPubFile)
+	fmt.Fprintf(stdout, "    Commit it as %s:\n", publisherKeyRepoPath)
+	fmt.Fprintf(stdout, "      cp %q %s\n", storedPub, publisherKeyRepoPath)
 }
 
 // committedPublisherKey is a committed keys/publisher.pub found on the ascent

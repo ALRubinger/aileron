@@ -10,6 +10,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -912,14 +914,19 @@ func TestRunSkillFreeze_NoCommittedKeyHints(t *testing.T) {
 }
 
 // TestRunSkillFreeze_InstalledNameNoDivergenceCheck proves freezing --publisher
-// from an installed skill name (no source repo path) surfaces the key but runs
-// no divergence check and never crashes (issue #2146, item 2: skip silently when
-// there is no repo).
+// from an installed skill name (no source repo path) surfaces the key and, when
+// the REMOTE published key is unreachable (no committed key yet — a 404),
+// prints a non-fatal "NOT checked" note rather than crashing or falsely warning
+// STALE (issue #2148: the name-freeze remote-fallback stays non-fatal on a
+// fetch miss). rawGitHubBase is stubbed to 404 so the test stays hermetic.
 func TestRunSkillFreeze_InstalledNameNoDivergenceCheck(t *testing.T) {
 	storeDir := withTempStore(t)
 	installExample(t, storeDir)
 	stubFreezeResolvers(t, fakeFreezeDigest)
 	key := writeSigningKey(t)
+	// Serve no publisher.pub for acme/plans: fetchPublisherKey 404s, so the
+	// remote reconciliation is skipped non-fatally.
+	withMockGitHubRaw(t, map[string][]byte{})
 
 	var stdout, stderr bytes.Buffer
 	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", "weekly-metrics-digest"}, &stdout, &stderr)
@@ -928,11 +935,112 @@ func TestRunSkillFreeze_InstalledNameNoDivergenceCheck(t *testing.T) {
 	}
 	out := stdout.String()
 	if strings.Contains(out, "STALE") {
-		t.Errorf("an installed-name freeze has no repo, so no stale warning:\n%s", out)
+		t.Errorf("an unreachable remote key must not warn STALE:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT checked") {
+		t.Errorf("a remote fetch miss must print the non-fatal NOT-checked note:\n%s", out)
 	}
 	// The key is still surfaced with a generic commit hint.
 	if !strings.Contains(out, "Publisher key:") {
 		t.Errorf("the surfaced publisher key must still print for an installed-name freeze:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_InstalledNameRemoteStaleWarns is the issue #2148 regression:
+// freezing --publisher github://acme/plans from an installed skill NAME (srcPath
+// == "", so no local repo to walk) must reconcile the derived signing key against
+// the REMOTE committed keys/publisher.pub via fetchPublisherKey. A divergent
+// published key fires the same STALE warning the local-path check emits. Before
+// the fix this check was skipped entirely for name-freezes.
+func TestRunSkillFreeze_InstalledNameRemoteStaleWarns(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	// Publish a DIFFERENT (unrelated) key at acme/plans so the freshly derived
+	// signing key diverges from it. The path mirrors fetchPublisherKey's raw URL.
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/plans/HEAD/keys/publisher.pub": freshPubPEM(t),
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("a stale remote key must warn NON-fatally; exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "STALE") {
+		t.Errorf("a divergent remote key must produce a STALE warning on a name-freeze:\n%s", out)
+	}
+	if !strings.Contains(out, publisherKeyRepoPath) {
+		t.Errorf("the stale warning must point at the committed key path:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_InstalledNameRemoteMatchConfirms proves the agreement path:
+// a name-freeze whose REMOTE published key matches the derived signing key prints
+// a match confirmation and no STALE warning.
+func TestRunSkillFreeze_InstalledNameRemoteMatchConfirms(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key, pub := writeSigningKeyWithPub(t)
+	// Publish the MATCHING key so the derived signing key agrees with the remote.
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/plans/HEAD/keys/publisher.pub": pub,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme/plans", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "STALE") {
+		t.Errorf("a matching remote key must NOT warn:\n%s", out)
+	}
+	if !strings.Contains(out, "matches this signing key") {
+		t.Errorf("a matching remote key should be confirmed:\n%s", out)
+	}
+}
+
+// TestRunSkillFreeze_InstalledNameBareOwnerSkipsRemote proves a bare-owner
+// --publisher (github://acme) skips the remote fetch entirely (it has no fixed
+// keys/publisher.pub — the Hub resolves the repo) and prints the non-fatal
+// NOT-checked note naming the bare-owner reason.
+func TestRunSkillFreeze_InstalledNameBareOwnerSkipsRemote(t *testing.T) {
+	storeDir := withTempStore(t)
+	installExample(t, storeDir)
+	stubFreezeResolvers(t, fakeFreezeDigest)
+	key := writeSigningKey(t)
+	// Point rawGitHubBase at a server that fails the test if hit: a bare-owner
+	// publisher must never reach the per-repo raw fetch.
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	prev := rawGitHubBase
+	rawGitHubBase = srv.URL
+	t.Cleanup(func() { rawGitHubBase = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := runSkillFreeze([]string{"--signing-key", key, "--publisher", "github://acme", "weekly-metrics-digest"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if hit {
+		t.Errorf("a bare-owner publisher must not trigger a per-repo raw fetch")
+	}
+	out := stdout.String()
+	if strings.Contains(out, "STALE") {
+		t.Errorf("a bare-owner publisher must not warn STALE:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT checked") {
+		t.Errorf("a bare-owner publisher must print the NOT-checked note:\n%s", out)
 	}
 }
 
