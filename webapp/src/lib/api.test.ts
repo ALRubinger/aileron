@@ -3,6 +3,7 @@ import {
 	decideActionApproval,
 	getHubInstallDecision,
 	listRecentMaterialized,
+	listAudit,
 	getAuditByContentHash,
 	getAuditByInvocation,
 	getAuditTrace
@@ -245,6 +246,35 @@ describe('audit wrappers — URL construction and unwrap', () => {
 		expect(url).toContain('limit=25');
 		expect(got).toHaveLength(1);
 		expect(got[0].audit_id).toBe('a1');
+	});
+
+	it('listAudit with no params requests /v1/audit with no query string and returns every event', async () => {
+		fetchSpy.mockResolvedValue(auditResponse([materializedEvent, nonMaterializedEvent]));
+
+		const got = await listAudit();
+
+		const url = auditCall(fetchSpy, '/v1/audit');
+		// The general feed does not narrow to materialized records, so both come back.
+		expect(got).toHaveLength(2);
+		// No filters → bare path, no `?`.
+		expect(url).not.toContain('?');
+	});
+
+	it('listAudit maps camelCase params onto the snake_case wire query, encoding values', async () => {
+		fetchSpy.mockResolvedValue(auditResponse([materializedEvent]));
+
+		await listAudit({
+			connectorFqn: 'github://aileron/slack',
+			class: 'execution.failed',
+			invocationId: 'inv/42',
+			limit: 25
+		});
+
+		const url = auditCall(fetchSpy, '/v1/audit?');
+		expect(url).toContain('connector_fqn=github%3A%2F%2Faileron%2Fslack');
+		expect(url).toContain('class=execution.failed');
+		expect(url).toContain('invocation_id=inv%2F42');
+		expect(url).toContain('limit=25');
 	});
 
 	it('getAuditByContentHash encodes the hash into the content_hash filter', async () => {

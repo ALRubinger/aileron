@@ -6,6 +6,9 @@ import {
 	signatureVerified,
 	actorLabel,
 	resolvedInputs,
+	auditPayloadSummary,
+	payloadName,
+	payloadConnector,
 	SIGNATURE_STATUS_VERIFIED
 } from './payload';
 import type { AuditEvent } from '$lib/api';
@@ -122,6 +125,105 @@ describe('actorLabel', () => {
 		expect(
 			actorLabel(evActor(undefined, { 'aileron.actor.identity_label': 'flat@corp' }))
 		).toBe('flat@corp');
+	});
+});
+
+describe('audit event summary (CLI parity)', () => {
+	// Mirrors the Go cases in cmd/aileron/main_test.go
+	// (TestAuditPayloadSummary_PerEventShape) plus the approval shape called
+	// out in #2162, so the webapp feed and the `aileron audit` CLI render the
+	// identical summary line for the same event.
+	function ev(eventType: string, payload: Record<string, unknown>): AuditEvent {
+		return { audit_id: 'x', event_type: eventType, timestamp: 't', payload };
+	}
+
+	describe('payloadName', () => {
+		it('prefers the action name', () => {
+			expect(payloadName(ev('action.installed', { 'aileron.action.name': 'ship-update' }))).toBe(
+				'ship-update'
+			);
+		});
+		it('falls back to the binding name', () => {
+			expect(payloadName(ev('binding.created', { 'aileron.binding.name': 'slack-prod' }))).toBe(
+				'slack-prod'
+			);
+		});
+		it('is empty when neither key is present', () => {
+			expect(payloadName(ev('unknown', {}))).toBe('');
+		});
+	});
+
+	describe('payloadConnector', () => {
+		it('prefers the connector fqn', () => {
+			expect(
+				payloadConnector(ev('binding.created', { 'aileron.connector.fqn': 'github://aileron/slack' }))
+			).toBe('github://aileron/slack');
+		});
+		it('falls back to the action fqn', () => {
+			expect(
+				payloadConnector(ev('action.installed', { 'aileron.action.fqn': 'github://aileron/ship' }))
+			).toBe('github://aileron/ship');
+		});
+		it('reads the nested failure-details connector as a last resort', () => {
+			expect(
+				payloadConnector(
+					ev('execution.failed', { 'aileron.failure.details': { connector: 'github://aileron/x' } })
+				)
+			).toBe('github://aileron/x');
+		});
+		it('is empty when no connector key resolves', () => {
+			expect(payloadConnector(ev('unknown', {}))).toBe('');
+			expect(payloadConnector(ev('execution.failed', { 'aileron.failure.details': 'nope' }))).toBe(
+				''
+			);
+		});
+	});
+
+	describe('auditPayloadSummary', () => {
+		it('renders an action.installed event as name + connector (CLI parity)', () => {
+			expect(
+				auditPayloadSummary(
+					ev('action.installed', {
+						'aileron.action.name': 'ship-update',
+						'aileron.action.fqn': 'github://aileron/ship-update'
+					})
+				)
+			).toBe('name=ship-update connector=github://aileron/ship-update');
+		});
+		it('renders a binding event as connector only (CLI parity)', () => {
+			expect(
+				auditPayloadSummary(ev('binding.created', { 'aileron.connector.fqn': 'github://aileron/slack' }))
+			).toBe('connector=github://aileron/slack');
+		});
+		it('renders an empty summary for an event with no useful keys (CLI parity)', () => {
+			expect(auditPayloadSummary(ev('unknown', {}))).toBe('');
+		});
+		it('renders execution.failed as class (+ connector when present)', () => {
+			expect(
+				auditPayloadSummary(ev('execution.failed', { 'aileron.failure.class': 'timeout' }))
+			).toBe('class=timeout');
+			expect(
+				auditPayloadSummary(
+					ev('execution.failed', {
+						'aileron.failure.class': 'auth',
+						'aileron.failure.details': { connector: 'github://aileron/slack' }
+					})
+				)
+			).toBe('class=auth connector=github://aileron/slack');
+		});
+		it('summarizes an approval.approved connector-action event by name + connector', () => {
+			// An approved connector-action approval carries the gated action's
+			// identity in the OTel-namespaced keys; the feed reads it the same
+			// way the CLI does, yielding a name+connector one-liner.
+			expect(
+				auditPayloadSummary(
+					ev('approval.approved', {
+						'aileron.action.name': 'send_email',
+						'aileron.connector.fqn': 'github://aileron/google'
+					})
+				)
+			).toBe('name=send_email connector=github://aileron/google');
+		});
 	});
 });
 
