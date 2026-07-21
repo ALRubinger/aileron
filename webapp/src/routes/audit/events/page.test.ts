@@ -110,6 +110,19 @@ describe('Audit events feed — /audit/events', () => {
 		});
 	});
 
+	it('keeps refresh available after an empty result so the feed can recover', async () => {
+		vi.mocked(listAudit).mockResolvedValueOnce([]);
+		render(Page);
+		await screen.findByTestId('events-empty');
+		// Refresh lives outside the state branches, so it is present even
+		// when the feed rendered empty.
+		vi.mocked(listAudit).mockResolvedValueOnce([event({ id: 'evt-1', type: 'action.installed' })]);
+		await fireEvent.click(screen.getByTestId('events-refresh'));
+		await waitFor(() => {
+			expect(screen.getByTestId('events-list')).toBeInTheDocument();
+		});
+	});
+
 	it('links back to the artifact-scoped provenance view', async () => {
 		vi.mocked(listAudit).mockResolvedValue([]);
 		render(Page);

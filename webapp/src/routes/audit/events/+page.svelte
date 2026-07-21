@@ -18,15 +18,24 @@
 	let loading = $state(true);
 	let error = $state('');
 
+	// Guards against a slow earlier load() (e.g. a double-clicked refresh)
+	// resolving after a newer one and overwriting fresher data or clearing
+	// the newer request's loading state. Only the latest invocation applies
+	// its result — mirrors the invocation-id staleness guard on the
+	// provenance view.
+	let loadVersion = 0;
+
 	async function load() {
+		const version = ++loadVersion;
 		loading = true;
 		error = '';
 		try {
-			events = await listAudit();
+			const result = await listAudit();
+			if (version === loadVersion) events = result;
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			if (version === loadVersion) error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			if (version === loadVersion) loading = false;
 		}
 	}
 
@@ -85,7 +94,10 @@
 			</Card.Root>
 		{/each}
 	</div>
-	<div class="mt-4">
-		<Button variant="ghost" size="sm" data-testid="events-refresh" onclick={load}>Refresh</Button>
-	</div>
 {/if}
+
+<div class="mt-4">
+	<Button variant="ghost" size="sm" data-testid="events-refresh" disabled={loading} onclick={load}
+		>Refresh</Button
+	>
+</div>
