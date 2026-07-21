@@ -137,7 +137,14 @@
 	<title>Audit — Aileron</title>
 </svelte:head>
 
-<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Audit &amp; Provenance</h1>
+<div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+	<h1 class="text-3xl font-extrabold tracking-tight">Audit &amp; Provenance</h1>
+	<a
+		href="/audit/events"
+		data-testid="to-events"
+		class="text-sm text-primary no-underline hover:underline">All audit events →</a
+	>
+</div>
 
 {#if root && graph}
 	<!-- Focused artifact graph / timeline -->

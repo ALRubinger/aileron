@@ -223,6 +223,77 @@ export function invocationId(e: AuditEvent): string | undefined {
 	return str(e.payload, 'aileron.invocation.id');
 }
 
+// --- one-line event summary (parity with the CLI) ---
+//
+// The `aileron audit` CLI renders each event as a single
+// timestamp/audit-id/event-type/summary row. The summary column is a
+// human-readable hint pulled from the most identifying payload fields of
+// each event shape. The three functions below are a faithful port of
+// `auditPayloadSummary`, `payloadName`, and `payloadConnector` from
+// cmd/aileron/main.go, so the "Audit events" webapp feed reads the same
+// line the CLI prints for the same event. Payload keys follow the
+// OTel-namespaced audit schema (issue #390).
+
+/** Reads a raw string payload value with no non-empty coercion, matching
+ *  the Go type-assertion semantics the CLI relies on (an empty string is
+ *  a present-but-empty value, distinct from a missing key). Used only by
+ *  the summary port; the accessors above intentionally treat "" as
+ *  absent. */
+function rawStr(payload: Record<string, unknown>, key: string): string {
+	const v = payload[key];
+	return typeof v === 'string' ? v : '';
+}
+
+/** Pulls a human-identifying name from the namespaced payload. Action and
+ *  binding events surface different keys; either resolves to the same
+ *  single-line summary slot. Mirrors `payloadName` in cmd/aileron/main.go. */
+export function payloadName(e: AuditEvent): string {
+	const action = rawStr(e.payload, 'aileron.action.name');
+	if (action) return action;
+	const binding = rawStr(e.payload, 'aileron.binding.name');
+	if (binding) return binding;
+	return '';
+}
+
+/** Pulls the connector FQN backing an event, checking connector, action,
+ *  and nested failure-detail keys in the CLI's order. Mirrors
+ *  `payloadConnector` in cmd/aileron/main.go. */
+export function payloadConnector(e: AuditEvent): string {
+	const conn = rawStr(e.payload, 'aileron.connector.fqn');
+	if (conn) return conn;
+	const actionFqn = rawStr(e.payload, 'aileron.action.fqn');
+	if (actionFqn) return actionFqn;
+	const details = e.payload['aileron.failure.details'];
+	if (details !== null && typeof details === 'object' && !Array.isArray(details)) {
+		const c = (details as Record<string, unknown>)['connector'];
+		if (typeof c === 'string' && c.length > 0) return c;
+	}
+	return '';
+}
+
+/** Renders a one-line, human-readable hint about an event, pulling the
+ *  most identifying fields from each event shape the recorder emits.
+ *  Faithful port of `auditPayloadSummary` in cmd/aileron/main.go — an
+ *  `execution.failed` event summarizes its class (and connector, if any);
+ *  every other event prefers a name, then a connector, then blank. */
+export function auditPayloadSummary(e: AuditEvent): string {
+	if (e.event_type === 'execution.failed') {
+		const cls = rawStr(e.payload, 'aileron.failure.class');
+		const conn = payloadConnector(e);
+		if (conn) return `class=${cls} connector=${conn}`;
+		return `class=${cls}`;
+	}
+	const name = payloadName(e);
+	if (name) {
+		const conn = payloadConnector(e);
+		if (conn) return `name=${name} connector=${conn}`;
+		return `name=${name}`;
+	}
+	const conn = payloadConnector(e);
+	if (conn) return `connector=${conn}`;
+	return '';
+}
+
 // --- formatting helpers (reused by cards) ---
 
 /** Shortens a `sha256:<hex>` (or bare hex) content hash for card display,

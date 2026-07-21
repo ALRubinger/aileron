@@ -167,6 +167,46 @@ export async function listRecentMaterialized(limit = 100): Promise<AuditEvent[]>
 	);
 }
 
+/** Filter parameters for a general `GET /v1/audit` listing. Mirrors the
+ *  spec's `ListAuditParams` query set (internal/api/openapi.yaml): every
+ *  field is optional and maps 1:1 to a wire query parameter. Omitted
+ *  fields are left off the query string entirely, so the daemon applies
+ *  its defaults (newest-first, `limit` default 100). */
+export type AuditListParams = {
+	/** RFC3339 lower time bound. */
+	since?: string;
+	auditId?: string;
+	connectorFqn?: string;
+	/** Event class discriminator (e.g. `execution.failed`). */
+	class?: string;
+	outputName?: string;
+	contentHash?: string;
+	invocationId?: string;
+	limit?: number;
+};
+
+/** Lists audit events newest-first with any subset of the daemon's
+ *  supported filters, returning the flat event list. Unlike
+ *  {@link listRecentMaterialized} (which fetches-by-limit then narrows to
+ *  materialized-output records), this is the general feed: it surfaces
+ *  every event class the recorder holds, so the "Audit events" view can
+ *  render approvals, action calls, failures, and bindings alongside
+ *  materialized outputs. */
+export async function listAudit(params: AuditListParams = {}): Promise<AuditEvent[]> {
+	const qs = new URLSearchParams();
+	if (params.since) qs.set('since', params.since);
+	if (params.auditId) qs.set('audit_id', params.auditId);
+	if (params.connectorFqn) qs.set('connector_fqn', params.connectorFqn);
+	if (params.class) qs.set('class', params.class);
+	if (params.outputName) qs.set('output_name', params.outputName);
+	if (params.contentHash) qs.set('content_hash', params.contentHash);
+	if (params.invocationId) qs.set('invocation_id', params.invocationId);
+	if (params.limit !== undefined) qs.set('limit', String(params.limit));
+	const suffix = qs.toString();
+	const resp = await apiFetch<AuditListResponse>(`/v1/audit${suffix ? `?${suffix}` : ''}`);
+	return resp.events ?? [];
+}
+
 /** Resolves the audit event(s) for a single artifact content hash. The
  *  daemon supports the `content_hash` filter on `GET /v1/audit`. */
 export async function getAuditByContentHash(hash: string): Promise<AuditEvent[]> {
