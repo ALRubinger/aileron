@@ -347,6 +347,43 @@ describe('Approvals page — input_fields rendering (ADR-0003 amendment)', () =>
 		expect(blockquote!.textContent).not.toContain('\\n');
 	});
 
+	it('renders the multiline body as a user-resizable preview region', async () => {
+		// The user must be able to read the *entire* body before
+		// authorizing an irreversible send. The blockquote therefore
+		// opens at a small preview height but exposes a vertical resize
+		// handle (`resize-y`) so it can be dragged open to reveal the
+		// whole value, with `overflow-y-auto` scrolling the remainder
+		// until then. A `max-h` cap would stop the drag short of a long
+		// body, so its absence is part of the contract this pins.
+		const body = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}`).join('\n');
+		setupWatcher([
+			{
+				id: 'act-input-resize',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				args: { body },
+				requested_at: '2026-05-04T12:00:00Z',
+				input_fields: [{ label: 'Body', value: body, multiline: true }]
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		const blockquote = screen
+			.getByTestId('approval-input-multiline')
+			.querySelector('blockquote');
+		expect(blockquote).not.toBeNull();
+		// User-draggable vertical resize handle.
+		expect(blockquote!.className).toContain('resize-y');
+		// Small default preview height with a floor, scrollbar for the
+		// overflow, and no upper cap that would clip a long body.
+		expect(blockquote!.className).toContain('h-32');
+		expect(blockquote!.className).toContain('min-h-16');
+		expect(blockquote!.className).toContain('overflow-y-auto');
+		expect(blockquote!.className).not.toContain('max-h-');
+	});
+
 	it('renders missing required inputs as "n/a"', async () => {
 		setupWatcher([
 			{

@@ -17,6 +17,14 @@
 	// bearing rule: it draws embedded `\n` characters from the value as
 	// real newlines, which is what the user expects when they read an
 	// email body or commit message in the approval surface.
+	//
+	// The blockquote opens at a small preview height (`h-32`) with a
+	// `min-h-16` floor and `resize-y` so the user can drag the corner to
+	// expand it and read the whole value before authorizing an
+	// irreversible send. `overflow-y-auto` keeps a scrollbar for the
+	// remainder until they resize. There is deliberately no `max-h`: a
+	// cap would stop the drag short of revealing a long body, which is
+	// the exact review gap this affordance closes.
 
 	type Props = {
 		fields: ActionApprovalPreviewField[];
@@ -69,7 +77,7 @@
 			<div class="text-sm italic text-muted-foreground">n/a</div>
 		{:else}
 			<blockquote
-				class="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded border-l-2 border-border bg-background/60 px-3 py-2 text-sm"
+				class="h-32 min-h-16 resize-y overflow-y-auto whitespace-pre-wrap break-words rounded border-l-2 border-border bg-background/60 px-3 py-2 text-sm"
 			>{field.value ?? ''}</blockquote>
 		{/if}
 	</div>
