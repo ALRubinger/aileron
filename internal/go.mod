@@ -32,7 +32,7 @@ require (
 	golang.org/x/term v0.44.0
 	google.golang.org/api v0.287.0
 	gopkg.in/yaml.v3 v3.0.1
-	oras.land/oras-go/v2 v2.6.1
+	oras.land/oras-go/v2 v2.6.2
 )
 
 require (
