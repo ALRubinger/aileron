@@ -16,7 +16,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
 	github.com/tetratelabs/wazero v1.12.0
 	go.opentelemetry.io/otel v1.44.0
