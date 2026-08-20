@@ -50,7 +50,7 @@ func seedGrantAndIntent(ctx context.Context, s *apiServer, grantID, intentID str
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    intentID,
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.push",
 			Summary: "push to main",
@@ -110,7 +110,7 @@ func TestRunExecution_DirectMode_Success(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.Status != api.Accepted {
+	if resp.Status != api.ExecutionRunResponseStatusAccepted {
 		t.Errorf("expected status 'accepted', got %s", resp.Status)
 	}
 	if resp.ExecutionId == "" {
@@ -127,7 +127,7 @@ func TestApproveRequest_IssuesExecutionGrant(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_approve",
 		WorkspaceId: "ws_1",
-		Status:      api.PendingApproval,
+		Status:      api.IntentStatusPendingApproval,
 		Action:      api.ActionIntent{Type: "git.push", Summary: "push"},
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -204,7 +204,7 @@ func TestModifyRequest_IssuesBoundedExecutionGrant(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_modify",
 		WorkspaceId: "ws_1",
-		Status:      api.PendingApproval,
+		Status:      api.IntentStatusPendingApproval,
 		Action:      api.ActionIntent{Type: "git.issue.create", Summary: "file issue"},
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -334,7 +334,7 @@ func TestRunExecution_NoConnector(t *testing.T) {
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    "int_nc",
 		WorkspaceId: "ws",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action:      api.ActionIntent{Type: "custom", Summary: "do something"},
 	})
 	s.grants.Create(ctx, api.ExecutionGrant{
@@ -360,7 +360,7 @@ func TestRunExecution_VaultError(t *testing.T) {
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    "int_ve",
 		WorkspaceId: "ws",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action:      api.ActionIntent{Type: "git.push", Summary: "push"},
 	})
 	s.grants.Create(ctx, api.ExecutionGrant{
@@ -427,7 +427,7 @@ func seedEncryptedGrantAndIntent(ctx context.Context, s *apiServer, grantID, int
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    intentID,
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.push",
 			Summary: "push to main",
@@ -545,7 +545,7 @@ func newApprovalActionServer(t *testing.T, ctx context.Context, intentID, action
 	intent := api.IntentEnvelope{
 		IntentId:    intentID,
 		WorkspaceId: "ws_1",
-		Status:      api.PendingApproval,
+		Status:      api.IntentStatusPendingApproval,
 		Action:      api.ActionIntent{Type: actionType, Summary: "summary"},
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -598,14 +598,14 @@ func TestDenyRequest_Success(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.IntentStatus == nil || *resp.IntentStatus != api.Denied {
+	if resp.IntentStatus == nil || *resp.IntentStatus != api.IntentStatusDenied {
 		t.Fatalf("intent status = %v, want denied", resp.IntentStatus)
 	}
 	intent, err := s.intents.Get(ctx, "int_deny_ok")
 	if err != nil {
 		t.Fatalf("Get intent: %v", err)
 	}
-	if intent.Status != api.Denied {
+	if intent.Status != api.IntentStatusDenied {
 		t.Fatalf("persisted intent status = %q, want denied", intent.Status)
 	}
 }

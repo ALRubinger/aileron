@@ -18,7 +18,7 @@ func TestIntentStore_CreateAndGet(t *testing.T) {
 		WorkspaceId: "ws_1",
 		Agent:       api.ActorRef{Id: "agent_1", Type: api.Agent},
 		Action:      api.ActionIntent{Type: "git.pull_request.create", Summary: "Create PR"},
-		Status:      api.PendingPolicy,
+		Status:      api.IntentStatusPendingPolicy,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 		Decision:    api.Decision{Disposition: api.DecisionDispositionAllow, RiskLevel: api.Low},
@@ -58,19 +58,19 @@ func TestIntentStore_List(t *testing.T) {
 	now := time.Now().UTC()
 
 	s.Create(ctx, api.IntentEnvelope{
-		IntentId: "int_1", WorkspaceId: "ws_1", Status: api.PendingApproval,
+		IntentId: "int_1", WorkspaceId: "ws_1", Status: api.IntentStatusPendingApproval,
 		Agent: api.ActorRef{Id: "a1", Type: api.Agent}, CreatedAt: now, UpdatedAt: now,
 		Action: api.ActionIntent{Type: "git.pull_request.create", Summary: "s1"},
 		Decision: api.Decision{Disposition: api.DecisionDispositionRequireApproval, RiskLevel: api.Medium},
 	})
 	s.Create(ctx, api.IntentEnvelope{
-		IntentId: "int_2", WorkspaceId: "ws_1", Status: api.Approved,
+		IntentId: "int_2", WorkspaceId: "ws_1", Status: api.IntentStatusApproved,
 		Agent: api.ActorRef{Id: "a2", Type: api.Agent}, CreatedAt: now, UpdatedAt: now,
 		Action: api.ActionIntent{Type: "payment.charge", Summary: "s2"},
 		Decision: api.Decision{Disposition: api.DecisionDispositionAllow, RiskLevel: api.Low},
 	})
 	s.Create(ctx, api.IntentEnvelope{
-		IntentId: "int_3", WorkspaceId: "ws_2", Status: api.PendingApproval,
+		IntentId: "int_3", WorkspaceId: "ws_2", Status: api.IntentStatusPendingApproval,
 		Agent: api.ActorRef{Id: "a1", Type: api.Agent}, CreatedAt: now, UpdatedAt: now,
 		Action: api.ActionIntent{Type: "git.pull_request.create", Summary: "s3"},
 		Decision: api.Decision{Disposition: api.DecisionDispositionRequireApproval, RiskLevel: api.Medium},
@@ -83,7 +83,7 @@ func TestIntentStore_List(t *testing.T) {
 	}
 
 	// Filter by status.
-	pending := api.PendingApproval
+	pending := api.IntentStatusPendingApproval
 	results, _ = s.List(ctx, store.IntentFilter{Status: &pending})
 	if len(results) != 2 {
 		t.Errorf("List(pending_approval): got %d, want 2", len(results))
@@ -108,21 +108,21 @@ func TestIntentStore_Update(t *testing.T) {
 	now := time.Now().UTC()
 
 	intent := api.IntentEnvelope{
-		IntentId: "int_1", WorkspaceId: "ws_1", Status: api.PendingPolicy,
+		IntentId: "int_1", WorkspaceId: "ws_1", Status: api.IntentStatusPendingPolicy,
 		Agent: api.ActorRef{Id: "a1", Type: api.Agent}, CreatedAt: now, UpdatedAt: now,
 		Action: api.ActionIntent{Type: "git.pull_request.create", Summary: "s"},
 		Decision: api.Decision{Disposition: api.DecisionDispositionAllow, RiskLevel: api.Low},
 	}
 	s.Create(ctx, intent)
 
-	intent.Status = api.Approved
+	intent.Status = api.IntentStatusApproved
 	if err := s.Update(ctx, intent); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
 	got, _ := s.Get(ctx, "int_1")
-	if got.Status != api.Approved {
-		t.Errorf("Status = %q, want %q", got.Status, api.Approved)
+	if got.Status != api.IntentStatusApproved {
+		t.Errorf("Status = %q, want %q", got.Status, api.IntentStatusApproved)
 	}
 }
 
