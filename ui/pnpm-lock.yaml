@@ -28,7 +28,7 @@ importers:
         version: 4.12.0
       posthog-js:
         specifier: ^1.257.0
-        version: 1.417.4
+        version: 1.418.1
       svelte:
         specifier: ^5.55.0
         version: 5.56.9
@@ -303,8 +303,8 @@ packages:
   '@posthog/browser-common@0.5.0':
     resolution: {integrity: sha512-8DaxVZS1bQPbA514RePurLNbYjei3P4jhnC206DwVv5XThmZM3QdlsXenI2ujE3pLbgQ79hYn9o1Kda8I3WK/Q==}
 
-  '@posthog/core@1.48.5':
-    resolution: {integrity: sha512-ZE27PmVyPmw9wZOVVyn64uaTdqhopuwQfX7PzBpyCvsezuvNmrUHAMpJKkqOvaHxu7HeJt1jTQtjtTuwy+S7Og==}
+  '@posthog/core@1.48.6':
+    resolution: {integrity: sha512-lvSO1nrxxakrAfB51fetHC29gSqdDtT+AyRrGlnc5nDSWhiBGtyqKNjDqsbnlTQoj14bAaWXS7RtzuGoTo5IsQ==}
 
   '@posthog/types@1.405.0':
     resolution: {integrity: sha512-4rZ/taVXKQxs9Jrf7ZjlCRgrOSL69oKAgIWJQa5kRNJ6wll1UANbrJTSY+Su1e88LIG4zZVjKKKjyQHCkHdHcw==}
@@ -1581,8 +1581,8 @@ packages:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
-  posthog-js@1.417.4:
-    resolution: {integrity: sha512-7hJ8k66qQ9+C390ahfXwna2dljkEk+l0Ks6lYhMlhrMLtG4Q02qLe3GCJE7IU8zyd08aky2p9mAqDliu2yuIqQ==}
+  posthog-js@1.418.1:
+    resolution: {integrity: sha512-gGJSGE1sTRcnK53TvZpoFzVBaFTE37NpgGykeQzb6CACx34piy6SFtp5wudFSo49taqFMZdcNG/TrnfJVx0YQw==}
 
   preact@10.29.8:
     resolution: {integrity: sha512-ej2aVZ+vZ8WO7tvlQWRM9N63A0KzF9q4mWJfDUHgYaIofWY9hu74QdnQrjoPMmZi2/nZ5gN0bJCQF49xQqx09Q==}
@@ -2279,10 +2279,10 @@ snapshots:
 
   '@posthog/browser-common@0.5.0':
     dependencies:
-      '@posthog/core': 1.48.5
+      '@posthog/core': 1.48.6
       '@posthog/types': 1.405.0
 
-  '@posthog/core@1.48.5':
+  '@posthog/core@1.48.6':
     dependencies:
       '@posthog/types': 1.405.0
 
@@ -3352,10 +3352,10 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  posthog-js@1.417.4:
+  posthog-js@1.418.1:
     dependencies:
       '@posthog/browser-common': 0.5.0
-      '@posthog/core': 1.48.5
+      '@posthog/core': 1.48.6
       '@posthog/types': 1.405.0
       core-js: 3.50.0
       dompurify: 3.4.14
