@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.63.1
 	github.com/creack/pty v1.1.24
-	github.com/getkin/kin-openapi v0.146.0
+	github.com/getkin/kin-openapi v0.147.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-github/v88 v88.0.0
 	github.com/google/uuid v1.6.0
