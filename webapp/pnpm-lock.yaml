@@ -36,7 +36,7 @@ importers:
         specifier: ^1.4.0
         version: 1.4.0
       vite:
-        specifier: ^8.2.2
+        specifier: ^8.0.0
         version: 8.2.2(@types/node@24.13.3)(jiti@2.7.0)
     devDependencies:
       '@internationalized/date':
