@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
@@ -81,7 +81,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
@@ -136,7 +136,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: internal/go.mod
 
       - name: Install Task
@@ -185,7 +185,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
@@ -242,7 +242,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           # Matches the three binaries GoReleaser builds (./internal/server,
           # ./cmd/aileron, ./cmd/aileron-mcp).
           cache-dependency-path: |
@@ -484,7 +484,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
@@ -656,7 +656,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             sdk/go/go.mod
@@ -841,7 +841,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: internal/go.mod
 
       - name: Install Task
@@ -900,7 +900,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: internal/go.mod
 
       - uses: actions/setup-node@v6
@@ -991,7 +991,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             test/integration/go.mod
@@ -1069,7 +1069,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: |
             internal/go.mod
             test/integration/go.mod

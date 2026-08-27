@@ -84,7 +84,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26"
+          go-version: "1.27"
           cache-dependency-path: internal/go.mod
       - id: agents
         name: Resolve publishable agents
