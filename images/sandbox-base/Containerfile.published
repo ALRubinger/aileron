@@ -28,7 +28,7 @@
 #
 # Pin the toolchain to the repo's Go version (go.work `go 1.26.0`); bump in
 # lockstep when the workspace bumps Go (stay close to upstream).
-FROM --platform=$BUILDPLATFORM golang:1.26 AS mcp-builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS mcp-builder
 WORKDIR /build
 
 # aileron-mcp resolves its module graph through the repo workspace (go.work),
@@ -66,7 +66,7 @@ RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 # issue #1731 image-boot re-entry contract requires `aileron` on PATH in the
 # sealed runtime; this stage produces that binary. BuildKit runs this stage in
 # parallel with mcp-builder since both read the same context layers.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS cli-builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS cli-builder
 WORKDIR /build
 
 # Like aileron-mcp, the aileron CLI resolves its module graph through the repo
