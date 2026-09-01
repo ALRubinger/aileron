@@ -24,7 +24,7 @@ importers:
         specifier: ^2.1.1
         version: 2.1.1
       svelte:
-        specifier: ^5.57.0
+        specifier: ^5.55.0
         version: 5.57.0
       tailwind-merge:
         specifier: ^3.5.0
