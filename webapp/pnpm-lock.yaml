@@ -43,7 +43,7 @@ importers:
         specifier: ^3.12.1
         version: 3.12.3
       '@lucide/svelte':
-        specifier: ^1.37.0
+        specifier: ^1.14.0
         version: 1.37.0(svelte@5.57.0)
       '@playwright/test':
         specifier: ^1.59.1
