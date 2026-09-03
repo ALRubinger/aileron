@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -134,7 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: internal/go.mod
@@ -183,7 +183,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -240,7 +240,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           # Matches the three binaries GoReleaser builds (./internal/server,
@@ -482,7 +482,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -654,7 +654,7 @@ jobs:
           docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml logs
           exit 1
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -839,7 +839,7 @@ jobs:
           done
           echo "registry did not come up"; exit 1
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: internal/go.mod
@@ -898,7 +898,7 @@ jobs:
           done
           echo "registry did not come up"; exit 1
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: internal/go.mod
@@ -989,7 +989,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
@@ -1067,7 +1067,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
           cache-dependency-path: |
