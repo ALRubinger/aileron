@@ -39,7 +39,7 @@
     "@testing-library/svelte": "^5.3.1",
     "@testing-library/user-event": "^14.6.1",
     "@vitest/coverage-v8": "^4.1.6",
-    "jsdom": "^29.0.2",
+    "jsdom": "^30.0.0",
     "nyc": "^18.0.0",
     "svelte-check": "^4.0.0",
     "tailwindcss": "^4.2.2",
