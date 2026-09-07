@@ -28,7 +28,7 @@ importers:
         version: 4.12.0
       posthog-js:
         specifier: ^1.257.0
-        version: 1.427.1
+        version: 1.427.2
       svelte:
         specifier: ^5.55.0
         version: 5.57.0
@@ -1578,8 +1578,8 @@ packages:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
-  posthog-js@1.427.1:
-    resolution: {integrity: sha512-jPKpF5qQS+SIzg2kJH6mTqkMEVY9YVBEywIccLFdl8A7zn+9aSnXQVv4xbF5gIjPtQe2MdcDugcyyJqfVrImLw==}
+  posthog-js@1.427.2:
+    resolution: {integrity: sha512-/jRg3ChHuxcHTTJ/xb+IbpXLYxiBKIWdjrsNNqY1tAwjnFoijmz58i4mIR4A2P5MWx+4R7LlpK9vQfBr8v292g==}
     peerDependencies:
       '@types/react': '>=16.8.0'
       react: '>=16.8.0'
@@ -3353,7 +3353,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  posthog-js@1.427.1:
+  posthog-js@1.427.2:
     dependencies:
       '@posthog/browser-common': 0.7.2
       '@posthog/core': 1.50.5
