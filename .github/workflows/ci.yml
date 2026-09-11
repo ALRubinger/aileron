@@ -296,12 +296,12 @@ jobs:
     timeout-minutes: 25
     container:
       # Pinned to match the Playwright version resolved in ui/pnpm-lock.yaml
-      # (currently 1.61.0). The image bakes Chromium + its system deps, so no
+      # (currently 1.63.0). The image bakes Chromium + its system deps, so no
       # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
       # ui/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-webapp job) so the baked browser
       # stays compatible with the installed @playwright/test.
-      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
     steps:
       - uses: actions/checkout@v7
 
@@ -399,12 +399,12 @@ jobs:
     timeout-minutes: 25
     container:
       # Pinned to match the Playwright version resolved in webapp/pnpm-lock.yaml
-      # (currently 1.61.0). The image bakes Chromium + its system deps, so no
+      # (currently 1.63.0). The image bakes Chromium + its system deps, so no
       # `playwright install --with-deps` / apt-get is needed. JOINT BUMP: when
       # webapp/pnpm-lock.yaml's Playwright pin changes, bump this tag in lockstep
       # (and the matching tag in the test-ui job) so the baked browser
       # stays compatible with the installed @playwright/test.
-      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
     steps:
       - uses: actions/checkout@v7
 
