@@ -22,7 +22,7 @@ importers:
         version: 7.3.2(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.3)(jiti@2.7.0)(yaml@2.9.0)
       bits-ui:
         specifier: ^2.18.0
-        version: 2.19.0(@internationalized/date@3.12.4)(svelte@5.57.0)
+        version: 2.19.1(@internationalized/date@3.12.4)(svelte@5.57.0)
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -1291,8 +1291,8 @@ packages:
   bail@2.0.2:
     resolution: {integrity: sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw==}
 
-  bits-ui@2.19.0:
-    resolution: {integrity: sha512-dHDm5Jw2NZJgLRvHAwPeuR4BnZij+AqTIq33OqVfo+qiMXontoC/yIvGT5TZaviv7OuBdJ2QUy2JPQ2yKBvF6w==}
+  bits-ui@2.19.1:
+    resolution: {integrity: sha512-NPgXkZQRU1upJB+c3lnWTxdY8vS6cLuXcS8dNtsH4DAjqpJLav8H6Fh3zUQFe8VT5NcH/domm0WWWTO3UqHK7w==}
     engines: {node: '>=20'}
     peerDependencies:
       '@internationalized/date': ^3.8.1
@@ -4245,7 +4245,7 @@ snapshots:
 
   bail@2.0.2: {}
 
-  bits-ui@2.19.0(@internationalized/date@3.12.4)(svelte@5.57.0):
+  bits-ui@2.19.1(@internationalized/date@3.12.4)(svelte@5.57.0):
     dependencies:
       '@floating-ui/core': 1.7.5
       '@floating-ui/dom': 1.7.6
