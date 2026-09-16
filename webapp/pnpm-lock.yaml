@@ -27,7 +27,7 @@ importers:
         specifier: ^5.55.0
         version: 5.57.0
       tailwind-merge:
-        specifier: ^3.7.0
+        specifier: ^3.5.0
         version: 3.7.0
       tailwind-variants:
         specifier: ^3.2.2
