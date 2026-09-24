@@ -41,7 +41,7 @@ jobs:
 
       # Node 22 matches the integration-sandbox-features job in ci.yml so both
       # paths exercise the Features with one Node major.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
